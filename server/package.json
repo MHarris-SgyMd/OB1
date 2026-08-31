@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test-stateless.mjs"
+    "test": "node test-stateless.mjs && node test-stats-pagination.mjs"
   },
   "comment": "Versions are pinned EXACTLY to server/deno.json so the test exercises the same libraries the Edge Function deploys with. @hono/node-server has no deno.json counterpart (test-only shim) and is pinned for reproducibility. If you bump deno.json, bump this file in the same commit.",
   "devDependencies": {
