@@ -123,8 +123,12 @@ git log --oneline upstream-pin-9543c29..upstream/main -- server/ docs/01-getting
 git checkout -b siggymd/rebase-$(date +%Y%m%d) siggymd/fork-baseline
 git rebase upstream/main
 
-cd server && bun install --frozen-lockfile && bun test-stateless.mjs \
-  && bun test-stats-pagination.mjs && bun test-capture-atomicity.mjs
+cd server
+bun install --frozen-lockfile
+bun test-stateless.mjs && bun test-stats-pagination.mjs && bun test-capture-atomicity.mjs
+deno check --node-modules-dir=none index.ts   # --node-modules-dir=none is required
+                                              # once the line above has created
+                                              # server/node_modules
 cd .. && node scripts/check-fork-consistency.mjs
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \

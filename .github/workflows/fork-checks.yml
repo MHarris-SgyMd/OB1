@@ -83,6 +83,13 @@ jobs:
 
       # The Node suites cannot import index.ts (Deno.env at module scope, jsr:
       # imports), so this is the only thing that typechecks the file as deployed.
+      #
+      # --node-modules-dir=none resolves imports through deno.json exactly as
+      # Supabase does. Without it, a stray node_modules/ (bun creates one in
+      # server/ when running the test suites locally) flips Deno into manual
+      # node_modules mode and the check fails with "Could not find a matching
+      # package for 'npm:@supabase/supabase-js'". The flag makes this behave the
+      # same in CI and on a developer machine that has just run the tests.
       - name: deno check server/index.ts
         working-directory: server
-        run: deno check index.ts
+        run: deno check --node-modules-dir=none index.ts
