@@ -95,11 +95,49 @@ Only extract what's explicitly there.`,
       ],
     }),
   });
-  const d = await r.json();
+
+  // The original swallowed every failure into the fallback below: an auth error,
+  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
+  // "uncategorized" and a success message to the user, with no way to tell a
+  // genuinely uncategorisable thought from a broken API key. Capture must still
+  // succeed — the content matters more than the tags — but the degradation is
+  // now recorded on the thought and surfaced in the confirmation.
+  const fallback = (reason: string): Record<string, unknown> => ({
+    topics: ["uncategorized"],
+    type: "observation",
+    metadata_extraction_failed: reason,
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    console.error(`extractMetadata: OpenRouter ${r.status} ${msg.slice(0, 500)}`);
+    return fallback(`openrouter_${r.status}`);
+  }
+
+  let d: { choices?: [{ message?: { content?: string } }] };
   try {
-    return JSON.parse(d.choices[0].message.content);
+    d = await r.json();
   } catch {
-    return { topics: ["uncategorized"], type: "observation" };
+    console.error("extractMetadata: OpenRouter returned a non-JSON body");
+    return fallback("invalid_response_body");
+  }
+
+  const content = d?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    console.error("extractMetadata: OpenRouter response had no message content");
+    return fallback("no_message_content");
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.error("extractMetadata: model returned JSON that is not an object");
+      return fallback("unexpected_json_shape");
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    console.error("extractMetadata: model content was not valid JSON");
+    return fallback("unparseable_model_output");
   }
 }
 
@@ -542,6 +580,15 @@ function buildServer(): McpServer {
           confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
         if (Array.isArray(meta.action_items) && meta.action_items.length)
           confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+
+        // Tell the user when tags are placeholders rather than real extraction,
+        // so a broken OPENROUTER_API_KEY does not look like a successful capture.
+        if (typeof meta.metadata_extraction_failed === "string") {
+          confirmation +=
+            `\n\nNote: the thought was saved, but automatic tagging failed ` +
+            `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
+            `Check OPENROUTER_API_KEY and the function logs.`;
+        }
 
         return {
           content: [{ type: "text" as const, text: confirmation }],
