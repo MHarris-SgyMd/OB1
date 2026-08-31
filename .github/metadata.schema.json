@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/NateBJones-Projects/OB1/blob/main/.github/metadata.schema.json",
   "title": "Open Brain Source Contribution Metadata",
-  "description": "Schema for metadata.json files in OB1 contributions (recipes, schemas, dashboards, integrations, skills, primitives, extensions).",
+  "description": "Schema for metadata.json files in OB1 contributions (recipes, schemas, dashboards, integrations, skills, primitives, extensions). FORK NOTE (siggymd): three optional fields added to the upstream schema \u2014 requires.env, contributors, status \u2014 so existing contributions that carry legitimate data upstream never modelled validate instead of being stripped. All are additive and optional; anything valid upstream stays valid here.",
   "type": "object",
   "required": [
     "name",
@@ -28,12 +28,22 @@
     },
     "category": {
       "type": "string",
-      "enum": ["recipes", "schemas", "dashboards", "integrations", "skills", "primitives", "extensions"],
+      "enum": [
+        "recipes",
+        "schemas",
+        "dashboards",
+        "integrations",
+        "skills",
+        "primitives",
+        "extensions"
+      ],
       "description": "Which contribution directory this belongs to."
     },
     "author": {
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
         "name": {
           "type": "string",
@@ -54,7 +64,9 @@
     },
     "requires": {
       "type": "object",
-      "required": ["open_brain"],
+      "required": [
+        "open_brain"
+      ],
       "properties": {
         "open_brain": {
           "type": "boolean",
@@ -63,25 +75,47 @@
         },
         "services": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "External services needed (e.g., Gmail API, OpenRouter)."
         },
         "tools": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Tools or runtimes needed (e.g., Node.js 18+, Python 3.10+)."
+        },
+        "env": {
+          "description": "Environment variables the contribution reads. Either a flat list of names, or an object grouping them (e.g. required / optional / legacy_aliases).",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "object"
+            }
+          ]
         }
       },
       "additionalProperties": false
     },
     "requires_primitives": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Slugs of primitives this contribution depends on (e.g., [\"rls\", \"shared-mcp\"]). Primarily used by extensions."
     },
     "requires_skills": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Slugs of canonical skills this contribution depends on (e.g., [\"auto-capture\"]). Use this when a contribution builds on reusable agent behavior from skills/."
     },
     "learning_order": {
@@ -91,13 +125,19 @@
     },
     "tags": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "minItems": 1,
       "description": "Tags for browsing by use case."
     },
     "difficulty": {
       "type": "string",
-      "enum": ["beginner", "intermediate", "advanced"],
+      "enum": [
+        "beginner",
+        "intermediate",
+        "advanced"
+      ],
       "description": "Difficulty level for contributors."
     },
     "estimated_time": {
@@ -114,6 +154,41 @@
       "type": "string",
       "format": "date",
       "description": "Date of the last update (YYYY-MM-DD)."
+    },
+    "contributors": {
+      "type": "array",
+      "description": "Additional people credited beyond `author`.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "github": {
+            "type": "string",
+            "description": "GitHub username (without @)."
+          },
+          "contribution": {
+            "type": "string",
+            "description": "What they contributed."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "experimental",
+        "beta",
+        "stable",
+        "deprecated"
+      ],
+      "description": "Maturity signal. Absent means stable."
     }
   },
   "additionalProperties": false

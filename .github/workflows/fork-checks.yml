@@ -1,0 +1,88 @@
+# Fork-local CI.
+#
+# Upstream runs no tests at all: 11 test files across ~85k lines of code and no
+# workflow invokes any of them. That is how server/test-stateless.mjs came to
+# assert the opposite of production for three months without anyone noticing.
+#
+# This workflow exists so the fork's patch series cannot rot the same way. It is
+# additive — it touches no upstream workflow — so it survives a rebase onto
+# upstream/main untouched.
+name: Fork Checks
+
+on:
+  push:
+    branches: [main, "siggymd/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      # bun.lock pins the full transitive tree; package.json pins the direct deps
+      # exactly to server/deno.json, so the tests exercise the same libraries the
+      # Edge Function deploys with. (`npm install && npm test` also works for
+      # anyone without bun — the suites are plain node-compatible ESM.)
+      - name: Install pinned test dependencies
+        working-directory: server
+        run: bun install --frozen-lockfile
+
+      # Three suites, each carrying a drift guard that reads server/index.ts and
+      # fails if the behaviour it asserts is no longer what the server implements.
+      - name: Stateless transport + auth contract
+        working-directory: server
+        run: bun test-stateless.mjs
+
+      - name: thought_stats pagination
+        working-directory: server
+        run: bun test-stats-pagination.mjs
+
+      - name: capture_thought atomicity
+        working-directory: server
+        run: bun test-capture-atomicity.mjs
+
+  repo-consistency:
+    name: Repo consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Applies the upstream gate's rules to the WHOLE repo, not just the
+      # directories a PR happens to touch. The upstream gate only validates
+      # changed dirs, so pre-existing violations never surface there.
+      - name: Check metadata, links, dependencies and SQL guards
+        run: node scripts/check-fork-consistency.mjs
+
+  deno-check:
+    name: Edge Function typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # The Node suites cannot import index.ts (Deno.env at module scope, jsr:
+      # imports), so this is the only thing that typechecks the file as deployed.
+      - name: deno check server/index.ts
+        working-directory: server
+        run: deno check index.ts
