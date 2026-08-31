@@ -547,27 +547,86 @@ function buildServer(): McpServer {
           extractMetadata(content),
         ]);
 
-        const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+        const payload = { metadata: { ...metadata, source: "mcp" } };
+
+        // Single round-trip: content, metadata and embedding land in one
+        // statement. The two-step version below could leave a row committed with
+        // a NULL embedding if the follow-up UPDATE failed — the thought would be
+        // stored but invisible to every semantic search, with no error surfaced
+        // after the fact. Requires migrations/001-upsert-thought-with-embedding.sql.
+        const { data: atomicResult, error: atomicError } = await supabase.rpc("upsert_thought", {
           p_content: content,
-          p_payload: { metadata: { ...metadata, source: "mcp" } },
+          p_payload: payload,
+          p_embedding: embedding,
         });
 
-        if (upsertError) {
+        // PGRST202 = no function matching that name and argument list. Deployments
+        // that have not applied the migration fall back to the original two-step
+        // path so this stays a drop-in replacement.
+        const atomicUnavailable =
+          atomicError && (atomicError.code === "PGRST202" || /Could not find the function/i.test(atomicError.message ?? ""));
+
+        if (atomicError && !atomicUnavailable) {
           return {
-            content: [{ type: "text" as const, text: `Failed to capture: ${upsertError.message}` }],
+            content: [{ type: "text" as const, text: `Failed to capture: ${atomicError.message}` }],
             isError: true,
           };
         }
 
-        const thoughtId = upsertResult?.id;
-        const { error: embError } = await supabase
-          .from("thoughts")
-          .update({ embedding })
-          .eq("id", thoughtId);
+        if (atomicUnavailable) {
+          console.warn(
+            "capture_thought: 3-arg upsert_thought not found — falling back to the " +
+              "non-atomic two-step write. Apply migrations/001-upsert-thought-with-embedding.sql."
+          );
 
-        if (embError) {
+          const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+            p_content: content,
+            p_payload: payload,
+          });
+
+          if (upsertError) {
+            return {
+              content: [{ type: "text" as const, text: `Failed to capture: ${upsertError.message}` }],
+              isError: true,
+            };
+          }
+
+          const thoughtId = upsertResult?.id;
+          if (!thoughtId) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Failed to capture: upsert_thought returned no id, so the embedding could not be attached.",
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const { error: embError } = await supabase
+            .from("thoughts")
+            .update({ embedding })
+            .eq("id", thoughtId);
+
+          if (embError) {
+            // The row is committed but unsearchable. Say so plainly — the old code
+            // reported a generic failure that read as "nothing was saved".
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `Thought saved (id ${thoughtId}) but its embedding failed to attach: ` +
+                    `${embError.message}. It will NOT appear in semantic search until re-captured.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        } else if (!atomicResult?.id) {
           return {
-            content: [{ type: "text" as const, text: `Failed to save embedding: ${embError.message}` }],
+            content: [{ type: "text" as const, text: "Failed to capture: upsert_thought returned no id." }],
             isError: true,
           };
         }
