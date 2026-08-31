@@ -30,7 +30,7 @@ The recipe does **not** ingest into Supabase itself. It produces a pack that a d
 - Node.js 18+ (tested on 20 and 22)
 - Google Cloud project with the Gmail API enabled and an OAuth 2.0 Desktop-app client
 - One LLM provider for atomization: Anthropic API key OR OpenRouter API key
-- (Optional, recommended) A companion ingest pipeline that can read the pack format described in [Expected Outcome](#expected-outcome) below — the pack is designed to flow into a fingerprint-dedup + sensitivity-gate pipeline. See [content-fingerprint-dedup primitive](../../primitives/content-fingerprint-dedup/) for the dedup convention.
+- (Optional, recommended) A companion ingest pipeline that can read the pack format described in [Expected Outcome](#expected-outcome) below — the pack is designed to flow into a fingerprint-dedup + sensitivity-gate pipeline. See [content-fingerprint-dedup recipe](../../recipes/content-fingerprint-dedup/) for the dedup convention.
 
 ## Credential Tracker
 
@@ -284,7 +284,7 @@ After a successful run you should see:
 
 ## Dependencies
 
-- **Content fingerprint dedup.** The pack's `fingerprint` field follows the convention documented in [primitives/content-fingerprint-dedup](../../primitives/content-fingerprint-dedup/). Your ingest pipeline should use this for idempotency.
+- **Content fingerprint dedup.** The pack's `fingerprint` field follows the convention documented in [recipes/content-fingerprint-dedup](../../recipes/content-fingerprint-dedup/). Your ingest pipeline should use this for idempotency.
 - **Optional: CRM person tiers.** If you run a `schemas/crm-person-tiers/` style schema, the contacts cache can be generated from it. This recipe does not depend on that schema being present — it's a performance enhancement, not a requirement.
 - **Optional: atomization fixes for the wider import pipeline.** The atomizer in `scripts/lib/atomize-text.mjs` includes two fixes that surfaced during real-world use: (1) multi-line prompts now pipe via stdin instead of the `-p` command-line flag (fixes silent truncation on Windows `shell:true`), and (2) a `codex` provider for running under Codex orchestration without crossing streams with Claude. If you run a separate re-atomization batch job elsewhere, consider adopting the same patterns — see [`scripts/lib/atomize-text.mjs`](./scripts/lib/atomize-text.mjs) for the reference implementation.
 
