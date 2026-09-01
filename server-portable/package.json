@@ -1,0 +1,25 @@
+{
+  "name": "ob1-server-portable",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test-server.ts",
+    "typecheck": "tsc --noEmit",
+    "dev": "bun --watch index.ts",
+    "cf:build": "wrangler deploy --dry-run --outdir=.cf-out",
+    "cf:dev": "wrangler dev"
+  },
+  "comment": "Runtime dependencies are pinned to the exact versions in ../server/deno.json so all four targets run identical library code. Bump both files in the same commit.",
+  "dependencies": {
+    "@hono/mcp": "0.1.1",
+    "@modelcontextprotocol/sdk": "1.24.3",
+    "@supabase/supabase-js": "2.47.10",
+    "hono": "4.9.2",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3",
+    "wrangler": "4.127.1"
+  }
+}

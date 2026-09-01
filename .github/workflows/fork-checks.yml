@@ -93,3 +93,36 @@ jobs:
       - name: deno check server/index.ts
         working-directory: server
         run: deno check --node-modules-dir=none index.ts
+
+  portable-server:
+    name: Portable server (Bun + Workers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
+      # Imports the real server rather than a mirror of it, so there is no drift
+      # guard here and none is needed.
+      - name: Test against the real server
+        working-directory: server-portable
+        run: bun test-server.ts
+
+      - name: Typecheck
+        working-directory: server-portable
+        run: bunx tsc --noEmit
+
+      # Proves the Cloudflare target still builds under the real Workers bundler.
+      # Catches a dependency pulling in a node: builtin Workers cannot provide.
+      - name: Cloudflare Workers build
+        working-directory: server-portable
+        run: bunx wrangler deploy --dry-run --outdir=.cf-out
+        env:
+          CLOUDFLARE_API_TOKEN: ""
+          WRANGLER_SEND_METRICS: "false"

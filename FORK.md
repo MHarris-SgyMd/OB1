@@ -54,8 +54,8 @@ migration exists to remove. Apply it in the Supabase SQL Editor.
 
 ## What we changed
 
-Seven commits on top of the pin. Every one is a fix for a defect found in an
-audit of the pinned tree; none is a feature.
+Eight commits on top of the pin. Seven fix defects found in an audit of the pinned
+tree; the eighth adds a parallel runtime-neutral build without touching `server/`.
 
 | # | Commit | What | Upstream status |
 | --- | --- | --- | --- |
@@ -66,6 +66,7 @@ audit of the pinned tree; none is a feature.
 | 5 | `[fork] server: …capture atomically` | Row committed first, embedding attached by a second call. A failure between left a thought stored but invisible to semantic search. | **Unfiled** ([PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) closed as out of scope) |
 | 6 | `[fork] docs: make fingerprint setup re-runnable…` | Core setup and `recipes/content-fingerprint-dedup` shipped the same unguarded DDL, so following both in order errored. Plus three links to paths that do not exist. | **Unfiled** |
 | 7 | `[fork] ci: run the tests…` | Upstream invokes no test from any workflow. Adds fork CI and a repo-wide consistency checker; fixes the 14 metadata violations it found. | **Unfiled** |
+| 8 | `[fork] server-portable: runtime-neutral build` | New parallel `server-portable/` targeting Bun, Node, Cloudflare Workers and Deno Deploy. Two changes from `server/index.ts`: no Deno globals, and env read lazily. Its test suite **imports the real server**, so the drift class the guards detect cannot occur. | **Unfiled** |
 
 ### Files we own
 
@@ -82,6 +83,7 @@ server/migrations/               # fix 5   (new dir)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
+server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -104,11 +106,17 @@ It has changed **9 times in upstream's entire history** and not since June.
 
 The Node test suites cannot import `server/index.ts` (it reads `Deno.env` at
 module scope and imports from `jsr:`), so they mirror its logic. A silent mirror
-is exactly how fix 1's bug happened, so **every suite opens with a drift guard**
-that reads `index.ts` as text and fails if the behaviour it asserts is no longer
-what the server implements. Each guard was verified against the pre-fix source.
+is exactly how fix 1's bug happened, so **every suite under `server/` opens with a
+drift guard** that reads `index.ts` as text and fails if the behaviour it asserts
+is no longer what the server implements. Each guard was verified against the
+pre-fix source.
 
 If you change `server/index.ts`, expect the guards to tell you. That is the point.
+
+`server-portable/` needs none of this. Its env is read lazily, so `test-server.ts`
+imports the server and asserts against the running handler — there is nothing to
+drift from. That is the strongest argument for eventually making it the primary
+build.
 
 ---
 
@@ -129,6 +137,9 @@ bun test-stateless.mjs && bun test-stats-pagination.mjs && bun test-capture-atom
 deno check --node-modules-dir=none index.ts   # --node-modules-dir=none is required
                                               # once the line above has created
                                               # server/node_modules
+cd ../server-portable
+bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
+bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd .. && node scripts/check-fork-consistency.mjs
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
@@ -183,6 +194,14 @@ Deliberate. Recorded so nobody assumes they were missed.
   `weekly-digest` recipe and its code reference it as a primitive.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
+- **`server-portable` has not served a live `workerd` request.** The Cloudflare
+  target is verified with the real bundler (252 KiB gzipped) and CI rebuilds it on
+  every push, but no request has gone through `workerd` end to end. Smoke-test a
+  real deploy before relying on it.
+- **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and
+  `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
+  lazy `db()` accessor makes easy to inject but which is not built. Until then they
+  keep their drift guards.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

@@ -1,0 +1,12 @@
+# Cloudflare Workers target.
+#
+# Secrets are NOT set here. Provide them with:
+#   wrangler secret put MCP_ACCESS_KEY
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#   wrangler secret put OPENROUTER_API_KEY
+# For local `wrangler dev`, copy .dev.vars.example to .dev.vars (gitignored).
+name = "ob1-mcp"
+main = "index.ts"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
