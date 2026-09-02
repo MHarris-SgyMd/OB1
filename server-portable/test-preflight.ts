@@ -17,6 +17,15 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
 
+/** db/migrations/*.sql are templates; migrate.ts substitutes these at apply time. */
+const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
+const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+function subst(sql: string): string {
+  return sql
+    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
+    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
+}
+
 let passed = 0, failed = 0, skipped = 0;
 const assert = (c: unknown, l: string) =>
   c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
@@ -97,7 +106,7 @@ else {
   const { readdirSync, readFileSync } = await import("node:fs");
   const dir = join(HERE, "..", "db", "migrations");
   for (const f of readdirSync(dir).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(readFileSync(join(dir, f), "utf8"));
+    await admin.unsafe(subst(readFileSync(join(dir, f), "utf8")));
   }
   await admin.close();
 

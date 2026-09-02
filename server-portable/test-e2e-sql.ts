@@ -26,6 +26,18 @@ if (!URL_) {
   process.exit(2);
 }
 
+/**
+ * db/migrations/*.sql are templates — migrate.ts substitutes these at apply time.
+ * Applying them raw fails with `syntax error at or near "{"`.
+ */
+const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
+const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+function subst(sql: string): string {
+  return sql
+    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
+    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
+}
+
 let passed = 0;
 let failed = 0;
 function assert(cond: unknown, label: string): void {
@@ -44,7 +56,7 @@ function assert(cond: unknown, label: string): void {
   await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
   await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
   for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(readFileSync(join(HERE, "..", "db", "migrations", f), "utf8"));
+    await admin.unsafe(subst(readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")));
   }
   await admin.close();
 }
@@ -62,7 +74,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.includes("openrouter.ai")) {
     const body = JSON.parse(String(init?.body ?? "{}"));
     if (url.endsWith("/embeddings")) {
-      const v = new Array(1536).fill(0);
+      const v = new Array(EMBEDDING_DIM).fill(0);
       v[axisFor(String(body.input))] = 1;
       return new Response(JSON.stringify({ data: [{ embedding: v }] }), {
         headers: { "Content-Type": "application/json" },
