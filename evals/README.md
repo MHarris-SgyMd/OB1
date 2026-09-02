@@ -58,10 +58,19 @@ Twenty thoughts, twenty queries. R@1 per slice.
 | **embeddinggemma** | **768** | 5/5 | 7/8 | 4/4 | **3/3** | **0.975** |
 | bge-m3 | 1024 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
 | snowflake-arctic-embed2 | 1024 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
+| qwen3-embedding:0.6b | 1024 | 5/5 | 7/8 | 4/4 | 2/3 | 0.950 |
 | mxbai-embed-large | 1024 | 5/5 | 7/8 | 4/4 | 1/3 | 0.896 |
 | nomic-embed-text | 768 | 4/5 | 6/8 | 4/4 | 2/3 | 0.892 |
 | all-minilm | 384 | 4/5 | 6/8 | 4/4 | 2/3 | 0.869 |
+| nomic-embed-text-v2-moe | 768 | 4/5 | 7/8 | 3/4 | 1/3 | 0.860 |
+| bge-large | 1024 | 3/5 | 7/8 | 3/4 | 3/3 | 0.851 |
 | granite-embedding | 384 | 4/5 | 6/8 | 3/4 | 0/3 | 0.772 |
+
+Ten models, every embedding-capable entry in the Ollama library that fits.
+`embeddinggemma` leads and nothing has displaced it — including two that look like
+they should. `nomic-embed-text-v2-moe` is the newer nomic and scores *below* the
+model it replaces (0.860 vs 0.892). `bge-large` is the bigger sibling of `bge-m3`
+and scores well below it (0.851 vs 0.975).
 
 **`embeddinggemma` is the recommendation.** It ties the best MRR, is the only
 768-dimension model to do so — meaning it is a drop-in for a schema already built
@@ -198,10 +207,18 @@ At temperature 0:
 | model | size | core | hard | total | per capture | structural failures |
 | --- | --- | --- | --- | --- | --- | --- |
 | gemma4 **+ reasoning** | 9.6 GB | 47/48 | **36/36** | **83/84** | 7.7s | **none** |
-| **qwen2.5:7b** | 4.7 GB | 45/48 | **36/36** | 81/84 | **1.4s** | **none** |
+| **qwen2.5:7b** | 4.7 GB | 45/48 | **36/36** | 81/84 | 1.4s | **none** |
 | gemma4 − reasoning | 9.6 GB | 46/48 | 34/36 | 80/84 | 1.4s | 1 invented person |
 | gpt-oss:20b | 13 GB | 48/48 | 35/36 | 83/84 | 6.7s | 1 invented person |
+| granite4.2:30b | 17 GB | 47/48 | 35/36 | 82/84 | 4.8s | 1 invented person |
+| **lfm2.5:8b** | 5.2 GB | 42/48 | 33/36 | 75/84 | **0.54s** | **none** |
 | functiongemma:270m | 301 MB | 27/48 | 22/36 | 49/84 | 8.8s | 11 with no topics, 1 bad JSON |
+
+`lfm2.5:8b` is worth calling out separately: an MoE with roughly 1B active
+parameters, it is **2.2× faster than `qwen2.5:7b`** with zero structural failures,
+for six points of accuracy. If you capture constantly and want the tool to feel
+instant, that is the trade to take. It is the only model tested that is both
+faster than the default and clean.
 
 **`gemma4` with reasoning is the best result on this benchmark** — it ties
 `gpt-oss:20b`'s 83/84 but with zero structural failures, in a smaller model.
@@ -247,9 +264,11 @@ Asked for explicitly, so checked explicitly.
 Ollama library; Kimi K2 is a ~1T-parameter MoE, larger still. On 64 GB neither is
 runnable at any quantisation worth using.
 
-**Kimi has no smaller variant.** Every Kimi tag in the Ollama library returns 404
-(`kimi-linear`, `kimi-vl`, `kimi-dev`). It is not locally available at any size, so
-there was nothing to test.
+**Kimi is in the library — my earlier claim was wrong.** I guessed at tag names
+(`kimi-linear`, `kimi-vl`, `kimi-dev`), got 404s, and concluded Kimi was
+unavailable. Enumerating the library properly shows `kimi-k3`, `kimi-k2.6` and
+`kimi-k2.7-code`. They are still MoE models far past 64 GB, so the conclusion
+holds — but it was reached the wrong way, by guessing instead of listing.
 
 **DeepSeek-R1's distills run, and lose badly on this task.** `deepseek-r1:8b`
 (5.2 GB) at temperature 0:
@@ -288,6 +307,31 @@ sixteen times the context (32k vs 2k), and still scored lower. Above 2000
 dimensions the column can be created but no HNSW index can be built, so every
 search becomes a full scan — a bigger embedding model would need Matryoshka
 truncation to be usable at all, which Ollama does not expose.
+
+## What the library sweep turned up, and what is still untested
+
+Enumerating `ollama.com/library?sort=newest` returns 239 models, many of them
+newer than the knowledge these choices were first made with. That is the argument
+for re-running these harnesses rather than trusting any snapshot, this one
+included.
+
+Post-cutoff families that exist and were **not** evaluated, with why:
+
+| family | smallest tag | why not tested |
+| --- | --- | --- |
+| `qwen3.8`, `qwen3.6`, `qwen3.5` | 18 GB (`qwen3.8:27b`) | Runnable; not yet pulled. The direct successor to the incumbent and the most likely to displace it. There is no small tag — 27B is the floor for the whole family. |
+| `nemotron-3.5-lightning` | 23 GB (`:30b-a3b`) | MoE with ~3B active — the shape that made `lfm2.5` fast. Not yet pulled. |
+| `glm-5.3-flash` | — | **Cloud-only** (`:cloud`). No local weights published, so it is out of scope for a local brain. |
+| `deepseek-v4-flash`, `deepseek-v4-pro` | unknown | DeepSeek V4 exists; sizes not resolved. |
+| `minimax-m3`, `kimi-k3`, `qwen3.8-flash-next` | 105 GB+ where known | Beyond 64 GB. |
+
+`granite4.2:30b` was pulled and tested: 82/84, one invented person, 4.8s per
+capture. That is the pattern the whole sweep keeps producing — a much larger model
+lands a point or two above `qwen2.5:7b` and three to five times slower, and still
+invents a person the 7B does not. Nothing yet beats it on the combination.
+
+The gap for the rest is not that they are known to be worse — it is that they are
+unmeasured. Anyone re-running this should start with `qwen3.8:27b`.
 
 ## The biggest gap: nothing hosted has been measured
 

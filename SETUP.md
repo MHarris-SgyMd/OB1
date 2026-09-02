@@ -109,6 +109,8 @@ The short version:
   dimensions, above pgvector's HNSW limit of 2000 — the column works but no index
   can be built. The largest usable one, `qwen3-embedding:0.6b`, scored below
   `embeddinggemma` despite more parameters and 16× the context.
+- **`lfm2.5:8b` is the fast option** — 0.54s per capture against 1.4s, zero
+  structural failures, six points less accurate. Worth it if you capture often.
 - **`gemma4` is the most accurate local option** (83/84, no failures) but only
   with reasoning on, which costs ~7.7s per capture against ~1.4s. Set
   `OB1_METADATA_REASONING=on` if that trade suits you. Reasoning is off by
