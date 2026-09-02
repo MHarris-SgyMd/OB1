@@ -32,6 +32,8 @@ type Env = {
   OB1_EMBEDDING_MODEL?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
+  /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
+  OB1_METADATA_TEMPERATURE?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
@@ -94,6 +96,14 @@ function embeddingDim(): number {
 }
 function metadataModel(): string {
   return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
+}
+
+/** Deterministic by default; overridable for anyone who wants variety. */
+function metadataTemperature(): number {
+  const raw = env().OB1_METADATA_TEMPERATURE;
+  if (raw === undefined || raw === "") return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 function citationBase(): string {
@@ -197,6 +207,14 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     body: JSON.stringify({
       model: metadataModel(),
       response_format: { type: "json_object" },
+      // Structured extraction has one right answer, so sampling only adds
+      // variance. No temperature was sent before, which meant the provider
+      // default — 0.8 on Ollama. Measured over three runs of evals/: at the
+      // default, scores ranged 79/84 to 82/84 and the same capture could gain or
+      // lose a field between runs; at 0 the result was identical every time and
+      // above the sampled mean. Determinism also makes a bad capture
+      // reproducible, which matters more than the point of score.
+      temperature: metadataTemperature(),
       messages: [
         {
           role: "system",

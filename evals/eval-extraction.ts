@@ -41,6 +41,7 @@ type Case = {
   wantAction: boolean;
   topicHints: string[];   // at least one topic should relate to one of these
   okTypes: string[];      // more than one is often defensible
+  slice?: "core" | "hard";
 };
 
 const CASES: Case[] = [
@@ -84,14 +85,78 @@ const CASES: Case[] = [
     people: [], wantDate: false, wantAction: false,
     topicHints: ["caffeine", "sleep", "coffee", "health"], okTypes: ["observation", "reference"],
   },
+
+  // ── hard slice ────────────────────────────────────────────────────────────
+  // Added because the core set saturated: qwen2.5:7b scored 45/48 and the models
+  // could not be separated. These are the cases where a small model is expected
+  // to break down.
+
+  {
+    // Proper nouns that are NOT people. A model that treats a road or a book
+    // title as a person poisons thought_stats with fictitious contacts.
+    text: "The dentist on Ashworth Road recommended Seeing Like a State, oddly enough.",
+    people: [], wantDate: false, wantAction: false,
+    topicHints: ["dentist", "book", "recommend"], okTypes: ["observation", "reference", "person_note"],
+    slice: "hard",
+  },
+  {
+    // Negation. The decision was NOT to act; inventing an action item here is a
+    // to-do list full of things you explicitly chose not to do.
+    text: "After the review we decided not to migrate off Elasticsearch this year after all.",
+    people: [], wantDate: false, wantAction: false,
+    topicHints: ["elastic", "migrat", "decision"], okTypes: ["observation", "reference"],
+    slice: "hard",
+  },
+  {
+    // Three people in nested roles. Getting the set right requires reading who is
+    // mentioned rather than pattern-matching the first capitalised word.
+    text: "Priya said Dev should ask Anita about the reconciliation job before touching it.",
+    people: ["Priya", "Dev", "Anita"], wantDate: false, wantAction: true,
+    topicHints: ["reconcil", "billing", "job"], okTypes: ["task", "person_note", "observation"],
+    slice: "hard",
+  },
+  {
+    // A superseded date. Only the new one is true; extracting both is worse than
+    // extracting neither, because a calendar with a stale entry is misleading.
+    text: "The review moved from 2026-03-14 to 2026-03-21, so the earlier slot is dead.",
+    people: [], wantDate: true, wantAction: false,
+    topicHints: ["review", "reschedul", "meeting", "date"], okTypes: ["observation", "reference"],
+    slice: "hard",
+  },
+  {
+    // Long input with the substance at the end — the same shape the retrieval
+    // eval showed models diluting.
+    text: "Quarterly planning session. " + new Array(6).fill(
+      "We went round the same arguments as last quarter without much new evidence, and there was a long digression about whether the previous vendor evaluation was still valid, plus the usual complaints about stale dashboards and untrustworthy alerting thresholds."
+    ).join(" ") + " The decision, finally: Priya approved eighty thousand for observability, and I need to send her the contract by 2026-04-02.",
+    people: ["Priya"], wantDate: true, wantAction: true,
+    topicHints: ["observab", "budget", "planning", "contract"], okTypes: ["task", "observation", "person_note"],
+    slice: "hard",
+  },
+  {
+    // No usable content. The honest answer is a generic topic and no entities;
+    // a model that invents structure here inflates every tally.
+    text: "hmm.",
+    people: [], wantDate: false, wantAction: false,
+    topicHints: [""], okTypes: ["observation"],
+    slice: "hard",
+  },
 ];
 
 type Score = {
   model: string;
   json: number; type: number; people: number; dates: number; topics: number; actions: number;
+  core: number; hard: number;
   outEnum: string[]; hallucinated: string[]; emptyTopics: number;
   seconds: number; total: number;
 };
+
+/**
+ * OB1_EVAL_TEMP lets the same model be scored at different sampling temperatures.
+ * The server currently sends none, so extraction runs at the provider default —
+ * 0.8 on Ollama — for a task with exactly one right answer.
+ */
+const TEMP = process.env.OB1_EVAL_TEMP === undefined ? undefined : Number(process.env.OB1_EVAL_TEMP);
 
 async function extract(model: string, text: string): Promise<Record<string, unknown> | null> {
   const r = await fetch(`${BASE}/chat/completions`, {
@@ -100,6 +165,7 @@ async function extract(model: string, text: string): Promise<Record<string, unkn
     body: JSON.stringify({
       model,
       response_format: { type: "json_object" },
+      ...(TEMP === undefined ? {} : { temperature: TEMP }),
       messages: [{ role: "system", content: SYSTEM }, { role: "user", content: text }],
     }),
   });
@@ -119,33 +185,37 @@ const asArray = (v: unknown): string[] =>
 async function evaluate(model: string): Promise<Score> {
   const t0 = Date.now();
   const s: Score = { model, json: 0, type: 0, people: 0, dates: 0, topics: 0, actions: 0,
-                     outEnum: [], hallucinated: [], emptyTopics: 0, seconds: 0, total: 0 };
+                     core: 0, hard: 0, outEnum: [], hallucinated: [], emptyTopics: 0, seconds: 0, total: 0 };
 
   for (const c of CASES) {
+    const slice = c.slice ?? "core";
+    let caseScore = 0;
     const out = await extract(model, c.text);
-    if (!out) continue;
-    s.json++;
+    if (!out) { continue; }
+    s.json++; caseScore++;
 
     const type = String(out.type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
     if (!TYPES.includes(type)) s.outEnum.push(String(out.type ?? "(missing)"));
-    else if (c.okTypes.includes(type)) s.type++;
+    else if (c.okTypes.includes(type)) { s.type++; caseScore++; }
 
     // People: exact set, case-insensitive. A hallucinated name is a real harm —
     // it shows up in thought_stats as someone you know.
     const got = asArray(out.people).map((p) => p.toLowerCase());
     const want = c.people.map((p) => p.toLowerCase());
-    if (got.length === want.length && want.every((w) => got.includes(w))) s.people++;
+    if (got.length === want.length && want.every((w) => got.includes(w))) { s.people++; caseScore++; }
     for (const g of got) if (!want.includes(g)) s.hallucinated.push(`${g} (from "${c.text.slice(0, 32)}…")`);
 
     const dates = asArray(out.dates_mentioned).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
-    if (c.wantDate ? dates.length > 0 : dates.length === 0) s.dates++;
+    if (c.wantDate ? dates.length > 0 : dates.length === 0) { s.dates++; caseScore++; }
 
     const topics = asArray(out.topics);
     if (topics.length === 0) s.emptyTopics++;
-    else if (topics.some((t) => c.topicHints.some((h) => t.toLowerCase().includes(h)))) s.topics++;
+    else if (topics.some((t) => c.topicHints.some((h) => t.toLowerCase().includes(h)))) { s.topics++; caseScore++; }
 
     const actions = asArray(out.action_items);
-    if (c.wantAction ? actions.length > 0 : actions.length === 0) s.actions++;
+    if (c.wantAction ? actions.length > 0 : actions.length === 0) { s.actions++; caseScore++; }
+
+    if (slice === "hard") s.hard += caseScore; else s.core += caseScore;
   }
 
   s.seconds = (Date.now() - t0) / 1000;
@@ -163,13 +233,16 @@ for (const m of models) {
 
 const N = CASES.length;
 console.log(`\n  ${N} captures, scored per field (higher is better, max ${N} each)\n`);
-console.log("  model                  json  type  people dates topics actions   total   sec");
-console.log("  " + "─".repeat(78));
+const nCore = CASES.filter((c) => (c.slice ?? "core") === "core").length;
+const nHard = CASES.filter((c) => c.slice === "hard").length;
+console.log("  model                  json  type  people dates topics actions    core     hard    total   sec");
+console.log("  " + "─".repeat(100));
 for (const s of out.sort((a, b) => b.total - a.total)) {
   console.log(
     `  ${s.model.padEnd(22)} ${String(s.json).padStart(4)}  ${String(s.type).padStart(4)}  ` +
     `${String(s.people).padStart(6)} ${String(s.dates).padStart(5)} ${String(s.topics).padStart(6)} ` +
-    `${String(s.actions).padStart(7)}   ${String(s.total).padStart(2)}/${N * 6}  ${s.seconds.toFixed(1).padStart(5)}`
+    `${String(s.actions).padStart(7)}   ${`${s.core}/${nCore * 6}`.padStart(6)}  ${`${s.hard}/${nHard * 6}`.padStart(6)}  ` +
+    `${`${s.total}/${N * 6}`.padStart(7)}  ${s.seconds.toFixed(1).padStart(5)}`
   );
 }
 

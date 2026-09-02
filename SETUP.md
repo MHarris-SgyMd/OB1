@@ -101,6 +101,17 @@ The short version:
   captures: a type outside the enum, and a capture with no topics at all.
 - **Avoid reasoning models here.** `qwen3:4b` takes 17.8s per extraction against
   ~2s, because it emits thinking tokens first. This call runs on every capture.
+- **Bigger barely helps extraction, and costs latency.** `qwen2.5:14b` scored
+  identically to the 7B at 1.7× the time. `gpt-oss:20b` did score best (83/84 vs
+  81/84) but takes ~6.7s per capture against ~1.2s, and still invented a person the
+  7B did not. Worth it only if captures are batched.
+- **Bigger is not possible for embeddings.** `qwen3-embedding:4b` emits 2560
+  dimensions, above pgvector's HNSW limit of 2000 — the column works but no index
+  can be built. The largest usable one, `qwen3-embedding:0.6b`, scored below
+  `embeddinggemma` despite more parameters and 16× the context.
+- **Extraction runs at `temperature: 0`.** It was previously unset, so it sampled
+  at the provider default and the same note could gain or lose a field between
+  captures. Override with `OB1_METADATA_TEMPERATURE` if you want variety.
 
 If you use a weaker model anyway, the server copes: unknown `type` values are
 normalised to a known alias or `observation`, with the original kept in `type_raw`

@@ -23,8 +23,11 @@ Or name models directly:
 
 ```bash
 bun eval-retrieval.ts embeddinggemma bge-m3
-bun eval-extraction.ts qwen2.5:7b llama3.2
+OB1_EVAL_TEMP=0 bun eval-extraction.ts qwen2.5:7b llama3.2
 ```
+
+**Always pass `OB1_EVAL_TEMP=0` when comparing extraction models.** Without it the
+provider samples and a single run is not reproducible — see below.
 
 ## Expected outcome
 
@@ -131,9 +134,82 @@ reproduces them, which is the point.
 it emits thinking tokens first. This call happens on every capture, so that is
 disqualifying regardless of quality.
 
+### Sampling temperature mattered more than model size
+
+The server sent no `temperature`, so extraction ran at the provider default — 0.8
+on Ollama — for a task with exactly one right answer. Three runs of the full
+benchmark with `qwen2.5:7b`:
+
+| | run 1 | run 2 | run 3 | spread |
+| --- | --- | --- | --- | --- |
+| provider default | 79/84 | 82/84 | 80/84 | **3 points** |
+| `temperature: 0` | 81/84 | 81/84 | 81/84 | **0** |
+
+Temperature 0 is deterministic, scores above the sampled mean, and reaches 36/36
+on the hard slice every time. It also makes a bad capture *reproducible*, which is
+worth more than the point of score — an intermittently wrong extraction cannot be
+debugged.
+
+The server now sends `temperature: 0`, overridable with
+`OB1_METADATA_TEMPERATURE`. This was a one-line change and it outperformed
+doubling the model.
+
+### Larger models: a small accuracy gain at a large latency cost
+
+The first pass capped at 7B with no justification. Revisited on a 64 GB machine,
+at temperature 0:
+
+| model | size | core | hard | total | sec (14 captures) | structural failures |
+| --- | --- | --- | --- | --- | --- | --- |
+| gpt-oss:20b | 13 GB | **48/48** | 35/36 | **83/84** | **93.6** | 1 invented person |
+| **qwen2.5:7b** | 4.7 GB | 45/48 | **36/36** | 81/84 | 16.7 | **none** |
+| qwen2.5:14b | 9.0 GB | 46/48 | 35/36 | 81/84 | 27.1 | 1 capture with no topics |
+| llama3.2 | 2.0 GB | 44/48 | 32/36 | 76/84 | 7.8 | 2 with no topics, 1 invented person |
+
+Two different results, and it is worth not collapsing them:
+
+**Same family, 2× the parameters, no gain.** `qwen2.5:14b` matched the 7B's total
+exactly while taking 1.7× as long, and dropped a `topics` field the 7B kept.
+
+**Different family, 3× the parameters, +2 points.** `gpt-oss:20b` is genuinely the
+most accurate — a perfect core slice, and the only model to get every date and
+every action item right. It costs **5.6× the latency**: ~6.7s per capture against
+~1.2s. It also still invented "dentist" as a person on the proper-noun case, which
+the 7B did not, so more parameters did not fix the failure that matters most for
+`thought_stats`.
+
+So the honest reading is: accuracy is still improving at 20B, but slowly, and this
+call sits in the interactive path of every capture. `qwen2.5:7b` is the default
+because ~1.2s with no structural failures beats ~6.7s with one. Pick `gpt-oss:20b`
+if captures are batched or latency is irrelevant to you.
+
+What did **not** help: nothing about extraction from a short note is
+capability-limited in the way model choice implies. The temperature fix above was
+worth more than either size step, and cost nothing.
+
+### The embedding side has a hard ceiling, not a resource one
+
+Scaling embeddings up runs into pgvector, not memory:
+
+| model | dims | usable? |
+| --- | --- | --- |
+| qwen3-embedding:0.6b | 1024 | yes — scored 0.950, *below* embeddinggemma's 0.975 |
+| qwen3-embedding:4b | **2560** | no — exceeds the HNSW limit of 2000 |
+| qwen3-embedding:8b | 4096 | no |
+
+`qwen3-embedding:0.6b` has roughly twice the parameters of `embeddinggemma` and
+sixteen times the context (32k vs 2k), and still scored lower. Above 2000
+dimensions the column can be created but no HNSW index can be built, so every
+search becomes a full scan — a bigger embedding model would need Matryoshka
+truncation to be usable at all, which Ollama does not expose.
+
 ## Caveats
 
-- **Twenty queries and eight captures is a small sample.** Differences under ~0.05
+- **Run once, results move.** At the provider default temperature the same model
+  varied by 3 points across three runs. Any comparison here that is not at
+  `OB1_EVAL_TEMP=0` should be treated as a single sample, and differences of one
+  or two points as noise. This bit the first version of these results.
+- **Fourteen captures and twenty queries is a small sample.** Differences under ~0.05
   MRR, or one point of a per-field score, are not meaningful. The clear separations
   — the `long` slice, the structural failures — are.
 - **The test sets reflect one person's kind of notes**: engineering work, some
