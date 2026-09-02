@@ -54,7 +54,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eleven commits on top of the pin. Seven fix defects found in an audit of the pinned
+Twelve commits on top of the pin. Seven fix defects found in an audit of the pinned
 tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
 schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
@@ -71,6 +71,7 @@ schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 | 9 | `[fork] db: core schema as applicable migrations` | The core schema existed only as prose in `docs/01-getting-started.md`. `db/migrations/` makes it executable, idempotent and versioned, with the Supabase-isms removed and a runner. Verified against real PostgreSQL 17 + pgvector via PGlite — 49 assertions, no daemon needed. | **Unfiled** |
 | 10 | `[fork] db: live suite against a real Postgres server` | PGlite cannot reach the migration runner, driver-level jsonb binding, or the planner. Adds `test-live.ts` plus `with-postgres.sh` (podman first) and a CI service container. | **Unfiled** |
 | 11 | `[fork] server-portable: swappable data layer` | Phase 2. Every DB call goes through `ThoughtStore`; `store-sql.ts` talks to Postgres directly via `Bun.sql`, `store-postgrest.ts` keeps the old path for cutover and for Workers. Verified end to end over MCP with no Supabase present. | **Unfiled** |
+| 12 | `[fork] deploy: preflight gate and a full stack with no Supabase` | Phase 4. A misconfigured server used to start, answer the handshake, pass every liveness probe and fail on first real use. `preflight.ts` gates the container entrypoint; `deploy/compose.yaml` runs Postgres + migrations + server with no Supabase CLI; `smoke.sh` verifies any deployment over MCP. | **Unfiled** |
 
 ### Files we own
 
@@ -89,6 +90,7 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
+deploy/                          # fix 12  (new dir — compose stack, smoke test)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6

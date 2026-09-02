@@ -230,3 +230,55 @@ jobs:
         run: bun test-e2e-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The deploy gate. Without it a misconfigured server starts, answers the MCP
+      # handshake, passes every HTTP liveness probe, and fails only when a user
+      # captures their first thought.
+      - name: Preflight catches bad configurations
+        working-directory: server-portable
+        run: bun test-preflight.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+  deploy-stack:
+    name: Full stack, no Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
+      # serve MCP, with no Supabase CLI installed and no supabase.com account.
+      - name: Bring up the compose stack
+        working-directory: deploy
+        run: |
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          MCP_ACCESS_KEY=$(openssl rand -hex 32)
+          OPENROUTER_API_KEY=stub-not-called-by-smoke-test
+          SERVER_PORT=8010
+          POSTGRES_PORT=55433
+          EOF
+          docker compose -f compose.yaml up -d --build --wait --wait-timeout 240
+
+      - name: Smoke-test it over MCP
+        working-directory: deploy
+        run: ./smoke.sh
+
+      - name: Confirm no Supabase CLI anywhere in the stack
+        working-directory: deploy
+        run: |
+          if docker compose -f compose.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+            echo "A supabase binary is present in the server image." >&2
+            exit 1
+          fi
+          echo "No supabase binary in the running stack."
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose -f compose.yaml logs --tail 60
+
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose -f compose.yaml down -v

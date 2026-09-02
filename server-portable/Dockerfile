@@ -9,19 +9,30 @@ FROM oven/bun:1.4.0-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json index.ts ./
+COPY package.json index.ts preflight.ts store.ts store-postgrest.ts store-sql.ts ./
+COPY shims ./shims
 
 # Secrets are injected at runtime, never baked in:
-#   MCP_ACCESS_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY
-# Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000)
+#   MCP_ACCESS_KEY, OPENROUTER_API_KEY
+#   OB1_STORE=postgrest  → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+#   OB1_STORE=sql        → DATABASE_URL
+# Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL
 EXPOSE 8000
 USER bun
 
-# Liveness only — the MCP endpoint requires auth, so a health probe cannot use it.
-# An unauthenticated POST returns HTTP 200 with a JSON-RPC -32001 envelope, which
-# is a valid "process is serving" signal and leaks nothing.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Refuse to serve when misconfigured.
+#
+# The data layer is built lazily on first use, so without this the container
+# starts, answers `initialize` and `tools/list`, passes any HTTP liveness probe,
+# and only fails when a user captures their first thought. A crashloop is visible;
+# a server that looks healthy and is not, is not. preflight exits non-zero on a
+# bad configuration, unreachable database, or missing schema.
+ENTRYPOINT ["/bin/sh", "-c", "bun preflight.ts && exec bun index.ts"]
+
+# Liveness only. The MCP endpoint requires auth, so a probe cannot exercise a real
+# tool; an unauthenticated POST returns HTTP 200 with a JSON-RPC -32001 envelope,
+# which proves the process is serving and leaks nothing. Readiness — is the
+# database actually reachable — is the entrypoint's job, above.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- --post-data='{}' --header='Content-Type: application/json' \
       http://127.0.0.1:${PORT:-8000}/ >/dev/null || exit 1
-
-CMD ["bun", "index.ts"]

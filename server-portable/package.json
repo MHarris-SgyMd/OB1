@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "dev": "bun --watch index.ts",
     "cf:build": "wrangler deploy --dry-run --outdir=.cf-out",
-    "cf:dev": "wrangler dev"
+    "cf:dev": "wrangler dev",
+    "preflight": "bun preflight.ts",
+    "test:preflight": "../db/with-postgres.sh bun test-preflight.ts"
   },
   "comment": "Runtime dependencies are pinned to the exact versions in ../server/deno.json so all four targets run identical library code. Bump both files in the same commit.",
   "dependencies": {
