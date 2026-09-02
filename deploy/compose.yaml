@@ -60,8 +60,13 @@ services:
   # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
   server:
     build:
-      context: ../server-portable
-      dockerfile: Dockerfile
+      # Repo root, not server-portable/, because preflight.ts imports
+      # ../db/config.mjs — the single definition of the embedding contract, shared
+      # with migrate.ts so the runner and the server cannot disagree about it. A
+      # context of server-portable/ cannot reach it, and the container crashlooped
+      # on the missing module.
+      context: ..
+      dockerfile: server-portable/Dockerfile
     environment:
       OB1_STORE: sql
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain

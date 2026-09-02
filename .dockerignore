@@ -1,0 +1,52 @@
+# Build context for server-portable/Dockerfile, which is built from the REPO ROOT
+# so it can reach db/config.mjs — the embedding contract shared with migrate.ts.
+#
+# A root context means the whole repository is a candidate for upload, and this
+# repo is mostly recipes, dashboards and docs that the server image never touches.
+# Without these rules the context is hundreds of megabytes of node_modules alone.
+# server-portable/.dockerignore no longer applies: Docker reads the file at the
+# context root, so its rules are folded in below.
+
+# Never ship dependency trees — the image installs its own from bun.lock.
+**/node_modules
+
+# Everything outside the two directories the image actually needs.
+recipes
+dashboards
+integrations
+extensions
+primitives
+schemas
+skills
+docs
+resources
+evals
+server
+supabase
+.planning
+.github
+.git
+
+# Tooling and tests, from every directory.
+**/test-*.ts
+**/test-*.mjs
+**/*.test.ts
+**/tsconfig.json
+**/wrangler.toml
+**/README.md
+**/.dev.vars
+**/.cf-out
+**/*.log
+
+# db/ is included only for config.mjs and its types; migrations are applied by the
+# separate migrate service, not by the server image.
+db/migrations
+db/*.ts
+db/*.sh
+
+# Local environment and editor state.
+.env
+**/.env
+.DS_Store
+.vscode
+.idea

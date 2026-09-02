@@ -1,8 +1,10 @@
 # Container target (EKS, ECS, Fly.io, Railway, Render).
 # Cloudflare Workers uses wrangler.toml instead; Deno Deploy needs neither.
+# Built from the REPO ROOT, not server-portable/ — see deploy/compose.yaml. The
+# server needs db/config.mjs, which a narrower context cannot reach.
 FROM oven/bun:1.4.0-alpine AS deps
 WORKDIR /app
-COPY package.json bun.lock ./
+COPY server-portable/package.json server-portable/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 FROM oven/bun:1.4.0-alpine
@@ -12,8 +14,11 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy every source file rather than naming them. An explicit list silently broke
 # the image when auth.ts was added — the container crashlooped on a missing module.
 # .dockerignore keeps tests and tooling out.
-COPY *.ts package.json ./
-COPY shims ./shims
+COPY server-portable/*.ts server-portable/package.json ./
+COPY server-portable/shims ./shims
+# The embedding contract, imported by preflight.ts. Kept at ../db/ inside the
+# image so the import path is identical in the container and in a checkout.
+COPY db/config.mjs db/config.d.mts /db/
 
 # Secrets are injected at runtime, never baked in:
 #   MCP_ACCESS_KEY, OPENROUTER_API_KEY

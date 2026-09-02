@@ -171,15 +171,16 @@ console.log("\n[2] Chunks are written only for content that needs them");
     SELECT t.content LIKE 'Opening notes%' AS is_long, count(c.*)::int AS chunks
     FROM thoughts t LEFT JOIN thought_chunks c ON c.thought_id = t.id
     GROUP BY 1, t.id ORDER BY 1 DESC`;
-  const longRow = rows.find((r) => r.is_long);
+  const longRow = rows.find((r: { is_long: boolean }) => r.is_long);
   assert(Number(longRow?.chunks) >= 3, `the long thought is split into ${longRow?.chunks} chunks`);
 
   const idx = await sql`
     SELECT c.chunk_index FROM thought_chunks c
     JOIN thoughts t ON t.id = c.thought_id
     WHERE t.content LIKE 'Opening notes%' ORDER BY c.chunk_index`;
-  assert(idx.every((r, i) => Number(r.chunk_index) === i),
-         `chunk indices are dense and ordered (${idx.map((r) => r.chunk_index).join(",")})`);
+  type Idx = { chunk_index: number };
+  assert(idx.every((r: Idx, i: number) => Number(r.chunk_index) === i),
+         `chunk indices are dense and ordered (${idx.map((r: Idx) => r.chunk_index).join(",")})`);
 
   const [short] = await sql`
     SELECT count(c.*)::int AS chunks FROM thoughts t

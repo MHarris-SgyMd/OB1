@@ -105,8 +105,9 @@ console.log("\n[2] captureThought WITH chunks — the 4-arg RPC arrives intact")
     SELECT chunk_index, content, vector_dims(embedding) AS d
     FROM thought_chunks WHERE thought_id = ${id} ORDER BY chunk_index`;
   assert(rows.length === 3, `three chunk rows written (${rows.length})`);
-  assert(rows.every((r, i) => Number(r.chunk_index) === i), "indices are dense and ordered");
-  assert(rows.every((r) => Number(r.d) === DIM), "every chunk embedding is a real vector, not a string");
+  type ChunkRow = { chunk_index: number; content: string; d: number };
+  assert(rows.every((r: ChunkRow, i: number) => Number(r.chunk_index) === i), "indices are dense and ordered");
+  assert(rows.every((r: ChunkRow) => Number(r.d) === DIM), "every chunk embedding is a real vector, not a string");
   assert(rows[2].content === "window three, the conclusion", "chunk content round-trips");
   await sql.close();
 }
