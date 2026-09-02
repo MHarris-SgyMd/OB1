@@ -253,6 +253,15 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # OB1_EMBEDDING_DIMENSIONS: the opt-in that makes a model wider than
+      # pgvector's HNSW ceiling usable at all. Separate process because the server
+      # snapshots the environment at boot, so the flag cannot be flipped mid-run.
+      - name: Embedding truncation via the dimensions parameter
+        working-directory: server-portable
+        run: bun test-embedding-dimensions.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # The deploy gate. Without it a misconfigured server starts, answers the MCP
       # handshake, passes every HTTP liveness probe, and fails only when a user
       # captures their first thought.

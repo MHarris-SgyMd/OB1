@@ -30,6 +30,12 @@ type Env = {
   /** Must match the width of thoughts.embedding — see db/config.mjs. */
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_MODEL?: string;
+  /**
+   * "on" to send the OpenAI `dimensions` parameter, asking the provider to return
+   * OB1_EMBEDDING_DIM numbers instead of the model's native width. Off by default;
+   * only safe for models trained for Matryoshka truncation.
+   */
+  OB1_EMBEDDING_DIMENSIONS?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
@@ -96,6 +102,26 @@ function embeddingDim(): number {
   const raw = env().OB1_EMBEDDING_DIM;
   return raw ? Number(raw) : DEFAULT_EMBEDDING_DIM;
 }
+
+/**
+ * Whether to ask the provider for a narrower vector, via the OpenAI `dimensions`
+ * parameter.
+ *
+ * This exists so a model whose native width exceeds pgvector's 2000-dimension
+ * HNSW ceiling can be used at all. `qwen3-embedding:4b` emits 2560 and cannot be
+ * indexed, but truncated to 1024 it scored the best retrieval result measured on
+ * real data — better than every model that fits natively (evals/README.md).
+ *
+ * It is OFF by default and deliberately so. Providers apply the parameter to any
+ * model, including ones never trained for Matryoshka truncation: Ollama returns
+ * 256 numbers for `all-minilm` just as happily as for `embeddinggemma`, with no
+ * error either way. The result is a valid-looking vector that retrieves worse, and
+ * silent quality loss is the failure mode this fork exists to eliminate rather
+ * than add to. Opting in is a claim that you checked.
+ */
+function embeddingDimensionsRequested(): boolean {
+  return /^(1|on|true|yes)$/i.test(env().OB1_EMBEDDING_DIMENSIONS ?? "");
+}
 function metadataModel(): string {
   return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
 }
@@ -154,6 +180,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     body: JSON.stringify({
       model: embeddingModel(),
       input: text,
+      ...(embeddingDimensionsRequested() ? { dimensions: embeddingDim() } : {}),
     }),
   });
   if (!r.ok) {
@@ -174,10 +201,19 @@ async function getEmbedding(text: string): Promise<number[]> {
   // ob1_config and checked by preflight.
   const expected = embeddingDim();
   if (embedding.length !== expected) {
+    // The cost of changing model is always worth stating; the truncation hint is
+    // only worth stating when truncation could actually resolve it.
+    const hint = embeddingDimensionsRequested()
+      ? ` OB1_EMBEDDING_DIMENSIONS=on was set, so the provider was asked for ${expected} and ` +
+        `ignored it — not every provider or model supports the parameter.`
+      : embedding.length > expected
+        ? ` If the model supports Matryoshka truncation, set OB1_EMBEDDING_DIMENSIONS=on to ` +
+          `request ${expected} instead of ${embedding.length}.`
+        : "";
     throw new Error(
       `Embedding width mismatch: model ${embeddingModel()} returned ${embedding.length} ` +
         `dimensions but thoughts.embedding is vector(${expected}). Changing embedding model ` +
-        `requires a schema migration and re-embedding every existing row.`
+        `requires a schema migration and re-embedding every existing row.${hint}`
     );
   }
   return embedding;

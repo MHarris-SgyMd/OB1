@@ -39,9 +39,49 @@ export const KNOWN_MODEL_DIMS = {
   "mxbai-embed-large": 1024,
   "granite-embedding": 384,
   "all-minilm": 384,
+  "bge-large": 1024,
+  "nomic-embed-text-v2-moe": 768,
+  "qwen3-embedding:0.6b": 1024,
+  "qwen3-embedding:4b": 2560,          // exceeds MAX_HNSW_DIM natively — needs MRL truncation
+  "qwen3-embedding:8b": 4096,          // likewise
 };
 
-export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL) {
+/**
+ * Models trained with Matryoshka Representation Learning, which concentrates
+ * meaning in the leading dimensions so a prefix of the vector is still a good
+ * vector. Truncating one of these is a supported operation; truncating anything
+ * else is just throwing away numbers.
+ *
+ * This matters because **Ollama truncates for every model regardless** — asking a
+ * non-MRL model for 256 dimensions returns 256 numbers and no warning. Measured on
+ * 97 real documents: `embeddinggemma` (MRL) loses 0.025 MRR going 768 → 256, while
+ * `bge-m3` (not MRL) loses 0.042 and its Recall@5 falls from 97% to 92%. Both
+ * degrade; the unsupported one degrades faster and just as quietly.
+ */
+export const MRL_MODELS = new Set([
+  "openai/text-embedding-3-small",
+  "openai/text-embedding-3-large",
+  "embeddinggemma",
+  "qwen3-embedding:0.6b",
+  "qwen3-embedding:4b",
+  "qwen3-embedding:8b",
+]);
+
+/**
+ * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
+ * parameter. Off by default: a silently shortened vector from a model that was not
+ * trained for it is precisely the kind of quiet quality loss this fork tries to
+ * make loud.
+ *
+ * Turn it on to use a model whose native width exceeds pgvector's 2000-dimension
+ * HNSW ceiling. `qwen3-embedding:4b` is 2560 natively and unindexable, but scored
+ * the best result measured on real data at 1024 — better than any model that fits
+ * natively. That is what this flag is for.
+ */
+export const EMBEDDING_DIMENSIONS =
+  /^(1|on|true|yes)$/i.test(process.env.OB1_EMBEDDING_DIMENSIONS ?? "");
+
+export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL, truncate = EMBEDDING_DIMENSIONS) {
   const problems = [];
   if (!Number.isInteger(dim) || dim < 1) {
     problems.push(`OB1_EMBEDDING_DIM must be a positive integer, got "${dim}"`);
@@ -49,15 +89,54 @@ export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_M
   if (dim > MAX_HNSW_DIM) {
     problems.push(
       `OB1_EMBEDDING_DIM=${dim} exceeds pgvector's HNSW limit of ${MAX_HNSW_DIM}. ` +
-        `The column would work but the index could not be built, so every search becomes a full scan.`
+        `The column would work but the index could not be built, so every search becomes a full scan. ` +
+        `If the model supports Matryoshka truncation, set OB1_EMBEDDING_DIM to 1024 or 1536 and ` +
+        `OB1_EMBEDDING_DIMENSIONS=on to request a narrower vector that can be indexed.`
     );
   }
   const known = KNOWN_MODEL_DIMS[model];
   if (known !== undefined && known !== dim) {
-    problems.push(
-      `OB1_EMBEDDING_MODEL="${model}" returns ${known} dimensions but OB1_EMBEDDING_DIM=${dim}. ` +
-        `Set the dimension to ${known}, or choose a model that matches.`
-    );
+    if (!truncate) {
+      problems.push(
+        `OB1_EMBEDDING_MODEL="${model}" returns ${known} dimensions but OB1_EMBEDDING_DIM=${dim}. ` +
+          `Set the dimension to ${known}, choose a model that matches, or — if ${dim} < ${known} and ` +
+          `the model supports Matryoshka truncation — set OB1_EMBEDDING_DIMENSIONS=on to request ` +
+          `${dim} from the provider.`
+      );
+    } else if (dim > known) {
+      problems.push(
+        `OB1_EMBEDDING_DIMENSIONS=on cannot widen a vector: OB1_EMBEDDING_MODEL="${model}" returns ` +
+          `${known} dimensions and OB1_EMBEDDING_DIM=${dim} is larger. Truncation only shortens.`
+      );
+    }
+    // Truncating a non-MRL model is not fatal — it works, it is just quietly
+    // worse — so it is reported by embeddingConfigWarnings() rather than here.
   }
   return problems;
+}
+
+/**
+ * Non-fatal configuration smells. Separate from validateEmbeddingConfig because
+ * callers exit non-zero on anything that function returns, and "this will work but
+ * retrieval will be worse" must not block a migration. Preflight surfaces these.
+ */
+export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL, truncate = EMBEDDING_DIMENSIONS) {
+  const warnings = [];
+  const known = KNOWN_MODEL_DIMS[model];
+  if (truncate && known !== undefined && dim < known && !MRL_MODELS.has(model)) {
+    warnings.push(
+      `"${model}" is not known to be trained for Matryoshka truncation, but ` +
+        `OB1_EMBEDDING_DIMENSIONS=on will shorten it from ${known} to ${dim}. Providers do this ` +
+        `silently and retrieval quality drops — measured at roughly twice the loss of an MRL ` +
+        `model on the same corpus. Benchmark it on your own notes: see evals/README.md.`
+    );
+  }
+  if (truncate && known === undefined) {
+    warnings.push(
+      `OB1_EMBEDDING_DIMENSIONS=on but "${model}" has no known native width, so the request ` +
+        `cannot be sanity-checked. If the provider ignores the parameter the server will refuse ` +
+        `the mismatched vector at capture time rather than storing a bad one.`
+    );
+  }
+  return warnings;
 }

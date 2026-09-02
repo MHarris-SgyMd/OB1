@@ -64,6 +64,10 @@ const seen: Seen[] = [];
  */
 let replyDim = DIM;
 
+/** The last body the server POSTed to /embeddings, so the test can assert on it. */
+let lastEmbedBody: Record<string, unknown> = {};
+
+
 /** Type the stub's metadata model claims. Real llama3.2 returned "action_item". */
 let replyType = "idea";
 
@@ -80,6 +84,9 @@ const provider = Bun.serve({
     });
 
     if (url.pathname.endsWith("/embeddings")) {
+      lastEmbedBody = body as Record<string, unknown>;
+      // Honour `dimensions` the way Ollama and OpenAI do, so the test exercises a
+      // provider that supports it; `ignoreDimensions` models one that does not.
       const v = new Array(replyDim).fill(0);
       v[String(body.input ?? "").length % replyDim] = 1;
       return Response.json({ data: [{ embedding: v }], model: body.model });
@@ -187,11 +194,25 @@ console.log("\n[6] A width mismatch from the provider is refused, not stored");
   try { await call("capture_thought", { content: "wrong width" }); } catch (e) { msg = (e as Error).message; }
   assert(/width mismatch/i.test(msg), `capture refuses a 1536-wide vector for a 768 column (${msg.slice(0, 60)})`);
   assert(/re-embedding/.test(msg), "…and says what changing the model would cost");
+  assert(/OB1_EMBEDDING_DIMENSIONS=on/.test(msg),
+         "…and points at truncation, since the vector was too WIDE rather than wrong");
 
   const sql = new SQL({ url: URL_, max: 1 });
   assert((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c === 2, "no row was written");
   await sql.close();
   replyDim = DIM;
+}
+
+console.log("\n[7] `dimensions` is not sent unless asked for");
+{
+  // A provider applies `dimensions` to any model, including ones never trained for
+  // Matryoshka truncation, and returns a shorter vector with no error — so sending
+  // it unasked would quietly degrade retrieval. The opt-in path is covered by
+  // test-embedding-dimensions.ts, which needs its own process: the server snapshots
+  // the environment once at boot so Workers bindings behave, and a mid-run change
+  // to process.env does nothing.
+  assert(!("dimensions" in lastEmbedBody),
+         "off by default: the server does not send `dimensions` unasked");
 }
 
 console.log("\n[7] A drifting `type` is normalised, not stored as a new category");

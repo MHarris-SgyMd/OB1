@@ -78,7 +78,22 @@ if (store !== "postgrest" && store !== "sql") {
 // ── Model provider ──────────────────────────────────────────────────────────
 
 add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credential needed)" : ""}`);
-add("embedding model", "ok", `${embModel} @ ${embDim} dimensions`);
+{
+  const truncate = /^(1|on|true|yes)$/i.test(env.OB1_EMBEDDING_DIMENSIONS ?? "");
+  add("embedding model", "ok",
+      `${embModel} @ ${embDim} dimensions${truncate ? " (requesting truncation)" : ""}`);
+
+  // Fatal contradictions (asking to widen, a dim over the HNSW ceiling) and the
+  // non-fatal smell of truncating a model not trained for it. Both come from
+  // db/config.mjs so the migration runner and the server cannot disagree.
+  const { validateEmbeddingConfig, embeddingConfigWarnings } = await import("../db/config.mjs");
+  for (const p of validateEmbeddingConfig(embDim, embModel, truncate)) {
+    add("embedding config", "fail", p, "Fix OB1_EMBEDDING_DIM / OB1_EMBEDDING_MODEL / OB1_EMBEDDING_DIMENSIONS.");
+  }
+  for (const w of embeddingConfigWarnings(embDim, embModel, truncate)) {
+    add("embedding config", "warn", w, "Benchmark it on your own corpus — see evals/README.md.");
+  }
+}
 add("metadata model", "ok", metaModel);
 
 if (!llmKey) {
@@ -246,10 +261,18 @@ if (!deep) {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (llmKey) headers.Authorization = `Bearer ${llmKey}`;
 
+    const wantsTruncation = /^(1|on|true|yes)$/i.test(env.OB1_EMBEDDING_DIMENSIONS ?? "");
     const r = await fetch(`${llmBase}/embeddings`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model: embModel, input: "preflight" }),
+      // Send exactly what the server will send. Omitting `dimensions` here would
+      // let preflight pass against a provider that ignores or rejects it, and the
+      // failure would surface on the first real capture instead.
+      body: JSON.stringify({
+        model: embModel,
+        input: "preflight",
+        ...(wantsTruncation ? { dimensions: embDim } : {}),
+      }),
     });
     if (!r.ok) {
       add("embedding provider", "fail", `OpenRouter returned ${r.status}`,
@@ -258,8 +281,14 @@ if (!deep) {
       const d = (await r.json()) as { data?: [{ embedding?: number[] }] };
       const dim = d.data?.[0]?.embedding?.length;
       if (dim === embDim) add("embedding provider", "ok", `${embModel} returns ${dim} dimensions, matching the schema`);
+      else if (wantsTruncation)
+        add("embedding provider", "fail",
+            `${embModel} returned ${dim} dimensions despite being asked for ${embDim}`,
+            "The provider ignored the `dimensions` parameter. Unset OB1_EMBEDDING_DIMENSIONS and " +
+            `set OB1_EMBEDDING_DIM=${dim}, or choose a provider that honours it.`);
       else add("embedding provider", "fail", `${embModel} returned ${dim} dimensions, but the schema is vector(${embDim})`,
-               `Set OB1_EMBEDDING_DIM=${dim} before any data exists, or choose a model that returns ${embDim}.`);
+               `Set OB1_EMBEDDING_DIM=${dim} before any data exists, choose a model that returns ${embDim}, ` +
+               (dim && dim > embDim ? "or set OB1_EMBEDDING_DIMENSIONS=on if the model supports truncation." : "."));
 
       // Metadata extraction needs JSON mode. Providers differ here — Ollama's
       // OpenAI layer has been inconsistent about response_format — and a provider

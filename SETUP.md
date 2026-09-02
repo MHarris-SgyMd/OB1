@@ -27,7 +27,32 @@ produce exactly that many numbers. Changing either later means a schema migratio
 | `openai/text-embedding-3-small` | 1536 | The hosted default. Cheap, unmeasured here. |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
-| `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. |
+| `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.933 MRR vs `embeddinggemma`'s 0.914). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~3x the embedding time. |
+| `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. Truncatable to 1536 with `OB1_EMBEDDING_DIMENSIONS=on`. |
+
+#### Using a model that is too wide to index
+
+pgvector's HNSW index tops out at 2000 dimensions, which rules out most of the
+strongest embedding models — until you ask the provider for a shorter vector:
+
+```bash
+OB1_EMBEDDING_MODEL=qwen3-embedding:4b
+OB1_EMBEDDING_DIM=1024
+OB1_EMBEDDING_DIMENSIONS=on        # send the OpenAI `dimensions` parameter
+```
+
+That is the best-scoring configuration measured here. Without the flag, the
+server refuses the 2560-wide vector rather than storing something the index
+cannot cover.
+
+**It is off by default, and only safe for models trained for Matryoshka
+truncation** — `embeddinggemma`, `qwen3-embedding`, `openai/text-embedding-3-*`.
+Providers apply the parameter to *any* model and return a shortened vector with no
+warning: Ollama will happily give you 256 numbers for `all-minilm`. On a model not
+trained for it, retrieval quietly gets worse — measured at roughly twice the MRR
+loss of an MRL model at the same width. `preflight.ts` warns when you truncate a
+model not known to support it, and refuses outright if the provider ignores the
+parameter and returns the wrong width.
 
 Set `OB1_EMBEDDING_MODEL` and `OB1_EMBEDDING_DIM` together. `migrate.ts` refuses a
 mismatched pair, and the width is recorded in `ob1_config` so `preflight.ts`
