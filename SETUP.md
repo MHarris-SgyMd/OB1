@@ -26,7 +26,7 @@ produce exactly that many numbers. Changing either later means a schema migratio
 | `embeddinggemma` | 768 | **Best measured local option** — see [`evals/`](evals/README.md). Runs via Ollama. |
 | `openai/text-embedding-3-small` | 1536 | The hosted default. Cheap, unmeasured here. |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
-| `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 7. |
+| `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. |
 
 Set `OB1_EMBEDDING_MODEL` and `OB1_EMBEDDING_DIM` together. `migrate.ts` refuses a
@@ -92,10 +92,17 @@ The short version:
 - **`embeddinggemma`** ties the best retrieval MRR (0.975) and is the only
   768-dimension model to do so, so it drops into a schema already built at 768.
   `nomic-embed-text` — the obvious small default, and what this guide recommended
-  first — placed 5th of 7. The gap is almost entirely on **long thoughts with the
+  first — placed 5th of 10. The gap is almost entirely on **long thoughts with the
   decision at the end**: change only the final sentence of a long note and
   `nomic-embed-text`'s vector barely moves (cosine 0.982), so the note becomes hard
-  to find by its conclusion. `embeddinggemma` moves properly (0.816).
+  to find by its conclusion. `embeddinggemma` moves properly (0.816). This is a
+  documented failure mode of embedding models generally, not a quirk of this
+  benchmark — see [`evals/`](evals/README.md).
+- **Check the context window before anything else.** Every 512-token model tested
+  scores 1/3 on long thoughts and every 2048+ model scores 2/3 or 3/3 — a hard cut,
+  with no error when a thought is silently truncated. Use `ollama show <model>`,
+  not the model card: Ollama serves `nomic-embed-text` at 2048, not the advertised
+  8192.
 - **`qwen2.5:7b`** was the only extraction model with no structural failures
   (45/48). `llama3.2` scored 42/48 and produced exactly the faults seen on real
   captures: a type outside the enum, and a capture with no topics at all.

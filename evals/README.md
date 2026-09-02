@@ -53,24 +53,41 @@ lexical overlap does not carry them.
 
 Twenty thoughts, twenty queries. R@1 per slice.
 
-| model | dims | easy | near-dup | temporal | long | MRR |
-| --- | --- | --- | --- | --- | --- | --- |
-| **embeddinggemma** | **768** | 5/5 | 7/8 | 4/4 | **3/3** | **0.975** |
-| bge-m3 | 1024 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
-| snowflake-arctic-embed2 | 1024 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
-| qwen3-embedding:0.6b | 1024 | 5/5 | 7/8 | 4/4 | 2/3 | 0.950 |
-| mxbai-embed-large | 1024 | 5/5 | 7/8 | 4/4 | 1/3 | 0.896 |
-| nomic-embed-text | 768 | 4/5 | 6/8 | 4/4 | 2/3 | 0.892 |
-| all-minilm | 384 | 4/5 | 6/8 | 4/4 | 2/3 | 0.869 |
-| nomic-embed-text-v2-moe | 768 | 4/5 | 7/8 | 3/4 | 1/3 | 0.860 |
-| bge-large | 1024 | 3/5 | 7/8 | 3/4 | 3/3 | 0.851 |
-| granite-embedding | 384 | 4/5 | 6/8 | 3/4 | 0/3 | 0.772 |
+| model | dims | ctx | easy | near-dup | temporal | long | MRR |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **embeddinggemma** | **768** | 2048 | 5/5 | 7/8 | 4/4 | **3/3** | **0.975** |
+| bge-m3 | 1024 | 8192 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
+| snowflake-arctic-embed2 | 1024 | 8192 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 |
+| qwen3-embedding:0.6b | 1024 | 32768 | 5/5 | 7/8 | 4/4 | 2/3 | 0.950 |
+| nomic-embed-text | 768 | 2048 | 4/5 | 7/8 | 4/4 | 2/3 | 0.912 |
+| mxbai-embed-large | 1024 | 512 | 5/5 | 7/8 | 4/4 | 1/3 | 0.896 |
+| nomic-embed-text-v2-moe | 768 | 512 | 4/5 | 7/8 | 3/4 | 1/3 | 0.852 |
+| all-minilm | 384 | 512 | 4/5 | 6/8 | 4/4 | 1/3 | 0.835 |
+| granite-embedding | 384 | 512 | 4/5 | 6/8 | 4/4 | 1/3 | 0.827 |
+| bge-large | 1024 | 512 | 3/5 | 7/8 | 3/4 | 1/3 | 0.797 |
 
 Ten models, every embedding-capable entry in the Ollama library that fits.
 `embeddinggemma` leads and nothing has displaced it — including two that look like
 they should. `nomic-embed-text-v2-moe` is the newer nomic and scores *below* the
-model it replaces (0.860 vs 0.892). `bge-large` is the bigger sibling of `bge-m3`
-and scores well below it (0.851 vs 0.975).
+model it replaces. `bge-large` is the bigger sibling of `bge-m3` and scores well
+below it.
+
+**The `ctx` column explains almost the whole table.** The long documents are ~616
+tokens with the answer in the final sentence, so a 512-token model physically
+cannot see the answer. Every model at 512 scores exactly 1/3; every model at 2048
+or above scores 2/3 or 3/3. That is not a subtle quality difference — it is a
+hard architectural cut, and it is invisible at capture time because nothing errors.
+
+Note that Ollama serves `nomic-embed-text` at **2048** tokens, not the 8192 its
+model card advertises. Check `ollama show <model>` rather than the card.
+
+### A confound this table used to have
+
+An earlier version of this benchmark gave each long document a distinctive opening
+line, and `bge-large` scored 3/3 on the long slice despite a 512-token window that
+made the answer unreachable. It was matching the lead, not retrieving the tail.
+Making all three leads identical drops it to 1/3 and its overall MRR from 0.851 to
+0.797. The slice now measures what it claims to.
 
 **`embeddinggemma` is the recommendation.** It ties the best MRR, is the only
 768-dimension model to do so — meaning it is a drop-in for a schema already built
@@ -332,6 +349,49 @@ invents a person the 7B does not. Nothing yet beats it on the combination.
 
 The gap for the rest is not that they are known to be worse — it is that they are
 unmeasured. Anyone re-running this should start with `qwen3.8:27b`.
+
+## How this compares to public benchmarks
+
+Worth asking whether these results are typical or an artefact of a 20-document
+corpus. Checked against MTEB and the retrieval literature:
+
+**The winner agrees with the public data.** `embeddinggemma-300m` scores 69.67 on
+MTEB English v2 and ranks first among sub-500M models by a wide margin — 17 places
+above the next one on the multilingual board. Its win here is not a small-sample
+fluke.
+
+**`bge-large` below `bge-m3` agrees too.** MTEB retrieval puts them at roughly 55
+and 58. Same direction; the gap is wider here because our long slice punishes
+`bge-large`'s 512-token window, which MTEB's mostly-short corpora do not.
+
+**The long-document finding is textbook.** [Quantifying Positional Biases in Text
+Embedding Models](https://arxiv.org/abs/2412.15241) finds that content later in a
+document contributes less to the embedding, and that edits at the *start* move
+cosine similarity up to 12.3% more than the same edits at the end — present even
+when the context window is not exceeded, so it is not purely truncation.
+["Dwell in the Beginning"](https://arxiv.org/pdf/2404.04163) reports the same. Our
+result — change only the final sentence of a long note and `nomic-embed-text`'s
+vector barely moves — is a known, named failure mode, not a quirk of this corpus.
+
+**One result looks like it contradicts the leaderboard, and does not.**
+`nomic-embed-text-v2-moe` is the newer model and scores at or above v1.5 on
+headline MTEB, yet loses here. The model card explains it: v2-moe is a
+**multilingual** model (~100 languages) with a **512-token** window, where v1.5 is
+English-first with a longer one. This corpus is English-only with 616-token
+documents — precisely the case v2-moe was not built for. Newer is not worse; it is
+optimised for a different job.
+
+**`qwen3-embedding:0.6b` losing to a smaller model is also expected.** It scores
+higher than `embeddinggemma` on MTEB multilingual (64.33 vs 61.15), but
+EmbeddingGemma beats it specifically on instruction retrieval and reranking — and
+this task is short-query retrieval in English.
+
+**Which is the general caveat.** MTEB is widely held to be contaminated by now —
+models train on its splits, and two models within a point of each other on the
+board routinely sit eight to twelve points apart on a few hundred queries from a
+real corpus. That is the argument for this directory existing. The public numbers
+were useful here as a *cross-check* — they are what exposed the lead-matching
+confound above — but they were not a substitute for measuring.
 
 ## The biggest gap: nothing hosted has been measured
 

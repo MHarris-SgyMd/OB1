@@ -27,7 +27,17 @@ const BASE = process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
 type Doc = { id: string; text: string; slice: string };
 type Query = { q: string; want: string; slice: string };
 
-/** ~700 words of plausible filler, so the payload sits past a 512-token window. */
+/**
+ * ~460 words of plausible filler, so the payload sits past a 512-token window
+ * (~616 tokens) while fitting a 2048-token one.
+ *
+ * Every long doc takes the SAME lead deliberately. An earlier version gave each
+ * one a distinctive opening and the slice silently measured the wrong thing: a
+ * 512-token model cannot see the tail at all, yet `bge-large` scored 3/3 by
+ * matching the lead. With the leads made identical it scores 1/3, which is what
+ * a truncating model should score. Only the final sentence now discriminates,
+ * which is the failure mode this slice exists to catch.
+ */
 function padded(lead: string, tail: string): string {
   const filler = [
     "Context from the meeting, written up afterwards so it is not lost.",
@@ -65,13 +75,13 @@ const DOCS: Doc[] = [
 
   // ── long documents, answer at the very end ────────────────────────────────
   { id: "long-budget", slice: "long", text: padded(
-      "Quarterly planning session, third of the year.",
+      "Meeting notes, written up afterwards.",
       "The decision, finally: we approved eighty thousand for the observability migration, contingent on Priya signing off the vendor contract by the fourteenth.") },
   { id: "long-arch", slice: "long", text: padded(
-      "Architecture review for the ingestion rewrite.",
+      "Meeting notes, written up afterwards.",
       "The conclusion nobody wrote down at the time: we are keeping Kafka and dropping the direct-to-Postgres path entirely, because the reconciliation job cannot be made idempotent.") },
   { id: "long-people", slice: "long", text: padded(
-      "Skip-level notes, second round.",
+      "Meeting notes, written up afterwards.",
       "The thing worth remembering: Dev wants to move into platform work next cycle, and Anita is the one who should mentor that transition.") },
 
   // ── temporal / numeric specificity ────────────────────────────────────────
