@@ -406,6 +406,63 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Validation against a real corpus
+
+Everything else in this file is measured on twenty thoughts I wrote to be
+adversarial. `eval-real.ts` runs the same comparison over **97 closed issues from
+a real Linear tracker** — body as the document, title as the query, no hand
+labelling — to find out which conclusions survive data nobody wrote for the test.
+
+The corpus is internal engineering data from a healthcare company, so it is **not
+committed** and it ran entirely against local Ollama. Nothing was sent to a hosted
+embedding provider. That constraint is the whole argument for the local path being
+a supported option rather than a curiosity. Point `OB1_EVAL_CORPUS` at your own
+JSON (`[{id, title, text}]`) to reproduce this shape on your own data.
+
+| model | dims | R@1 | R@5 | MRR | synthetic MRR | rank move |
+| --- | --- | --- | --- | --- | --- | --- |
+| **qwen3-embedding:4b !instruct @1024** | 1024 | **90%** | 97% | **0.933** | 0.975 | **+2 → 1st** |
+| snowflake-arctic-embed2 | 1024 | 87% | 99% | 0.921 | 0.975 | — |
+| qwen3-embedding:0.6b !instruct | 1024 | 87% | 99% | 0.918 | 0.950 | +2 |
+| embeddinggemma | 768 | 86% | 99% | 0.914 | 0.975 | **−2** |
+| granite-embedding | 384 | 86% | 96% | 0.902 | 0.827 | **+4** |
+| bge-m3 | 1024 | 86% | 97% | 0.901 | 0.975 | **−4** |
+| bge-large | 1024 | 82% | 97% | 0.894 | 0.797 | +3 |
+| nomic-embed-text | 768 | 82% | 97% | 0.890 | 0.912 | −2 |
+| mxbai-embed-large | 1024 | 80% | 99% | 0.882 | 0.896 | −2 |
+| all-minilm | 384 | 79% | 95% | 0.869 | 0.835 | −2 |
+
+**Spearman rank correlation between the two corpora: 0.64.** Directionally useful,
+unreliable at the top — and the top is the only part anyone picks from.
+
+### What changed, and one conclusion that was wrong
+
+**The synthetic corpus was saturated.** Four models tied at 0.975 there. Here they
+spread across 0.933–0.901 and separate cleanly. Twenty queries could not tell them
+apart; ninety-seven can.
+
+**"Five leaderboard points bought nothing" was an artefact of that saturation.**
+Above, `qwen3-embedding:4b` ties `embeddinggemma` on the synthetic set and I
+concluded the MTEB gap did not transfer. On real data it wins outright — 0.933 vs
+0.914, and the best R@1 of anything tested. The leaderboard was directionally
+right and my corpus was too easy to show it. It still costs 3x the embedding time
+and 4x the disk, so `embeddinggemma` remains a defensible default; but the claim
+that the bigger model buys nothing does not survive.
+
+**`granite-embedding` is the surprise.** Last on the synthetic set (0.827) and
+fifth here (0.902) — within 0.012 of `embeddinggemma` at **62 MB**, a tenth the
+size. Real issues are ~500 characters, so the long-document slice that dominated
+the synthetic ranking never fires. If your captures are short, the tiny model is
+very nearly as good and the ranking above over-punishes it.
+
+**`bge-m3` fell furthest** (1st → 6th), for the mirror-image reason: much of its
+synthetic standing came from the long-document slice.
+
+The general lesson is the one the MTEB critics make, reproduced in miniature: a
+corpus that does not look like your data will rank models in an order that does
+not apply to your data. The mix matters as much as the size — 15% long documents
+in the synthetic set was enough to reorder half the table.
+
 ## Is a second retrieval tier worth it?
 
 `eval-cascade.ts`. The three best embedding models plateau at 0.975 MRR and fail
@@ -448,7 +505,33 @@ best and second-best score is a usable confidence signal: escalating only when i
 is below 0.08 fires on 3 of 20 queries and cuts the average cost from 1229ms to
 152ms for identical accuracy — an 8x saving.
 
-### Why this is not yet a recommendation
+### Does the cascade survive real data? Yes — better than on synthetic
+
+Same design, 97 real issues, `embeddinggemma` + `qwen3.8:27b` reranking the top 5:
+
+| gate | escalated | R@1 | MRR | +ms/query | fixed | **broke** |
+| --- | --- | --- | --- | --- | --- | --- |
+| tier 1 only | — | 86% | 0.914 | 0 | — | — |
+| margin < 0.035 | 20/97 (21%) | **91%** | **0.950** | **+510** | 5 | **0** |
+| margin < 0.074 | 36/97 (37%) | 91% | 0.950 | +998 | 5 | **0** |
+| margin < 0.15 | 63/97 (65%) | **93%** | **0.960** | +1548 | 7 | **0** |
+
+**The reranker never demoted a correct answer — zero regressions at every
+threshold.** That is the result that matters most: escalation is monotone, so the
+gate is purely a cost control and not an accuracy risk. On synthetic data the tier
+fixed one query; here it fixes five to seven real misses.
+
+**The threshold did not transfer, exactly as warned.** The synthetic set put the
+gate at 0.08; on real data 0.035 captures the entire benefit of 0.074 at half the
+latency, and the useful range runs to 0.15 if you will pay for it. Fitting that
+number to one failing query was as unsafe as it looked — but the *mechanism* it was
+testing held up.
+
+So the recommendation firms up: a gated second tier is worth building, the gate
+must be fitted on your own corpus, and 0.035–0.05 is a better starting guess than
+0.08.
+
+### Remaining caveats
 
 - **One query separates 0.975 from 1.000.** The 0.08 threshold is tuned on a single
   failure, which is overfitting by any standard. On a real corpus it needs fitting
