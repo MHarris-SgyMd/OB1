@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: @supabase/supabase-js
+// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *
@@ -13,7 +19,7 @@
  * Adapt writeToOB1() to call your OB1 capture MCP tool or REST endpoint.
  */
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from "../../compat/supabase-sql/index.ts";
 
 // ---------------------------------------------------------------------------
 // Config

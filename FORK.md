@@ -54,7 +54,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twelve commits on top of the pin. Seven fix defects found in an audit of the pinned
+Thirteen commits on top of the pin. Seven fix defects found in an audit of the pinned
 tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
 schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
@@ -72,6 +72,7 @@ schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 | 10 | `[fork] db: live suite against a real Postgres server` | PGlite cannot reach the migration runner, driver-level jsonb binding, or the planner. Adds `test-live.ts` plus `with-postgres.sh` (podman first) and a CI service container. | **Unfiled** |
 | 11 | `[fork] server-portable: swappable data layer` | Phase 2. Every DB call goes through `ThoughtStore`; `store-sql.ts` talks to Postgres directly via `Bun.sql`, `store-postgrest.ts` keeps the old path for cutover and for Workers. Verified end to end over MCP with no Supabase present. | **Unfiled** |
 | 12 | `[fork] deploy: preflight gate and a full stack with no Supabase` | Phase 4. A misconfigured server used to start, answer the handshake, pass every liveness probe and fail on first real use. `preflight.ts` gates the container entrypoint; `deploy/compose.yaml` runs Postgres + migrations + server with no Supabase CLI; `smoke.sh` verifies any deployment over MCP. | **Unfiled** |
+| 13 | `[fork] compat: a supabase-js-shaped client that speaks SQL` | 54 non-core files call PostgREST across 33k lines. Rather than rewrite them, `compat/supabase-sql` reimplements the ~20 methods they use, so 24 migrated by changing one import. Refuses resource embedding, nested `.or()`, type-only imports and `.auth`/`.storage` rather than faking them. | **Unfiled** |
 
 ### Files we own
 
@@ -91,6 +92,9 @@ scripts/check-fork-consistency.mjs # fix 7 (new file)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
+compat/supabase-sql/             # fix 13  (new dir — the shim)
+scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
+<24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -212,6 +216,14 @@ Deliberate. Recorded so nobody assumes they were missed.
   `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
   lazy `db()` accessor makes easy to inject but which is not built. Until then they
   keep their drift guards.
+- **The 24 shim-migrated files are not individually tested.** Most need live
+  credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
+  real Postgres, and CI checks every migrated file still parses and that the
+  codemod round-trips byte-for-byte — but exercise the ones you actually run
+  before trusting them.
+- **Seven files still need a human.** Four use PostgREST resource embedding (a
+  join), two use nested `.or()` grouping, and one is a type-only import. Run
+  `node scripts/migrate-to-sql-shim.mjs` for the current list and the reason.
 - **`CLAUDE.md` and `AGENTS.md` disagree** — a duplicated worktrees block, then
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the

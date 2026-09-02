@@ -14,7 +14,19 @@ set -euo pipefail
 
 IMAGE="${OB1_PG_IMAGE:-pgvector/pgvector:pg16}"
 NAME="ob1-test-pg-$$"
-PORT="${OB1_PG_PORT:-55432}"
+# Pick a free port rather than a fixed one: a leftover container from an
+# interrupted run would otherwise fail every later run with "address already in
+# use", and two suites cannot run at once.
+pick_port() {
+  if [ -n "${OB1_PG_PORT:-}" ]; then echo "$OB1_PG_PORT"; return; fi
+  for _ in $(seq 1 50); do
+    p=$(( 49152 + RANDOM % 15000 ))
+    if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then echo "$p"; return; fi
+    exec 3>&- 2>/dev/null || true
+  done
+  echo 55432
+}
+PORT="$(pick_port)"
 PASSWORD="ob1test"
 DB="ob1test"
 

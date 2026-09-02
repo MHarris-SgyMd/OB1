@@ -282,3 +282,68 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
+
+  compat-shim:
+    name: supabase-js compatibility shim
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: compat/supabase-sql
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: compat/supabase-sql
+        run: bunx tsc --noEmit
+
+      # 24 files depend on this behaving exactly like supabase-js. A shim that is
+      # merely close is worse than none — they would inherit the differences with
+      # no failing test to find them.
+      - name: Conformance against real Postgres
+        working-directory: compat/supabase-sql
+        run: bun test-compat.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # Every migrated file must still parse, and the codemod must round-trip
+      # byte-for-byte so a migration is always reversible.
+      - name: Migrated files parse
+        run: |
+          fail=0
+          for f in $(grep -rl 'MIGRATED OFF SUPABASE' --include='*.ts' --include='*.mjs' --include='*.js' \
+                       --exclude-dir=node_modules --exclude-dir=.git . | grep -v scripts/); do
+            bun build "$f" --target=bun --external '*' --outfile /dev/null >/dev/null 2>&1 \
+              || { echo "does not parse: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: Codemod round-trips losslessly
+        run: |
+          bun scripts/migrate-to-sql-shim.mjs --revert >/dev/null
+          bun scripts/migrate-to-sql-shim.mjs --apply --all >/dev/null
+          if ! git diff --quiet; then
+            echo "apply→revert→apply is not idempotent:" >&2
+            git diff --stat >&2
+            exit 1
+          fi
+          echo "round-trip clean"
