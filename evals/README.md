@@ -411,6 +411,39 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Does chunking actually work? Measured end to end
+
+`eval-chunking-e2e.ts`. The CI test for chunking uses a stub provider, which is
+right for CI but means the *benefit* was asserted rather than measured — a stub
+that refuses over-batch input cannot show what real truncation costs or what
+chunking buys back. This runs the real server over MCP against real Ollama and
+real Postgres. "Chunking off" is the same server with `OB1_CHUNK_TOKENS` set
+high enough that nothing splits: exactly the pre-007 behaviour.
+
+Four documents per row, identical but for the final sentence, each queried by
+that sentence. Found means ranked first.
+
+| document | chunking off | chunking on | |
+| --- | --- | --- | --- |
+| ~551 tokens | 4/4 | 4/4 | 0 chunk rows — correctly left alone |
+| ~2285 tokens | 4/4 | 4/4 | 12 chunk rows |
+| ~4631 tokens | **1/4** | **4/4** | 20 chunk rows |
+| ~9221 tokens | **1/4** | **4/4** | 36 chunk rows |
+
+1/4 is chance. So the failure begins between 2.3K and 4.6K tokens — consistent
+with the 2048-token batch — and chunking removes it completely.
+
+The 9221-token row is the interesting one. Earlier in this file, raising
+`num_batch` recovered 4K documents but **not** 8K ones, because past that size the
+answer stops being truncated and starts being diluted, and no provider setting
+fixes dilution. Chunking scores 4/4 there anyway — it never asks one vector to
+represent nine thousand tokens, so the problem does not arise. That makes it a
+better answer than either a bigger batch or a longer-context model.
+
+An earlier version of this table labelled its rows by guesswork and reported a
+"4K" row that was really ~1800 tokens, under the ceiling, making the feature look
+useless at that size. Sizes are now measured from the document actually built.
+
 ## Long documents: the context column was wrong
 
 `eval-longctx.ts`. Everything else here uses short text — the synthetic "long"

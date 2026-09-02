@@ -182,7 +182,16 @@ above `OB1_CHUNK_TOKENS` (1200) into overlapping windows and embeds each. Notes:
 
 `server-portable/test-chunking.ts` asserts the case that used to fail, with a stub
 provider that *refuses* over-batch input rather than truncating it, so removing
-chunking fails loudly instead of quietly regressing.
+chunking fails loudly instead of quietly regressing. Measured for real in
+`evals/eval-chunking-e2e.ts` — the actual server against actual Ollama and
+Postgres — where documents of ~4.6K and ~9.2K tokens go from 1/4 (chance) to 4/4.
+
+Two gaps this closed on the way. The PostgREST store had **no test at all**, so
+its RPC argument shapes were unverified until chunking added a fourth one;
+`test-store-postgrest.ts` now covers it using `compat/supabase-sql` as the
+fixture. That immediately found a real bug in the shim: a numeric array bound to a
+`vector` parameter became a Postgres array literal, which pgvector rejects, so
+**every** `.rpc()` call passing an embedding through the shim was broken.
 
 ---
 

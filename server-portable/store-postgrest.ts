@@ -25,8 +25,15 @@ export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
   private client: SupabaseClient;
 
-  constructor(url: string, serviceKey: string) {
-    this.client = createClient(url, serviceKey);
+  /**
+   * `client` is a seam for tests. Production passes a URL and key and gets a real
+   * supabase-js client; the suite passes the compat/supabase-sql shim, which
+   * speaks the same surface over a real Postgres. Without it this class could only
+   * be exercised against a live PostgREST, which is why its RPC argument shapes
+   * went unverified until chunking added a fourth one.
+   */
+  constructor(url: string, serviceKey: string, client?: SupabaseClient) {
+    this.client = client ?? createClient(url, serviceKey);
   }
 
   async matchThoughts(opts: {

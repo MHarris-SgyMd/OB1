@@ -428,7 +428,30 @@ export class SupabaseSqlClient {
       const call = names.length
         ? `${ident(fn, "function")}(${names.map((n, i) => `${ident(n, "argument")} => $${i + 1}`).join(", ")})`
         : `${ident(fn, "function")}()`;
-      const values = names.map((n) => args[n]);
+      // Argument binding has to split by shape, because Bun gets each one wrong
+      // in a different direction and PostgREST gets both right by accident: it
+      // sends a JSON body and lets Postgres coerce to the declared parameter type.
+      //
+      //   NUMERIC ARRAYS — an embedding for a `vector` parameter. Bun binds a JS
+      //   array as a Postgres array literal, and `{1,0,0}` is not valid `vector`
+      //   input. Passed as JSON text, `[1,0,0]`, Postgres coerces it correctly.
+      //
+      //   EVERYTHING ELSE — arrays of objects, and objects, for `jsonb`
+      //   parameters. These must NOT be pre-stringified: Bun binds a JS string to
+      //   jsonb as a JSON *scalar string*, so `jsonb_array_length` then fails with
+      //   "cannot get array length of a scalar". Bun serialises the value itself
+      //   correctly, so hand it over untouched.
+      //
+      // The split is a heuristic, not introspection. A numeric array genuinely
+      // destined for a `jsonb` parameter would arrive as text and a real
+      // Postgres array parameter (`int[]`) would need `{1,2}` rather than
+      // `[1,2]`; nothing in this repo has either. A caller that grows one wants an
+      // explicit cast in its own SQL rather than more guessing here.
+      const values = names.map((n) => {
+        const v = args[n];
+        const numeric = Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "number");
+        return numeric ? JSON.stringify(v) : v;
+      });
       const rows = (await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[];
 
       // A set-returning function yields rows; a scalar one yields a single column
