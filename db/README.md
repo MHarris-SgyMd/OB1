@@ -13,7 +13,7 @@ Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
 - To apply against a real database: Postgres 15+ with the `vector` extension
   available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted)
 - To run the tests: nothing else. They use PGlite, which is real PostgreSQL 17
-  compiled to WASM.
+  compiled to WASM — no daemon, no container.
 
 ## Steps
 
@@ -51,8 +51,8 @@ bun migrate.ts --url ... --baseline
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `49 assertions: 49 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports four migrations applied, and
+`bun test-schema.ts` prints `59 assertions: 59 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports five migrations applied, and
 `\d thoughts` shows seven columns and four indexes.
 
 ## The migrations
@@ -63,6 +63,7 @@ Against a real database, `bun migrate.ts` reports four migrations applied, and
 | `002_match_thoughts.sql` | Semantic search RPC | Guide step 2.3 |
 | `003_content_fingerprint.sql` | Fingerprint column, unique partial index, `upsert_thought` | Guide step 2.6 |
 | `004_upsert_thought_with_embedding.sql` | 3-arg atomic-capture overload | This fork |
+| `005_reject_non_object_payload.sql` | Reject a non-object `p_payload` instead of silently storing `{}` | This fork |
 
 ## What changed relative to the guide
 
@@ -98,7 +99,7 @@ five files elsewhere in the repo creating it. `pg_trgm` is needed only by
 ## Testing
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 49 properties, including:
+asserts 59 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and all four index access methods match the guide
@@ -115,12 +116,28 @@ asserts 49 properties, including:
   the threshold is excluded. Anyone reimplementing this in raw SQL must keep the
   strict `>` or result counts change silently.
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
+- a non-object `p_payload` raises rather than silently storing `{}`
+
+### The double-encoding trap
+
+Both overloads read metadata as `COALESCE(p_payload->'metadata', '{}')`. The `->`
+operator returns NULL for anything that is not a JSON object, so a caller that
+passes a JSON *string* stored empty metadata and got a success back — content and
+embedding written correctly, metadata gone.
+
+Client libraries differ on this. `Bun.sql` binds a JS string to a `jsonb`
+parameter as a JSON string (`jsonb_typeof = 'string'`), not an object; pass a JS
+object instead. Upstream has already fixed this same class twice, in
+`thought-enrichment` and `add_household_item`.
+
+Migration 005 makes it raise. Valid calls — an object, `NULL`, or the `'{}'`
+default — are unaffected.
 
 ## Caveats
 
-- **Not yet run against a managed Postgres.** PGlite is real PostgreSQL with real
-  pgvector, but it is not RDS or Neon. Run `--dry-run` first against the real
-  target.
+- **Not yet run against a managed Postgres.** Verified against PGlite (PostgreSQL 17
+  in WASM) *and* a real `pgvector/pgvector:pg16` container, but neither is RDS or
+  Neon. Run `--dry-run` first against the real target.
 - **HNSW index build time is not represented.** On an empty table it is instant; on
   a populated one it is not. Build it after a bulk load, not before.
 - **Data migration is not covered here.** These migrations create the schema. Moving

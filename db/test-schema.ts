@@ -257,6 +257,52 @@ console.log("\n[10] Migrations carry nothing Supabase-specific");
   assert(!/pgcrypto/i.test(all) || /NOT pgcrypto/.test(all), "pgcrypto not required (gen_random_uuid + sha256 are built-ins)");
 }
 
+
+// ── 11. A malformed payload must be loud ─────────────────────────────────────
+
+console.log("\n[11] Non-object payloads are rejected, not silently emptied");
+{
+  await db.exec(`DELETE FROM thoughts`);
+
+  // The trap: `->` returns NULL for a non-object, so COALESCE writes '{}' and the
+  // caller sees success while the metadata is gone. Client libraries differ here —
+  // Bun.sql binds a JS string to jsonb as a JSON *string*, not an object.
+  let raised = false;
+  let message = "";
+  try {
+    await db.query(`SELECT upsert_thought('scalar payload', '"{\\"metadata\\":{\\"k\\":1}}"'::jsonb)`);
+  } catch (e) {
+    raised = true;
+    message = (e as Error).message;
+  }
+  assert(raised, "a JSON string payload raises instead of storing {}");
+  assert(/must be a JSON object/.test(message), "…with a message naming the cause");
+  assert(/double-encode/.test(message), "…and pointing at double-encoding");
+
+  const n = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts`);
+  assert(n.rows[0].c === 0, "nothing was written on rejection");
+
+  // Valid shapes still behave exactly as before.
+  const okObj = await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('object payload', '{"metadata":{"k":1}}'::jsonb) AS r`
+  );
+  assert(okObj.rows[0].r.id != null, "an object payload still works");
+  const okNull = await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('null payload', NULL::jsonb) AS r`
+  );
+  assert(okNull.rows[0].r.id != null, "a NULL payload still works");
+  const okDefault = await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('default payload') AS r`
+  );
+  assert(okDefault.rows[0].r.id != null, "the '{}' default still works");
+
+  let raised3 = false;
+  try {
+    await db.query(`SELECT upsert_thought('scalar 3arg', '"oops"'::jsonb, NULL::vector)`);
+  } catch { raised3 = true; }
+  assert(raised3, "the 3-arg overload rejects it too");
+}
+
 console.log(`\n${"─".repeat(52)}`);
 console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
 console.log(failed > 0 ? "FAIL\n" : "PASS\n");
