@@ -109,6 +109,16 @@ The short version:
   dimensions, above pgvector's HNSW limit of 2000 — the column works but no index
   can be built. The largest usable one, `qwen3-embedding:0.6b`, scored below
   `embeddinggemma` despite more parameters and 16× the context.
+- **Reasoning models are wrong for this, consistently.** `qwen3:4b` 17.8s,
+  `deepseek-r1:8b` ~34s per capture against ~1.2s — and R1 also scored lower
+  (78/84) with one unusable response. DeepSeek's and Kimi's flagship weights
+  (404 GB and ~1T parameters) do not run on a workstation at all; Kimi has no
+  smaller variant in Ollama.
+- **The hosted defaults are unmeasured.** `openai/gpt-4o-mini` and
+  `openai/text-embedding-3-small` are carried over from upstream and have not been
+  benchmarked. `deepseek/deepseek-chat` via OpenRouter is a cheap, plausible
+  alternative. The harnesses in [`evals/`](evals/README.md) work against any
+  OpenAI-compatible endpoint — point them at OpenRouter with a key to settle it.
 - **Extraction runs at `temperature: 0`.** It was previously unset, so it sampled
   at the provider default and the same note could gain or lose a field between
   captures. Override with `OB1_METADATA_TEMPERATURE` if you want variety.

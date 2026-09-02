@@ -187,6 +187,40 @@ What did **not** help: nothing about extraction from a short note is
 capability-limited in the way model choice implies. The temperature fix above was
 worth more than either size step, and cost nothing.
 
+### DeepSeek and Kimi
+
+Asked for explicitly, so checked explicitly.
+
+**The flagships do not fit.** `deepseek-v3` and `deepseek-v3.1` are 404 GB in the
+Ollama library; Kimi K2 is a ~1T-parameter MoE, larger still. On 64 GB neither is
+runnable at any quantisation worth using.
+
+**Kimi has no smaller variant.** Every Kimi tag in the Ollama library returns 404
+(`kimi-linear`, `kimi-vl`, `kimi-dev`). It is not locally available at any size, so
+there was nothing to test.
+
+**DeepSeek-R1's distills run, and lose badly on this task.** `deepseek-r1:8b`
+(5.2 GB) at temperature 0:
+
+| model | core | hard | total | sec (14 captures) | per capture |
+| --- | --- | --- | --- | --- | --- |
+| qwen2.5:7b | 45/48 | **36/36** | **81/84** | **16.7** | **~1.2s** |
+| deepseek-r1:8b | **48/48** | 30/36 | 78/84 | 482.1 | **~34s** |
+
+A perfect core slice — and then 30/36 on hard, one capture that returned unusable
+JSON, and **29× the wall-clock**. It spends the budget in the wrong place: 5,064
+characters of reasoning to pull two fields out of one sentence.
+
+Ollama does at least route that reasoning into a separate `reasoning` field, so
+`response_format: json_object` still holds — R1 is not broken here, just
+pathologically expensive. `deepseek-r1:14b` was not scored: at ~34s per capture
+for the 8B, a larger distill can only be slower, and the disqualification is
+latency rather than quality.
+
+This is the third reasoning model to fail the same way — `qwen3:4b` at 17.8s,
+`deepseek-r1:8b` at 34s. The pattern is not about any one family. **Chain-of-thought
+is the wrong tool for a fixed-schema extraction that runs on every capture.**
+
 ### The embedding side has a hard ceiling, not a resource one
 
 Scaling embeddings up runs into pgvector, not memory:
@@ -202,6 +236,26 @@ sixteen times the context (32k vs 2k), and still scored lower. Above 2000
 dimensions the column can be created but no HNSW index can be built, so every
 search becomes a full scan — a bigger embedding model would need Matryoshka
 truncation to be usable at all, which Ollama does not expose.
+
+## The biggest gap: nothing hosted has been measured
+
+Everything above is local, via Ollama. The **default** configuration is not local —
+it is OpenRouter with `openai/gpt-4o-mini` for extraction and
+`openai/text-embedding-3-small` for embeddings, and **neither has been benchmarked
+here at all.** They are the upstream defaults, carried forward unexamined.
+
+That matters in both directions:
+
+- `gpt-4o-mini` may well beat `qwen2.5:7b` — or not. It is simply unknown, and it
+  is what most people will actually run.
+- `deepseek/deepseek-chat` on OpenRouter is a strong, unusually cheap option for
+  exactly this kind of structured extraction, and is the realistic way to use
+  DeepSeek here given the flagship weights cannot run locally.
+
+These harnesses can measure hosted models unchanged — point `OLLAMA_BASE` at
+OpenRouter's `/v1` and supply a key. That has not been done because there is no
+key in this environment. Until it is, treat "qwen2.5:7b is the best extraction
+model" as scoped to *local* options.
 
 ## Caveats
 
