@@ -195,6 +195,37 @@ fixture. That immediately found a real bug in the shim: a numeric array bound to
 
 ---
 
+## Checking CI on this fork
+
+Two traps, both of which cost real time.
+
+**`gh` defaults to the parent repo.** In a fork, `gh run list` resolves to
+`NateBJones-Projects/OB1` and reports nothing for our branches, which reads exactly
+like "no runs" rather than "wrong repository". Fix it once per clone:
+
+```bash
+gh repo set-default MHarris-SgyMd/OB1
+gh run list --branch siggymd/db-migrations          # now the fork
+```
+
+Eight commits went out on a red CI because of this. Only `Fork Checks` ever runs
+here; the other eleven inherited workflows are PR- and issue-triggered against
+upstream and never fire on a branch push.
+
+**Running the suites individually cannot catch state leaking between them.**
+`db/with-postgres.sh` starts a fresh container per invocation, so anything one
+suite leaves behind is invisible; CI reuses one Postgres service across every
+step. That difference hid a real failure: `DROP TABLE thoughts CASCADE` removes the
+foreign-key constraint on `thought_chunks`, not the table, so a stale chunk table
+survived at the previous suite's vector width and the next suite died on a
+dimension mismatch. Every suite now drops `thought_chunks` first, and
+
+```bash
+./db/ci-parity.sh
+```
+
+runs them all in CI's order against one shared database. Use it before pushing.
+
 ## Rebasing onto upstream
 
 Roughly quarterly, or when something lands that we want.

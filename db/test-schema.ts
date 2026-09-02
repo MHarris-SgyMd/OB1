@@ -146,7 +146,9 @@ console.log("\n[5] Both upsert_thought overloads resolve unambiguously");
      WHERE p.proname = 'upsert_thought' AND n.nspname = 'public' ORDER BY 1`
   );
   const sigs = fns.rows.map((r) => r.args);
-  assert(sigs.length === 2, `two overloads registered (got ${sigs.length}: ${sigs.join(" | ")})`);
+  // Three since migration 007 added the chunk-carrying form: (text, jsonb),
+  // (text, jsonb, vector) and (text, jsonb, vector, jsonb).
+  assert(sigs.length === 3, `three overloads registered (got ${sigs.length}: ${sigs.join(" | ")})`);
   assert(sigs.some((s) => s === "p_content text, p_payload jsonb"), "2-arg upsert_thought(text, jsonb) present");
   assert(sigs.some((s) => /vector/.test(s)), "3-arg overload with a vector present");
 

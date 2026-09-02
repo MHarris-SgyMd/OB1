@@ -96,6 +96,15 @@ if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is disti
 else {
   const { SQL } = await import("bun");
   const admin = new SQL({ url: LIVE, max: 1 });
+  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
+
+  // constraint, not this table, so a stale one survives at the PREVIOUS test's
+
+  // vector width. Harmless locally, where each run gets a fresh container, and a
+
+  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
+
+  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
   await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
   await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
 

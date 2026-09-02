@@ -44,6 +44,15 @@ const assert = (c: unknown, l: string) =>
 // Schema at 768.
 {
   const admin = new SQL({ url: URL_, max: 1 });
+  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
+
+  // constraint, not this table, so a stale one survives at the PREVIOUS test's
+
+  // vector width. Harmless locally, where each run gets a fresh container, and a
+
+  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
+
+  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
   await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
   await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
   await admin`DROP TABLE IF EXISTS ob1_config CASCADE`;
