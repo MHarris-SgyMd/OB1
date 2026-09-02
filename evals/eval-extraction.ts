@@ -21,7 +21,21 @@
  *   actions   an action item when the text implies one
  */
 
-const BASE = process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
+/**
+ * Any OpenAI-compatible endpoint. Ollama by default, but the point of the
+ * indirection is that the *hosted* defaults this fork inherited can be measured
+ * on the same corpus as the local ones — otherwise the comparison is a leaderboard
+ * citation, not a measurement.
+ *
+ *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
+ *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
+ */
+const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
+const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
+const HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
+};
 
 /** Verbatim from server-portable/index.ts, so this scores the real prompt. */
 const SYSTEM = `Extract metadata from the user's captured thought. Return JSON with:
@@ -161,7 +175,7 @@ const TEMP = process.env.OB1_EVAL_TEMP === undefined ? undefined : Number(proces
 async function extract(model: string, text: string): Promise<Record<string, unknown> | null> {
   const r = await fetch(`${BASE}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: HEADERS,
     body: JSON.stringify({
       model,
       response_format: { type: "json_object" },

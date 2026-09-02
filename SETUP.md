@@ -118,9 +118,10 @@ The short version:
   `embeddinggemma` despite more parameters and 16× the context.
 - **`lfm2.5:8b` is the fast option** — 0.54s per capture against 1.4s, zero
   structural failures, six points less accurate. Worth it if you capture often.
-- **`gemma4` is the most accurate local option** (83/84, no failures) but only
-  with reasoning on, which costs ~7.7s per capture against ~1.4s. Set
-  `OB1_METADATA_REASONING=on` if that trade suits you. Reasoning is off by
+- **`qwen3.8:27b` is the most accurate local option** — the only model to score a
+  perfect 84/84 with no structural failures, at ~3.5s per capture and 18 GB. It is
+  both more accurate and faster than `gemma4 + reasoning`, which it replaces. Worth
+  it if correctness of `topics`/`people`/`type` matters more than capture latency. Reasoning is off by
   default: `think: false` is silently ignored on the OpenAI-compatible endpoint, so
   the server sends `reasoning_effort: "none"` — without it a thinking model
   multiplies capture latency with no warning.

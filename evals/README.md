@@ -223,13 +223,27 @@ At temperature 0:
 
 | model | size | core | hard | total | per capture | structural failures |
 | --- | --- | --- | --- | --- | --- | --- |
-| gemma4 **+ reasoning** | 9.6 GB | 47/48 | **36/36** | **83/84** | 7.7s | **none** |
+| **qwen3.8:27b** | 18 GB | **48/48** | **36/36** | **84/84** | 3.5s | **none** |
+| gemma4 + reasoning | 9.6 GB | 47/48 | 36/36 | 83/84 | 7.7s | none |
 | **qwen2.5:7b** | 4.7 GB | 45/48 | **36/36** | 81/84 | 1.4s | **none** |
 | gemma4 − reasoning | 9.6 GB | 46/48 | 34/36 | 80/84 | 1.4s | 1 invented person |
 | gpt-oss:20b | 13 GB | 48/48 | 35/36 | 83/84 | 6.7s | 1 invented person |
 | granite4.2:30b | 17 GB | 47/48 | 35/36 | 82/84 | 4.8s | 1 invented person |
+| nemotron-3.5-lightning:30b-a3b | 23 GB | 46/48 | 35/36 | 81/84 | 1.15s | none |
 | **lfm2.5:8b** | 5.2 GB | 42/48 | 33/36 | 75/84 | **0.54s** | **none** |
 | functiongemma:270m | 301 MB | 27/48 | 22/36 | 49/84 | 8.8s | 11 with no topics, 1 bad JSON |
+
+**`qwen3.8:27b` is the first model to score a perfect 84/84**, with no structural
+failures, and it does it in 3.5s per capture — more accurate *and* 2.2x faster than
+`gemma4 + reasoning`, which it replaces as the accuracy option. It costs 18 GB and
+2.9x the latency of `qwen2.5:7b` for three points, so the 7B stays the default; but
+if you want the most correct metadata a workstation can produce, this is now it.
+It is also the one case in this whole sweep where a much larger model genuinely
+paid.
+
+`nemotron-3.5-lightning:30b-a3b` is the MoE story again: ~3B active, 81/84 with no
+failures at 1.15s per capture — matching `qwen2.5:7b`'s score and speed from a
+23 GB model. Interesting, but it buys nothing the 4.7 GB model does not already do.
 
 `lfm2.5:8b` is worth calling out separately: an MoE with roughly 1B active
 parameters, it is **2.2× faster than `qwen2.5:7b`** with zero structural failures,
@@ -336,16 +350,15 @@ Post-cutoff families that exist and were **not** evaluated, with why:
 
 | family | smallest tag | why not tested |
 | --- | --- | --- |
-| `qwen3.8`, `qwen3.6`, `qwen3.5` | 18 GB (`qwen3.8:27b`) | Runnable; not yet pulled. The direct successor to the incumbent and the most likely to displace it. There is no small tag — 27B is the floor for the whole family. |
-| `nemotron-3.5-lightning` | 23 GB (`:30b-a3b`) | MoE with ~3B active — the shape that made `lfm2.5` fast. Not yet pulled. |
+| `qwen3.6`, `qwen3.5` | 18 GB | Siblings of the tested `qwen3.8:27b`; unlikely to beat it. |
 | `glm-5.3-flash` | — | **Cloud-only** (`:cloud`). No local weights published, so it is out of scope for a local brain. |
 | `deepseek-v4-flash`, `deepseek-v4-pro` | unknown | DeepSeek V4 exists; sizes not resolved. |
 | `minimax-m3`, `kimi-k3`, `qwen3.8-flash-next` | 105 GB+ where known | Beyond 64 GB. |
 
-`granite4.2:30b` was pulled and tested: 82/84, one invented person, 4.8s per
-capture. That is the pattern the whole sweep keeps producing — a much larger model
-lands a point or two above `qwen2.5:7b` and three to five times slower, and still
-invents a person the 7B does not. Nothing yet beats it on the combination.
+Three were pulled and tested. `granite4.2:30b` scored 82/84 with an invented
+person at 4.8s, and `nemotron-3.5-lightning:30b-a3b` scored 81/84 at 1.15s — both
+the familiar pattern, a much larger model landing at or just above `qwen2.5:7b`.
+`qwen3.8:27b` broke it: 84/84, clean, 3.5s. So the sweep was worth running.
 
 The gap for the rest is not that they are known to be worse — it is that they are
 unmeasured. Anyone re-running this should start with `qwen3.8:27b`.
@@ -393,6 +406,65 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Open versus proprietary
+
+On the public leaderboards the open models are ahead, which was not true two years
+ago. MTEB multilingual v2, top of each camp:
+
+| model | MTEB | $/M tokens | |
+| --- | --- | --- | --- |
+| **Qwen3-Embedding-8B** | **70.58** | **$0.01** hosted, free self-hosted | open |
+| Gemini embedding-001 | 68.32 | $0.15 | proprietary |
+| voyage-3-large | ~67 | $0.06 | proprietary |
+| Cohere embed-v4 | 65.2 | $0.10 | proprietary |
+| text-embedding-3-large | 64.6 | $0.13 | proprietary |
+| BGE-M3 | 63.0 | free self-hosted | open |
+
+The best open model outscores every proprietary one *and* is the cheapest way to
+buy embeddings even if you do not self-host — $0.01/M against $0.13/M for
+`text-embedding-3-large`, thirteen times cheaper and higher scoring. On MTEB
+English v2 the same family reports 75.22 (8B), 74.60 (4B) and 70.70 (0.6B) against
+`embeddinggemma`'s 69.67.
+
+Treat the cross-camp rows as directional: the proprietary numbers come from
+secondary sources that mostly do not state which MTEB version they are on, and
+mixing English v1, English v2 and multilingual v2 is an easy way to produce a
+comparison that means nothing. Only the Qwen and Gemma numbers here are from
+primary model cards on a stated, matching benchmark.
+
+### …and what that is worth on this corpus
+
+`qwen3-embedding:4b` scores 74.60 on MTEB English v2 against `embeddinggemma`'s
+69.67 — five points, which on a leaderboard is a rout. Here:
+
+| model | dims | easy | near-dup | temporal | long | MRR | sec |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| qwen3-embedding:4b (+instruct) | 1024 | 5/5 | 7/8 | 4/4 | 3/3 | 0.975 | 2.8 |
+| **embeddinggemma** | **768** | 5/5 | 7/8 | 4/4 | 3/3 | **0.975** | **0.8** |
+| qwen3-embedding:4b (no instruct) | 1024 | 4/5 | 7/8 | 4/4 | 3/3 | 0.938 | 2.8 |
+
+A dead tie, from a model four times the size and three and a half times slower.
+Five leaderboard points bought nothing on twenty personal notes. That is the
+clearest single illustration of why this directory exists.
+
+Two things that had to be right for that to be a fair test:
+
+**Qwen3-Embedding needs its query instruction.** Documents go in bare, queries are
+wrapped as `Instruct: {task}\nQuery: {q}`. Without it the same model scores 0.938
+instead of 0.975 — so an unprefixed comparison would have understated it by more
+than the leaderboard gap being tested. The harness takes `model!instruct` for this.
+
+**pgvector's 2000-dimension ceiling is not the hard exclusion this file used to say
+it was.** `qwen3-embedding:4b` is 2560 natively, which cannot be HNSW-indexed — but
+Qwen3-Embedding supports Matryoshka truncation from 32 to 4096 dimensions, and
+**Ollama honours the OpenAI `dimensions` parameter**, verified: ask for 1024 and you
+get 1024. The harness takes `model@1024`. Interestingly 1024 beat 1536 here
+(0.975 vs 0.912) — narrower was better, on this corpus.
+
+Note that the server does **not** currently send `dimensions`, so configuring a
+2560-native model against a 1024 column still fails the width check at capture
+time. Making that configurable is the obvious follow-up.
+
 ## The biggest gap: nothing hosted has been measured
 
 Everything above is local, via Ollama. The **default** configuration is not local —
@@ -408,10 +480,18 @@ That matters in both directions:
   exactly this kind of structured extraction, and is the realistic way to use
   DeepSeek here given the flagship weights cannot run locally.
 
-These harnesses can measure hosted models unchanged — point `OLLAMA_BASE` at
-OpenRouter's `/v1` and supply a key. That has not been done because there is no
-key in this environment. Until it is, treat "qwen2.5:7b is the best extraction
-model" as scoped to *local* options.
+The harnesses now speak to any OpenAI-compatible endpoint with a key, so this is a
+one-liner the moment one exists:
+
+```bash
+OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… OB1_EVAL_TEMP=0 \
+  bun eval-retrieval.ts openai/text-embedding-3-small qwen/qwen3-embedding-8b@1024
+```
+
+It costs almost nothing to settle — the whole retrieval corpus is about 15k tokens,
+so a run against `text-embedding-3-small` at $0.02/M is a small fraction of a cent.
+Until it is run, treat "qwen2.5:7b is the best extraction model" and
+"embeddinggemma is the best embedding model" as scoped to *local* options.
 
 ## Caveats
 

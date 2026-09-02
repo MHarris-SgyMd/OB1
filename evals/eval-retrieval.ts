@@ -22,7 +22,21 @@
  * the thing worth knowing.
  */
 
-const BASE = process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
+/**
+ * Any OpenAI-compatible endpoint. Ollama by default, but the point of the
+ * indirection is that the *hosted* defaults this fork inherited can be measured
+ * on the same corpus as the local ones — otherwise the comparison is a leaderboard
+ * citation, not a measurement.
+ *
+ *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
+ *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
+ */
+const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
+const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
+const HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
+};
 
 type Doc = { id: string; text: string; slice: string };
 type Query = { q: string; want: string; slice: string };
@@ -128,10 +142,22 @@ const QUERIES: Query[] = [
   { q: "why does my instrument drift out of tune?", want: "guitar", slice: "easy" },
 ];
 
-async function embed(model: string, input: string): Promise<number[]> {
+/**
+ * `model@dims` requests MRL truncation via the OpenAI `dimensions` parameter.
+ * This is how a model whose native width exceeds pgvector's 2000-dimension HNSW
+ * ceiling can still be used: qwen3-embedding:4b is 2560 natively and unindexable,
+ * but 1024 on request. Ollama honours the parameter.
+ */
+async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
+  const [spec, dims] = model.split("@");
+  const instruct = spec.endsWith("!instruct");
+  const name = spec.replace(/!instruct$/, "");
+  if (instruct && isQuery) {
+    input = `Instruct: Given a search query, retrieve the note that answers it\nQuery: ${input}`;
+  }
   const r = await fetch(`${BASE}/embeddings`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input }),
+    method: "POST", headers: HEADERS,
+    body: JSON.stringify({ model: name, input, ...(dims ? { dimensions: Number(dims) } : {}) }),
   });
   if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 80)}`);
   return ((await r.json()) as { data: [{ embedding: number[] }] }).data[0].embedding;
@@ -156,7 +182,7 @@ async function evaluate(model: string) {
   const misses: string[] = [];
 
   for (const { q, want, slice } of QUERIES) {
-    const qv = await embed(model, q);
+    const qv = await embed(model, q, true);
     const ranked = DOCS.map((d) => ({ id: d.id, s: cosine(qv, vecs[d.id]) })).sort((a, b) => b.s - a.s);
     const rank = ranked.findIndex((r) => r.id === want) + 1;
     per[slice].n++;
