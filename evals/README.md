@@ -556,6 +556,44 @@ must be fitted on your own corpus, and 0.035–0.05 is a better starting guess t
   content the model can act on. So a second tier cannot stream a first draft — it
   can only be adaptive and invisible, or an explicit parameter on the tool.
 
+### Verifying Matryoshka support against the model cards
+
+Widths were measured, which beats any card. **MRL membership was not** — I inferred
+it from vendor and family, and got four models wrong. Every entry is now taken from
+the model's own card:
+
+| model | card says | was I right? |
+| --- | --- | --- |
+| `embeddinggemma` | MRL to 512/256/128 | ✓ |
+| `qwen3-embedding:*` | "user-defined output dimensions from 32 to N", all variants | ✓ |
+| `nomic-embed-text` | "utilizes Matryoshka Representation Learning", 768→512/256/128/64 | ✗ **missed** |
+| `nomic-embed-text-v2-moe` | "Trained with Matryoshka Embeddings", 768→256 | ✗ **missed** |
+| `mxbai-embed-large` | "The model supports both approaches!" (MRL + binary quant) | ✗ **missed** |
+| `snowflake-arctic-embed2` | MRL at 256, "less than 3% degradation" | ✗ **missed** |
+| `bge-m3`, `bge-large`, `granite-embedding`, `all-minilm` | no MRL claim | ✓ |
+
+Four false warnings against correct configurations — the same class of error as the
+non-existent model ids below, from the same cause: asserting something I had not
+checked.
+
+The distinction is real, but only visible at a **matched reduction ratio**. At 256
+dimensions the raw losses look muddled, because cutting 384→256 is not the same act
+as cutting 1024→256. Comparing like with like, at 4x:
+
+| model | 1024 → 256 | |
+| --- | --- | --- |
+| `mxbai-embed-large` | −0.011 MRR | MRL |
+| `snowflake-arctic-embed2` | −0.020 MRR | MRL |
+| `bge-m3` | **−0.042 MRR** | not MRL |
+
+Two to four times the loss for the model not trained for it. `granite-embedding`
+(not MRL) loses 0.018 at only a 1.5x cut — worse than `mxbai-embed-large` manages
+at 4x. Arctic's card claimed under 3% degradation at 256 and measured 2.2%, so the
+card was honest.
+
+A useful side effect: `snowflake-arctic-embed2` at **256 dimensions** scores 0.901,
+matching `bge-m3` at full width, in a quarter of the storage.
+
 ### Verifying the dimension table
 
 `db/config.mjs` refuses a configuration whose model and column width disagree,

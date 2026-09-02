@@ -71,21 +71,50 @@ export const KNOWN_MODEL_DIMS = {
  * vector. Truncating one of these is a supported operation; truncating anything
  * else is just throwing away numbers.
  *
- * This matters because **Ollama truncates for every model regardless** — asking a
- * non-MRL model for 256 dimensions returns 256 numbers and no warning. Measured on
- * 97 real documents: `embeddinggemma` (MRL) loses 0.025 MRR going 768 → 256, while
- * `bge-m3` (not MRL) loses 0.042 and its Recall@5 falls from 97% to 92%. Both
- * degrade; the unsupported one degrades faster and just as quietly.
+ * This matters because **providers truncate for every model regardless** — asking
+ * a non-MRL model for 256 dimensions returns 256 numbers and no warning.
+ *
+ * Membership is taken from each model's own card, not inferred from the family or
+ * the vendor, because inferring it got four of these wrong. Measured on 97 real
+ * documents, at a matched 4x reduction to 256 dimensions:
+ *
+ *   mxbai-embed-large        MRL      −0.011 MRR
+ *   snowflake-arctic-embed2  MRL      −0.020      (its card claims <3%; it held)
+ *   bge-m3                   not MRL  −0.042
+ *
+ * Two to four times the loss for the model not trained for it, at the same cut.
+ * `granite-embedding` loses 0.018 at only a 1.5x cut, which is worse than
+ * `mxbai-embed-large` manages at 4x.
  */
 export const MRL_MODELS = new Set([
+  // OpenAI documents a `dimensions` parameter for both.
   "openai/text-embedding-3-small",
   "openai/text-embedding-3-large",
-  "embeddinggemma",
+  // Card: "supports user-defined output dimensions ranging from 32 to N", and the
+  // comparison table marks MRL support for every Qwen3-Embedding variant.
   "qwen3-embedding:0.6b",
   "qwen3-embedding:4b",
   "qwen3-embedding:8b",
   "qwen/qwen3-embedding-4b",
   "qwen/qwen3-embedding-8b",
+  // Card: MRL truncation to 512, 256 or 128 after re-normalisation.
+  "embeddinggemma",
+  // Card: "utilizes Matryoshka Representation Learning" — 768 to 512/256/128/64.
+  "nomic-embed-text",
+  // Card: "Trained with Matryoshka Embeddings" — 768 down to 256.
+  "nomic-embed-text-v2-moe",
+  // Card: "The model supports both approaches!" (MRL and binary quantization).
+  "mxbai-embed-large",
+  // Card: MRL at 256 dimensions, "less than 3% degradation in quality".
+  "snowflake-arctic-embed2",
+]);
+
+/**
+ * Checked against their cards and found to make NO Matryoshka claim, so the
+ * warning is correct for these. Recorded so the next person need not re-check.
+ */
+export const VERIFIED_NOT_MRL = new Set([
+  "bge-m3", "bge-large", "granite-embedding", "all-minilm",
 ]);
 
 /**
