@@ -93,6 +93,12 @@ export interface ThoughtStore {
     content: string;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
+    /**
+     * Per-window embeddings for a capture too long to embed in one provider call.
+     * Empty or absent for ordinary short thoughts, which stay exactly as they
+     * were: one row, one vector, no chunk rows. See chunk.ts and migration 007.
+     */
+    chunks?: { content: string; embedding: number[] }[];
   }): Promise<CaptureResult>;
 
   close(): Promise<void>;

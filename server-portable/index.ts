@@ -1,4 +1,5 @@
 
+import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -36,6 +37,13 @@ type Env = {
    * only safe for models trained for Matryoshka truncation.
    */
   OB1_EMBEDDING_DIMENSIONS?: string;
+  /**
+   * Chunking for captures too long to embed in one provider call. Tokens per
+   * window and overlap between windows; see chunk.ts. Defaults suit Ollama's
+   * 2048-token batch.
+   */
+  OB1_CHUNK_TOKENS?: string;
+  OB1_CHUNK_OVERLAP?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
@@ -171,6 +179,54 @@ function thoughtTitle(content: string, createdAt?: string): string {
 
 function thoughtUrl(id: string): string {
   return `${citationBase().replace(/\/$/, "")}/${id}`;
+}
+
+/**
+ * Chunk sizing. The default is deliberately well under Ollama's 2048-token batch
+ * rather than close to it: the token count is an estimate, and a chunk that
+ * overshoots is silently truncated, which is the failure being fixed rather than a
+ * degradation of it. Retrieval was measured perfect at 2000 tokens and at chance
+ * by 4000, so crowding the ceiling buys nothing.
+ */
+function chunkTokens(): number {
+  const raw = Number(env().OB1_CHUNK_TOKENS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_TOKENS;
+}
+function chunkOverlap(): number {
+  const raw = Number(env().OB1_CHUNK_OVERLAP);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_OVERLAP_TOKENS;
+}
+
+/**
+ * Embed a capture: one vector for `thoughts.embedding`, plus per-window vectors
+ * when the content is too long to embed in a single provider call.
+ *
+ * Short content — nearly everything — takes exactly the path it always did: one
+ * call, one vector, no chunk rows.
+ *
+ * For long content, `thoughts.embedding` becomes **the first chunk's** vector
+ * rather than the whole content's. That matters: sending the whole content would
+ * be a request over the provider's batch, which Ollama answers by silently
+ * truncating — reintroducing the precise bug this is fixing, in the one column
+ * that every pre-existing row and the PostgREST path still rely on. Using the
+ * head chunk gives that column a defined meaning (the opening of the thought)
+ * instead of an accidental one (however much of it happened to fit), and costs one
+ * fewer provider call.
+ *
+ * Windows are embedded concurrently; they are independent, and serialising them
+ * would multiply the latency of a long capture for no benefit.
+ */
+async function embedCapture(content: string): Promise<{
+  embedding: number[];
+  chunks: { content: string; embedding: number[] }[];
+}> {
+  const windows = chunkContent(content, { maxTokens: chunkTokens(), overlapTokens: chunkOverlap() });
+  const texts = windows.length ? windows.map((w) => w.content) : [content];
+  const embeddings = await Promise.all(texts.map((t) => getEmbedding(t)));
+  return {
+    embedding: embeddings[0],
+    chunks: windows.map((w, i) => ({ content: w.content, embedding: embeddings[i] })),
+  };
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
@@ -687,8 +743,9 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ content }) => {
       try {
-        const [embedding, metadata] = await Promise.all([
-          getEmbedding(content),
+        // Independent of each other, so they overlap.
+        const [{ embedding, chunks }, metadata] = await Promise.all([
+          embedCapture(content),
           extractMetadata(content),
         ]);
 
@@ -701,6 +758,7 @@ function buildServer(principal: Principal): McpServer {
         const captured = await (await db()).captureThought({
           content,
           payload,
+          chunks,
           embedding,
         });
 

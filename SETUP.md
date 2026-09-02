@@ -136,12 +136,16 @@ The short version:
   ollama create bge-m3-long -f Modelfile     # then set OB1_EMBEDDING_MODEL=bge-m3-long
   ```
 
-  That takes 4K-token captures from unfindable to perfectly findable. It does **not**
-  help at 8K: the model then embeds the whole document and still cannot surface its
-  final sentence, which is dilution rather than truncation and has no configuration
-  fix. For captures that long, `qwen3-embedding:4b` is the only local model measured
-  that handles them — or chunk before capturing. All of this is silent: no error on
-  the write, no error on the search, just a note you cannot find.
+  **The server now handles this for you**: a capture above `OB1_CHUNK_TOKENS`
+  (1200 by default) is split into overlapping windows, each embedded separately, so
+  the whole note stays searchable regardless of the provider's batch. Short thoughts
+  are untouched. Raising `num_batch` is therefore optional — it lets each window be
+  larger, nothing more.
+
+  It also sidesteps the harder problem. Even with the batch raised, a single 8K-token
+  embedding cannot surface its own final sentence: the model embeds all of it and the
+  ending is diluted away, which is a property of the model and has no configuration
+  fix. Chunking avoids it by never asking one vector to represent that much text.
 - **Check the context window before anything else.** Every 512-token model tested
   scores 1/3 on long thoughts and every 2048+ model scores 2/3 or 3/3 — a hard cut,
   with no error when a thought is silently truncated. Use `ollama show <model>`,

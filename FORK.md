@@ -154,6 +154,36 @@ imports the server and asserts against the running handler — there is nothing 
 drift from. That is the strongest argument for eventually making it the primary
 build.
 
+### 18. Long captures stay searchable — `thought_chunks`
+
+A capture longer than the provider's per-request batch was embedded only in part.
+The text was stored whole and `fetch` returned it whole, but `search_thoughts`
+could not find the note by anything said in its second half — silently, with no
+error on either the write or the search. Measured: a 4000-token note whose
+conclusion is in its final sentence was retrieved at chance.
+
+Migration 007 adds `thought_chunks`, and `capture_thought` now splits content
+above `OB1_CHUNK_TOKENS` (1200) into overlapping windows and embeds each. Notes:
+
+- **`thoughts` is untouched** — no new columns, so the core guard rail holds — and
+  existing rows keep working with no re-embedding. Chunks are extra evidence, never
+  a replacement.
+- **Short thoughts write no chunk rows at all.** Both corpora measured in `evals/`
+  average under 500 tokens, so the common case pays nothing.
+- For chunked content `thoughts.embedding` becomes the *first chunk's* vector, not
+  the whole content's. Embedding the whole thing would be an over-batch request,
+  which Ollama answers by silently truncating — reintroducing the bug in the one
+  column pre-existing rows and the PostgREST path still depend on.
+- `match_thoughts` searches both tables and deduplicates to one row per thought,
+  scored by its best evidence. Each side takes its own indexed top-K rather than
+  scoring every row, because the obvious formulation cannot use an HNSW index.
+- `ON DELETE CASCADE`, so a deleted thought cannot leave orphan vectors still
+  answering searches.
+
+`server-portable/test-chunking.ts` asserts the case that used to fail, with a stub
+provider that *refuses* over-batch input rather than truncating it, so removing
+chunking fails loudly instead of quietly regressing.
+
 ---
 
 ## Rebasing onto upstream
@@ -210,28 +240,6 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 ## Known issues we did NOT fix
 
 Deliberate. Recorded so nobody assumes they were missed.
-
-- **Long captures are embedded only in part — there is no chunking.** One thought
-  is one row with one vector, upstream's design and unchanged here. `content` is
-  `text` with no limit, so the whole capture is stored and `fetch` and
-  `list_thoughts` return it intact — nothing is lost. But `getEmbedding` sends the
-  string in a single call, so past the provider's per-request ceiling (2048 tokens
-  by default on Ollama — see `evals/README.md`) the tail is not represented in the
-  vector, and `search_thoughts` cannot find the note by anything said in it. The
-  text is preserved; only its searchability is truncated, and silently.
-
-  Raising `num_batch` moves the ceiling but does not remove it: past roughly 4K
-  tokens the answer stops being cut and starts being diluted instead, which no
-  setting fixes. This matters for `capture_thought`'s own suggested use of
-  "migrated content from other systems" — a pasted transcript is exactly the shape
-  that loses its ending.
-
-  Fixing it properly means a `thought_chunks` table, embedding per chunk, and
-  `match_thoughts` searching chunks and folding results back to thoughts. That is
-  compatible with the guard rail against altering `thoughts` itself, but it is a
-  schema change and a data-model change, so it is not something to do quietly.
-  Until then: keep captures under a couple of thousand tokens, or split them
-  yourself at the point of capture.
 
 - **The access key still rides in the URL** — but it is now scoped, named and
   hashed (fix 14). `?key=` is kept because Claude Desktop connectors are URL-only,

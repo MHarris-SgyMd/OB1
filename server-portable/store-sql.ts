@@ -142,17 +142,36 @@ export class SqlStore implements ThoughtStore {
     content: string;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
+    chunks?: { content: string; embedding: number[] }[];
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
     // non-atomic write would reintroduce exactly the bug migration 004 removes.
     // `payload` is passed as an object — see the double-encoding note at the top.
-    const rows = await this.sql`
-      SELECT upsert_thought(
-        ${opts.content}::text,
-        ${opts.payload}::jsonb,
-        ${toVector(opts.embedding)}::vector
-      ) AS r`;
+    // The array is passed as an object, NOT JSON.stringify'd — see the
+    // double-encoding note at the top of this file. A pre-stringified value binds
+    // as a jsonb *scalar string*, and jsonb_array_length then fails with "cannot
+    // get array length of a scalar".
+    //
+    // The 4-arg overload also replaces the thought's chunk rows, in the same
+    // statement, so a long capture cannot end up half-chunked. The 3-arg form is
+    // kept for the ordinary case rather than passing an empty array, so a
+    // deployment that has not applied migration 007 keeps working unchanged.
+    const chunks = opts.chunks ?? [];
+    const rows = chunks.length
+      ? await this.sql`
+          SELECT upsert_thought(
+            ${opts.content}::text,
+            ${opts.payload}::jsonb,
+            ${toVector(opts.embedding)}::vector,
+            ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
+          ) AS r`
+      : await this.sql`
+          SELECT upsert_thought(
+            ${opts.content}::text,
+            ${opts.payload}::jsonb,
+            ${toVector(opts.embedding)}::vector
+          ) AS r`;
 
     const id = (rows[0]?.r as { id?: string } | undefined)?.id;
     if (!id) throw new Error("upsert_thought returned no id.");

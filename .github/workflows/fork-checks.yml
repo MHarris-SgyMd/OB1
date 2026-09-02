@@ -256,6 +256,15 @@ jobs:
       # OB1_EMBEDDING_DIMENSIONS: the opt-in that makes a model wider than
       # pgvector's HNSW ceiling usable at all. Separate process because the server
       # snapshots the environment at boot, so the flag cannot be flipped mid-run.
+      # The assertion that a long capture is findable by its FINAL sentence — the
+      # one that failed before migration 007. The stub provider refuses over-batch
+      # input rather than truncating, so dropping chunking fails loudly here.
+      - name: Chunking keeps long captures searchable
+        working-directory: server-portable
+        run: bun test-chunking.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       - name: Embedding truncation via the dimensions parameter
         working-directory: server-portable
         run: bun test-embedding-dimensions.ts

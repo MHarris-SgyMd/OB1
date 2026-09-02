@@ -65,6 +65,8 @@ Against a real database, `bun migrate.ts` reports five migrations applied, and
 | `003_content_fingerprint.sql` | Fingerprint column, unique partial index, `upsert_thought` | Guide step 2.6 |
 | `004_upsert_thought_with_embedding.sql` | 3-arg atomic-capture overload | This fork |
 | `005_reject_non_object_payload.sql` | Reject a non-object `p_payload` instead of silently storing `{}` | This fork |
+| `006_embedding_config.sql` | Record the embedding contract so preflight can catch a later disagreement | This fork |
+| `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables | This fork |
 
 ## What changed relative to the guide
 

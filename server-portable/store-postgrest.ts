@@ -98,14 +98,22 @@ export class PostgrestStore implements ThoughtStore {
     content: string;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
+    chunks?: { content: string; embedding: number[] }[];
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
     // to every semantic search. Requires db/migrations/004.
+    // With chunks, the 4-arg overload from migration 007; without, the 3-arg form
+    // exactly as before. Passing p_chunks unconditionally would make every
+    // deployment that has not applied 007 fall through to the two-step path.
+    const chunks = opts.chunks ?? [];
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
       p_payload: opts.payload,
       p_embedding: opts.embedding,
+      ...(chunks.length
+        ? { p_chunks: chunks.map((c) => ({ content: c.content, embedding: `[${c.embedding.join(",")}]` })) }
+        : {}),
     });
 
     // PGRST202 = no function with that name and argument list.
