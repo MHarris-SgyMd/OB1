@@ -64,6 +64,9 @@ const seen: Seen[] = [];
  */
 let replyDim = DIM;
 
+/** Type the stub's metadata model claims. Real llama3.2 returned "action_item". */
+let replyType = "idea";
+
 const provider = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -82,7 +85,7 @@ const provider = Bun.serve({
       return Response.json({ data: [{ embedding: v }], model: body.model });
     }
     return Response.json({
-      choices: [{ message: { content: JSON.stringify({ topics: ["local"], type: "idea", people: [] }) } }],
+      choices: [{ message: { content: JSON.stringify({ topics: ["local"], type: replyType, people: [] }) } }],
     });
   },
 });
@@ -189,6 +192,41 @@ console.log("\n[6] A width mismatch from the provider is refused, not stored");
   assert((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c === 2, "no row was written");
   await sql.close();
   replyDim = DIM;
+}
+
+console.log("\n[7] A drifting `type` is normalised, not stored as a new category");
+{
+  // Observed for real: llama3.2 answered "action_item" for a reminder, which is
+  // not in the enum the prompt asks for. Unenforced, that silently fragments the
+  // taxonomy — list_thoughts(type: "task") misses the row and thought_stats grows
+  // a tail of one-off types that look like categories.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`DELETE FROM thoughts`;
+
+  replyType = "action_item";
+  await call("capture_thought", { content: "an aliased type" });
+  const [aliased] = await sql`SELECT metadata FROM thoughts WHERE content = ${"an aliased type"}`;
+  assert(aliased.metadata?.type === "task", `action_item maps to task (${aliased.metadata?.type})`);
+  assert(aliased.metadata?.type_raw === "action_item", "…and the model's original answer is kept in type_raw");
+
+  replyType = "Cromulent Thing";
+  await call("capture_thought", { content: "an invented type" });
+  const [invented] = await sql`SELECT metadata FROM thoughts WHERE content = ${"an invented type"}`;
+  assert(invented.metadata?.type === "observation", `an unknown type falls back to observation (${invented.metadata?.type})`);
+  assert(invented.metadata?.type_raw === "Cromulent Thing", "…with the original preserved so drift stays visible");
+
+  replyType = "TASK";
+  await call("capture_thought", { content: "a shouty type" });
+  const [shouty] = await sql`SELECT metadata FROM thoughts WHERE content = ${"a shouty type"}`;
+  assert(shouty.metadata?.type === "task", "case is normalised");
+  assert(shouty.metadata?.type_raw === undefined, "…and an exact match after normalising records no type_raw");
+
+  // The point of all of it: filtering works.
+  const listed = await call("list_thoughts", { limit: 10, type: "task" });
+  assert(/2 recent thought/.test(listed), `list_thoughts type=task finds both (${listed.split("\n")[0]})`);
+
+  await sql.close();
+  replyType = "idea";
 }
 
 server.stop();

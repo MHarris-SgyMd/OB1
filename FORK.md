@@ -239,14 +239,15 @@ Deliberate. Recorded so nobody assumes they were missed.
   `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
   lazy `db()` accessor makes easy to inject but which is not built. Until then they
   keep their drift guards.
-- **Ollama itself has not been exercised.** The local path is verified against a
-  stub that speaks Ollama's documented OpenAI-compatible shapes — 22 assertions
-  covering both calls, model selection, the absent `Authorization` header, a real
-  768-dimension vector in Postgres, and a refused width mismatch. What that does
-  NOT prove is that your Ollama version honours `response_format:
-  {type:"json_object"}`. Run `bun preflight.ts --deep` against a live Ollama; it
-  checks exactly that, and a provider which ignores JSON mode degrades every
-  capture to `uncategorized` without failing.
+- **The local path is verified against real Ollama** (0.33.2, `nomic-embed-text` +
+  `llama3.2`): `preflight --deep` passes, including `llama3.2 honours JSON mode`,
+  and real thoughts capture and retrieve with no external service. Two caveats
+  remain: Ollama was installed **natively** (Homebrew), because a Linux container
+  on Apple Silicon gets no Metal passthrough and runs inference on CPU — the
+  compose `local-models` profile is for Linux hosts and CI. And a container
+  reaching a host-native Ollama needs `OLLAMA_HOST=0.0.0.0` plus
+  `OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1`, since Ollama binds
+  loopback by default.
 - **The 24 shim-migrated files are not individually tested.** Most need live
   credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
   real Postgres, and CI checks every migrated file still parses and that the

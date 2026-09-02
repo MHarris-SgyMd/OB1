@@ -153,6 +153,43 @@ async function getEmbedding(text: string): Promise<number[]> {
   return embedding;
 }
 
+/**
+ * The `type` field is a closed set, but only the prompt says so — nothing enforced
+ * it, so a model free to invent one did. Observed for real: llama3.2 returned
+ * "action_item" for a reminder.
+ *
+ * Unenforced, that fragments the taxonomy silently. `list_thoughts` filtering on
+ * `type=task` misses the row, and `thought_stats` accumulates a long tail of
+ * one-off types that look like categories but are model noise. A smaller local
+ * model drifts more than a hosted one, which makes this matter more now that the
+ * local path is supported.
+ *
+ * Unknown values are coerced to `observation` — the same neutral default the
+ * failure path uses — and the model's original answer is kept in `type_raw` so
+ * drift is visible rather than discarded.
+ */
+const THOUGHT_TYPES = ["observation", "task", "idea", "reference", "person_note"] as const;
+
+const TYPE_ALIASES: Record<string, (typeof THOUGHT_TYPES)[number]> = {
+  action_item: "task",
+  action: "task",
+  todo: "task",
+  note: "observation",
+  fact: "reference",
+  person: "person_note",
+  contact: "person_note",
+};
+
+function normaliseType(raw: unknown): { type: string; raw?: string } {
+  if (typeof raw !== "string" || raw.trim() === "") return { type: "observation" };
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((THOUGHT_TYPES as readonly string[]).includes(key)) return { type: key };
+  const aliased = TYPE_ALIASES[key];
+  if (aliased) return { type: aliased, raw: raw.trim() };
+  console.warn(`extractMetadata: model returned type "${raw}", which is not one of ${THOUGHT_TYPES.join(", ")}; recorded as observation`);
+  return { type: "observation", raw: raw.trim() };
+}
+
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
   const r = await fetch(`${llmBase()}/chat/completions`, {
     method: "POST",
@@ -214,7 +251,12 @@ Only extract what's explicitly there.`,
       console.error("extractMetadata: model returned JSON that is not an object");
       return fallback("unexpected_json_shape");
     }
-    return parsed as Record<string, unknown>;
+
+    const out = parsed as Record<string, unknown>;
+    const { type, raw } = normaliseType(out.type);
+    out.type = type;
+    if (raw) out.type_raw = raw;
+    return out;
   } catch {
     console.error("extractMetadata: model content was not valid JSON");
     return fallback("unparseable_model_output");

@@ -59,8 +59,36 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 That profile adds an `ollama` service and a one-shot job that pulls both models
-(a few hundred MB on first run). No credential is sent to a loopback provider —
-the server omits the `Authorization` header entirely.
+(~2.3 GB on first run). No credential is sent to a loopback provider — the server
+omits the `Authorization` header entirely.
+
+**On macOS, install Ollama natively instead.** A Linux container on Apple Silicon
+gets no Metal passthrough, so containerised inference runs on CPU. Native Ollama
+uses the GPU and host memory, leaving the podman VM untouched:
+
+```bash
+brew install ollama
+OLLAMA_HOST=0.0.0.0:11434 ollama serve          # 0.0.0.0 so containers can reach it
+ollama pull nomic-embed-text && ollama pull llama3.2
+```
+
+Then point the server at the host rather than the compose network, and skip the
+profile:
+
+```bash
+# deploy/.env
+OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1   # docker: host.docker.internal
+```
+
+Verified on Ollama 0.33.2: `nomic-embed-text` returns 768 dimensions through the
+`/v1/embeddings` shape, and `llama3.2` honours `response_format: json_object`.
+Confirm your own version with `bun preflight.ts --deep`.
+
+**Expect more type drift from a small model.** `llama3.2` answered `action_item`
+for a reminder, which is not one of the five allowed types. The server normalises
+unknown values to `observation` (or a known alias, as here → `task`) and keeps the
+original in `type_raw`, so `list_thoughts` filters and `thought_stats` tallies stay
+coherent instead of growing a tail of one-off categories.
 
 The metadata model is the safer of the two to change your mind about: it has no
 schema dependency and no re-embed cost, so you can swap it whenever you like.
