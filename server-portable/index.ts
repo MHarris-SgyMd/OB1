@@ -30,6 +30,12 @@ type Env = {
   /** Must match the width of thoughts.embedding — see db/config.mjs. */
   OB1_EMBEDDING_DIM?: string;
   OB1_EMBEDDING_MODEL?: string;
+  /** Model for metadata extraction. No schema dependency — safe to change anytime. */
+  OB1_METADATA_MODEL?: string;
+  /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
+  OB1_LLM_BASE_URL?: string;
+  /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
+  OB1_LLM_API_KEY?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
 };
 
@@ -54,13 +60,30 @@ function db(): Promise<ThoughtStore> {
   return _store;
 }
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
-
-// The embedding contract. Defaults match db/config.mjs; both must agree with the
-// width thoughts.embedding was created with, and cannot change once there is data
-// without re-embedding every row.
+// The model provider. Anything speaking the OpenAI /embeddings and
+// /chat/completions shapes works, which includes OpenRouter, OpenAI itself, and
+// Ollama's compatibility layer — so a fully local brain is a URL change, not a
+// code change.
+const DEFAULT_LLM_BASE = "https://openrouter.ai/api/v1";
 const DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const DEFAULT_EMBEDDING_DIM = 1536;
+const DEFAULT_METADATA_MODEL = "openai/gpt-4o-mini";
+
+function llmBase(): string {
+  return (env().OB1_LLM_BASE_URL || DEFAULT_LLM_BASE).replace(/\/+$/, "");
+}
+
+/**
+ * A local endpoint needs no credential, so the key is optional there. Sending an
+ * `Authorization: Bearer undefined` header to Ollama is harmless but confusing in
+ * logs, so it is omitted entirely when there is no key.
+ */
+function llmHeaders(): Record<string, string> {
+  const key = env().OB1_LLM_API_KEY || env().OPENROUTER_API_KEY;
+  return key
+    ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
+    : { "Content-Type": "application/json" };
+}
 
 function embeddingModel(): string {
   return env().OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
@@ -68,6 +91,9 @@ function embeddingModel(): string {
 function embeddingDim(): number {
   const raw = env().OB1_EMBEDDING_DIM;
   return raw ? Number(raw) : DEFAULT_EMBEDDING_DIM;
+}
+function metadataModel(): string {
+  return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
 }
 
 function citationBase(): string {
@@ -92,12 +118,9 @@ function thoughtUrl(id: string): string {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
+  const r = await fetch(`${llmBase()}/embeddings`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${env().OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: llmHeaders(),
     body: JSON.stringify({
       model: embeddingModel(),
       input: text,
@@ -105,12 +128,12 @@ async function getEmbedding(text: string): Promise<number[]> {
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
+    throw new Error(`Embeddings request to ${llmBase()} failed: ${r.status} ${msg}`);
   }
   const d = await r.json();
   const embedding = d?.data?.[0]?.embedding;
   if (!Array.isArray(embedding)) {
-    throw new Error(`OpenRouter returned no embedding for model ${embeddingModel()}`);
+    throw new Error(`${llmBase()} returned no embedding for model ${embeddingModel()}`);
   }
 
   // Refuse a width the column cannot hold. Postgres would reject the insert
@@ -131,14 +154,11 @@ async function getEmbedding(text: string): Promise<number[]> {
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+  const r = await fetch(`${llmBase()}/chat/completions`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${env().OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: llmHeaders(),
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: metadataModel(),
       response_format: { type: "json_object" },
       messages: [
         {
@@ -170,21 +190,21 @@ Only extract what's explicitly there.`,
 
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    console.error(`extractMetadata: OpenRouter ${r.status} ${msg.slice(0, 500)}`);
-    return fallback(`openrouter_${r.status}`);
+    console.error(`extractMetadata: ${llmBase()} returned ${r.status} ${msg.slice(0, 500)}`);
+    return fallback(`provider_${r.status}`);
   }
 
   let d: { choices?: [{ message?: { content?: string } }] };
   try {
     d = await r.json();
   } catch {
-    console.error("extractMetadata: OpenRouter returned a non-JSON body");
+    console.error("extractMetadata: provider returned a non-JSON body");
     return fallback("invalid_response_body");
   }
 
   const content = d?.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
-    console.error("extractMetadata: OpenRouter response had no message content");
+    console.error("extractMetadata: provider response had no message content");
     return fallback("no_message_content");
   }
 

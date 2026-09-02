@@ -66,7 +66,9 @@ services:
       OB1_STORE: sql
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in deploy/.env}
+      # Not required when OB1_LLM_BASE_URL points at a local provider; preflight
+      # decides, and fails the container if a remote endpoint has no credential.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1536}
       OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-openai/text-embedding-3-small}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
@@ -81,5 +83,40 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Replaces: OpenRouter. Optional — enable with `--profile local-models`.
+  #
+  # Ollama exposes an OpenAI-compatible surface at /v1, so the server needs no
+  # code change: OB1_LLM_BASE_URL points here and no credential is sent. With this
+  # running, nothing about a captured thought leaves the host.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-models"]
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Pulls the two models, then exits. First run downloads a few hundred MB.
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: ["local-models"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull ${OB1_EMBEDDING_MODEL:-nomic-embed-text}
+        ollama pull ${OB1_METADATA_MODEL:-llama3.2}
+    restart: "no"
+
 volumes:
   pgdata:
+  ollama:

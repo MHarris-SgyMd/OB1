@@ -30,6 +30,28 @@ Three changes.
 The second change is what makes the file portable and testable; the third is
 Phase 2 of the migration.
 
+## Choosing a model provider
+
+Two calls happen per capture — an embedding, and a metadata extraction. Both go to
+one OpenAI-compatible endpoint, so switching providers is configuration:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `OB1_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible `/v1`. Ollama works. |
+| `OB1_LLM_API_KEY` | falls back to `OPENROUTER_API_KEY` | Omitted entirely for a loopback endpoint |
+| `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
+| `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
+
+The two calls fail differently and deliberately. An embedding failure fails the
+capture, because a thought with no vector is invisible to search. A metadata
+failure lets the capture succeed and records why, because the content is the
+durable part and the tags are re-derivable.
+
+`preflight.ts --deep` exercises both against the live endpoint, checks the
+embedding width matches the schema, and checks the metadata model actually honours
+JSON mode — a provider that ignores `response_format` degrades every capture to
+`uncategorized` without ever failing.
+
 ## Choosing a data layer
 
 | `OB1_STORE` | Talks to | Needs | Runs on |
@@ -108,6 +130,8 @@ logs a warning.
 
 ```bash
 bun test-server.ts        # 41 — transport, auth, tool surface
+bun test-auth.ts          # 43 — scoped, hashed, named keys
+bun run test:local        # 22 — fully local provider, no credential
 bun run test:sql          # 37 — store conformance, real Postgres in a container
 bun run test:e2e          # 30 — the whole server over MCP with no Supabase at all
 bun run cf:build          # ~256 KiB gzipped

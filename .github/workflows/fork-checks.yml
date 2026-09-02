@@ -245,6 +245,14 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # The fully local path: both model calls go to a configured endpoint with no
+      # credential, and a wrong-width vector is refused rather than stored.
+      - name: Local model provider, no OpenRouter
+        working-directory: server-portable
+        run: bun test-local-provider.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # The deploy gate. Without it a misconfigured server starts, answers the MCP
       # handshake, passes every HTTP liveness probe, and fails only when a user
       # captures their first thought.

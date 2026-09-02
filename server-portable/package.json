@@ -13,7 +13,8 @@
     "preflight": "bun preflight.ts",
     "test:preflight": "../db/with-postgres.sh bun test-preflight.ts",
     "test:auth": "bun test-auth.ts",
-    "keygen": "bun keygen.ts"
+    "keygen": "bun keygen.ts",
+    "test:local": "../db/with-postgres.sh bun test-local-provider.ts"
   },
   "comment": "Runtime dependencies are pinned to the exact versions in ../server/deno.json so all four targets run identical library code. Bump both files in the same commit.",
   "dependencies": {

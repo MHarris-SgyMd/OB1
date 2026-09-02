@@ -68,7 +68,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifteen commits on top of the pin. Seven fix defects found in an audit of the pinned
+Sixteen commits on top of the pin. Seven fix defects found in an audit of the pinned
 tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
 schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
@@ -89,6 +89,7 @@ schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 | 13 | `[fork] compat: a supabase-js-shaped client that speaks SQL` | 54 non-core files call PostgREST across 33k lines. Rather than rewrite them, `compat/supabase-sql` reimplements the ~20 methods they use, so 24 migrated by changing one import. Refuses resource embedding, nested `.or()`, type-only imports and `.auth`/`.storage` rather than faking them. | **Unfiled** |
 | 14 | `[fork] server-portable: named, scoped, hashed access keys` | Replaced one shared plaintext key with `name:scope:sha256` entries, timing-safe comparison, and independent revocation. A read-scoped key does not merely fail to write — `capture_thought` is never registered for it, so it is absent from `tools/list`. `keygen.ts` mints them. Legacy `MCP_ACCESS_KEY` still works, with a preflight warning. | **Unfiled** |
 | 15 | `[fork] db + server: the embedding contract is configurable` | `vector(1536)` was hard-coded in four migrations. Migrations are now templates, `OB1_EMBEDDING_DIM`/`OB1_EMBEDDING_MODEL` choose the pair, the choice is recorded in `ob1_config`, and preflight fails on a mismatch. Catches `text-embedding-3-large` at 3072, which exceeds pgvector's HNSW limit and would silently make every search a full scan. | **Unfiled** |
+| 16 | `[fork] server: the model provider is configurable, including fully local` | Both per-capture calls (embedding, metadata extraction) now go to `OB1_LLM_BASE_URL` with `OB1_EMBEDDING_MODEL` and `OB1_METADATA_MODEL`; the credential is omitted for a loopback endpoint. A `local-models` compose profile runs Ollama so nothing about a captured thought leaves the host. | **Unfiled** |
 
 ### Files we own
 
@@ -114,6 +115,7 @@ server-portable/auth.ts          # fix 14  (new file)
 server-portable/keygen.ts        # fix 14  (new file)
 db/config.mjs                    # fix 15  (new file)
 db/migrations/006_*.sql          # fix 15  (new file)
+server-portable/test-local-provider.ts # fix 16 (new file)
 scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 docs/01-getting-started.md       # fix 6
@@ -237,6 +239,14 @@ Deliberate. Recorded so nobody assumes they were missed.
   `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
   lazy `db()` accessor makes easy to inject but which is not built. Until then they
   keep their drift guards.
+- **Ollama itself has not been exercised.** The local path is verified against a
+  stub that speaks Ollama's documented OpenAI-compatible shapes — 22 assertions
+  covering both calls, model selection, the absent `Authorization` header, a real
+  768-dimension vector in Postgres, and a refused width mismatch. What that does
+  NOT prove is that your Ollama version honours `response_format:
+  {type:"json_object"}`. Run `bun preflight.ts --deep` against a live Ollama; it
+  checks exactly that, and a provider which ignores JSON mode degrades every
+  capture to `uncategorized` without failing.
 - **The 24 shim-migrated files are not individually tested.** Most need live
   credentials (Gmail, Slack, Readwise). The shim itself has 61 assertions against
   real Postgres, and CI checks every migrated file still parses and that the

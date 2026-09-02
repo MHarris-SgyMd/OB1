@@ -41,6 +41,30 @@ const env = process.env as Record<string, string | undefined>;
 const store = (env.OB1_STORE ?? "postgrest").toLowerCase();
 const embModel = env.OB1_EMBEDDING_MODEL || "openai/text-embedding-3-small";
 const embDim = Number(env.OB1_EMBEDDING_DIM ?? 1536);
+const metaModel = env.OB1_METADATA_MODEL || "openai/gpt-4o-mini";
+const llmBase = (env.OB1_LLM_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
+
+/**
+ * A loopback or private-network endpoint — Ollama, LM Studio, vLLM on the same
+ * host or compose network — needs no credential. Anything reachable over the
+ * internet does, and a missing key there is a hard failure rather than a warning.
+ */
+function isLocalEndpoint(url: string): boolean {
+  try {
+    const h = new URL(url).hostname;
+    return (
+      h === "localhost" || h === "127.0.0.1" || h === "::1" ||
+      h === "host.docker.internal" || h === "host.containers.internal" ||
+      h === "ollama" ||                       // the compose service name
+      /^10\./.test(h) || /^192\.168\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+    );
+  } catch {
+    return false;
+  }
+}
+const localProvider = isLocalEndpoint(llmBase);
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -51,10 +75,26 @@ if (store !== "postgrest" && store !== "sql") {
   add("store selection", "ok", `OB1_STORE=${store}`);
 }
 
-if (!env.OPENROUTER_API_KEY) {
-  add("OPENROUTER_API_KEY", "fail", "not set", "Provide OPENROUTER_API_KEY in the environment or your secret store.");
+// ── Model provider ──────────────────────────────────────────────────────────
+
+add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credential needed)" : ""}`);
+add("embedding model", "ok", `${embModel} @ ${embDim} dimensions`);
+add("metadata model", "ok", metaModel);
+
+if (!llmKey) {
+  if (localProvider) {
+    add("provider credential", "ok", "not required for a local endpoint");
+  } else {
+    add("provider credential", "fail",
+        `no OB1_LLM_API_KEY or OPENROUTER_API_KEY, and ${llmBase} is not local`,
+        "Set OB1_LLM_API_KEY, or point OB1_LLM_BASE_URL at a local provider.");
+  }
 } else {
-  add("OPENROUTER_API_KEY", "ok", `set (${env.OPENROUTER_API_KEY.length} chars)`);
+  add("provider credential", "ok", `set (${llmKey.length} chars)`);
+  if (localProvider) {
+    add("provider credential", "warn", "a key is set but the endpoint is local — it will be sent anyway",
+        "Unset it to keep local traffic credential-free.");
+  }
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
@@ -199,13 +239,16 @@ if (configFailed) {
 
 if (!deep) {
   add("embedding provider", "skip", "not checked — pass --deep to call OpenRouter");
-} else if (!env.OPENROUTER_API_KEY) {
-  add("embedding provider", "skip", "no key to test with");
+} else if (!llmKey && !localProvider) {
+  add("embedding provider", "skip", "no credential to test with");
 } else {
   try {
-    const r = await fetch("https://openrouter.ai/api/v1/embeddings", {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (llmKey) headers.Authorization = `Bearer ${llmKey}`;
+
+    const r = await fetch(`${llmBase}/embeddings`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ model: embModel, input: "preflight" }),
     });
     if (!r.ok) {
@@ -217,6 +260,36 @@ if (!deep) {
       if (dim === embDim) add("embedding provider", "ok", `${embModel} returns ${dim} dimensions, matching the schema`);
       else add("embedding provider", "fail", `${embModel} returned ${dim} dimensions, but the schema is vector(${embDim})`,
                `Set OB1_EMBEDDING_DIM=${dim} before any data exists, or choose a model that returns ${embDim}.`);
+
+      // Metadata extraction needs JSON mode. Providers differ here — Ollama's
+      // OpenAI layer has been inconsistent about response_format — and a provider
+      // that ignores it degrades every capture to "uncategorized" without failing.
+      const m = await fetch(`${llmBase}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: metaModel,
+          response_format: { type: "json_object" },
+          messages: [{ role: "user", content: 'Reply with only this JSON: {"ok":true}' }],
+        }),
+      });
+      if (!m.ok) {
+        add("metadata model", "fail", `${metaModel} returned ${m.status} from ${llmBase}`,
+            "Capture would still succeed, but every thought would be tagged uncategorized.");
+      } else {
+        const md = (await m.json()) as { choices?: [{ message?: { content?: string } }] };
+        const content = md.choices?.[0]?.message?.content ?? "";
+        try {
+          const parsed = JSON.parse(content);
+          add("metadata model", typeof parsed === "object" && parsed !== null ? "ok" : "warn",
+              typeof parsed === "object" && parsed !== null
+                ? `${metaModel} honours JSON mode`
+                : `${metaModel} returned JSON that is not an object`);
+        } catch {
+          add("metadata model", "warn", `${metaModel} did not return parseable JSON in JSON mode`,
+              "Captures will still work but will fall back to uncategorized metadata.");
+        }
+      }
     }
   } catch (e) {
     add("embedding provider", "fail", (e as Error).message, "Network reachability to openrouter.ai.");

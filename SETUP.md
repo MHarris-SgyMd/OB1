@@ -15,7 +15,7 @@ the Supabase path, which continues to work if you want it — see `FORK.md`.
 Both are free right now and expensive after your first captures. Neither has a
 good default that suits everyone.
 
-### 1. The embedding model, and therefore the vector width
+### 1. Where the models run, and therefore the vector width
 
 `thoughts.embedding` is a fixed-width column, and the model that fills it must
 produce exactly that many numbers. Changing either later means a schema migration
@@ -23,14 +23,47 @@ produce exactly that many numbers. Changing either later means a schema migratio
 
 | Model | Width | Note |
 | --- | --- | --- |
+| `nomic-embed-text` | 768 | Runs locally via Ollama. See below. |
 | `openai/text-embedding-3-small` | 1536 | The default. Cheap, good enough for most brains. |
 | `voyage/voyage-3` | 1024 | Smaller index, competitive retrieval quality. |
-| `nomic-embed-text` | 768 | Runs locally via Ollama — no per-capture API cost. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. |
 
 Set `OB1_EMBEDDING_MODEL` and `OB1_EMBEDDING_DIM` together. `migrate.ts` refuses a
 mismatched pair, and the width is recorded in `ob1_config` so `preflight.ts`
-catches a later disagreement rather than letting search quietly degrade.
+catches a later disagreement rather than letting search quietly degrade. The
+server also refuses a vector the column cannot hold, rather than surfacing an
+opaque cast error from Postgres.
+
+#### Running the models locally instead
+
+Every capture makes two calls: an embedding, and a metadata extraction that
+produces the `topics`, `people`, `type` and `action_items` behind
+`list_thoughts`'s filters and the `thought_stats` tallies. By default both go to
+OpenRouter, which means **the text of every thought you capture leaves your
+machine**.
+
+Both are configurable, and both speak the OpenAI-compatible shapes that Ollama
+exposes at `/v1` — so a fully local brain is a URL change, not a code change:
+
+```bash
+# deploy/.env
+OB1_LLM_BASE_URL=http://ollama:11434/v1
+OB1_EMBEDDING_MODEL=nomic-embed-text
+OB1_EMBEDDING_DIM=768
+OB1_METADATA_MODEL=llama3.2
+# leave OPENROUTER_API_KEY empty
+```
+
+```bash
+podman compose -f deploy/compose.yaml --profile local-models up --build
+```
+
+That profile adds an `ollama` service and a one-shot job that pulls both models
+(a few hundred MB on first run). No credential is sent to a loopback provider —
+the server omits the `Authorization` header entirely.
+
+The metadata model is the safer of the two to change your mind about: it has no
+schema dependency and no re-embed cost, so you can swap it whenever you like.
 
 A same-width model from a *different family* is the nastiest case: the vectors are
 numerically valid and semantically unrelated to what you already stored. Nothing
@@ -64,7 +97,9 @@ a leak is worth. See [issue #216](https://github.com/NateBJones-Projects/OB1/iss
 ## Prerequisites
 
 - podman or docker, with compose
-- An [OpenRouter](https://openrouter.ai) API key, with a few dollars of credit
+- **Either** an [OpenRouter](https://openrouter.ai) API key with a few dollars of
+  credit, **or** nothing at all if you use the `local-models` profile — in which
+  case budget a few hundred MB for the model downloads instead
 - [Bun](https://bun.sh) 1.4+ to mint keys and run the tests
 
 No Supabase account. No Supabase CLI. No Deno.
@@ -79,16 +114,22 @@ openssl rand -hex 24                                    # POSTGRES_PASSWORD
 cd server-portable && bun keygen.ts --name laptop --scope write
 ```
 
-Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS` and your OpenRouter key in
-`OPENROUTER_API_KEY`. Keep the raw key somewhere safe — it is not recoverable.
+Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS`, and keep the raw key
+somewhere safe — it is not recoverable.
+
+Then pick a model provider: either fill in `OPENROUTER_API_KEY`, or uncomment the
+`local-models` block and leave the key empty.
 
 ### 2. Bring it up
 
 ```bash
 podman compose -f deploy/compose.yaml up --build
+
+# …or, for the fully local path:
+podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Three services in order: Postgres with pgvector, a migration job that applies the
+Three services in order (five with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then the MCP server. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture.
@@ -131,11 +172,11 @@ no backups, no resource limits. For something durable:
 client with no expiry and no per-user identity. Fine for a personal or small-team
 brain; not an authorization model.
 
-**Every captured thought goes to OpenRouter** for embedding and metadata
-extraction. Combined with one shared table and no per-user isolation, this is not
-an architecture for regulated or patient-adjacent data, wherever you host the
-database. `recipes/local-ollama-embeddings` removes the embedding call if that is
-the concern.
+**By default every captured thought goes to OpenRouter** for embedding and
+metadata extraction. The `local-models` profile above removes that entirely, which
+closes the largest hole — but one shared table with no per-user isolation and a
+bearer-key auth model remain, so this is still not an architecture for regulated
+or patient-adjacent data, wherever you host it.
 
 ## Related
 
