@@ -68,7 +68,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixteen commits on top of the pin. Seven fix defects found in an audit of the pinned
+Seventeen commits on top of the pin. Seven fix defects found in an audit of the pinned
 tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
 schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
@@ -90,6 +90,7 @@ schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 | 14 | `[fork] server-portable: named, scoped, hashed access keys` | Replaced one shared plaintext key with `name:scope:sha256` entries, timing-safe comparison, and independent revocation. A read-scoped key does not merely fail to write — `capture_thought` is never registered for it, so it is absent from `tools/list`. `keygen.ts` mints them. Legacy `MCP_ACCESS_KEY` still works, with a preflight warning. | **Unfiled** |
 | 15 | `[fork] db + server: the embedding contract is configurable` | `vector(1536)` was hard-coded in four migrations. Migrations are now templates, `OB1_EMBEDDING_DIM`/`OB1_EMBEDDING_MODEL` choose the pair, the choice is recorded in `ob1_config`, and preflight fails on a mismatch. Catches `text-embedding-3-large` at 3072, which exceeds pgvector's HNSW limit and would silently make every search a full scan. | **Unfiled** |
 | 16 | `[fork] server: the model provider is configurable, including fully local` | Both per-capture calls (embedding, metadata extraction) now go to `OB1_LLM_BASE_URL` with `OB1_EMBEDDING_MODEL` and `OB1_METADATA_MODEL`; the credential is omitted for a loopback endpoint. A `local-models` compose profile runs Ollama so nothing about a captured thought leaves the host. | **Unfiled** |
+| 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 ### Files we own
 
@@ -116,6 +117,7 @@ server-portable/keygen.ts        # fix 14  (new file)
 db/config.mjs                    # fix 15  (new file)
 db/migrations/006_*.sql          # fix 15  (new file)
 server-portable/test-local-provider.ts # fix 16 (new file)
+evals/                           # fix 17  (new dir — retrieval + extraction benchmarks)
 scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 docs/01-getting-started.md       # fix 6
@@ -239,6 +241,10 @@ Deliberate. Recorded so nobody assumes they were missed.
   `server/test-capture-atomicity.mjs` need a stubbed Supabase client, which the
   lazy `db()` accessor makes easy to inject but which is not built. Until then they
   keep their drift guards.
+- **The eval sample is small.** Twenty retrieval queries and eight extraction
+  captures. Differences under ~0.05 MRR, or one point of a per-field score, are not
+  meaningful; the clear separations (the long-document slice, the structural
+  failures) are. The test sets also reflect one person's kind of notes.
 - **The local path is verified against real Ollama** (0.33.2, `nomic-embed-text` +
   `llama3.2`): `preflight --deep` passes, including `llama3.2 honours JSON mode`,
   and real thoughts capture and retrieve with no external service. Two caveats

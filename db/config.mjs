@@ -17,17 +17,28 @@ export const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
 /** The model that must produce exactly EMBEDDING_DIM numbers. */
 export const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
 
+/** Metadata extraction. No schema dependency, so safe to change at any time. */
+export const METADATA_MODEL = process.env.OB1_METADATA_MODEL ?? "openai/gpt-4o-mini";
+
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;
 
 /** Known model widths, so an obvious mismatch is caught without a network call. */
 export const KNOWN_MODEL_DIMS = {
+  // Hosted
   "openai/text-embedding-3-small": 1536,
-  "openai/text-embedding-3-large": 3072,
+  "openai/text-embedding-3-large": 3072,   // exceeds MAX_HNSW_DIM — unindexable
   "openai/text-embedding-ada-002": 1536,
   "voyage/voyage-3": 1024,
   "mistral/mistral-embed": 1024,
+  // Local, via Ollama. Measured — see evals/README.md, not chosen by size.
+  embeddinggemma: 768,
   "nomic-embed-text": 768,
+  "bge-m3": 1024,
+  "snowflake-arctic-embed2": 1024,
+  "mxbai-embed-large": 1024,
+  "granite-embedding": 384,
+  "all-minilm": 384,
 };
 
 export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL) {

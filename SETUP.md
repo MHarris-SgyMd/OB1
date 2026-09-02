@@ -23,9 +23,10 @@ produce exactly that many numbers. Changing either later means a schema migratio
 
 | Model | Width | Note |
 | --- | --- | --- |
-| `nomic-embed-text` | 768 | Runs locally via Ollama. See below. |
-| `openai/text-embedding-3-small` | 1536 | The default. Cheap, good enough for most brains. |
-| `voyage/voyage-3` | 1024 | Smaller index, competitive retrieval quality. |
+| `embeddinggemma` | 768 | **Best measured local option** — see [`evals/`](evals/README.md). Runs via Ollama. |
+| `openai/text-embedding-3-small` | 1536 | The hosted default. Cheap, unmeasured here. |
+| `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
+| `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 7. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. |
 
 Set `OB1_EMBEDDING_MODEL` and `OB1_EMBEDDING_DIM` together. `migrate.ts` refuses a
@@ -48,9 +49,9 @@ exposes at `/v1` — so a fully local brain is a URL change, not a code change:
 ```bash
 # deploy/.env
 OB1_LLM_BASE_URL=http://ollama:11434/v1
-OB1_EMBEDDING_MODEL=nomic-embed-text
+OB1_EMBEDDING_MODEL=embeddinggemma
 OB1_EMBEDDING_DIM=768
-OB1_METADATA_MODEL=llama3.2
+OB1_METADATA_MODEL=qwen2.5:7b
 # leave OPENROUTER_API_KEY empty
 ```
 
@@ -69,7 +70,7 @@ uses the GPU and host memory, leaving the podman VM untouched:
 ```bash
 brew install ollama
 OLLAMA_HOST=0.0.0.0:11434 ollama serve          # 0.0.0.0 so containers can reach it
-ollama pull nomic-embed-text && ollama pull llama3.2
+ollama pull embeddinggemma && ollama pull qwen2.5:7b
 ```
 
 Then point the server at the host rather than the compose network, and skip the
@@ -80,15 +81,30 @@ profile:
 OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1   # docker: host.docker.internal
 ```
 
-Verified on Ollama 0.33.2: `nomic-embed-text` returns 768 dimensions through the
-`/v1/embeddings` shape, and `llama3.2` honours `response_format: json_object`.
-Confirm your own version with `bun preflight.ts --deep`.
+#### These two were chosen by measurement
 
-**Expect more type drift from a small model.** `llama3.2` answered `action_item`
-for a reminder, which is not one of the five allowed types. The server normalises
-unknown values to `observation` (or a known alias, as here → `task`) and keeps the
-original in `type_raw`, so `list_thoughts` filters and `thought_stats` tallies stay
-coherent instead of growing a tail of one-off categories.
+`embeddinggemma` and `qwen2.5:7b` are not the smallest or most obvious picks —
+they are what won a benchmark. The harnesses are in [`evals/`](evals/README.md) so
+you can re-run them when better models appear, or against your own notes.
+
+The short version:
+
+- **`embeddinggemma`** ties the best retrieval MRR (0.975) and is the only
+  768-dimension model to do so, so it drops into a schema already built at 768.
+  `nomic-embed-text` — the obvious small default, and what this guide recommended
+  first — placed 5th of 7. The gap is almost entirely on **long thoughts with the
+  decision at the end**: change only the final sentence of a long note and
+  `nomic-embed-text`'s vector barely moves (cosine 0.982), so the note becomes hard
+  to find by its conclusion. `embeddinggemma` moves properly (0.816).
+- **`qwen2.5:7b`** was the only extraction model with no structural failures
+  (45/48). `llama3.2` scored 42/48 and produced exactly the faults seen on real
+  captures: a type outside the enum, and a capture with no topics at all.
+- **Avoid reasoning models here.** `qwen3:4b` takes 17.8s per extraction against
+  ~2s, because it emits thinking tokens first. This call runs on every capture.
+
+If you use a weaker model anyway, the server copes: unknown `type` values are
+normalised to a known alias or `observation`, with the original kept in `type_raw`
+so drift stays visible rather than fragmenting your filters.
 
 The metadata model is the safer of the two to change your mind about: it has no
 schema dependency and no re-embed cost, so you can swap it whenever you like.
@@ -211,5 +227,6 @@ or patient-adjacent data, wherever you host it.
 - `db/README.md` — the schema, migrations, and the runner
 - `server-portable/README.md` — the server, its four runtimes, and the data layers
 - `compat/supabase-sql/README.md` — running recipes and integrations without PostgREST
+- `evals/README.md` — how the local models were chosen, and how to re-run it
 - `deploy/README.md` — the compose stack in detail
 - `FORK.md` — what this fork changes and why

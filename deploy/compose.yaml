@@ -113,8 +113,8 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        ollama pull ${OB1_EMBEDDING_MODEL:-nomic-embed-text}
-        ollama pull ${OB1_METADATA_MODEL:-llama3.2}
+        ollama pull ${OB1_EMBEDDING_MODEL:-embeddinggemma}
+        ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
     restart: "no"
 
 volumes:
