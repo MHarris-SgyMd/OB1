@@ -422,6 +422,7 @@ JSON (`[{id, title, text}]`) to reproduce this shape on your own data.
 | model | dims | R@1 | R@5 | MRR | synthetic MRR | rank move |
 | --- | --- | --- | --- | --- | --- | --- |
 | **qwen3-embedding:4b !instruct @1024** | 1024 | **90%** | 97% | **0.933** | 0.975 | **+2 → 1st** |
+| qwen3-embedding:8b !instruct @1024 | 1024 | 88% | 97% | 0.919 | — | — |
 | snowflake-arctic-embed2 | 1024 | 87% | 99% | 0.921 | 0.975 | — |
 | qwen3-embedding:0.6b !instruct | 1024 | 87% | 99% | 0.918 | 0.950 | +2 |
 | embeddinggemma | 768 | 86% | 99% | 0.914 | 0.975 | **−2** |
@@ -457,6 +458,12 @@ very nearly as good and the ranking above over-punishes it.
 
 **`bge-m3` fell furthest** (1st → 6th), for the mirror-image reason: much of its
 synthetic standing came from the long-document slice.
+
+**Bigger does not hold within a family either.** `qwen3-embedding:8b` reports 75.22
+on MTEB English v2 against the 4B's 74.60, and scores *below* it here — 0.919
+against 0.933 — while taking 40% longer. Verified locally: 4096 native, and Ollama
+honours `dimensions` down from it. Two model sizes from one family, one benchmark
+apart, and the leaderboard order still did not hold on real data.
 
 The general lesson is the one the MTEB critics make, reproduced in miniature: a
 corpus that does not look like your data will rank models in an order that does
@@ -548,6 +555,33 @@ must be fitted on your own corpus, and 0.035–0.05 is a better starting guess t
   `tools/call` returns exactly one result; progress notifications carry status, not
   content the model can act on. So a second tier cannot stream a first draft — it
   can only be adaptive and invisible, or an explicit parameter on the tool.
+
+### Verifying the dimension table
+
+`db/config.mjs` refuses a configuration whose model and column width disagree,
+which makes a wrong entry worse than a missing one: it produces a confident error
+against a correct setup. So every local entry was checked against a live Ollama by
+requesting an embedding and counting the numbers — all eleven correct, plus
+`qwen3-embedding:8b` confirmed at 4096.
+
+The hosted entries were checked against OpenRouter's public model listing, which
+needs no key:
+
+```bash
+curl https://openrouter.ai/api/v1/embeddings/models   # 33 models, ids and context lengths
+```
+
+Two entries named models that **do not exist**: `voyage/voyage-3` and
+`mistral/mistral-embed`. The real ids are `voyageai/voyage-4*` and
+`mistralai/mistral-embed-2312`. Both have been removed rather than guessed at —
+`mistral-embed-2312` went back in at 1024 because its own listing states the width,
+and the Voyage and Gemini families stayed out because nothing here can confirm
+their dimensions. Note that the listing's `supported_parameters` field is useless
+for this: it returns chat parameters like `temperature` and `stop`, and omits
+`dimensions` even for `openai/text-embedding-3-small`, which certainly supports it.
+
+Hosted widths for models whose open weights were measured locally — the Qwen3
+family and `bge-m3` — carry over, since they are the same weights.
 
 ## Open versus proprietary
 

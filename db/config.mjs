@@ -24,26 +24,45 @@ export const METADATA_MODEL = process.env.OB1_METADATA_MODEL ?? "openai/gpt-4o-m
 export const MAX_HNSW_DIM = 2000;
 
 /** Known model widths, so an obvious mismatch is caught without a network call. */
+/**
+ * Native output width per model, used to catch a configuration mistake before it
+ * becomes a schema you cannot change.
+ *
+ * Provenance matters here, because a WRONG entry is worse than a missing one — it
+ * produces a confident error against a correct config. Every local entry below was
+ * verified against a live Ollama by requesting an embedding and counting the
+ * numbers. Hosted entries are marked with how they are known; two earlier entries
+ * (`voyage/voyage-3`, `mistral/mistral-embed`) were removed because those model IDs
+ * do not exist on OpenRouter at all — checked against its public model list, which
+ * needs no key: `curl https://openrouter.ai/api/v1/embeddings/models`.
+ */
 export const KNOWN_MODEL_DIMS = {
-  // Hosted
+  // ── Hosted, from provider documentation. Not verified here: no key. ─────────
   "openai/text-embedding-3-small": 1536,
-  "openai/text-embedding-3-large": 3072,   // exceeds MAX_HNSW_DIM — unindexable
+  "openai/text-embedding-3-large": 3072,   // exceeds MAX_HNSW_DIM — truncate or no index
   "openai/text-embedding-ada-002": 1536,
-  "voyage/voyage-3": 1024,
-  "mistral/mistral-embed": 1024,
-  // Local, via Ollama. Measured — see evals/README.md, not chosen by size.
+  "mistralai/mistral-embed-2312": 1024,    // width stated in OpenRouter's own listing
+
+  // ── Hosted, but the same open weights measured locally below, so the width
+  //    carries over. IDs confirmed against OpenRouter's public listing. ────────
+  "qwen/qwen3-embedding-4b": 2560,
+  "qwen/qwen3-embedding-8b": 4096,
+  "baai/bge-m3": 1024,
+
+  // ── Local via Ollama. Every width below was MEASURED, not read off a card,
+  //    and the retrieval scores behind the recommendations are in evals/. ──────
   embeddinggemma: 768,
   "nomic-embed-text": 768,
+  "nomic-embed-text-v2-moe": 768,
   "bge-m3": 1024,
+  "bge-large": 1024,
   "snowflake-arctic-embed2": 1024,
   "mxbai-embed-large": 1024,
   "granite-embedding": 384,
   "all-minilm": 384,
-  "bge-large": 1024,
-  "nomic-embed-text-v2-moe": 768,
   "qwen3-embedding:0.6b": 1024,
-  "qwen3-embedding:4b": 2560,          // exceeds MAX_HNSW_DIM natively — needs MRL truncation
-  "qwen3-embedding:8b": 4096,          // likewise
+  "qwen3-embedding:4b": 2560,              // exceeds MAX_HNSW_DIM — needs truncation
+  "qwen3-embedding:8b": 4096,              // likewise
 };
 
 /**
@@ -65,6 +84,8 @@ export const MRL_MODELS = new Set([
   "qwen3-embedding:0.6b",
   "qwen3-embedding:4b",
   "qwen3-embedding:8b",
+  "qwen/qwen3-embedding-4b",
+  "qwen/qwen3-embedding-8b",
 ]);
 
 /**
