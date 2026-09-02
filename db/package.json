@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "test": "bun test-schema.ts",
+    "test:live": "./with-postgres.sh bun test-live.ts",
     "migrate": "bun migrate.ts"
   },
-  "comment": "PGlite is real PostgreSQL 17 in WASM with pgvector, so the schema tests need no daemon or container. Pinned to 0.3.10 — the ./vector export was removed in 0.5.x.",
+  "comment": "PGlite is real PostgreSQL 17 in WASM with pgvector, so the schema tests need no daemon or container. Pinned to 0.3.10 \u2014 the ./vector export was removed in 0.5.x.",
   "devDependencies": {
     "@electric-sql/pglite": "0.3.10"
   }

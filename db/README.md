@@ -12,8 +12,9 @@ Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
 - [Bun](https://bun.sh) 1.4+
 - To apply against a real database: Postgres 15+ with the `vector` extension
   available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted)
-- To run the tests: nothing else. They use PGlite, which is real PostgreSQL 17
-  compiled to WASM — no daemon, no container.
+- To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
+  17 compiled to WASM — no daemon, no container.
+- To run `test-live.ts`: podman or docker, for a throwaway container
 
 ## Steps
 
@@ -97,6 +98,31 @@ five files elsewhere in the repo creating it. `pg_trgm` is needed only by
 `schemas/text-search-trgm`.
 
 ## Testing
+
+Two suites, because one of them cannot reach everything.
+
+```bash
+bun test-schema.ts                    # 59 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 30 assertions, real server, throwaway container
+```
+
+`with-postgres.sh` starts `pgvector/pgvector:pg16`, exports `DATABASE_URL`, runs
+the command and removes the container on exit. It prefers podman (including the
+macOS `/opt/podman/bin` location that is often off `PATH`) and falls back to
+docker. CI does not use it — GitHub Actions supplies the database as a service
+container.
+
+### What only the live suite can catch
+
+- **The migration runner.** `migrate.ts` talks to a server over TCP with `Bun.sql`.
+  PGlite is not a server, so the ledger, `--dry-run`, `--baseline` and drift
+  detection were untested until `test-live.ts` existed.
+- **Driver-level parameter binding.** The double-encoding bug below is invisible to
+  a test that writes SQL literals. It only appears when a client binds a JS value
+  to a `jsonb` parameter.
+- **The planner.** Whether HNSW is actually chosen, rather than merely present.
+
+### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
 asserts 59 properties, including:

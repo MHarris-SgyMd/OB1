@@ -146,3 +146,44 @@ jobs:
       - name: Apply migrations and assert the schema
         working-directory: db
         run: bun test-schema.ts
+
+  db-live:
+    name: Schema against real Postgres
+    runs-on: ubuntu-latest
+
+    # A service container, not with-postgres.sh — the runner provides the database
+    # and Actions handles readiness. The local script exists for developers, who
+    # mostly run podman.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # Covers what PGlite structurally cannot: the migration runner over TCP,
+      # driver-level jsonb binding (where the double-encoding bug lived), and
+      # whether the planner actually reaches for the HNSW index.
+      - name: Run the live suite
+        working-directory: db
+        run: bun test-live.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
