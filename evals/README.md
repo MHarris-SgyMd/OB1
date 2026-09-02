@@ -72,6 +72,11 @@ they should. `nomic-embed-text-v2-moe` is the newer nomic and scores *below* the
 model it replaces. `bge-large` is the bigger sibling of `bge-m3` and scores well
 below it.
 
+**The `ctx` column here is what `ollama show` reports, which is not what Ollama
+serves** — see the long-document section above; the effective cap is 2048 for every
+model below except `qwen3-embedding`. At the 616-token documents in this corpus the
+distinction does not bite, so the analysis that follows still holds.
+
 **The `ctx` column explains almost the whole table.** The long documents are ~616
 tokens with the answer in the final sentence, so a 512-token model physically
 cannot see the answer. Every model at 512 scores exactly 1/3; every model at 2048
@@ -405,6 +410,59 @@ board routinely sit eight to twelve points apart on a few hundred queries from a
 real corpus. That is the argument for this directory existing. The public numbers
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
+
+## Long documents: the context column was wrong
+
+`eval-longctx.ts`. Everything else here uses short text — the synthetic "long"
+slice is 616 tokens and the real issue corpus averages ~125 — so the whole
+`embeddinggemma` recommendation rested on evidence that never approached a context
+limit. A personal brain is exactly where a long capture happens: a pasted
+transcript, a meeting write-up, a design note.
+
+Four documents per bucket, identical except the final sentence, and the query asks
+for that final sentence. A document truncated before its tail is unfindable.
+
+| model | `ollama show` says | 1K | 2K | 4K | 8K |
+| --- | --- | --- | --- | --- | --- |
+| **qwen3-embedding:4b !instruct @1024** | 40960 | 4/4 | 4/4 | **4/4** | **4/4** |
+| embeddinggemma | 2048 | 4/4 | 4/4 | 1/4 | 1/4 |
+| nomic-embed-text | 2048 | 4/4 | 4/4 | 1/4 | 1/4 |
+| bge-m3 | **8192** | 4/4 | 4/4 | **1/4** | **1/4** |
+| snowflake-arctic-embed2 | **8192** | 4/4 | 4/4 | **1/4** | **1/4** |
+| granite-embedding | 512 | 1/4 | 1/4 | 1/4 | 1/4 |
+
+1/4 is chance. `bge-m3` and `snowflake-arctic-embed2` advertise 8192 and fail at
+4K, which is not a quality result — it is a plumbing one.
+
+### Ollama caps embeddings at 2048 tokens, whatever the model says
+
+`/api/embed` returns `prompt_eval_count`, so this is directly observable rather
+than inferred:
+
+| model | 4K document | 8K document |
+| --- | --- | --- |
+| bge-m3 | embedded **2048** | embedded **2048** |
+| snowflake-arctic-embed2 | embedded **2048** | embedded **2048** |
+| embeddinggemma | embedded 2048 | embedded 2048 |
+| granite-embedding | embedded 512 | embedded 512 |
+| **qwen3-embedding:4b** | embedded **3357** | embedded **6711** |
+
+Everything except `qwen3-embedding` is cut at 2048, silently, with no error and no
+warning in the response. Three documented ways to lift it were tried on `bge-m3`
+and **none worked**: `options.num_ctx` at request time, `PARAMETER num_ctx 8192` in
+a Modelfile, and the model's own declared window. `OLLAMA_CONTEXT_LENGTH` on the
+server is the remaining candidate and was not tested, because it needs a restart of
+a server this environment does not own.
+
+So the `ctx` column in the table further down reports what `ollama show` claims,
+not what you get. **The effective ceiling is 2048 for every model tested except
+`qwen3-embedding`**, which is the only one that actually embeds a long capture.
+
+That changes the recommendation for one specific case: if your thoughts are short —
+and both real corpora here are — `embeddinggemma` is unaffected, because 2048 is
+its window anyway. If you paste long documents in, it is the difference between
+finding a note by its conclusion and never finding it at all, and
+`qwen3-embedding:4b` is currently the only local answer.
 
 ## Validation against a real corpus
 
