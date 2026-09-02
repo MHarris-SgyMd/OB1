@@ -553,7 +553,7 @@ function buildServer(): McpServer {
         // statement. The two-step version below could leave a row committed with
         // a NULL embedding if the follow-up UPDATE failed — the thought would be
         // stored but invisible to every semantic search, with no error surfaced
-        // after the fact. Requires migrations/001-upsert-thought-with-embedding.sql.
+        // after the fact. Requires db/migrations/004_upsert_thought_with_embedding.sql.
         const { data: atomicResult, error: atomicError } = await supabase.rpc("upsert_thought", {
           p_content: content,
           p_payload: payload,
@@ -576,7 +576,7 @@ function buildServer(): McpServer {
         if (atomicUnavailable) {
           console.warn(
             "capture_thought: 3-arg upsert_thought not found — falling back to the " +
-              "non-atomic two-step write. Apply migrations/001-upsert-thought-with-embedding.sql."
+              "non-atomic two-step write. Apply db/migrations/004_upsert_thought_with_embedding.sql."
           );
 
           const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {

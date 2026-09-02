@@ -126,3 +126,23 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ""
           WRANGLER_SEND_METRICS: "false"
+
+  db-schema:
+    name: Schema migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # PGlite is real PostgreSQL 17 + pgvector in WASM, so this needs no service
+      # container: the migrations are applied and asserted against a real planner.
+      - name: Apply migrations and assert the schema
+        working-directory: db
+        run: bun test-schema.ts

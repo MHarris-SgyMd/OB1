@@ -69,7 +69,7 @@ committed. For `wrangler dev`, copy `.dev.vars.example` to `.dev.vars`
 
 ### 4. Apply the migration
 
-`../server/migrations/001-upsert-thought-with-embedding.sql` is still required for
+`../db/migrations/004_upsert_thought_with_embedding.sql` is still required for
 the atomic capture path. Without it, capture falls back to the two-step write and
 logs a warning.
 

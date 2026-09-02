@@ -10,7 +10,7 @@
  * embedding" that reads as though nothing was saved at all.
  *
  * The fix calls the 3-arg upsert_thought(text, jsonb, vector) overload added by
- * migrations/001-upsert-thought-with-embedding.sql, falling back to the old
+ * db/migrations/004_upsert_thought_with_embedding.sql, falling back to the old
  * two-step path when that function is absent so it stays a drop-in change.
  *
  * index.ts cannot be imported under Node (Deno.env at module scope, jsr:
@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INDEX_TS = readFileSync(join(HERE, "index.ts"), "utf8");
 const MIGRATION = readFileSync(
-  join(HERE, "migrations", "001-upsert-thought-with-embedding.sql"),
+  join(HERE, "..", "db", "migrations", "004_upsert_thought_with_embedding.sql"),
   "utf8"
 );
 

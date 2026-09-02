@@ -45,17 +45,18 @@ supabase functions deploy open-brain-mcp --no-verify-jwt
 
 ### Required migration
 
-`server/migrations/001-upsert-thought-with-embedding.sql` must be applied for
+`db/migrations/004_upsert_thought_with_embedding.sql` must be applied for
 the atomic capture path. Without it `capture_thought` still works — it falls back
 to the old two-step write and logs a warning — but you keep the failure mode the
-migration exists to remove. Apply it in the Supabase SQL Editor.
+migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ---
 
 ## What we changed
 
-Eight commits on top of the pin. Seven fix defects found in an audit of the pinned
-tree; the eighth adds a parallel runtime-neutral build without touching `server/`.
+Nine commits on top of the pin. Seven fix defects found in an audit of the pinned
+tree; the last two are migration work — a runtime-neutral build and the core schema
+extracted into applicable migrations.
 
 | # | Commit | What | Upstream status |
 | --- | --- | --- | --- |
@@ -67,6 +68,7 @@ tree; the eighth adds a parallel runtime-neutral build without touching `server/
 | 6 | `[fork] docs: make fingerprint setup re-runnable…` | Core setup and `recipes/content-fingerprint-dedup` shipped the same unguarded DDL, so following both in order errored. Plus three links to paths that do not exist. | **Unfiled** |
 | 7 | `[fork] ci: run the tests…` | Upstream invokes no test from any workflow. Adds fork CI and a repo-wide consistency checker; fixes the 14 metadata violations it found. | **Unfiled** |
 | 8 | `[fork] server-portable: runtime-neutral build` | New parallel `server-portable/` targeting Bun, Node, Cloudflare Workers and Deno Deploy. Two changes from `server/index.ts`: no Deno globals, and env read lazily. Its test suite **imports the real server**, so the drift class the guards detect cannot occur. | **Unfiled** |
+| 9 | `[fork] db: core schema as applicable migrations` | The core schema existed only as prose in `docs/01-getting-started.md`. `db/migrations/` makes it executable, idempotent and versioned, with the Supabase-isms removed and a runner. Verified against real PostgreSQL 17 + pgvector via PGlite — 49 assertions, no daemon needed. | **Unfiled** |
 
 ### Files we own
 
@@ -79,11 +81,12 @@ server/bun.lock                  # fix 2
 server/test-stateless.mjs        # fix 1
 server/test-stats-pagination.mjs # fix 3   (new file)
 server/test-capture-atomicity.mjs# fix 5   (new file)
-server/migrations/               # fix 5   (new dir)
+db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/metadata.schema.json     # fix 7   (3 additive optional fields)
 .github/workflows/fork-checks.yml# fix 7   (new file)
 scripts/check-fork-consistency.mjs # fix 7 (new file)
 server-portable/                 # fix 8   (new dir — parallel, does not touch server/)
+db/                              # fix 9   (new dir — schema, runner, tests)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -140,6 +143,7 @@ deno check --node-modules-dir=none index.ts   # --node-modules-dir=none is requi
 cd ../server-portable
 bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
+cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 cd .. && node scripts/check-fork-consistency.mjs
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \

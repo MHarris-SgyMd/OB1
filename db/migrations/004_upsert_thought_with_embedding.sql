@@ -1,5 +1,5 @@
 -- ============================================================================
--- 001 — upsert_thought(text, jsonb, vector): atomic capture
+-- 004 — upsert_thought(text, jsonb, vector): atomic capture
 --
 -- Why
 --   capture_thought previously wrote in two steps: upsert_thought(content,
@@ -21,8 +21,7 @@
 --   * Idempotent — safe to run more than once.
 --
 -- Prerequisites
---   Core setup step 2.6 (content_fingerprint column + unique index +
---   upsert_thought). Apply this in the Supabase SQL Editor.
+--   Migration 003. Applied by `bun db/migrate.ts`, or by hand in any SQL client.
 --
 -- Expected outcome
 --   Database → Functions lists two upsert_thought entries: (text, jsonb) and
@@ -75,4 +74,5 @@ $$;
 COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
   'Atomic capture: content + metadata + embedding in one statement. Overload of upsert_thought(text, jsonb); no default on p_embedding so the 2-arg form stays unambiguous.';
 
-GRANT EXECUTE ON FUNCTION upsert_thought(text, jsonb, vector) TO service_role;
+-- No GRANT here. `service_role` is a Supabase-managed role that does not exist
+-- off Supabase; grant to whichever role your application connects as.
