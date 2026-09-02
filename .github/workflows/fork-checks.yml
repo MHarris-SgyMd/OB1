@@ -187,3 +187,46 @@ jobs:
         run: bun test-live.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+  data-layer:
+    name: SQL data layer against real Postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
+      - name: Store conformance
+        working-directory: server-portable
+        run: bun test-store-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The one that matters: the real MCP server, driven over JSON-RPC, with
+      # OB1_STORE=sql and no Supabase configuration present at all.
+      - name: End-to-end over MCP with no Supabase
+        working-directory: server-portable
+        run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test

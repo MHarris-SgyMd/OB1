@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createStore, type ThoughtStore } from "./store.ts";
 
 /**
  * Runtime-portable env access.
@@ -14,10 +14,15 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
  * lets one file run on all four.
  */
 type Env = {
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
   OPENROUTER_API_KEY: string;
   MCP_ACCESS_KEY: string;
+  /** Which data layer to use: "postgrest" (default) or "sql". */
+  OB1_STORE?: string;
+  /** Required when OB1_STORE=postgrest. */
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  /** Required when OB1_STORE=sql. */
+  DATABASE_URL?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
 };
 
@@ -34,29 +39,15 @@ function env(): Env {
   return ENV;
 }
 
-let _supabase: SupabaseClient | null = null;
-function db(): SupabaseClient {
-  if (!_supabase) _supabase = createClient(env().SUPABASE_URL, env().SUPABASE_SERVICE_ROLE_KEY);
-  return _supabase;
+// Built once, on first use. createStore() dynamically imports whichever backend
+// is configured, so a Cloudflare build never pulls in the Postgres client.
+let _store: Promise<ThoughtStore> | null = null;
+function db(): Promise<ThoughtStore> {
+  if (!_store) _store = createStore(env());
+  return _store;
 }
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
-
-type ThoughtMatch = {
-  id: string;
-  content: string;
-  metadata: Record<string, unknown>;
-  similarity: number;
-  created_at: string;
-};
-
-type ThoughtRecord = {
-  id: string;
-  content: string;
-  metadata: Record<string, unknown>;
-  created_at: string;
-  updated_at?: string | null;
-};
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -196,21 +187,14 @@ function buildServer(): McpServer {
     async ({ query }) => {
       try {
         const qEmb = await getEmbedding(query);
-        const { data, error } = await db().rpc("match_thoughts", {
-          query_embedding: qEmb,
-          match_threshold: 0.5,
-          match_count: 10,
+        const data = await (await db()).matchThoughts({
+          embedding: qEmb,
+          threshold: 0.5,
+          limit: 10,
           filter: {},
         });
 
-        if (error) {
-          return {
-            content: [{ type: "text" as const, text: `Search error: ${error.message}` }],
-            isError: true,
-          };
-        }
-
-        const results = ((data || []) as ThoughtMatch[]).map((t) => ({
+        const results = data.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
           url: thoughtUrl(t.id),
@@ -243,20 +227,14 @@ function buildServer(): McpServer {
     },
     async ({ id }) => {
       try {
-        const { data, error } = await db()
-          .from("thoughts")
-          .select("id, content, metadata, created_at, updated_at")
-          .eq("id", id)
-          .single();
+        const thought = await (await db()).getThought(id);
 
-        if (error) {
+        if (!thought) {
           return {
-            content: [{ type: "text" as const, text: `Fetch error: ${error.message}` }],
+            content: [{ type: "text" as const, text: `Fetch error: no thought with id ${id}` }],
             isError: true,
           };
         }
-
-        const thought = data as ThoughtRecord;
         const document = {
           id: thought.id,
           title: thoughtTitle(thought.content, thought.created_at),
@@ -300,31 +278,21 @@ function buildServer(): McpServer {
     async ({ query, limit, threshold }) => {
       try {
         const qEmb = await getEmbedding(query);
-        const { data, error } = await db().rpc("match_thoughts", {
-          query_embedding: qEmb,
-          match_threshold: threshold,
-          match_count: limit,
+        const data = await (await db()).matchThoughts({
+          embedding: qEmb,
+          threshold,
+          limit,
           filter: {},
         });
 
-        if (error) {
-          return {
-            content: [{ type: "text" as const, text: `Search error: ${error.message}` }],
-            isError: true,
-          };
-        }
-
-        if (!data || data.length === 0) {
+        if (data.length === 0) {
           return {
             content: [{ type: "text" as const, text: `No thoughts found matching "${query}".` }],
           };
         }
 
         const results = data.map(
-          (
-            t: ThoughtMatch,
-            i: number
-          ) => {
+          (t, i) => {
             const m = t.metadata || {};
             const parts = [
               `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
@@ -379,31 +347,9 @@ function buildServer(): McpServer {
     },
     async ({ limit, type, topic, person, days }) => {
       try {
-        let q = db()
-          .from("thoughts")
-          .select("content, metadata, created_at")
-          .order("created_at", { ascending: false })
-          .limit(limit);
+        const data = await (await db()).listThoughts({ limit, type, topic, person, days });
 
-        if (type) q = q.contains("metadata", { type });
-        if (topic) q = q.contains("metadata", { topics: [topic] });
-        if (person) q = q.contains("metadata", { people: [person] });
-        if (days) {
-          const since = new Date();
-          since.setDate(since.getDate() - days);
-          q = q.gte("created_at", since.toISOString());
-        }
-
-        const { data, error } = await q;
-
-        if (error) {
-          return {
-            content: [{ type: "text" as const, text: `Error: ${error.message}` }],
-            isError: true,
-          };
-        }
-
-        if (!data || !data.length) {
+        if (!data.length) {
           return { content: [{ type: "text" as const, text: "No thoughts found." }] };
         }
 
@@ -448,9 +394,8 @@ function buildServer(): McpServer {
     },
     async () => {
       try {
-        const { count } = await db()
-          .from("thoughts")
-          .select("*", { count: "exact", head: true });
+        const store = await db();
+        const count = await store.countThoughts();
 
         // Supabase caps an unbounded select at 1000 rows by default, so a single
         // query silently aggregates only the newest page while `count` above
@@ -472,20 +417,9 @@ function buildServer(): McpServer {
             break;
           }
 
-          const { data: page, error } = await db()
-            .from("thoughts")
-            .select("metadata, created_at")
-            .order("created_at", { ascending: false })
-            .range(offset, offset + STATS_PAGE_SIZE - 1);
+          const page = await store.pageThoughtMeta(offset, STATS_PAGE_SIZE);
 
-          if (error) {
-            return {
-              content: [{ type: "text" as const, text: `Error: ${error.message}` }],
-              isError: true,
-            };
-          }
-
-          if (!page || page.length === 0) break;
+          if (page.length === 0) break;
 
           for (const r of page) {
             const m = (r.metadata || {}) as Record<string, unknown>;
@@ -578,84 +512,26 @@ function buildServer(): McpServer {
 
         const payload = { metadata: { ...metadata, source: "mcp" } };
 
-        // Single round-trip: content, metadata and embedding land in one
-        // statement. The two-step version below could leave a row committed with
-        // a NULL embedding if the follow-up UPDATE failed — the thought would be
-        // stored but invisible to every semantic search, with no error surfaced
-        // after the fact. Requires db/migrations/004_upsert_thought_with_embedding.sql.
-        const { data: atomicResult, error: atomicError } = await db().rpc("upsert_thought", {
-          p_content: content,
-          p_payload: payload,
-          p_embedding: embedding,
+        // Atomicity is the store's problem now: the SQL path writes content,
+        // metadata and vector in one statement, while the PostgREST path keeps the
+        // 3-arg RPC with its two-step fallback. Either way a row committed without
+        // its embedding is reported, never silently accepted.
+        const captured = await (await db()).captureThought({
+          content,
+          payload,
+          embedding,
         });
 
-        // PGRST202 = no function matching that name and argument list. Deployments
-        // that have not applied the migration fall back to the original two-step
-        // path so this stays a drop-in replacement.
-        const atomicUnavailable =
-          atomicError && (atomicError.code === "PGRST202" || /Could not find the function/i.test(atomicError.message ?? ""));
-
-        if (atomicError && !atomicUnavailable) {
+        if (captured.embeddingFailed) {
           return {
-            content: [{ type: "text" as const, text: `Failed to capture: ${atomicError.message}` }],
-            isError: true,
-          };
-        }
-
-        if (atomicUnavailable) {
-          console.warn(
-            "capture_thought: 3-arg upsert_thought not found — falling back to the " +
-              "non-atomic two-step write. Apply db/migrations/004_upsert_thought_with_embedding.sql."
-          );
-
-          const { data: upsertResult, error: upsertError } = await db().rpc("upsert_thought", {
-            p_content: content,
-            p_payload: payload,
-          });
-
-          if (upsertError) {
-            return {
-              content: [{ type: "text" as const, text: `Failed to capture: ${upsertError.message}` }],
-              isError: true,
-            };
-          }
-
-          const thoughtId = upsertResult?.id;
-          if (!thoughtId) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: "Failed to capture: upsert_thought returned no id, so the embedding could not be attached.",
-                },
-              ],
-              isError: true,
-            };
-          }
-
-          const { error: embError } = await db()
-            .from("thoughts")
-            .update({ embedding })
-            .eq("id", thoughtId);
-
-          if (embError) {
-            // The row is committed but unsearchable. Say so plainly — the old code
-            // reported a generic failure that read as "nothing was saved".
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text:
-                    `Thought saved (id ${thoughtId}) but its embedding failed to attach: ` +
-                    `${embError.message}. It will NOT appear in semantic search until re-captured.`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        } else if (!atomicResult?.id) {
-          return {
-            content: [{ type: "text" as const, text: "Failed to capture: upsert_thought returned no id." }],
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Thought saved (id ${captured.id}) but its embedding failed to attach: ` +
+                  `${captured.embeddingFailed}. It will NOT appear in semantic search until re-captured.`,
+              },
+            ],
             isError: true,
           };
         }

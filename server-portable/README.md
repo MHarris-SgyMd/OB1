@@ -16,17 +16,48 @@ and changed later. One file targets four runtimes.
 
 ## What differs from `../server/index.ts`
 
-Two changes. Everything else is byte-identical.
+Three changes.
 
 1. **No Deno globals.** `Deno.env.get(…)` and `Deno.serve(…)` are gone, and the
    `jsr:@supabase/functions-js/edge-runtime.d.ts` type import is removed.
 2. **Env is read lazily.** Cloudflare Workers has no module scope for secrets —
-   bindings arrive on the request context — so the four import-time env reads and
-   the eager `createClient` became an `initEnv`/`env()`/`db()` shim, seeded by the
-   first middleware. On Deno, Bun and Node it falls back to `process.env`.
+   bindings arrive on the request context — so the import-time env reads and the
+   eager client became an `initEnv`/`env()`/`db()` shim, seeded by the first
+   middleware. On Deno, Bun and Node it falls back to `process.env`.
+3. **The data layer is swappable.** Every database call goes through the
+   `ThoughtStore` interface in `store.ts`, with two implementations.
 
-The second change is what makes the file portable, and it is also what makes it
-testable. See *Testing* below.
+The second change is what makes the file portable and testable; the third is
+Phase 2 of the migration.
+
+## Choosing a data layer
+
+| `OB1_STORE` | Talks to | Needs | Runs on |
+| --- | --- | --- | --- |
+| `postgrest` *(default)* | PostgREST over HTTP, via `supabase-js` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | anywhere, Workers included |
+| `sql` | Postgres directly, via `Bun.sql` | `DATABASE_URL` | container runtimes only |
+
+Both are kept on purpose. The cutover step in the migration plan runs the two
+stacks against the same data and diffs the results, which is impossible if the old
+path is deleted in the same change. And Cloudflare Workers cannot hold a
+connection pool, so PostgREST stays the right pairing there — selecting at runtime
+keeps the runtime decision and the data-layer decision independent.
+
+`store-sql.ts` is imported **dynamically**, so a Workers build never pulls in the
+Postgres client. Wrangler's bundler still resolves the specifier statically, so
+`wrangler.toml` aliases `bun` to `shims/bun-unavailable.ts` — a stub that throws
+with an explanation if a Workers deployment is somehow configured with
+`OB1_STORE=sql`.
+
+### Two behaviours the SQL port had to preserve exactly
+
+- `match_thoughts` compares `> match_threshold` **strictly**, so a row whose
+  similarity equals the threshold is excluded. The SQL store calls the stored
+  function rather than reimplementing the ranking, which keeps that guaranteed in
+  one place.
+- jsonb parameters must be bound as **objects**. `Bun.sql` binds a JS string to a
+  jsonb parameter as `jsonb_typeof='string'`, and `p_payload->'metadata'` then
+  returns NULL — silently storing `{}`. Migration 005 rejects that outright.
 
 ## Steps
 
@@ -75,10 +106,15 @@ logs a warning.
 
 ## Expected outcome
 
-`bun test-server.ts` prints `41 assertions: 41 passed, 0 failed` and `PASS`.
-`bun run cf:build` reports a successful upload of roughly 252 KiB gzipped. An MCP
-client pointed at the deployed URL completes `initialize`, lists six tools, and
-can search and capture.
+```bash
+bun test-server.ts        # 41 — transport, auth, tool surface
+bun run test:sql          # 37 — store conformance, real Postgres in a container
+bun run test:e2e          # 30 — the whole server over MCP with no Supabase at all
+bun run cf:build          # ~256 KiB gzipped
+```
+
+`test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
+to start and remove a throwaway `pgvector/pgvector:pg16`.
 
 ## Testing
 
@@ -95,16 +131,24 @@ The fork's answer over there is a drift guard that greps `index.ts` as text, whi
 detects the divergence but does not prevent it. Here there is nothing to diverge
 from, so the guards are unnecessary and absent.
 
+`test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE=sql`,
+deletes `SUPABASE_URL` from the environment, and drives the six tools over real
+JSON-RPC against real Postgres. Only the model provider is stubbed, so the suite
+stays hermetic and free.
+
 **Not yet ported:** `test-stats-pagination.mjs` and `test-capture-atomicity.mjs`
-still live in `../server/` and still test mirrors, because they need a stubbed
-Supabase client. The lazy `db()` accessor makes injecting one straightforward, but
-that seam is not built yet.
+still live in `../server/` and still test mirrors of the Deno build. They are now
+largely superseded for the portable build — the store interface makes both paths
+directly testable — but the Deno build still needs them.
 
 ## Caveats
 
-- **Workers cannot pool Postgres connections.** If you pair this with native SQL
-  instead of PostgREST, budget for Hyperdrive. On a container the problem does not
-  arise.
+- **Workers cannot pool Postgres connections.** `OB1_STORE=sql` is unsupported
+  there and fails loudly via the shim. Use `postgrest` on Workers, or add
+  Hyperdrive and a Workers-compatible driver.
+- **The SQL store's pool is bounded** at `OB1_PG_POOL` (default 10). PostgREST was
+  stateless HTTP, so nothing upstream limits concurrency any more — an unbounded
+  pool would let a burst of captures exhaust the server's connection slots.
 - **A live `workerd` request has not been exercised.** The Cloudflare build is
   verified with the real bundler; `wrangler dev` could not be reached from the
   authoring sandbox, and a hello-world worker failed identically there, so the gap

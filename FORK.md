@@ -54,9 +54,9 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Nine commits on top of the pin. Seven fix defects found in an audit of the pinned
-tree; the last two are migration work — a runtime-neutral build and the core schema
-extracted into applicable migrations.
+Eleven commits on top of the pin. Seven fix defects found in an audit of the pinned
+tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
+schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
 | # | Commit | What | Upstream status |
 | --- | --- | --- | --- |
@@ -69,6 +69,8 @@ extracted into applicable migrations.
 | 7 | `[fork] ci: run the tests…` | Upstream invokes no test from any workflow. Adds fork CI and a repo-wide consistency checker; fixes the 14 metadata violations it found. | **Unfiled** |
 | 8 | `[fork] server-portable: runtime-neutral build` | New parallel `server-portable/` targeting Bun, Node, Cloudflare Workers and Deno Deploy. Two changes from `server/index.ts`: no Deno globals, and env read lazily. Its test suite **imports the real server**, so the drift class the guards detect cannot occur. | **Unfiled** |
 | 9 | `[fork] db: core schema as applicable migrations` | The core schema existed only as prose in `docs/01-getting-started.md`. `db/migrations/` makes it executable, idempotent and versioned, with the Supabase-isms removed and a runner. Verified against real PostgreSQL 17 + pgvector via PGlite — 49 assertions, no daemon needed. | **Unfiled** |
+| 10 | `[fork] db: live suite against a real Postgres server` | PGlite cannot reach the migration runner, driver-level jsonb binding, or the planner. Adds `test-live.ts` plus `with-postgres.sh` (podman first) and a CI service container. | **Unfiled** |
+| 11 | `[fork] server-portable: swappable data layer` | Phase 2. Every DB call goes through `ThoughtStore`; `store-sql.ts` talks to Postgres directly via `Bun.sql`, `store-postgrest.ts` keeps the old path for cutover and for Workers. Verified end to end over MCP with no Supabase present. | **Unfiled** |
 
 ### Files we own
 
@@ -142,6 +144,7 @@ deno check --node-modules-dir=none index.ts   # --node-modules-dir=none is requi
                                               # server/node_modules
 cd ../server-portable
 bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
+bun run test:sql && bun run test:e2e            # needs podman or docker
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker

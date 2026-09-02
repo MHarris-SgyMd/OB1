@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "bun test-server.ts",
+    "test:sql": "../db/with-postgres.sh bun test-store-sql.ts",
+    "test:e2e": "../db/with-postgres.sh bun test-e2e-sql.ts",
     "typecheck": "tsc --noEmit",
     "dev": "bun --watch index.ts",
     "cf:build": "wrangler deploy --dry-run --outdir=.cf-out",
