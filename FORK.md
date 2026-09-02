@@ -211,6 +211,28 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 Deliberate. Recorded so nobody assumes they were missed.
 
+- **Long captures are embedded only in part — there is no chunking.** One thought
+  is one row with one vector, upstream's design and unchanged here. `content` is
+  `text` with no limit, so the whole capture is stored and `fetch` and
+  `list_thoughts` return it intact — nothing is lost. But `getEmbedding` sends the
+  string in a single call, so past the provider's per-request ceiling (2048 tokens
+  by default on Ollama — see `evals/README.md`) the tail is not represented in the
+  vector, and `search_thoughts` cannot find the note by anything said in it. The
+  text is preserved; only its searchability is truncated, and silently.
+
+  Raising `num_batch` moves the ceiling but does not remove it: past roughly 4K
+  tokens the answer stops being cut and starts being diluted instead, which no
+  setting fixes. This matters for `capture_thought`'s own suggested use of
+  "migrated content from other systems" — a pasted transcript is exactly the shape
+  that loses its ending.
+
+  Fixing it properly means a `thought_chunks` table, embedding per chunk, and
+  `match_thoughts` searching chunks and folding results back to thoughts. That is
+  compatible with the guard rail against altering `thoughts` itself, but it is a
+  schema change and a data-model change, so it is not something to do quietly.
+  Until then: keep captures under a couple of thousand tokens, or split them
+  yourself at the point of capture.
+
 - **The access key still rides in the URL** — but it is now scoped, named and
   hashed (fix 14). `?key=` is kept because Claude Desktop connectors are URL-only,
   so a key in a URL still reaches access logs and browser history. What changed is
