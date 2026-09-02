@@ -187,6 +187,58 @@ What did **not** help: nothing about extraction from a short note is
 capability-limited in the way model choice implies. The temperature fix above was
 worth more than either size step, and cost nothing.
 
+### Gemma 4, and the reasoning tax
+
+`gemma4` shipped after this work started and would not have been tested without
+being asked for. It is 8B, 131k context, multimodal, and **thinks by default** —
+which turns out to matter more than the model itself.
+
+At temperature 0:
+
+| model | size | core | hard | total | per capture | structural failures |
+| --- | --- | --- | --- | --- | --- | --- |
+| gemma4 **+ reasoning** | 9.6 GB | 47/48 | **36/36** | **83/84** | 7.7s | **none** |
+| **qwen2.5:7b** | 4.7 GB | 45/48 | **36/36** | 81/84 | **1.4s** | **none** |
+| gemma4 − reasoning | 9.6 GB | 46/48 | 34/36 | 80/84 | 1.4s | 1 invented person |
+| gpt-oss:20b | 13 GB | 48/48 | 35/36 | 83/84 | 6.7s | 1 invented person |
+| functiongemma:270m | 301 MB | 27/48 | 22/36 | 49/84 | 8.8s | 11 with no topics, 1 bad JSON |
+
+**`gemma4` with reasoning is the best result on this benchmark** — it ties
+`gpt-oss:20b`'s 83/84 but with zero structural failures, in a smaller model.
+Reasoning is what buys it: turning reasoning off costs 3 points and introduces a
+hallucinated person, while making it 5.5× faster.
+
+`qwen2.5:7b` stays the default because ~1.4s with no failures beats ~7.7s for two
+more points on a fourteen-case benchmark. Choose `gemma4` with
+`OB1_METADATA_REASONING=on` if capture latency is not interactive for you.
+
+`functiongemma:270m` scored badly, but that is probably my prompt rather than the
+model: its declared capabilities are `completion` and `tools`, not JSON mode, and
+it is built to emit tool calls. Driving it through `response_format: json_object`
+is using it wrong. Reaching it properly would mean giving the extraction call a
+tool schema instead of a prose prompt — plausibly a better design, and untested.
+
+#### `think: false` is ignored on the OpenAI-compatible endpoint
+
+This is the practically important finding, and it is easy to get wrong:
+
+| how | latency | reasoning emitted |
+| --- | --- | --- |
+| `/v1`, no flag | 7.5s / 9.6s | 960 chars |
+| `/v1` + `think: false` | 15.4s / 8.7s | **960 chars — silently ignored** |
+| `/v1` + `reasoning_effort: "low"` | 4.4s / 4.3s | 960 chars — also ignored |
+| **`/v1` + `reasoning_effort: "none"`** | **0.5s / 0.5s** | **0** |
+| `/api/chat` + `think: false` | 0.5s / 0.5s | 0 |
+
+Ollama's native endpoint takes `think: false`; the OpenAI-compatible one takes
+`reasoning_effort`. Passing the wrong one costs 15× latency and reports nothing.
+Verified harmless on `qwen2.5:7b`, `llama3.2` and `phi4-mini` — all returned 200
+with valid JSON, several of them faster.
+
+The server now sends `reasoning_effort: "none"` by default, overridable with
+`OB1_METADATA_REASONING`. As more open-weight models ship thinking on by default,
+this stops each one silently multiplying capture latency.
+
 ### DeepSeek and Kimi
 
 Asked for explicitly, so checked explicitly.

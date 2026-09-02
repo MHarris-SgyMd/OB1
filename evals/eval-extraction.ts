@@ -166,6 +166,11 @@ async function extract(model: string, text: string): Promise<Record<string, unkn
       model,
       response_format: { type: "json_object" },
       ...(TEMP === undefined ? {} : { temperature: TEMP }),
+      // Thinking-capable models reason before answering unless told not to, and
+      // that is pure cost for a fixed-schema extraction. `think: false` is
+      // silently ignored on the OpenAI-compatible endpoint; reasoning_effort is
+      // what it honours. Harmless to models without a reasoning mode.
+      ...(process.env.OB1_EVAL_REASONING === "on" ? {} : { reasoning_effort: "none" }),
       messages: [{ role: "system", content: SYSTEM }, { role: "user", content: text }],
     }),
   });

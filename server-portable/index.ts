@@ -34,6 +34,8 @@ type Env = {
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
   OB1_METADATA_TEMPERATURE?: string;
+  /** "on" to let a thinking model reason; anything else disables it. Default off. */
+  OB1_METADATA_REASONING?: string;
   /** Any OpenAI-compatible base URL. Point it at Ollama for a fully local brain. */
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
@@ -96,6 +98,24 @@ function embeddingDim(): number {
 }
 function metadataModel(): string {
   return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
+}
+
+/**
+ * Thinking-capable models reason before answering unless told not to, and a
+ * growing share of open-weight models default to it — Gemma 4, Qwen 3,
+ * DeepSeek-R1. For a fixed-schema extraction on the interactive path of every
+ * capture, that is mostly cost: measured on gemma4, reasoning bought +3 points on
+ * the extraction benchmark for 5.5x the latency (7.7s vs 1.4s per capture).
+ *
+ * So reasoning is OFF by default and opt-in. Note that `think: false` is silently
+ * IGNORED on the OpenAI-compatible endpoint — `reasoning_effort` is what it
+ * honours, and it is harmless to models with no reasoning mode.
+ */
+function metadataReasoning(): Record<string, unknown> {
+  const raw = (env().OB1_METADATA_REASONING ?? "").toLowerCase();
+  if (raw === "on" || raw === "true" || raw === "1") return {};
+  if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
+  return { reasoning_effort: "none" };
 }
 
 /** Deterministic by default; overridable for anyone who wants variety. */
@@ -215,6 +235,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
       // above the sampled mean. Determinism also makes a bad capture
       // reproducible, which matters more than the point of score.
       temperature: metadataTemperature(),
+      ...metadataReasoning(),
       messages: [
         {
           role: "system",

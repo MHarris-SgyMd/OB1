@@ -109,6 +109,12 @@ The short version:
   dimensions, above pgvector's HNSW limit of 2000 — the column works but no index
   can be built. The largest usable one, `qwen3-embedding:0.6b`, scored below
   `embeddinggemma` despite more parameters and 16× the context.
+- **`gemma4` is the most accurate local option** (83/84, no failures) but only
+  with reasoning on, which costs ~7.7s per capture against ~1.4s. Set
+  `OB1_METADATA_REASONING=on` if that trade suits you. Reasoning is off by
+  default: `think: false` is silently ignored on the OpenAI-compatible endpoint, so
+  the server sends `reasoning_effort: "none"` — without it a thinking model
+  multiplies capture latency with no warning.
 - **Reasoning models are wrong for this, consistently.** `qwen3:4b` 17.8s,
   `deepseek-r1:8b` ~34s per capture against ~1.2s — and R1 also scored lower
   (78/84) with one unusable response. DeepSeek's and Kimi's flagship weights
