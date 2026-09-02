@@ -406,6 +406,66 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Is a second retrieval tier worth it?
+
+`eval-cascade.ts`. The three best embedding models plateau at 0.975 MRR and fail
+the *same* query:
+
+```
+"which certificate do I have to renew by hand?"
+  wanted  cert-staging  "Renew the SSL certificate for the staging cluster…"   (rank 2)
+  got     cert-prod     "…auto-renews through cert-manager, so it needs no manual action."
+```
+
+The distractor contains "manual" and states the negation of what was asked. A
+bi-encoder embeds query and document separately and never compares them, so
+polarity is precisely what it cannot see — which is why scaling the encoder does
+not help: `qwen3-embedding:4b` scores five points higher on MTEB and misses the
+identical query. The remaining error is not a quality gap, it is a class limit.
+
+| design | R@1 | MRR | ms/query |
+| --- | --- | --- | --- |
+| tier 0 — BM25 lexical only | 10/20 | 0.628 | 0 |
+| **tier 1 — embedding only (current)** | 19/20 | 0.975 | **19** |
+| tier 0+1 — hybrid RRF, always | 16/20 | 0.840 | 19 |
+| tier 0+1 — hybrid RRF, gated | 19/20 | 0.963 | 19 |
+| tier 1+2 — LLM rerank, always | **20/20** | **1.000** | 1229 |
+| **tier 1+2 — LLM rerank, gated at margin < 0.08** | **20/20** | **1.000** | **152** |
+
+**The free tier does not pay.** Adding BM25 by Reciprocal Rank Fusion *lowers*
+accuracy from 0.975 to 0.840 — lexical overlap drags down paraphrased queries the
+encoder already had right. It does fix the near-dup slice (8/8), so BM25 genuinely
+knows something the encoder does not, but gating it only trades one win for one
+loss (0.963, still below doing nothing).
+
+**The expensive tier does pay, and only with a large model.** `qwen3.8:27b`
+reranking the top 5 fixes the negation query and takes the corpus to a clean
+20/20. `qwen2.5:7b` on the same job fixed *nothing* — so this tier costs 18 GB
+resident on top of the embedder, not a small model.
+
+**Gating on the cosine margin is what makes it affordable.** The gap between the
+best and second-best score is a usable confidence signal: escalating only when it
+is below 0.08 fires on 3 of 20 queries and cuts the average cost from 1229ms to
+152ms for identical accuracy — an 8x saving.
+
+### Why this is not yet a recommendation
+
+- **One query separates 0.975 from 1.000.** The 0.08 threshold is tuned on a single
+  failure, which is overfitting by any standard. On a real corpus it needs fitting
+  against many misses, and the margin distribution will differ.
+- **Two queries have a *smaller* margin than the failing one** and are answered
+  correctly, so the signal is real but weak. It buys cheap escalation, not a
+  reliable "is this wrong" detector.
+- **Model residency dominates the measurement.** Tier 1 measured 535ms per query
+  in the first cascade run and 19ms once both models stayed loaded — a 28x
+  artifact from Ollama swapping models in and out. Any two-model design needs
+  `OLLAMA_MAX_LOADED_MODELS` and enough RAM for both, or the fast tier stops being
+  fast.
+- **"Fast results now, better results later" is not available over MCP.** A
+  `tools/call` returns exactly one result; progress notifications carry status, not
+  content the model can act on. So a second tier cannot stream a first draft — it
+  can only be adaptive and invisible, or an explicit parameter on the tool.
+
 ## Open versus proprietary
 
 On the public leaderboards the open models are ahead, which was not true two years
