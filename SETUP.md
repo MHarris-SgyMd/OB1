@@ -123,13 +123,25 @@ The short version:
   to find by its conclusion. `embeddinggemma` moves properly (0.816). This is a
   documented failure mode of embedding models generally, not a quirk of this
   benchmark — see [`evals/`](evals/README.md).
-- **Ollama caps embeddings at 2048 tokens regardless of the model.** `bge-m3` and
-  `snowflake-arctic-embed2` advertise 8192 and embed 2048; `ollama show` reports the
-  model's capability, not the served window. Measured via `prompt_eval_count`, and
-  neither `options.num_ctx` nor a Modelfile `PARAMETER num_ctx` lifts it. Only
-  `qwen3-embedding` embedded a whole long document. If you capture long notes, that
-  is the difference between finding one by its conclusion and never finding it —
-  and it is silent, with no error on either the write or the search.
+- **Ollama caps embeddings at 2048 tokens by default, and the knob is
+  `num_batch`.** `bge-m3` and `snowflake-arctic-embed2` advertise 8192 and embed
+  2048; `ollama show` reports the model's capability, not what you get. The cause is
+  batch size, not context: llama.cpp needs an embedding to fit in one batch. So
+  `num_ctx` does nothing — not as a request option, not in a Modelfile, not as
+  `OLLAMA_CONTEXT_LENGTH` — but `num_batch` does. Bake it in so it applies to the
+  OpenAI-compatible endpoint this server calls, which cannot pass request options:
+
+  ```bash
+  printf 'FROM bge-m3\nPARAMETER num_batch 8192\nPARAMETER num_ctx 8192\n' > Modelfile
+  ollama create bge-m3-long -f Modelfile     # then set OB1_EMBEDDING_MODEL=bge-m3-long
+  ```
+
+  That takes 4K-token captures from unfindable to perfectly findable. It does **not**
+  help at 8K: the model then embeds the whole document and still cannot surface its
+  final sentence, which is dilution rather than truncation and has no configuration
+  fix. For captures that long, `qwen3-embedding:4b` is the only local model measured
+  that handles them — or chunk before capturing. All of this is silent: no error on
+  the write, no error on the search, just a note you cannot find.
 - **Check the context window before anything else.** Every 512-token model tested
   scores 1/3 on long thoughts and every 2048+ model scores 2/3 or 3/3 — a hard cut,
   with no error when a thought is silently truncated. Use `ollama show <model>`,

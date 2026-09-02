@@ -434,7 +434,65 @@ for that final sentence. A document truncated before its tail is unfindable.
 1/4 is chance. `bge-m3` and `snowflake-arctic-embed2` advertise 8192 and fail at
 4K, which is not a quality result — it is a plumbing one.
 
-### Ollama caps embeddings at 2048 tokens, whatever the model says
+### The cap is `num_batch`, not `num_ctx` — and it is fixable
+
+Ollama's embedding limit is the **batch size**, not the context window. llama.cpp
+needs an embedding input to fit in a single batch, and Ollama's default batch is
+2048 — which is why the ceiling is 2048 for models declaring 512, 2048 and 8192
+alike, and why `qwen3-embedding` escapes it (its published parameters set a larger
+batch).
+
+What works, verified by `prompt_eval_count`:
+
+| lever | effect on `bge-m3`, 4K document |
+| --- | --- |
+| nothing (default) | 2048 tokens |
+| model's declared 8192 window | 2048 — ignored |
+| `options.num_ctx: 8192` | 2048 — ignored |
+| `PARAMETER num_ctx 8192` in a Modelfile | 2048 — ignored |
+| `OLLAMA_CONTEXT_LENGTH=8192` on the server | 2048 — ignored |
+| **`options.num_batch: 4096`** | **3594 — the whole document** |
+| **`PARAMETER num_batch 8192` in a Modelfile** | **3594 — the whole document** |
+
+The Modelfile form is the one that matters here, because it is baked into the
+model and therefore applies to **every** endpoint — including the OpenAI-compatible
+`/v1/embeddings` that this server actually calls, which has no `options` field to
+pass anything through:
+
+```bash
+printf 'FROM bge-m3\nPARAMETER num_batch 8192\nPARAMETER num_ctx 8192\n' > Modelfile
+ollama create bge-m3-long -f Modelfile
+```
+
+Retrieval through the normal `/v1` path recovers accordingly:
+
+| model | 1K | 2K | 4K | 8K |
+| --- | --- | --- | --- | --- |
+| bge-m3 | 4/4 | 4/4 | **1/4** | 1/4 |
+| bge-m3 + `num_batch 8192` | 4/4 | 4/4 | **4/4** | 1/4 |
+| qwen3-embedding:4b | 4/4 | 4/4 | 4/4 | **4/4** |
+
+### The 4K and 8K failures are not the same failure
+
+Worth separating, because only one of them is fixable.
+
+**4K was truncation.** `bge-m3` embedded 2048 of ~3600 tokens and the answer was
+never in the vector. Raising the batch fixes it completely.
+
+**8K is not.** With the batch raised, `bge-m3` embeds all 7182 tokens — verified —
+and *still* scores 1/4. Nothing is being cut; the final sentence is simply washed
+out of a vector averaging over seven thousand tokens. That is the positional-bias
+effect measured in
+[arXiv 2412.15241](https://arxiv.org/abs/2412.15241), which reports the bias
+persisting *even when the context window is not exceeded*. No configuration fixes
+it. `qwen3-embedding:4b` handles the same document at 4/4, presumably because 7K
+sits mid-range in a 40960-token training window rather than at its edge.
+
+So: raise the batch if you capture documents in the low thousands of tokens, and
+use `qwen3-embedding:4b` if you capture things longer than that. Chunking the
+document before capture is the other answer, and the one this server does not do.
+
+### Ollama caps embeddings at 2048 tokens by default
 
 `/api/embed` returns `prompt_eval_count`, so this is directly observable rather
 than inferred:
@@ -448,21 +506,11 @@ than inferred:
 | **qwen3-embedding:4b** | embedded **3357** | embedded **6711** |
 
 Everything except `qwen3-embedding` is cut at 2048, silently, with no error and no
-warning in the response. Three documented ways to lift it were tried on `bge-m3`
-and **none worked**: `options.num_ctx` at request time, `PARAMETER num_ctx 8192` in
-a Modelfile, and the model's own declared window. `OLLAMA_CONTEXT_LENGTH` on the
-server is the remaining candidate and was not tested, because it needs a restart of
-a server this environment does not own.
+warning in the response. `OLLAMA_CONTEXT_LENGTH=8192` on the server does not lift
+it either — tested with a restart, still 2048 for all three.
 
 So the `ctx` column in the table further down reports what `ollama show` claims,
-not what you get. **The effective ceiling is 2048 for every model tested except
-`qwen3-embedding`**, which is the only one that actually embeds a long capture.
-
-That changes the recommendation for one specific case: if your thoughts are short —
-and both real corpora here are — `embeddinggemma` is unaffected, because 2048 is
-its window anyway. If you paste long documents in, it is the difference between
-finding a note by its conclusion and never finding it at all, and
-`qwen3-embedding:4b` is currently the only local answer.
+not what you get by default. The cause and the fix are above.
 
 ## Validation against a real corpus
 
