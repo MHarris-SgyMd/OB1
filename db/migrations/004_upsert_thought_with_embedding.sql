@@ -35,7 +35,7 @@
 CREATE OR REPLACE FUNCTION upsert_thought(
   p_content   text,
   p_payload   jsonb,
-  p_embedding vector(1536)
+  p_embedding vector({{EMBEDDING_DIM}})
 )
 RETURNS jsonb
 LANGUAGE plpgsql

@@ -24,6 +24,7 @@
  */
 
 import { createStore, type StoreEnv } from "./store.ts";
+import { parseKeyRecords } from "./auth.ts";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -38,6 +39,8 @@ const add = (name: string, status: Status, detail: string, fix?: string) =>
 
 const env = process.env as Record<string, string | undefined>;
 const store = (env.OB1_STORE ?? "postgrest").toLowerCase();
+const embModel = env.OB1_EMBEDDING_MODEL || "openai/text-embedding-3-small";
+const embDim = Number(env.OB1_EMBEDDING_DIM ?? 1536);
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -48,20 +51,44 @@ if (store !== "postgrest" && store !== "sql") {
   add("store selection", "ok", `OB1_STORE=${store}`);
 }
 
-for (const key of ["MCP_ACCESS_KEY", "OPENROUTER_API_KEY"]) {
-  if (!env[key]) {
-    add(key, "fail", "not set", `Provide ${key} in the environment or your secret store.`);
-  } else {
-    add(key, "ok", `set (${env[key]!.length} chars)`);
-  }
+if (!env.OPENROUTER_API_KEY) {
+  add("OPENROUTER_API_KEY", "fail", "not set", "Provide OPENROUTER_API_KEY in the environment or your secret store.");
+} else {
+  add("OPENROUTER_API_KEY", "ok", `set (${env.OPENROUTER_API_KEY.length} chars)`);
 }
 
-// A short access key is the whole authentication story for this server; there is
-// no second factor behind it.
-if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
-  add("MCP_ACCESS_KEY strength", "warn",
-      `${env.MCP_ACCESS_KEY.length} chars — this key is the only thing protecting the endpoint`,
-      "Generate 32 bytes: openssl rand -hex 32");
+// ── Access keys ──────────────────────────────────────────────────────────────
+
+if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
+  add("access keys", "fail", "neither MCP_ACCESS_KEYS nor MCP_ACCESS_KEY is set",
+      "Mint one: bun keygen.ts --name laptop --scope write");
+} else if (env.MCP_ACCESS_KEYS) {
+  const { keys, problems } = parseKeyRecords(env.MCP_ACCESS_KEYS);
+  if (problems.length) {
+    for (const p of problems) add("access keys", "fail", p, "bun keygen.ts --name <client> --scope read|write");
+  } else {
+    const writers = keys.filter((k) => k.scope === "write").length;
+    add("access keys", "ok",
+        `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
+    if (writers === 0) {
+      add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",
+          "Mint a write key if you intend to capture thoughts.");
+    }
+    if (writers === keys.length && keys.length > 1) {
+      add("access keys scope", "warn", "every key can write",
+          "Prefer --scope read for clients that only search, especially URL-embedded connectors.");
+    }
+  }
+} else {
+  // Legacy form: one raw key, full write access, stored in plaintext.
+  add("access keys", "warn",
+      "using the legacy single MCP_ACCESS_KEY — unhashed, unnamed, write scope, not individually revocable",
+      "Move to MCP_ACCESS_KEYS: bun keygen.ts --name laptop --scope write");
+  if (env.MCP_ACCESS_KEY!.length < 32) {
+    add("access key strength", "warn",
+        `${env.MCP_ACCESS_KEY!.length} chars — this key is the only thing protecting the endpoint`,
+        "Generate 32 bytes: openssl rand -hex 32");
+  }
 }
 
 if (store === "sql") {
@@ -124,14 +151,41 @@ if (configFailed) {
           WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`;
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
-        await sql.close();
         if (Number(rows[0].c) >= 2) add("atomic capture", "ok", "both upsert_thought overloads present");
         else add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
                  "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
+        // ob1_config records the width and model the schema was created with.
+        // A same-width model from a different family produces numerically valid,
+        // semantically meaningless vectors — search degrades and nothing errors.
+        let recorded: Record<string, string> = {};
+        try {
+          const cfg = await sql`
+            SELECT key, value FROM ob1_config WHERE key IN ('embedding_dim','embedding_model')`;
+          recorded = Object.fromEntries((cfg as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+        } catch (e) {
+          // Never swallow this: a silent catch here previously made the whole
+          // embedding-contract check disappear without a trace.
+          add("embedding contract", "warn", `could not read ob1_config: ${(e as Error).message}`,
+              "Apply db/migrations/006_embedding_config.sql.");
+        }
+        if (recorded.embedding_dim && Number(recorded.embedding_dim) !== embDim) {
+          add("embedding contract", "fail",
+              `schema was built for ${recorded.embedding_dim} dimensions, but OB1_EMBEDDING_DIM=${embDim}`,
+              "Match the running config to the schema, or migrate and re-embed.");
+        } else if (recorded.embedding_model && recorded.embedding_model !== embModel) {
+          add("embedding contract", "warn",
+              `schema was built with ${recorded.embedding_model}, now configured for ${embModel}`,
+              "Same width, different family: existing vectors are not comparable to new ones. Re-embed.");
+        } else if (recorded.embedding_dim) {
+          add("embedding contract", "ok", `${recorded.embedding_model} @ ${recorded.embedding_dim} dimensions, matching`);
+        }
+
         if (Number(applied[0].c) === 0)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
         else add("migration ledger", "ok", "schema_migrations present");
+
+        await sql.close();
       } catch (e) {
         add("atomic capture", "warn", `could not verify: ${(e as Error).message}`);
       }
@@ -152,7 +206,7 @@ if (!deep) {
     const r = await fetch("https://openrouter.ai/api/v1/embeddings", {
       method: "POST",
       headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "preflight" }),
+      body: JSON.stringify({ model: embModel, input: "preflight" }),
     });
     if (!r.ok) {
       add("embedding provider", "fail", `OpenRouter returned ${r.status}`,
@@ -160,9 +214,9 @@ if (!deep) {
     } else {
       const d = (await r.json()) as { data?: [{ embedding?: number[] }] };
       const dim = d.data?.[0]?.embedding?.length;
-      if (dim === 1536) add("embedding provider", "ok", "returns 1536 dimensions, matching vector(1536)");
-      else add("embedding provider", "fail", `returned ${dim} dimensions, but the schema is vector(1536)`,
-               "A different embedding model needs a schema change and a full re-embed.");
+      if (dim === embDim) add("embedding provider", "ok", `${embModel} returns ${dim} dimensions, matching the schema`);
+      else add("embedding provider", "fail", `${embModel} returned ${dim} dimensions, but the schema is vector(${embDim})`,
+               `Set OB1_EMBEDDING_DIM=${dim} before any data exists, or choose a model that returns ${embDim}.`);
     }
   } catch (e) {
     add("embedding provider", "fail", (e as Error).message, "Network reachability to openrouter.ai.");

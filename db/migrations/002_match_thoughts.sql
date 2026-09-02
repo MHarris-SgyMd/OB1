@@ -5,7 +5,7 @@
 -- and a threshold applied before ordering.
 
 CREATE OR REPLACE FUNCTION match_thoughts(
-  query_embedding  vector(1536),
+  query_embedding  vector({{EMBEDDING_DIM}}),
   match_threshold  float   DEFAULT 0.7,
   match_count      int     DEFAULT 10,
   filter           jsonb   DEFAULT '{}'::jsonb

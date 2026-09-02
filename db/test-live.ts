@@ -26,6 +26,7 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,6 +40,13 @@ if (!URL_) {
       "  DATABASE_URL=postgres://… bun test-live.ts"
   );
   process.exit(2);
+}
+
+/** Migrations are templates; migrate.ts substitutes these at apply time. */
+function subst(sql: string): string {
+  return sql
+    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
+    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
 }
 
 let passed = 0;
@@ -65,7 +73,7 @@ async function migrate(...extra: string[]): Promise<{ code: number; out: string 
 }
 
 const unit = (i: number) => {
-  const v = new Array(1536).fill(0);
+  const v = new Array(EMBEDDING_DIM).fill(0);
   v[i] = 1;
   return `[${v.join(",")}]`;
 };
@@ -164,7 +172,7 @@ console.log("\n[4] Capture and search through Bun.sql and real pgvector");
     SELECT upsert_thought(${"exact"}, ${{ metadata: { kind: "a" } }}::jsonb, ${unit(0)}::vector) AS r`;
   assert(cap.r?.id != null, "3-arg atomic capture returns an id");
 
-  const blend = new Array(1536).fill(0);
+  const blend = new Array(EMBEDDING_DIM).fill(0);
   blend[0] = 0.9;
   blend[1] = 0.44;
   await sql`SELECT upsert_thought(${"near"}, ${{ metadata: { kind: "a" } }}::jsonb, ${`[${blend.join(",")}]`}::vector)`;

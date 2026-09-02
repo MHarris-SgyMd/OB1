@@ -12,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS thoughts (
   id          uuid        DEFAULT gen_random_uuid() PRIMARY KEY,
   content     text        NOT NULL,
-  embedding   vector(1536),
+  embedding   vector({{EMBEDDING_DIM}}),
   metadata    jsonb       DEFAULT '{}'::jsonb,
   created_at  timestamptz DEFAULT now(),
   updated_at  timestamptz DEFAULT now()

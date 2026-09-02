@@ -20,6 +20,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, validateEmbeddingConfig } from "./config.mjs";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -41,14 +42,45 @@ if (!url) {
 
 type Migration = { name: string; sql: string; sha: string };
 
+/** Values substituted into the migration templates. */
+const SUBSTITUTIONS: Record<string, string> = {
+  EMBEDDING_DIM: String(EMBEDDING_DIM),
+  EMBEDDING_MODEL: EMBEDDING_MODEL,
+};
+
+function substitute(sql: string, file: string): string {
+  return sql.replace(/\{\{([A-Z_]+)\}\}/g, (_m, key: string) => {
+    const value = SUBSTITUTIONS[key];
+    if (value === undefined) {
+      throw new Error(`${file}: unknown template variable {{${key}}}`);
+    }
+    return value;
+  });
+}
+
 function loadMigrations(): Migration[] {
   return readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
     .sort() // 001_, 002_, … lexical order is the intended order
     .map((name) => {
-      const sql = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
-      return { name, sql, sha: createHash("sha256").update(sql).digest("hex").slice(0, 12) };
+      const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+      return {
+        name,
+        sql: substitute(template, name),
+        // Hash the TEMPLATE, not the substituted SQL. Otherwise choosing a
+        // different embedding dimension would look like an edited migration and
+        // trip the drift check, when the file has not changed at all.
+        sha: createHash("sha256").update(template).digest("hex").slice(0, 12),
+      };
     });
+}
+
+const configProblems = validateEmbeddingConfig();
+if (configProblems.length > 0) {
+  console.error("Embedding configuration is not usable:\n");
+  for (const p of configProblems) console.error(`  ✗ ${p}`);
+  console.error("");
+  process.exit(2);
 }
 
 const migrations = loadMigrations();
@@ -56,6 +88,8 @@ if (migrations.length === 0) {
   console.error(`No .sql files in ${MIGRATIONS_DIR}`);
   process.exit(2);
 }
+
+console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 
 const sql = new SQL({ url, max: 1 });
 

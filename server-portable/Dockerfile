@@ -9,7 +9,10 @@ FROM oven/bun:1.4.0-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json index.ts preflight.ts store.ts store-postgrest.ts store-sql.ts ./
+# Copy every source file rather than naming them. An explicit list silently broke
+# the image when auth.ts was added — the container crashlooped on a missing module.
+# .dockerignore keeps tests and tooling out.
+COPY *.ts package.json ./
 COPY shims ./shims
 
 # Secrets are injected at runtime, never baked in:

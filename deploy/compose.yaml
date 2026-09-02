@@ -43,6 +43,10 @@ services:
       - ../db:/app:ro
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
+      # The vector width is baked into the schema here and cannot change later
+      # without re-embedding. migrate.ts refuses a model/width mismatch.
+      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1536}
+      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-openai/text-embedding-3-small}
     # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
     # The one dependency in db/package.json is pglite, used solely by the tests.
     # This also keeps the mount read-only — `bun install` would need to write
@@ -61,8 +65,10 @@ services:
     environment:
       OB1_STORE: sql
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
-      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:?set MCP_ACCESS_KEY in deploy/.env}
+      MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in deploy/.env}
+      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1536}
+      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-openai/text-embedding-3-small}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       OB1_PG_POOL: ${OB1_PG_POOL:-10}
       PORT: "8000"

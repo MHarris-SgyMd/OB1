@@ -4,6 +4,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, type ThoughtStore } from "./store.ts";
+import { authenticate, canWrite, type Principal } from "./auth.ts";
 
 /**
  * Runtime-portable env access.
@@ -15,7 +16,10 @@ import { createStore, type ThoughtStore } from "./store.ts";
  */
 type Env = {
   OPENROUTER_API_KEY: string;
-  MCP_ACCESS_KEY: string;
+  /** Named, scoped, hashed keys: `name:scope:sha256` entries. Preferred. */
+  MCP_ACCESS_KEYS?: string;
+  /** Legacy single raw key — full write access. See auth.ts. */
+  MCP_ACCESS_KEY?: string;
   /** Which data layer to use: "postgrest" (default) or "sql". */
   OB1_STORE?: string;
   /** Required when OB1_STORE=postgrest. */
@@ -23,6 +27,9 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   /** Required when OB1_STORE=sql. */
   DATABASE_URL?: string;
+  /** Must match the width of thoughts.embedding — see db/config.mjs. */
+  OB1_EMBEDDING_DIM?: string;
+  OB1_EMBEDDING_MODEL?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
 };
 
@@ -48,6 +55,20 @@ function db(): Promise<ThoughtStore> {
 }
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+
+// The embedding contract. Defaults match db/config.mjs; both must agree with the
+// width thoughts.embedding was created with, and cannot change once there is data
+// without re-embedding every row.
+const DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small";
+const DEFAULT_EMBEDDING_DIM = 1536;
+
+function embeddingModel(): string {
+  return env().OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+}
+function embeddingDim(): number {
+  const raw = env().OB1_EMBEDDING_DIM;
+  return raw ? Number(raw) : DEFAULT_EMBEDDING_DIM;
+}
 
 function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
@@ -78,7 +99,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: embeddingModel(),
       input: text,
     }),
   });
@@ -87,7 +108,26 @@ async function getEmbedding(text: string): Promise<number[]> {
     throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
   }
   const d = await r.json();
-  return d.data[0].embedding;
+  const embedding = d?.data?.[0]?.embedding;
+  if (!Array.isArray(embedding)) {
+    throw new Error(`OpenRouter returned no embedding for model ${embeddingModel()}`);
+  }
+
+  // Refuse a width the column cannot hold. Postgres would reject the insert
+  // anyway, but the error surfaces as an opaque cast failure inside a tool
+  // response; naming the model and both widths makes the cause obvious. A
+  // same-width model from a different family is NOT detectable here — it produces
+  // valid numbers that mean something else, which is why the model is recorded in
+  // ob1_config and checked by preflight.
+  const expected = embeddingDim();
+  if (embedding.length !== expected) {
+    throw new Error(
+      `Embedding width mismatch: model ${embeddingModel()} returned ${embedding.length} ` +
+        `dimensions but thoughts.embedding is vector(${expected}). Changing embedding model ` +
+        `requires a schema migration and re-embedding every existing row.`
+    );
+  }
+  return embedding;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
@@ -163,7 +203,7 @@ Only extract what's explicitly there.`,
 
 // --- MCP Server Setup ---
 
-function buildServer(): McpServer {
+function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: "open-brain",
     version: "1.0.0",
@@ -486,8 +526,13 @@ function buildServer(): McpServer {
     }
   );
 
-  // Tool 4: Capture Thought
-  server.registerTool(
+  // Tool 4: Capture Thought — the only tool that writes.
+  //
+  // Registered only for a write-scoped key. A read-only key does not get a
+  // permission error from it; the tool is absent from tools/list entirely, so the
+  // client never offers it and never tries. That is a smaller surface than
+  // refusing the call, and it is honest about what the key can do.
+  if (canWrite(principal)) server.registerTool(
     "capture_thought",
     {
       title: "Capture Thought",
@@ -669,9 +714,17 @@ app.options("*", (c) => {
 });
 
 app.all("*", async (c) => {
-  // Accept access key via header OR URL query parameter
+  // Accept the access key via header OR URL query parameter. The query form stays
+  // because Claude Desktop custom connectors are URL-only; scopes are what limit
+  // the damage when such a URL leaks. See auth.ts.
   const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== env().MCP_ACCESS_KEY) {
+
+  const principal = authenticate(provided, {
+    MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
+    MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
+  });
+
+  if (!principal) {
     // Return a JSON-RPC 2.0 error envelope (HTTP 200) instead of a bare
     // HTTP 401 so strict MCP hosts treat this as an application-level
     // error rather than a transport fault and keep the connection alive.
@@ -698,7 +751,7 @@ app.all("*", async (c) => {
     Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
-  const server = buildServer();
+  const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   const response = await transport.handleRequest(c);

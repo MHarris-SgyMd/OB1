@@ -5,7 +5,17 @@ This is a fork of [NateBJones-Projects/OB1](https://github.com/NateBJones-Projec
 taking from it; this file exists so the delta stays small, legible, and easy to
 rebase.
 
-Read this before changing anything under `server/`.
+**What this fork is for:** running Open Brain without Supabase. Upstream assumes a
+supabase.com project — hosted Postgres, an Edge Function, SQL pasted into a
+dashboard, `supabase secrets set`. This fork runs the same six MCP tools and the
+same schema on infrastructure you control.
+
+There is **no Supabase project to migrate from** here; this was built as a
+greenfield alternative, not a data migration. Nothing in this fork moves rows out
+of Supabase, and there is no cutover step. **Start at [`SETUP.md`](SETUP.md).**
+
+The upstream Supabase path still works and is untouched — `server/` is the
+original Deno Edge Function build. Read this file before changing anything there.
 
 ---
 
@@ -25,7 +35,11 @@ patches apply to.
 
 **Never deploy from upstream `main`.** Deploy from this branch.
 
-### Deploying the Edge Function
+### Deploying
+
+For a non-Supabase deployment, see [`SETUP.md`](SETUP.md) — that is the intended
+path. The rest of this section covers deploying the original Supabase Edge
+Function build, which is still supported.
 
 The upstream guide tells you to fetch `server/index.ts` from `main`, unpinned:
 
@@ -54,7 +68,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirteen commits on top of the pin. Seven fix defects found in an audit of the pinned
+Fifteen commits on top of the pin. Seven fix defects found in an audit of the pinned
 tree; the rest are migration work — a runtime-neutral build (Phase 3), the core
 schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 
@@ -73,6 +87,8 @@ schema as applicable migrations (Phase 1), and a swappable data layer (Phase 2).
 | 11 | `[fork] server-portable: swappable data layer` | Phase 2. Every DB call goes through `ThoughtStore`; `store-sql.ts` talks to Postgres directly via `Bun.sql`, `store-postgrest.ts` keeps the old path for cutover and for Workers. Verified end to end over MCP with no Supabase present. | **Unfiled** |
 | 12 | `[fork] deploy: preflight gate and a full stack with no Supabase` | Phase 4. A misconfigured server used to start, answer the handshake, pass every liveness probe and fail on first real use. `preflight.ts` gates the container entrypoint; `deploy/compose.yaml` runs Postgres + migrations + server with no Supabase CLI; `smoke.sh` verifies any deployment over MCP. | **Unfiled** |
 | 13 | `[fork] compat: a supabase-js-shaped client that speaks SQL` | 54 non-core files call PostgREST across 33k lines. Rather than rewrite them, `compat/supabase-sql` reimplements the ~20 methods they use, so 24 migrated by changing one import. Refuses resource embedding, nested `.or()`, type-only imports and `.auth`/`.storage` rather than faking them. | **Unfiled** |
+| 14 | `[fork] server-portable: named, scoped, hashed access keys` | Replaced one shared plaintext key with `name:scope:sha256` entries, timing-safe comparison, and independent revocation. A read-scoped key does not merely fail to write — `capture_thought` is never registered for it, so it is absent from `tools/list`. `keygen.ts` mints them. Legacy `MCP_ACCESS_KEY` still works, with a preflight warning. | **Unfiled** |
+| 15 | `[fork] db + server: the embedding contract is configurable` | `vector(1536)` was hard-coded in four migrations. Migrations are now templates, `OB1_EMBEDDING_DIM`/`OB1_EMBEDDING_MODEL` choose the pair, the choice is recorded in `ob1_config`, and preflight fails on a mismatch. Catches `text-embedding-3-large` at 3072, which exceeds pgvector's HNSW limit and would silently make every search a full scan. | **Unfiled** |
 
 ### Files we own
 
@@ -93,6 +109,11 @@ server-portable/                 # fix 8   (new dir — parallel, does not touch
 db/                              # fix 9   (new dir — schema, runner, tests)
 deploy/                          # fix 12  (new dir — compose stack, smoke test)
 compat/supabase-sql/             # fix 13  (new dir — the shim)
+SETUP.md                         # fix 15  (new file — the greenfield setup guide)
+server-portable/auth.ts          # fix 14  (new file)
+server-portable/keygen.ts        # fix 14  (new file)
+db/config.mjs                    # fix 15  (new file)
+db/migrations/006_*.sql          # fix 15  (new file)
 scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 docs/01-getting-started.md       # fix 6
@@ -186,15 +207,15 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 Deliberate. Recorded so nobody assumes they were missed.
 
-- **The access key rides in the URL.** `?key=<64-hex>` is the documented
-  connector string, it is one key for core *and* every extension, the function
-  deploys `--no-verify-jwt` so it is the only auth, and CORS is `*`. Query
-  strings land in access logs, shell history, and config files.
-  [Issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) covers it;
-  [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) proposes OAuth 2.1
-  upstream. Fixing it properly means changing the auth model, not patching a
-  line — out of scope for this series. **Treat the connection URL as a
-  credential and the Supabase request logs as sensitive.**
+- **The access key still rides in the URL** — but it is now scoped, named and
+  hashed (fix 14). `?key=` is kept because Claude Desktop connectors are URL-only,
+  so a key in a URL still reaches access logs and browser history. What changed is
+  what a leak is worth: a read-scoped key cannot write, and `capture_thought` is
+  not even registered for it. Upstream
+  [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
+  [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) remain
+  the real fix. **Still treat a connection URL as a credential**, and give
+  URL-embedded clients read scope.
 - **The upstream PR gate can be bypassed with a title.** A PR titled `[docs] …`
   (or touching no contribution directory) exits before the credential scan runs.
   Only matters if we start accepting PRs into this fork.

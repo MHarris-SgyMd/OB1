@@ -61,12 +61,15 @@ assert(
 
 console.log("\n[0b] Drift guard — the migration keeps the overload unambiguous");
 
+// The width is templated ({{EMBEDDING_DIM}}) so it can be chosen before any data
+// exists; migrate.ts substitutes it. What matters here is the parameter's shape,
+// not its width.
 assert(
-  /p_embedding vector\(1536\)\s*\)/.test(MIGRATION),
-  "migration declares p_embedding vector(1536)"
+  /p_embedding vector\((?:\d+|\{\{EMBEDDING_DIM\}\})\)\s*\)/.test(MIGRATION),
+  "migration declares p_embedding as a vector of the configured width"
 );
 assert(
-  !/p_embedding\s+vector\(1536\)\s+DEFAULT/i.test(MIGRATION),
+  !/p_embedding\s+vector\([^)]*\)\s+DEFAULT/i.test(MIGRATION),
   "p_embedding has NO default — a default would make the 2-arg call ambiguous"
 );
 assert(

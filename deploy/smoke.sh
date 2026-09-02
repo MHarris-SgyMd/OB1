@@ -18,7 +18,15 @@ if [ $# -ge 2 ]; then
   BASE="$1"; KEY="$2"
 elif [ -f "$HERE/.env" ]; then
   BASE="http://127.0.0.1:$(grep -E '^SERVER_PORT=' "$HERE/.env" | cut -d= -f2 || echo 8000)"
-  KEY="$(grep -E '^MCP_ACCESS_KEY=' "$HERE/.env" | cut -d= -f2)"
+  # deploy/.env holds key HASHES, not keys — by design. A raw key has to be
+  # supplied, so read it from OB1_SMOKE_KEY or take it as an argument.
+  KEY="${OB1_SMOKE_KEY:-}"
+  if [ -z "$KEY" ]; then
+    echo "deploy/.env stores hashes, not keys. Pass the raw key:" >&2
+    echo "  ./smoke.sh <base-url> <access-key>" >&2
+    echo "  OB1_SMOKE_KEY=<key> ./smoke.sh" >&2
+    exit 2
+  fi
 else
   echo "usage: $0 <base-url> <access-key>   (or create deploy/.env)" >&2
   exit 2

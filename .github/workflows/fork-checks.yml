@@ -114,6 +114,12 @@ jobs:
         working-directory: server-portable
         run: bun test-server.ts
 
+      # Scoped keys: a read-scoped key must not merely fail to write, it must not
+      # see capture_thought at all. Needs no database.
+      - name: Scoped access keys
+        working-directory: server-portable
+        run: bun test-auth.ts
+
       - name: Typecheck
         working-directory: server-portable
         run: bunx tsc --noEmit
@@ -146,6 +152,14 @@ jobs:
       - name: Apply migrations and assert the schema
         working-directory: db
         run: bun test-schema.ts
+
+      # The embedding width is configurable and must hold at more than one value.
+      - name: Schema builds at a non-default embedding width
+        working-directory: db
+        run: bun test-schema.ts
+        env:
+          OB1_EMBEDDING_DIM: "768"
+          OB1_EMBEDDING_MODEL: nomic-embed-text
 
   db-live:
     name: Schema against real Postgres

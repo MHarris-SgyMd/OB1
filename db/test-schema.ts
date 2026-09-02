@@ -18,11 +18,19 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
 import { readdirSync, readFileSync } from "node:fs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
+
+/** Migrations are templates; migrate.ts substitutes these at apply time. */
+function subst(sql: string): string {
+  return sql
+    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
+    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
+}
 
 let passed = 0;
 let failed = 0;
@@ -36,15 +44,15 @@ function assert(cond: unknown, label: string): void {
   }
 }
 
-/** A 1536-dim vector that is `1` at one position and 0 elsewhere. */
+/** A unit vector of EMBEDDING_DIM width that is `1` at one position and 0 elsewhere. */
 function unit(at: number): string {
-  const v = new Array(1536).fill(0);
+  const v = new Array(EMBEDDING_DIM).fill(0);
   v[at] = 1;
   return `[${v.join(",")}]`;
 }
-/** A 1536-dim vector spanning two axes, so cosine similarity is strictly between. */
+/** A unit vector of EMBEDDING_DIM width spanning two axes, so cosine similarity is strictly between. */
 function blend(a: number, b: number, wa: number, wb: number): string {
-  const v = new Array(1536).fill(0);
+  const v = new Array(EMBEDDING_DIM).fill(0);
   v[a] = wa;
   v[b] = wb;
   return `[${v.join(",")}]`;
@@ -59,7 +67,7 @@ console.log("[1] Migrations apply cleanly in lexical order");
 assert(files.length > 0, `found ${files.length} migration files`);
 for (const f of files) {
   try {
-    await db.exec(readFileSync(join(MIGRATIONS, f), "utf8"));
+    await db.exec(subst((readFileSync(join(MIGRATIONS, f), "utf8"))));
     assert(true, `${f} applied`);
   } catch (e) {
     assert(false, `${f} applied — ${(e as Error).message}`);
@@ -71,7 +79,7 @@ for (const f of files) {
 console.log("\n[2] Re-applying every migration is a no-op");
 for (const f of files) {
   try {
-    await db.exec(readFileSync(join(MIGRATIONS, f), "utf8"));
+    await db.exec(subst((readFileSync(join(MIGRATIONS, f), "utf8"))));
     assert(true, `${f} re-applied without error`);
   } catch (e) {
     assert(false, `${f} re-applied — ${(e as Error).message}`);
@@ -249,7 +257,7 @@ console.log("\n[9] updated_at trigger fires on update, created_at does not move"
 
 console.log("\n[10] Migrations carry nothing Supabase-specific");
 {
-  const all = files.map((f) => readFileSync(join(MIGRATIONS, f), "utf8")).join("\n");
+  const all = files.map((f) => subst((readFileSync(join(MIGRATIONS, f), "utf8")))).join("\n");
   assert(!/auth\.uid\(\)/.test(all), "no auth.uid() — GoTrue does not exist off Supabase");
   assert(!/auth\.role\(\)/.test(all), "no auth.role() — the core RLS policy is dropped deliberately");
   assert(!/\bTO service_role\b/.test(all), "no GRANT TO service_role — that role is Supabase-managed");
