@@ -43,7 +43,11 @@ services:
       - ../db:/app:ro
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
-    command: ["sh", "-c", "bun install --frozen-lockfile --silent && bun migrate.ts"]
+    # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
+    # The one dependency in db/package.json is pglite, used solely by the tests.
+    # This also keeps the mount read-only — `bun install` would need to write
+    # node_modules into it, which fails on a clean checkout.
+    command: ["bun", "migrate.ts"]
     depends_on:
       postgres:
         condition: service_healthy

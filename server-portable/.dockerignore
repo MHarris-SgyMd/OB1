@@ -1,0 +1,11 @@
+# The image installs its own production dependencies from package.json + bun.lock;
+# shipping the local tree as build context sent ~68 MB and slowed every build.
+node_modules
+.cf-out
+.dev.vars
+
+# Tests and tooling are not part of the runtime image.
+test-*.ts
+tsconfig.json
+wrangler.toml
+README.md
