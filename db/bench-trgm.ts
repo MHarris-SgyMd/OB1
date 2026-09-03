@@ -70,6 +70,13 @@ const RARE_ROWS = 5;
 const MID = "mesotrope";    // 10% of rows
 const COMMON = "polytrope"; // 90% of rows
 
+/**
+ * The two-character probe, derived from RARE rather than written out again, so
+ * changing the marker cannot silently decouple the two. Its whole value is that
+ * it matches the SAME rows as RARE — see the check in `verifyControl`.
+ */
+const SHORT = RARE.slice(0, 2);
+
 // ── Corpus → bigram model ────────────────────────────────────────────────────
 
 type Corpus = { texts: string[]; source: string };
@@ -183,7 +190,7 @@ const PROBES: Probe[] = [
   { label: `rare word (${RARE_ROWS} rows)`, pattern: `%${RARE}%`, note: "upstream's best case" },
   { label: "selective word (10%)", pattern: `%${MID}%`, note: "a minority of rows" },
   { label: "common word (90%)", pattern: `%${COMMON}%`, note: "matches most rows; an index cannot beat a scan" },
-  { label: `two-char (${RARE_ROWS} rows)`, pattern: "%zy%", note: "same rows as the rare probe, but shorter than a trigram" },
+  { label: `two-char (${RARE_ROWS} rows)`, pattern: `%${SHORT}%`, note: "same rows as the rare probe, but shorter than a trigram" },
 ];
 
 type Timing = { ms: number; plan: string; rows: number };
@@ -219,6 +226,49 @@ function describePlan(node: Record<string, unknown>): string {
     if (d !== "?") return d;
   }
   return t;
+}
+
+/**
+ * Check that the probes measure what their labels claim, before any conclusion
+ * is drawn from them.
+ *
+ * Two ways this benchmark can quietly stop being a controlled comparison, both
+ * of which have happened:
+ *
+ *   A probe matches nothing. An earlier version searched for a real word and
+ *   called it "medium selectivity"; at 1,000 rows it matched zero rows and the
+ *   script reported a 190x speedup for a query that returned nothing.
+ *
+ *   The two-char probe stops matching the same rows as the rare probe. Its
+ *   entire value is that the two differ in pattern length and in nothing else,
+ *   which holds only while the corpus never produces the two-character prefix on
+ *   its own. That is a property of somebody else's text, so it is checked rather
+ *   than assumed — with `OB1_BENCH_CORPUS` pointed at an arbitrary file it is
+ *   exactly the kind of thing that silently comes untrue.
+ *
+ * Both abort. A measurement tool that carries on after losing its control is
+ * worse than one that stops, because the output still looks like a result.
+ */
+function verifyControl(timings: Map<string, Timing>, scale: number): void {
+  for (const [label, t] of timings) {
+    if (t.rows === 0) {
+      throw new Error(
+        `probe "${label}" matched 0 rows at scale ${scale}. It would report a ` +
+          `speedup for a query that returns nothing — refusing to publish that.`
+      );
+    }
+  }
+  const rare = timings.get(`rare word (${RARE_ROWS} rows)`);
+  const short = timings.get(`two-char (${RARE_ROWS} rows)`);
+  if (rare && short && rare.rows !== short.rows) {
+    throw new Error(
+      `the two-char probe ("%${SHORT}%") matched ${short.rows} rows but the rare ` +
+        `probe matched ${rare.rows}. The corpus produces "${SHORT}" on its own, so ` +
+        `the two no longer differ only in pattern length and the comparison is not ` +
+        `controlled. Change RARE to a marker whose first two characters the corpus ` +
+        `does not contain.`
+    );
+  }
 }
 
 async function insertRows(sql: SQL, texts: string[], batch = 500): Promise<void> {
@@ -281,75 +331,77 @@ const overhead: { scale: number; withoutMs: number; withMs: number; indexBytes: 
 
 for (const scale of SCALES) {
   console.log(`── ${scale.toLocaleString()} rows ${"─".repeat(Math.max(0, 50 - String(scale).length))}`);
-  await resetSchema(URL_, OPTS);
-  const sql = new SQL({ url: URL_, max: 1 });
+  /**
+   * Three passes, each starting from a fresh schema, rather than one pass that
+   * reads, writes, then reads again.
+   *
+   * The one-pass version was wrong, and subtly. Its write arms inserted and
+   * deleted thousands of rows BETWEEN the two read arms, so the second read arm
+   * scanned a heap the first one never saw — 770 KB against 200 KB for the same
+   * 97 live rows, because VACUUM reclaims tuples but only hands back trailing
+   * pages. Every attempt to patch that around the edges replaced one bias with
+   * another: a plain VACUUM left the bloat, a VACUUM FULL compacted below the
+   * baseline, and applying VACUUM FULL to both arms ran a 60 MB table rewrite
+   * that exhausted the container's 64 MB /dev/shm at the largest scale.
+   *
+   * Separating the passes removes the whole class of problem instead of
+   * measuring around it. Nothing writes to the table between the two read arms,
+   * so there is nothing to compact; and each write arm inserts into its own
+   * freshly loaded table, so the two differ by the index and by nothing else.
+   * The cost is two extra loads per scale, which is the cheapest part of the run.
+   */
+  /**
+   * resetSchema applies every migration, and since SMD-925 landed that includes
+   * 011 — so the "before" state no longer exists after a reset and has to be
+   * recreated. Without this the baseline arm measures a table that already has
+   * the index, and the script reports no improvement at any scale.
+   */
+  const dropIndex = async (c: SQL): Promise<void> => {
+    await c`DROP INDEX IF EXISTS idx_thoughts_content_trgm`;
+    const [n] = await c`SELECT count(*)::int AS c FROM pg_indexes
+                         WHERE indexname = 'idx_thoughts_content_trgm'`;
+    if (n.c !== 0) throw new Error("the trigram index survived the drop — the baseline arm would be invalid");
+  };
+  const load = async (withIndex: boolean): Promise<SQL> => {
+    await resetSchema(URL_, OPTS);
+    const c = new SQL({ url: URL_, max: 1 });
+    // Drop before loading rather than after: resetSchema applies 011, so a load
+    // that keeps the index pays to maintain it for rows nothing will measure,
+    // which at 100,000 rows is most of a minute across the three passes.
+    if (!withIndex) await dropIndex(c);
+    await insertRows(c, generate(model, scale));
+    await c`ANALYZE thoughts`;
+    return c;
+  };
+  const buildIndex = async (c: SQL): Promise<number> => {
+    const t = performance.now();
+    await c`CREATE EXTENSION IF NOT EXISTS pg_trgm`;
+    await c`CREATE INDEX idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops)`;
+    const ms = performance.now() - t;
+    await c`ANALYZE thoughts`;
+    return ms;
+  };
+  const writeSample = generate(model, WRITE_BATCH, 7);
+  /** Time one batch of inserts into whatever state the table is already in. */
+  const timeInsert = async (c: SQL): Promise<number> => {
+    const t = performance.now();
+    await insertRows(c, writeSample);
+    return performance.now() - t;
+  };
 
-  // The whole point of this script is the before/after, and since SMD-925 landed
-  // the "before" state no longer exists after a reset: migration 011 builds the
-  // index. Dropping it here restores a pre-011 database. Without this line the
-  // first arm measures a table that already has the index and the script quietly
-  // reports no improvement at any scale.
-  await sql`DROP INDEX IF EXISTS idx_thoughts_content_trgm`;
-  const [pre] = await sql`SELECT count(*)::int AS c FROM pg_indexes
-                           WHERE indexname = 'idx_thoughts_content_trgm'`;
-  if (pre.c !== 0) throw new Error("the trigram index survived the drop — the baseline arm would be invalid");
-
-  await insertRows(sql, generate(model, scale));
-  // VACUUM here as well as after the write arms, so both read arms measure a
-  // table in the same state. See the note at the second VACUUM for why the
-  // asymmetry mattered — and for GIN specifically, VACUUM also flushes the
-  // pending list, which a query would otherwise scan in full on top of the index.
-  await sql`VACUUM (ANALYZE) thoughts`;
+  // ── Pass 1: reads. Nothing writes between the arms, so nothing bloats. ──────
+  const sql = await load(false);
   const bytes = await tableBytes(sql, "thoughts");
   console.log(`   table: ${fmtBytes(bytes)}`);
 
   const before = new Map<string, Timing>();
   for (const p of PROBES) before.set(p.label, await timeProbe(sql, p.pattern));
+  verifyControl(before, scale);
 
-  // The write arm runs before the index exists and again after, on the same
-  // table at the same size, so the delta is the index's contribution and not a
-  // difference in how full the table was. Three repeats each way, median taken:
-  // a single batch of a few thousand inserts is noisy enough that one sample
-  // can move the reported overhead by tens of percent.
-  const writeSample = generate(model, WRITE_BATCH, 7);
-  const writeArm = async (): Promise<number> => {
-    const runs: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      const t = performance.now();
-      await insertRows(sql, writeSample);
-      runs.push(performance.now() - t);
-      await sql`DELETE FROM thoughts WHERE id IN (
-                  SELECT id FROM thoughts ORDER BY created_at DESC LIMIT ${WRITE_BATCH})`;
-    }
-    runs.sort((a, b) => a - b);
-    return runs[1];
-  };
-  const withoutMs = await writeArm();
-
-  let t0 = performance.now();
-  await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`;
-  await sql`CREATE INDEX idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops)`;
-  const buildMs = performance.now() - t0;
-  await sql`ANALYZE thoughts`;
+  const buildMs = await buildIndex(sql);
   const indexBytes = Number((await sql`SELECT pg_relation_size('idx_thoughts_content_trgm')::bigint AS b`)[0].b);
   console.log(`   index: ${fmtBytes(indexBytes)}, built in ${fmtMs(buildMs)}`);
 
-  const withMs = await writeArm();
-
-  overhead.push({ scale, withoutMs, withMs, indexBytes, buildMs });
-
-  /**
-   * VACUUM, not just ANALYZE, and this matters more than it looks.
-   *
-   * The two write arms insert and delete 3 x WRITE_BATCH rows between the
-   * "before" reads and the "after" ones. Deleted tuples stay on the heap until
-   * vacuumed, and a seq scan still has to walk them — so without this the
-   * "after" arm scans a table carrying thousands of dead rows that the "before"
-   * arm never saw. At 100,000 live rows that bias is a rounding error. At 97 it
-   * is larger than the table, and it showed up as a consistent "1.4x slower"
-   * that was entirely an artifact of the measurement.
-   */
-  await sql`VACUUM (ANALYZE) thoughts`;
   for (const p of PROBES) {
     const after = await timeProbe(sql, p.pattern);
     results.push({ scale, bytes, probe: p.label, before: before.get(p.label)!, after, note: p.note });
@@ -360,12 +412,29 @@ for (const scale of SCALES) {
     );
   }
   await sql.close();
+
+  // ── Passes 2 and 3: writes, each into its own freshly loaded table. ─────────
+  const noIdx = await load(false);
+  const withoutMs = await timeInsert(noIdx);
+  await noIdx.close();
+
+  const withIdx = await load(true);
+  const withMs = await timeInsert(withIdx);
+  await withIdx.close();
+
+  overhead.push({ scale, withoutMs, withMs, indexBytes, buildMs });
+  console.log(
+    `   ${String(WRITE_BATCH).padStart(6)} inserts  ${fmtMs(withoutMs)} without → ${fmtMs(withMs)} with` +
+      `  (+${(((withMs - withoutMs) * 1000) / WRITE_BATCH).toFixed(0)} µs/row)`
+  );
   console.log();
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
 
 console.log("\n### Read latency (median of " + REPEATS + ", EXPLAIN ANALYZE)\n");
+for (const p of PROBES) console.log(`- \`${p.pattern}\` — ${p.label}: ${p.note}`);
+console.log();
 console.log("| rows | table | probe | matched | before | plan | after | plan | change |");
 console.log("| ---: | ---: | --- | ---: | ---: | --- | ---: | --- | ---: |");
 for (const r of results) {
@@ -379,9 +448,9 @@ for (const r of results) {
 }
 
 console.log("\n### Write cost of the index\n");
-console.log(`Median of 3 batches of ${WRITE_BATCH} inserts, each way. Per-row is the transferable`);
-console.log(`number: these rows carry no embedding, so a real capture pays this on top of an`);
-console.log(`HNSW insert rather than instead of one.\n`);
+console.log(`One batch of ${WRITE_BATCH} inserts into each of two freshly loaded tables that`);
+console.log(`differ only by the index. Per-row is the transferable number: these rows carry no`);
+console.log(`embedding, so a real capture pays this on top of an HNSW insert, not instead of one.\n`);
 console.log("| rows | index size | build | without | with | overhead | per row |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 for (const o of overhead) {

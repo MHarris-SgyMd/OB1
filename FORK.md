@@ -696,9 +696,11 @@ writes it already believes the key is dead.
 
 ### 24. A trigram index on `thoughts.content` — and what it is actually worth
 
-Ported from `schemas/text-search-trgm` as migration 011 (Linear SMD-925). This
-one is 39 lines of SQL with no API surface, so the interesting part is not the
-change — it is that measuring it contradicted the issue on two points.
+Ported from `schemas/text-search-trgm` as migration 011 (Linear SMD-925). The
+executable part is six lines — one `CREATE EXTENSION`, one `CREATE INDEX`, one
+`COMMENT` — with no API surface. So the interesting part is not the change. It is
+that measuring it contradicted the issue on three points, and that measuring it
+correctly took several tries.
 
 **The number did not transfer, and then it overshot.** SMD-925 quotes upstream:
 a rare-word `ILIKE` falling from ~8s to ~100–150ms on an 89,000-row brain, about
@@ -709,10 +711,13 @@ controlled variable rather than an accident of the text:
 
 | rows | table | rare (5 rows) | selective (10%) | common (90%) | two-char (5 rows) |
 | ---: | ---: | --- | --- | --- | --- |
-| 97 | 200 KB | 0.25 → 0.25 ms | 0.26 → 0.26 ms | no change | no change |
-| 1,000 | 768 KB | 2.62 → 2.60 ms | 2.66 → 2.65 ms | no change | no change |
-| 10,000 | 6.5 MB | 27 → 0.07 ms (**380x**) | 27 → 3.12 ms (8.7x) | no change | no change |
-| 100,000 | 63.3 MB | 264 → 0.21 ms (**1280x**) | 273 → 34 ms (8.1x) | no change | no change |
+| 97 | 168 KB | 0.25 → 0.26 ms | 0.25 → 0.25 ms | no change | no change |
+| 1,000 | 736 KB | 2.57 → 2.68 ms | 2.66 → 2.68 ms | no change | no change |
+| 10,000 | 6.4 MB | 26 → 0.08 ms (**347x**) | 27 → 3.20 ms (8.5x) | no change | no change |
+| 100,000 | 63.1 MB | 267 → 0.20 ms (**1355x**) | 276 → 34 ms (8.1x) | no change | no change |
+
+One run's verbatim output, not an average — across runs the ratios move a few
+percent. Read the order of magnitude and the plan change, not the last digit.
 
 Four things that table says and the quoted one-liner does not:
 
@@ -720,17 +725,17 @@ Four things that table says and the quoted one-liner does not:
    costs what the table weighs, so the whole benefit is a function of scale.
    Below the crossover the planner correctly ignores the index — it is not
    slower, it is simply never chosen. Our corpus is 97 rows and 45 KB.
-2. **Above it, upstream undersold.** 1280x rather than 50x at high selectivity,
+2. **Above it, upstream undersold.** ~1350x rather than 50x at high selectivity,
    because the win grows with the table.
 3. **But selectivity matters more than scale.** Ten percent of rows is still a
-   "rare word" by any ordinary reading, and it gets 8x, not 1280x — and that
+   "rare word" by any ordinary reading, and it gets 8-9x, not ~1350x — and that
    ratio barely moves between 10,000 rows and 100,000. Ninety percent gets
    nothing: the planner correctly declines, because pulling most of the heap
    through a bitmap is worse than scanning it.
 4. **A two-character pattern gets nothing in principle.** pg_trgm indexes
    three-character grams, so there is nothing to look up. The controlled version
    of that claim: the two-char probe matches *exactly the same five rows* as the
-   rare probe, and at 100,000 rows takes 261 ms against the rare probe's 0.21 ms.
+   rare probe, and at 100,000 rows takes 267 ms against the rare probe's 0.20 ms.
    Same rows, same table, one character too short.
 
 **"The only cost is index build time" is wrong.** That is the issue's argument
@@ -740,8 +745,8 @@ costs are storage and write amplification:
 - **~61 MB per 100,000 thoughts** — very nearly the size of the table itself,
   because ~500 characters of prose produce ~500 trigrams and almost all of them
   are distinct across a corpus.
-- **+80 to +90 µs per row inserted**, roughly flat as the table grows. On a bare
-  content `INSERT` that is +475% to +578%. The multiple overstates the real
+- **Roughly +70 to +95 µs per row inserted** across runs, and flat as the table
+  grows. On a bare content `INSERT` that is 4x to 6x. The multiple overstates the real
   effect — a capture also embeds and inserts into HNSW, so this lands on top of a
   much larger number — but the microseconds are paid on every capture forever.
 - **A vacuum dependency.** GIN buffers new entries in a pending list that every
@@ -749,11 +754,14 @@ costs are storage and write amplification:
   the two columns above until it is vacuumed.
 
 The half of the argument that *does* hold is the build lock. `CREATE INDEX`
-without `CONCURRENTLY` blocks writes for the length of the build (~4.9s at
+without `CONCURRENTLY` blocks writes for the length of the build (~5s at
 100,000 rows here), and that is the one cost that genuinely only grows. `CONCURRENTLY` is not available: `migrate.ts`
 wraps each file in a transaction and `CREATE INDEX CONCURRENTLY` may not run
 inside one. An operator upgrading a large live brain should expect captures to
-block, or build the index by hand and mark 011 applied with `--baseline`.
+block for that long. Building it by hand with `CREATE INDEX CONCURRENTLY` avoids
+the lock, but recording that afterwards means inserting the single
+`schema_migrations` row — **not** `--baseline`, which marks *every* unapplied
+migration as applied and would silently skip 010 on a database sitting at 009.
 
 **The caveat that outranks all of the above: no core query can reach it.**
 `search_thoughts_text`, the function this index was written to accelerate, lives
@@ -787,7 +795,7 @@ a result. A benchmark that prints a number always prints a number; the only
 defence is to make the thing you are varying the only thing that differs, and to
 print enough alongside it — matched row counts, the plan node — to notice when it
 is not. The two-character probe is the finished form of that: it matches exactly
-the same five rows as the rare-word probe, so the 1,200x gap between them at
+the same five rows as the rare-word probe, so the ~1,300x gap between them at
 100,000 rows is attributable to pattern length and to nothing else.
 
 **On testing an index.** Asserting `USING gin` passes for `gin (content)`, which

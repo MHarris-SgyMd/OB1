@@ -2,10 +2,11 @@
 --
 -- Source: schemas/text-search-trgm, promoted into core per SMD-925.
 --
--- Requires: pg_trgm (011 creates it). Unlike `vector`, pg_trgm is a TRUSTED
--- extension from PostgreSQL 13 onward, so a database owner can create it without
--- superuser. 001 already needs the stronger privilege for `vector`, so this
--- migration adds no new one.
+-- Requires: pg_trgm (011 creates it). Measured on PG16, pg_trgm is a TRUSTED
+-- extension and `vector` is not (pg_available_extension_versions.trusted), so a
+-- database owner can create pg_trgm without superuser while 001 already needs
+-- the stronger privilege. This migration therefore adds no requirement that was
+-- not already there.
 --
 -- ── What this is for ─────────────────────────────────────────────────────────
 -- A leading-wildcard pattern — `content ILIKE '%foo%'` — cannot use a B-tree or
@@ -24,10 +25,14 @@
 --
 --   rows      table    rare (5 rows)          selective (10%)     common (90%)
 --   -------   -------  --------------------   -----------------   ------------
---        97   200 KB   0.25 → 0.25 ms         0.26 → 0.26 ms      no change
---     1,000   768 KB   2.62 → 2.60 ms         2.66 → 2.65 ms      no change
---    10,000   6.5 MB   27 → 0.07 ms  (380x)   27 → 3.12 ms (8.7x) no change
---   100,000   63.3 MB  264 → 0.21 ms (1280x)  273 → 34 ms  (8.1x) no change
+--        97   168 KB   0.25 → 0.26 ms         0.25 → 0.25 ms      no change
+--     1,000   736 KB   2.57 → 2.68 ms         2.66 → 2.68 ms      no change
+--    10,000   6.4 MB   26 → 0.08 ms  (347x)   27 → 3.20 ms (8.5x) no change
+--   100,000   63.1 MB  267 → 0.20 ms (1355x)  276 → 34 ms  (8.1x) no change
+--
+-- That is one run's verbatim output, not an average. Across runs the ratios move
+-- by a few percent and the sub-millisecond figures by more; read the order of
+-- magnitude and the plan change, not the last digit.
 --
 -- Four things that table says and the upstream one-liner does not:
 --
@@ -40,14 +45,14 @@
 --      rather than matching it — the win scales with the table.
 --
 --   3. But selectivity is most of the story, not scale. Ten percent of rows is
---      still a "rare word" by any ordinary reading, and it gets 8x, not 1280x.
+--      still a "rare word" by any ordinary reading, and it gets 8-9x, not ~1350x.
 --      Ninety percent gets nothing: the planner correctly declines the index,
 --      because reading most of the heap through a bitmap is worse than scanning.
 --
 --   4. A pattern under three characters gets nothing *in principle* — pg_trgm
 --      indexes three-character grams, so there is nothing to look up. The
 --      benchmark's two-char probe matches exactly the same 5 rows as the rare
---      probe, and at 100,000 rows takes 261 ms against the rare probe's 0.21 ms.
+--      probe, and at 100,000 rows takes 267 ms against the rare probe's 0.20 ms.
 --      Same rows, same table; the pattern is one character too short.
 --
 -- ── What it costs ────────────────────────────────────────────────────────────
@@ -60,8 +65,8 @@
 --                 table itself, because ~500 characters of prose produce ~500
 --                 trigrams and almost all of them are distinct across the corpus.
 --
---   writes        +80 to +90 µs per row, roughly flat as the table grows. On a
---                 bare content INSERT that is +475% to +578%. That multiple
+--   writes        roughly +70 to +95 µs per row across runs, and flat as the
+--                 table grows. On a bare content INSERT that is 4x to 6x. That multiple
 --                 overstates the real effect — a capture also computes an
 --                 embedding and inserts into HNSW, so the trigram cost lands on
 --                 top of a much larger number — but the microseconds are real
@@ -73,12 +78,24 @@
 --                 the numbers above, which are measured on a vacuumed table.
 --
 --   build lock    CREATE INDEX, not CONCURRENTLY, so it holds a lock against
---                 writes for the length of the build — ~4.9s at 100,000 rows
+--                 writes for the length of the build — ~5s at 100,000 rows
 --                 here. CONCURRENTLY is not available to us: migrate.ts wraps
 --                 each file in a transaction and CREATE INDEX CONCURRENTLY may
 --                 not run inside one. An operator upgrading a large live brain
---                 should expect captures to block, or build the index by hand
---                 outside the runner and mark 011 applied with --baseline.
+--                 should expect captures to block for that long.
+--
+--                 To avoid the lock, build it by hand outside the runner:
+--
+--                   CREATE INDEX CONCURRENTLY idx_thoughts_content_trgm
+--                     ON thoughts USING gin (content gin_trgm_ops);
+--
+--                 then record 011 as applied. Do NOT reach for `--baseline` to
+--                 do that: it marks EVERY unapplied migration as applied, not
+--                 the one you built, so a database sitting at 009 would skip
+--                 010 as well and lose the agent registry with no error. Insert
+--                 the single row instead — the sha256 is the first 12 hex
+--                 characters of the digest of this file after substitution,
+--                 which `bun migrate.ts --dry-run` prints beside the name.
 --
 --                 This is the one part of the issue's "cheapest now" argument
 --                 that holds: the lock is the cost that genuinely only grows.

@@ -52,6 +52,13 @@ will be duplicated. Or record them as applied without executing:
 bun migrate.ts --url ... --baseline
 ```
 
+`--baseline` is all-or-nothing: it marks **every** migration not already in the
+ledger as applied, without running any of them. That is what adoption wants, and
+it is the wrong tool for recording a single migration you applied by hand — on a
+database sitting at 009 it would mark 010 applied too, and the agent registry
+would never be created. For one migration, insert the one `schema_migrations`
+row; `--dry-run` prints the `sha256` to use beside each name.
+
 ## Expected outcome
 
 `bun test-schema.ts` prints `78 assertions: 78 passed, 0 failed` and `PASS`.
@@ -107,9 +114,10 @@ so `pgcrypto` is not required — despite five files elsewhere in the repo creat
 it.
 
 The two extensions differ in what they demand of the role applying the migration.
-`pg_trgm` is a *trusted* extension from PostgreSQL 13 onward, so a database owner
-can create it without superuser. `vector` is not, and 001 already needs the
-stronger privilege — so 011 adds no requirement that was not already there.
+Measured on PG16 (`pg_available_extension_versions.trusted`), `pg_trgm` is a
+*trusted* extension and `vector` is not — so a database owner can create pg_trgm
+without superuser, while 001 already needs the stronger privilege. 011 adds no
+requirement that was not already there.
 
 ## Benchmarking the trigram index
 
@@ -136,20 +144,26 @@ best result in the table.
 The headline result on our own data, and the reason the migration header is as
 long as it is: **the crossover is somewhere between 1,000 and 10,000 rows.** Below
 it the index is not slower, it is simply never chosen. Above it a 5-row `ILIKE`
-improves by 380x at 10,000 rows and 1280x at 100,000 — but a word in 10% of rows
-gets only ~8x at either size, and a common word and any sub-trigram pattern are
-unaffected at every scale.
+improves by ~350x at 10,000 rows and ~1370x at 100,000 — but a word in 10% of rows
+gets only 8-9x at either size, and a common word and any sub-trigram pattern are
+unaffected at every scale. The full table, with the write cost beside it, is in
+the header of `migrations/011_text_search_trgm.sql`.
 
 Two things the script has to do that are easy to leave out, both of which produced
 confidently wrong numbers first:
 
 - **Drop the index before the baseline arm.** Since 011 landed, `resetSchema`
   builds it, so "before" is no longer the default state of a fresh schema.
-- **`VACUUM`, not just `ANALYZE`, between the arms.** The write-amplification arm
-  leaves thousands of dead tuples that only the second read arm has to scan past,
-  and GIN's pending list — which every query scans in full on top of the index —
-  is only flushed by a vacuum. Skipping it reported the index as consistently
-  *slower* at 97 rows, which was entirely an artifact of the measurement.
+- **Never write to the table between the two read arms.** The first version
+  measured reads, then ran the write-amplification arm, then measured reads
+  again — so the second arm scanned a heap the first never saw (770 KB against
+  200 KB, for the same 97 live rows, because `VACUUM` reclaims tuples but only
+  returns *trailing* pages). Patching that with a vacuum just moved the bias
+  around: a plain `VACUUM` left the bloat, `VACUUM FULL` compacted below the
+  baseline, and applying `VACUUM FULL` to both arms rewrote a 60 MB table and
+  exhausted the container's 64 MB `/dev/shm` at the largest scale. The script now
+  runs three passes over three freshly loaded tables — one for reads, one per
+  write arm — so there is nothing to compact and nothing to correct for.
 
 ## Testing
 

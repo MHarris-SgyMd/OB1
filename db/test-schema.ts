@@ -169,11 +169,18 @@ console.log("\n[4b] The trigram index is reachable by a leading-wildcard ILIKE")
   // and asserting otherwise would be asserting the planner is wrong.
   assert(typeof seqPlan === "string" && seqPlan.length > 0, "an ILIKE over content plans without error");
 
-  await db.query(`SET enable_seqscan = off`);
-  const forced = await db.query<{ "QUERY PLAN": string }>(
-    `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
-  );
-  await db.query(`SET enable_seqscan = on`);
+  // try/finally, because PGlite is one long-lived connection: a throw between
+  // the two SETs would leave enable_seqscan off for every section after this
+  // one, and those would then fail for a reason that has nothing to do with them.
+  let forced;
+  try {
+    await db.query(`SET enable_seqscan = off`);
+    forced = await db.query<{ "QUERY PLAN": string }>(
+      `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
+    );
+  } finally {
+    await db.query(`SET enable_seqscan = on`);
+  }
   const text = forced.rows.map((r) => r["QUERY PLAN"]).join("\n");
   assert(/idx_thoughts_content_trgm/.test(text),
          `with seqscan off the planner reaches for the trigram index (got: ${text.replace(/\s+/g, " ").slice(0, 90)})`);
