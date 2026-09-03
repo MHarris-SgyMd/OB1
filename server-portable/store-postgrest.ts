@@ -11,14 +11,18 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { normaliseMutation } from "./store.ts";
 import type {
   CaptureResult,
   ListFilters,
+  MutationError,
+  MutationResult,
   ThoughtListItem,
   ThoughtMatch,
   ThoughtMeta,
   ThoughtRecord,
   ThoughtStore,
+  UpdateResult,
 } from "./store.ts";
 
 export class PostgrestStore implements ThoughtStore {
@@ -168,6 +172,44 @@ export class PostgrestStore implements ThoughtStore {
     if (embError) return { id, embeddingFailed: embError.message };
 
     return { id };
+  }
+
+  async updateThought(opts: {
+    id: string;
+    content?: string;
+    metadataPatch?: Record<string, unknown>;
+    embedding?: number[];
+    chunks?: { content: string; embedding: number[] }[];
+    ifUnchangedSince?: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<UpdateResult> {
+    const chunks = (opts.chunks ?? []).map((c) => ({
+      content: c.content,
+      embedding: `[${c.embedding.join(",")}]`,
+    }));
+    const { data, error } = await this.client.rpc("update_thought", {
+      p_id: opts.id,
+      p_content: opts.content ?? null,
+      p_metadata_patch: opts.metadataPatch ?? null,
+      p_embedding: opts.embedding ?? null,
+      p_chunks: chunks.length ? chunks : null,
+      p_if_unchanged_since: opts.ifUnchangedSince ?? null,
+      p_actor: opts.actor ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return normaliseMutation(data as Record<string, unknown>);
+  }
+
+  async deleteThought(opts: {
+    id: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<MutationResult> {
+    const { data, error } = await this.client.rpc("delete_thought", {
+      p_id: opts.id,
+      p_actor: opts.actor ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return normaliseMutation(data as Record<string, unknown>);
   }
 
   async close(): Promise<void> {

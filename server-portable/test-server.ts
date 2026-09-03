@@ -155,11 +155,13 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
   const tools = ((b?.result as { tools?: { name: string }[] })?.tools ?? []).map((t) => t.name).sort();
   const expected = [
     "capture_thought",
+    "delete_thought",
     "fetch",
     "list_thoughts",
     "search",
     "search_thoughts",
     "thought_stats",
+    "update_thought",
   ];
   assert(tools.length === expected.length, `${expected.length} tools registered (got ${tools.length})`);
   for (const t of expected) assert(tools.includes(t), `exposes "${t}"`);

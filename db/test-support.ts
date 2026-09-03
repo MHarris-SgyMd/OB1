@@ -38,6 +38,8 @@ const TABLES = ["thought_audit", "thought_chunks", "thoughts", "schema_migration
  * matches on, so one entry covers every width the column has ever been.
  */
 const FUNCTIONS = [
+  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
+  "delete_thought(uuid, jsonb)",
   "thought_audit_refuse_mutation()",
   "thoughts_write_audit()",
   "ob1_current_actor()",

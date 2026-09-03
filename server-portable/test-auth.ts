@@ -130,11 +130,17 @@ async function toolsFor(key: string, via: "header" | "query"): Promise<string[]>
 console.log("\n[7] A read-only key cannot see the tool that writes");
 {
   const write = await toolsFor(WRITE_KEY, "header");
-  assert(write.length === 6, `write scope sees 6 tools (${write.length})`);
+  assert(write.length === 8, `write scope sees 8 tools (${write.length})`);
+  // The two mutating tools specifically — the count alone would pass if one
+  // write tool were swapped for another.
+  assert(write.includes("update_thought") && write.includes("delete_thought"),
+         "…including update_thought and delete_thought");
   assert(write.includes("capture_thought"), "…including capture_thought");
 
   const read = await toolsFor(READ_KEY, "header");
   assert(read.length === 5, `read scope sees 5 tools (${read.length})`);
+  assert(!read.includes("update_thought") && !read.includes("delete_thought"),
+         "…and neither mutating tool is among them");
   assert(!read.includes("capture_thought"), "capture_thought is absent, not merely refused");
   for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"]) {
     assert(read.includes(t), `read scope keeps "${t}"`);

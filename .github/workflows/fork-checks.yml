@@ -262,6 +262,15 @@ jobs:
       # OB1_EMBEDDING_DIMENSIONS: the opt-in that makes a model wider than
       # pgvector's HNSW ceiling usable at all. Separate process because the server
       # snapshots the environment at boot, so the flag cannot be flipped mid-run.
+      # update_thought / delete_thought, including the two defects the extension
+      # they were ported from has: a fingerprint left describing old text, and a
+      # concurrency check that races.
+      - name: Update and delete tools
+        working-directory: server-portable
+        run: bun test-update-delete.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # The audit trail: attribution, append-only enforcement, and the property
       # fire-and-forget cannot offer — no audit row for a rolled-back mutation.
       - name: Audit trail

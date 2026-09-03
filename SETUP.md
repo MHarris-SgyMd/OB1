@@ -298,6 +298,11 @@ http://localhost:8000/?key=<your-raw-key>
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
 URL. For anything reachable from outside your machine, put it behind TLS first.
 
+A write key sees eight tools; a read key sees five. `update_thought` and
+`delete_thought` are never registered for a read key, so they do not appear in
+`tools/list` at all rather than failing when called. `capture_thought` returns the
+new thought's id, which is what the other two take.
+
 ## Expected outcome
 
 `migrate` exits 0 having applied six migrations. `server` logs `preflight OK` and

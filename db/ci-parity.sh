@@ -22,7 +22,10 @@ run() {
   local dir="$1" script="$2" out res
   out=$(cd "$ROOT/$dir" && bun "$script" 2>&1)
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
-  if printf '%s' "$out" | grep -q 'FAIL\|error:'; then
+  # Judge the reported tally, not the prose: assertion labels legitimately
+  # contain the word "error" (a suite that tests error messages says so), and
+  # grepping for it marked test-update-delete failed while it reported 27/27.
+  if printf '%s' "$res" | grep -qvE ', 0 failed$' || [ -z "$res" ]; then
     printf "  \033[31m✗\033[0m %-26s %s\n" "$script" "${res:-crashed}"
     printf '%s\n' "$out" | grep -E '✗|error:' | head -3 | sed 's/^/        /'
     FAILED=1
@@ -39,11 +42,19 @@ main() {
   run server-portable    test-e2e-sql.ts
   run server-portable    test-local-provider.ts
   run server-portable    test-audit.ts
+  run server-portable    test-update-delete.ts
   run server-portable    test-store-postgrest.ts
   run server-portable    test-chunking.ts
   run server-portable    test-embedding-dimensions.ts
   run server-portable    test-preflight.ts
   run compat/supabase-sql test-compat.ts
+
+  # Suites that need no database. They are here because CI runs them and this
+  # script exists to be CI's local equivalent — leaving them out let two stale
+  # tool-count assertions reach a pull request while this reported all green.
+  run server-portable    test-server.ts
+  run server-portable    test-auth.ts
+  run server-portable    test-thoughts.ts
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"

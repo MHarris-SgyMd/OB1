@@ -381,6 +381,31 @@ Only extract what's explicitly there.`,
 
 // --- MCP Server Setup ---
 
+/** The `{ isError: true }` envelope the other tools return, in one place. */
+function toolError(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true as const };
+}
+
+/**
+ * Turn a refusal into something the caller can act on. A stale read is not a
+ * fault — it is a race the caller can resolve by refetching — so the message
+ * says what to do rather than only what went wrong.
+ */
+function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: string): string {
+  switch (r.error) {
+    case "NOT_FOUND":
+      return `No thought with id ${id}. It may already have been deleted — check the audit trail, which keeps the previous content.`;
+    case "STALE_READ":
+      return `Refused: ${id} changed after the if_unchanged_since you passed${
+        r.currentUpdatedAt ? ` (it is now ${r.currentUpdatedAt})` : ""
+      }. Re-read the thought and retry, so you amend the current text rather than overwrite someone else's edit.`;
+    case "DUPLICATE_CONTENT":
+      return `Refused: that text already exists as another thought, and two identical thoughts would break deduplication. Edit one of them, or delete the other first.`;
+    default:
+      return `Refused: ${r.error}`;
+  }
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: "open-brain",
@@ -766,7 +791,11 @@ function buildServer(principal: Principal): McpServer {
         }
 
         const meta = metadata as Record<string, unknown>;
-        let confirmation = `Captured as ${meta.type || "thought"}`;
+        // The id, because update_thought and delete_thought take one. Without it
+        // an agent that captures a typo has to search for its own thought to fix
+        // it, and the two new tools are only usable against things it did not
+        // just write.
+        let confirmation = `Captured as ${meta.type || "thought"} — id ${captured.id}`;
         if (Array.isArray(meta.topics) && meta.topics.length)
           confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
         if (Array.isArray(meta.people) && meta.people.length)
@@ -791,6 +820,109 @@ function buildServer(principal: Principal): McpServer {
           content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+
+  /**
+   * Both are writes, so both are gated on scope exactly as capture_thought is —
+   * a read-scoped key does not merely get a permission error, the tools are
+   * never registered and do not appear in tools/list.
+   */
+  if (canWrite(principal)) server.registerTool(
+    "update_thought",
+    {
+      title: "Update Thought",
+      description:
+        "Correct or amend an existing thought by id. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        // Not destructive: an update is recoverable from the audit trail, which
+        // records the previous content.
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        id: z.string().describe("UUID of the thought to update"),
+        content: z.string().min(1).optional()
+          .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
+        metadata_patch: z.record(z.string(), z.unknown()).optional()
+          .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone"),
+        if_unchanged_since: z.string().optional()
+          .describe("The updated_at from your last read. The update is refused as STALE_READ if the thought changed since"),
+      },
+    },
+    async ({ id, content, metadata_patch, if_unchanged_since }) => {
+      try {
+        if (content === undefined && metadata_patch === undefined) {
+          return toolError("Provide `content`, `metadata_patch`, or both — an update with neither would do nothing.");
+        }
+
+        // Only re-embed when the text actually changed. A metadata-only edit
+        // must not spend two model calls, nor risk replacing a good vector.
+        const embedded = content !== undefined ? await embedCapture(content) : undefined;
+
+        const result = await (await db()).updateThought({
+          id,
+          content,
+          metadataPatch: metadata_patch,
+          embedding: embedded?.embedding,
+          chunks: embedded?.chunks,
+          ifUnchangedSince: if_unchanged_since,
+          actor: { name: principal.name, source: "mcp" },
+        });
+
+        if (!result.ok) return toolError(explainRefusal(result, id));
+
+        const what = [
+          content !== undefined ? "content re-embedded" : null,
+          metadata_patch !== undefined ? "metadata merged" : null,
+        ].filter(Boolean).join(", ");
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.`,
+          }],
+        };
+      } catch (e) {
+        return toolError(`update_thought failed: ${(e as Error).message}`);
+      }
+    }
+  );
+
+  if (canWrite(principal)) server.registerTool(
+    "delete_thought",
+    {
+      title: "Delete Thought",
+      description:
+        "Permanently remove a thought by id, along with its search chunks. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Use `list_thoughts` or `search` first to confirm the id.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+      },
+      inputSchema: {
+        id: z.string().describe("UUID of the thought to delete"),
+      },
+    },
+    async ({ id }) => {
+      try {
+        const result = await (await db()).deleteThought({
+          id,
+          actor: { name: principal.name, source: "mcp" },
+        });
+        if (!result.ok) return toolError(explainRefusal(result, id));
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Deleted ${id}. Its previous content is preserved in the audit trail.`,
+          }],
+        };
+      } catch (e) {
+        return toolError(`delete_thought failed: ${(e as Error).message}`);
       }
     }
   );
