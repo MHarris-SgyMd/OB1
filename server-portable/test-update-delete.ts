@@ -153,6 +153,58 @@ console.log("\n[5] The concurrency guard refuses a stale write");
   assert(still.metadata?.other === "writer", "…including their metadata");
 }
 
+console.log("\n[5b] Reading and immediately writing back is NOT a stale read");
+{
+  // The case [5] could not distinguish: it asserted a refusal when there really
+  // had been an intervening edit, so it passed even while the guard refused
+  // everything. Postgres keeps microseconds; JavaScript's Date keeps
+  // milliseconds — so a client passing back exactly what it read was told
+  // STALE_READ on a thought nobody had touched. Every well-behaved caller.
+  await writer.call("capture_thought", { content: "a thought edited immediately" });
+  const [row] = await sql`SELECT id, updated_at FROM thoughts WHERE content = 'a thought edited immediately'`;
+  const asAClientWouldSeeIt = new Date(row.updated_at).toISOString();
+  assert(String(row.updated_at) !== asAClientWouldSeeIt,
+         "the stored timestamp really does carry precision a client cannot");
+
+  const out = await writer.call("update_thought", {
+    id: row.id, content: "edited with no intervening writer",
+    if_unchanged_since: asAClientWouldSeeIt,
+  });
+  assert(/Updated/.test(out), "…and passing it straight back is accepted");
+
+  // The guard must still bite when something genuinely changed.
+  await writer.call("update_thought", { id: row.id, metadata_patch: { touched: true } });
+  let msg = "";
+  try {
+    await writer.call("update_thought", {
+      id: row.id, content: "should not land", if_unchanged_since: asAClientWouldSeeIt,
+    });
+  } catch (e) { msg = (e as Error).message; }
+  assert(/STALE|changed after/i.test(msg), "…while a genuinely stale value is still refused");
+}
+
+console.log("\n[5c] Under genuine contention, exactly one writer wins");
+{
+  // [5] and [5b] test the guard sequentially, which cannot distinguish a real
+  // atomic check from upstream's read-then-write race — that version passes a
+  // sequential test too and only loses updates under concurrency.
+  await writer.call("capture_thought", { content: "a thought two writers want" });
+  const [row] = await sql`SELECT id, updated_at FROM thoughts WHERE content = 'a thought two writers want'`;
+  const seen = new Date(row.updated_at).toISOString();
+
+  const attempt = (text: string) =>
+    writer.call("update_thought", { id: row.id, content: text, if_unchanged_since: seen })
+      .then(() => "won").catch(() => "refused");
+  const outcomes = await Promise.all([attempt("writer A got there"), attempt("writer B got there")]);
+
+  assert(outcomes.filter((o) => o === "won").length === 1,
+         `exactly one of two racing writers succeeded (${outcomes.join(", ")})`);
+
+  // And the survivor is one of them intact, not a blend.
+  const [final] = await sql`SELECT content FROM thoughts WHERE id = ${row.id}`;
+  assert(/writer [AB] got there/.test(final.content), `the winner's text stands whole (${final.content})`);
+}
+
 console.log("\n[6] Delete removes the thought, its chunks, and reports a missing id");
 {
   const captured = await writer.call("capture_thought", { content: LONG.replace("zeppelin", "harpsichord") });

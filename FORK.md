@@ -513,6 +513,21 @@ Refusals are results, not exceptions: `NOT_FOUND`, `STALE_READ` and
 `DUPLICATE_CONTENT` come back as values with a message saying what to do, because
 at the tool boundary a thrown error is indistinguishable from a fault.
 
+A third defect, found reviewing rather than writing, and the worst of them: the
+`if_unchanged_since` guard **refused every correct caller**. Postgres keeps
+`timestamptz` to the microsecond and JavaScript's `Date` keeps milliseconds, so a
+client reading `12:01:53.133566` and passing back `12:01:53.133` was told
+`STALE_READ` on a thought nobody had touched. Both sides are now truncated to
+milliseconds, at the cost of a sub-millisecond window in which two writers could
+both pass — against a guard that otherwise refuses everything.
+
+The original test could not have caught it: it asserted a refusal in a case where
+there genuinely *had* been an intervening edit, so it passed while the guard was
+refusing indiscriminately. `[5b]` now asserts that reading and immediately writing
+back succeeds, and `[5c]` that two writers racing on the same `if_unchanged_since`
+produce exactly one winner — the assertion that separates a real atomic guard from
+upstream's read-then-write race, which passes any sequential test.
+
 Two tooling gaps this shook out. `db/ci-parity.sh` **only ran the
 Postgres-backed suites**, so `test-server`, `test-auth` and `test-thoughts` were
 never part of the local gate — and three stale tool-count assertions in them

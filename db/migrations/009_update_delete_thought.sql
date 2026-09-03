@@ -31,6 +31,19 @@
 --      text — findable by words that are no longer there, and not by the ones
 --      that are. Handled the same way capture does it: replace wholesale.
 --
+--
+--   4. THE GUARD COMPARES AT MILLISECOND PRECISION, NOT MICROSECOND.
+--      Postgres stores timestamptz to the microsecond; JavaScript's Date — and
+--      therefore every MCP client — carries milliseconds. A client that reads
+--      `updated_at` as 12:01:53.133566 and passes back 12:01:53.133 would be
+--      told STALE_READ on a thought nobody had touched, because .133566 > .133.
+--      That is not a rare edge: it is EVERY well-behaved caller, so the feature
+--      would appear broken to anyone who used it correctly.
+--
+--      Both sides are therefore truncated to milliseconds. The cost is a
+--      sub-millisecond window in which two writers could both pass the guard;
+--      the alternative is a guard that refuses everything.
+--
 -- Safety
 --   * Additive. No column on `thoughts` is altered or dropped.
 --   * Both functions fire migration 008's audit trigger, so an update records a
@@ -83,8 +96,11 @@ BEGIN
 
   -- Distinguish a stale read from a missing row before attempting the write, so
   -- the caller gets the reason rather than a bare "0 rows".
+  -- Truncated on both sides: see note 4 in the header. A caller passing back
+  -- exactly what it read must pass this, or the guard refuses correct usage.
   IF p_if_unchanged_since IS NOT NULL
-     AND COALESCE(v_existing.updated_at, v_existing.created_at) > p_if_unchanged_since THEN
+     AND date_trunc('milliseconds', COALESCE(v_existing.updated_at, v_existing.created_at))
+         > date_trunc('milliseconds', p_if_unchanged_since) THEN
     RETURN jsonb_build_object(
       'ok', false,
       'error', 'STALE_READ',
@@ -128,7 +144,8 @@ BEGIN
     updated_at          = now()
   WHERE id = p_id
     AND (p_if_unchanged_since IS NULL
-         OR COALESCE(updated_at, created_at) <= p_if_unchanged_since)
+         OR date_trunc('milliseconds', COALESCE(updated_at, created_at))
+            <= date_trunc('milliseconds', p_if_unchanged_since))
   RETURNING updated_at INTO v_updated;
 
   IF v_updated IS NULL THEN
