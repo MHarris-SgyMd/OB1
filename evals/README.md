@@ -703,9 +703,47 @@ latency, and the useful range runs to 0.15 if you will pay for it. Fitting that
 number to one failing query was as unsafe as it looked — but the *mechanism* it was
 testing held up.
 
-So the recommendation firms up: a gated second tier is worth building, the gate
-must be fitted on your own corpus, and 0.035–0.05 is a better starting guess than
-0.08.
+### …and then the recommendation reversed
+
+That conclusion was reached with `embeddinggemma` as tier 1. Changing the default
+to `qwen3-embedding:4b@1024` moved tier 1 from 86% to 90% R@1, and re-running the
+cascade against the new baseline changes the answer:
+
+| tier 1 | reranker | R@1 | fixed | broke | net |
+| --- | --- | --- | --- | --- | --- |
+| embeddinggemma | qwen3.8:27b | 86 → 91% | 5 | **0** | +5 |
+| **qwen3-embedding:4b** | qwen3.8:27b | 90 → 93% | 4 | **1** | +3 |
+| **qwen3-embedding:4b** | qwen2.5:7b | 90 → **88%** | 4 | **6** | **−2** |
+| qwen3-embedding:0.6b | qwen3.8:27b | 87 → 88% | 1 | 0 | +1 |
+
+Three things changed at once, and none of them favour building it:
+
+**The headroom moved into tier 1.** The reranker was recovering five queries from a
+weaker embedder; against a stronger one it recovers four and the ceiling is the
+same 93%. Most of what the cascade was buying, the embedding upgrade now provides
+for 13ms instead of 736ms.
+
+**It is no longer regression-free.** That was the strongest argument for it —
+escalation was monotone, so the gate was a pure cost control with no accuracy risk.
+Against a better tier 1 the reranker demotes a correct answer, because it now
+sometimes knows less than the embedder does.
+
+**The cheap reranker became actively harmful.** `qwen2.5:7b` fixed nothing against
+`embeddinggemma`; against `qwen3-embedding:4b` it takes R@1 *down* two points,
+breaking six to fix four. So the tier is not merely optional — configured with the
+obvious small model it makes retrieval worse.
+
+**Not built.** Three points of R@1 for a 15x latency increase, ~21 GB of resident
+models, and a regression on one query in a hundred is not a trade worth making by
+default, and a feature that is only correct with an 18 GB reranker is a footgun
+with an accuracy cost attached. `eval-cascade.ts` and the harness support in
+`eval-real.ts` remain, so anyone whose corpus differs can re-derive this in one
+command — which is the point of measuring rather than assuming.
+
+Worth noting what this says about the method. The cascade was a well-supported
+recommendation when it was made, on real data, with a clean result. It stopped
+being one because something upstream of it improved. A benchmark suite earns its
+keep by catching that.
 
 ### Remaining caveats
 

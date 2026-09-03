@@ -261,6 +261,23 @@ change:
 before the process starts, so a stale fallback silently overrides the code default
 rather than deferring to it.
 
+### Considered and not built: a second retrieval tier
+
+An LLM reranker over the embedding search's top-5, escalated only when the cosine
+margin says tier 1 is unsure. Measured well when tier 1 was `embeddinggemma`:
+86% → 91% Recall@1 on 97 real issues, five queries fixed, **none broken**.
+
+Re-measured after the default moved to `qwen3-embedding:4b@1024`, it no longer
+justifies itself. Tier 1 alone now reaches 90%, the reranker adds three points
+rather than five, and it is no longer regression-free — against a stronger embedder
+it demotes a correct answer, because it sometimes knows less than the embedder
+does. Worse, `qwen2.5:7b` in that role takes Recall@1 *down* two points, so the
+feature is only correct with an 18 GB model resident alongside the embedder.
+
+Three points for a 15x latency increase and a footgun is not a default. The
+harnesses stay (`evals/eval-cascade.ts`), so a corpus that behaves differently can
+re-derive it. Full numbers in `evals/README.md`.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
