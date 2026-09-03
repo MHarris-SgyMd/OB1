@@ -38,11 +38,13 @@ main() {
   FAILED=0
   run db                 test-schema.ts
   run db                 test-live.ts
+  run db                 test-upgrade.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
   run server-portable    test-local-provider.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts
+  run server-portable    test-agents.ts
   run server-portable    test-store-postgrest.ts
   run server-portable    test-chunking.ts
   run server-portable    test-embedding-dimensions.ts

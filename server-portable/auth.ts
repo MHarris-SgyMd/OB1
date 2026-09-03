@@ -38,6 +38,22 @@ export type Principal = {
   /** Which configured key authenticated, for logging. Never the key itself. */
   name: string;
   scope: Scope;
+  /**
+   * The SHA-256 digest of the presented key. A digest, never the key — the same
+   * thing already sitting in MCP_ACCESS_KEYS, so carrying it leaks nothing that
+   * the configuration does not.
+   *
+   * Migration 010 needs it because `name` alone cannot tell a RENAME from a new
+   * agent: the digest is what stays constant when the name changes, exactly as
+   * the name is what stays constant when the key is rotated. See agents.ts.
+   */
+  keyHash: string;
+  /**
+   * Stable agent id from ob1_agents, resolved after authentication. Undefined
+   * when the registry is unreachable or migration 010 has not been applied —
+   * attribution then falls back to `name`, which is where it was before 010.
+   */
+  agentId?: string;
 };
 
 export type KeyRecord = { name: string; scope: Scope; sha256: string };
@@ -57,6 +73,7 @@ export function parseKeyRecords(spec: string): { keys: KeyRecord[]; problems: st
   const keys: KeyRecord[] = [];
   const problems: string[] = [];
   const seen = new Set<string>();
+  const seenHashes = new Map<string, string>();
 
   for (const rawEntry of spec.split(/[,\n]/)) {
     const entry = rawEntry.trim();
@@ -77,6 +94,26 @@ export function parseKeyRecords(spec: string): { keys: KeyRecord[]; problems: st
     }
     if (seen.has(name)) problems.push(`key name "${name}" is used more than once`);
     seen.add(name);
+
+    /**
+     * The same raw key registered under two names.
+     *
+     * Harmless before migration 010 — `authenticate` returns the first match and
+     * the second entry is dead config. It stopped being harmless once a digest
+     * identifies an agent: two names claiming one digest means the registry
+     * cannot say which agent a write belongs to, and resolve_agent would rename
+     * the same agent back and forth depending on which client spoke last. The
+     * database guards against that too, but a config error should be reported
+     * where it was made.
+     */
+    const shaLower = sha.toLowerCase();
+    if (SHA256_HEX.test(sha) && seenHashes.has(shaLower)) {
+      problems.push(
+        `keys "${seenHashes.get(shaLower)}" and "${name}" share one digest — the same key cannot be two agents. Mint a separate key with: bun keygen.ts --name ${name} --scope ${scope}`
+      );
+    } else if (SHA256_HEX.test(sha)) {
+      seenHashes.set(shaLower, name);
+    }
 
     if (name && (scope === "read" || scope === "write") && SHA256_HEX.test(sha)) {
       keys.push({ name, scope, sha256: sha.toLowerCase() });
@@ -116,7 +153,7 @@ export function authenticate(presented: string | null | undefined, cfg: AuthConf
   if (cfg.MCP_ACCESS_KEYS) {
     for (const k of parseKeyRecords(cfg.MCP_ACCESS_KEYS).keys) {
       if (digestsMatch(presentedHash, k.sha256) && found === null) {
-        found = { name: k.name, scope: k.scope };
+        found = { name: k.name, scope: k.scope, keyHash: presentedHash };
       }
     }
   }
@@ -125,7 +162,9 @@ export function authenticate(presented: string | null | undefined, cfg: AuthConf
   // working; preflight warns about it.
   if (cfg.MCP_ACCESS_KEY) {
     const legacyMatch = digestsMatch(presentedHash, hashKey(cfg.MCP_ACCESS_KEY));
-    if (legacyMatch && found === null) found = { name: "MCP_ACCESS_KEY", scope: "write" };
+    if (legacyMatch && found === null) {
+      found = { name: "MCP_ACCESS_KEY", scope: "write", keyHash: presentedHash };
+    }
   }
 
   return found;

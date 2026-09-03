@@ -52,8 +52,8 @@ bun migrate.ts --url ... --baseline
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `59 assertions: 59 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports five migrations applied, and
+`bun test-schema.ts` prints `69 assertions: 69 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ten migrations applied, and
 `\d thoughts` shows seven columns and four indexes.
 
 ## The migrations
@@ -69,6 +69,7 @@ Against a real database, `bun migrate.ts` reports five migrations applied, and
 | `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables | This fork |
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
+| `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
 
 ## What changed relative to the guide
 
@@ -106,7 +107,7 @@ five files elsewhere in the repo creating it. `pg_trgm` is needed only by
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 59 assertions, PGlite, no container
+bun test-schema.ts                    # 69 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 30 assertions, real server, throwaway container
 ```
 

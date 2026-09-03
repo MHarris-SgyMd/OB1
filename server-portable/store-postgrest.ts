@@ -11,8 +11,10 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseMutation } from "./store.ts";
 import type {
+  Actor,
+  AgentResolution,
   CaptureResult,
   ListFilters,
   MutationError,
@@ -110,7 +112,7 @@ export class PostgrestStore implements ThoughtStore {
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     chunks?: { content: string; embedding: number[] }[];
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -123,7 +125,7 @@ export class PostgrestStore implements ThoughtStore {
     // reads it into the ob1.actor setting so the audit trigger can attribute
     // this write. Without it, every audit row on this store would have recorded
     // a NULL actor: present, plausible, and wrong.
-    const envelope = opts.actor ? { ...opts.payload, actor: opts.actor } : opts.payload;
+    const envelope = opts.actor ? { ...opts.payload, actor: actorPayload(opts.actor) } : opts.payload;
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
@@ -181,7 +183,7 @@ export class PostgrestStore implements ThoughtStore {
     embedding?: number[];
     chunks?: { content: string; embedding: number[] }[];
     ifUnchangedSince?: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
@@ -194,7 +196,7 @@ export class PostgrestStore implements ThoughtStore {
       p_embedding: opts.embedding ?? null,
       p_chunks: chunks.length ? chunks : null,
       p_if_unchanged_since: opts.ifUnchangedSince ?? null,
-      p_actor: opts.actor ?? null,
+      p_actor: actorPayload(opts.actor),
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);
@@ -202,14 +204,24 @@ export class PostgrestStore implements ThoughtStore {
 
   async deleteThought(opts: {
     id: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<MutationResult> {
     const { data, error } = await this.client.rpc("delete_thought", {
       p_id: opts.id,
-      p_actor: opts.actor ?? null,
+      p_actor: actorPayload(opts.actor),
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);
+  }
+
+  async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {
+    const { data, error } = await this.client.rpc("resolve_agent", {
+      p_key_hash: opts.keyHash,
+      p_label: opts.label,
+      p_scope: opts.scope ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return normaliseAgentResolution(data);
   }
 
   async close(): Promise<void> {

@@ -240,6 +240,28 @@ if (configFailed) {
         if (Number(audit[0].c) >= 1) add("audit trail", "ok", "thoughts_audit trigger present");
         else add("audit trail", "fail", "the thoughts_audit trigger is missing — mutations would go unrecorded",
                  "Apply db/migrations/008_thought_audit.sql.");
+
+        /**
+         * The agent registry, treated as a WARNING where audit is fatal.
+         *
+         * The distinction is not squeamishness. Without the audit trigger,
+         * history is lost and cannot be reconstructed. Without migration 010,
+         * every mutation is still attributed — by the key's name, in
+         * actor_name, exactly as it was before 010 existed. What is lost is the
+         * ability to survive a RENAME and the ability to revoke without a
+         * redeploy, neither of which makes the running deployment wrong.
+         *
+         * Refusing to start over a feature whose absence degrades cleanly would
+         * make applying migrations a hostage situation rather than an upgrade.
+         */
+        const registry = await sql`
+          SELECT count(*)::int AS c FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'resolve_agent' AND n.nspname = 'public'`;
+        if (Number(registry[0].c) >= 1) add("agent identity", "ok", "resolve_agent present");
+        else add("agent identity", "warn",
+                 "resolve_agent is missing — writes are attributed by key name only, and a rename would orphan the history",
+                 "Apply db/migrations/010_agent_identity.sql.");
         // ob1_config records the width and model the schema was created with.
         // A same-width model from a different family produces numerically valid,
         // semantically meaningless vectors — search degrades and nothing errors.

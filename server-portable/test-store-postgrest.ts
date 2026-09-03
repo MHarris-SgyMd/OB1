@@ -177,5 +177,40 @@ console.log("\n[6] Re-capture replaces chunks instead of accumulating them");
   await sql.close();
 }
 
+console.log("\n[7] resolveAgent's RPC argument shape, and the id it produces");
+{
+  /**
+   * The same gap [1b] exists for, one migration later. Every other suite runs
+   * OB1_STORE=sql, so `resolve_agent`'s three named arguments on this path —
+   * p_key_hash, p_label, p_scope — were unverified. A Workers deployment
+   * speaking PostgREST would have silently gone unattributed.
+   */
+  const hash = "e".repeat(64);
+  const first = await store.resolveAgent({ keyHash: hash, label: "connector", scope: "read" });
+  assert(first.ok === true, "the RPC resolves through the PostgREST client");
+  assert(first.ok === true && /^[0-9a-f-]{36}$/.test(first.agentId), "…returning a uuid");
+  assert(first.ok === true && first.created === true, "…and reporting first sight");
+
+  const again = await store.resolveAgent({ keyHash: hash, label: "connector", scope: "read" });
+  assert(again.ok === true && first.ok === true && again.agentId === first.agentId,
+         "the same pair resolves to the same id on this store");
+
+  // The end-to-end claim, on the path that had no coverage: an id resolved here
+  // lands in the audit row when passed as the actor.
+  const agentId = first.ok ? first.agentId : "";
+  const { id } = await store.captureThought({
+    content: "a thought captured by a resolved agent",
+    payload: { metadata: { source: "postgrest-test" } },
+    embedding: vec(6),
+    actor: { name: "connector", source: "postgrest-test", agentId },
+  });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const [ev] = await sql`
+    SELECT canonical_agent_id FROM thought_audit WHERE thought_id = ${id}`;
+  assert(ev?.canonical_agent_id === agentId,
+         `the resolved id reaches canonical_agent_id (${ev?.canonical_agent_id})`);
+  await sql.close();
+}
+
 await store.close();
 report();

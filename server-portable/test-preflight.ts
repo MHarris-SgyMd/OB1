@@ -112,6 +112,27 @@ else {
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
   assert(/both upsert_thought overloads present/.test(after.out), "…and that atomic capture is available");
   assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
+  assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
+
+  /**
+   * The agent registry is a WARNING where the audit trigger is fatal, and the
+   * difference has to be asserted rather than asserted-in-a-comment: without
+   * 010 every mutation is still attributed by key name, so refusing to start
+   * would make applying a migration a hostage situation.
+   *
+   * Dropping just the function leaves the rest of the schema intact, which is
+   * exactly the state a deployment on 009 is in.
+   */
+  const admin = new SQL({ url: LIVE, max: 1 });
+  await admin.unsafe("DROP FUNCTION IF EXISTS resolve_agent(text, text, text)");
+  await admin.close();
+
+  const noRegistry = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noRegistry.code === 0, "a database without migration 010 still starts");
+  assert(/resolve_agent is missing/.test(noRegistry.out), "…while saying the registry is absent");
+  assert(/attributed by key name only/.test(noRegistry.out), "…and what that costs");
+
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
   const j = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json");
   const parsed = JSON.parse(j.out);
