@@ -65,8 +65,10 @@ pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersi
 # 3. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
-expected="capture_thought,fetch,list_thoughts,search,search_thoughts,thought_stats"
-[ "$tools" = "$expected" ] && ok "all six tools exposed" || bad "tool surface is '$tools'"
+# Eight for a write key. update_thought and delete_thought are scope-gated, so a
+# read key would legitimately show five — this smoke test authenticates as a writer.
+expected="capture_thought,delete_thought,fetch,list_thoughts,search,search_thoughts,thought_stats,update_thought"
+[ "$tools" = "$expected" ] && ok "all eight tools exposed" || bad "tool surface is '$tools'"
 
 # 4. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
