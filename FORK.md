@@ -245,19 +245,23 @@ One consequence to know about. Fork status had been suppressing the
 upstream's eleven workflows were dormant. Detaching makes them live —
 `ob1-gate-v2.yml` would fail every internal PR by enforcing contribution rules
 this fork deliberately does not follow, and `update-readme-contributions.yml`
-would start rewriting the README on a schedule. So they are **disabled at the repo
-level** rather than deleted:
+runs on a cron with `contents: write` and rewrites the README on `main`.
 
-```bash
-./.github/disable-upstream-workflows.sh            # dry run
-./.github/disable-upstream-workflows.sh --apply
-```
+The plan was to disable them at the repo level, keeping the files byte-identical
+to the pin so rebases stayed clean. **That is not possible.** GitHub creates a
+workflow record on first run, so a workflow that has never run cannot be disabled:
+the API returns 404 and `gh workflow list` does not see it. Waiting until after
+the first run means accepting whatever that run does — for the scheduled one, an
+unattended bot commit to the default branch.
 
-Disabling keeps the eleven files byte-identical to the pin, so rebases stay clean;
-deleting them would add eleven more conflicts for no benefit. It is reversible.
-Only `fork-checks.yml` is ours and stays enabled. Re-run the script after a rebase
-brings in a new upstream workflow, since a workflow must register before it can be
-disabled.
+So all eleven are deleted, from `main` and from the working branch. Only
+`fork-checks.yml` remains. `.github/disable-upstream-workflows.sh` is kept for the
+case a rebase reintroduces one **and** it has already run, which is the only
+situation where disabling works.
+
+Removing them from `main` is safe because nothing reads our `main`: the pin is held
+by the annotated tag `upstream-pin-9543c29`, and the procedure below rebases onto
+`upstream/main` from `siggymd/fork-baseline`.
 
 ## Rebasing onto upstream
 
