@@ -143,6 +143,7 @@ export class SqlStore implements ThoughtStore {
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     chunks?: { content: string; embedding: number[] }[];
+    actor?: { name: string; source?: string; session?: string };
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -158,20 +159,33 @@ export class SqlStore implements ThoughtStore {
     // kept for the ordinary case rather than passing an empty array, so a
     // deployment that has not applied migration 007 keeps working unchanged.
     const chunks = opts.chunks ?? [];
-    const rows = chunks.length
-      ? await this.sql`
-          SELECT upsert_thought(
-            ${opts.content}::text,
-            ${opts.payload}::jsonb,
-            ${toVector(opts.embedding)}::vector,
-            ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
-          ) AS r`
-      : await this.sql`
-          SELECT upsert_thought(
-            ${opts.content}::text,
-            ${opts.payload}::jsonb,
-            ${toVector(opts.embedding)}::vector
-          ) AS r`;
+    /**
+     * One transaction, so the audit trigger from migration 008 sees the actor
+     * and so the audit row cannot commit without the mutation it describes.
+     *
+     * `set_config(..., true)` is the SET LOCAL form: scoped to this
+     * transaction, so it cannot leak to the next request sharing this pooled
+     * connection. A session-level setting would.
+     */
+    const rows = await this.sql.begin(async (tx) => {
+      if (opts.actor) {
+        await tx`SELECT set_config('ob1.actor', ${JSON.stringify(opts.actor)}, true)`;
+      }
+      return chunks.length
+        ? await tx`
+            SELECT upsert_thought(
+              ${opts.content}::text,
+              ${opts.payload}::jsonb,
+              ${toVector(opts.embedding)}::vector,
+              ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
+            ) AS r`
+        : await tx`
+            SELECT upsert_thought(
+              ${opts.content}::text,
+              ${opts.payload}::jsonb,
+              ${toVector(opts.embedding)}::vector
+            ) AS r`;
+    });
 
     const id = (rows[0]?.r as { id?: string } | undefined)?.id;
     if (!id) throw new Error("upsert_thought returned no id.");

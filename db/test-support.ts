@@ -25,7 +25,7 @@ const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");
  * dropped CASCADE, which removes constraints pointing AT it but not the tables
  * holding them, so anything with a foreign key has to be named before it.
  */
-const TABLES = ["thought_chunks", "thoughts", "schema_migrations", "ob1_config"];
+const TABLES = ["thought_audit", "thought_chunks", "thoughts", "schema_migrations", "ob1_config"];
 
 /**
  * Functions the schema owns, by signature. `CREATE OR REPLACE` masks a stale one
@@ -38,6 +38,9 @@ const TABLES = ["thought_chunks", "thoughts", "schema_migrations", "ob1_config"]
  * matches on, so one entry covers every width the column has ever been.
  */
 const FUNCTIONS = [
+  "thought_audit_refuse_mutation()",
+  "thoughts_write_audit()",
+  "ob1_current_actor()",
   "upsert_thought(text, jsonb)",
   "upsert_thought(text, jsonb, vector)",
   "upsert_thought(text, jsonb, vector, jsonb)",

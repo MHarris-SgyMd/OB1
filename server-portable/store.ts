@@ -91,6 +91,13 @@ export interface ThoughtStore {
    */
   captureThought(opts: {
     content: string;
+    /**
+     * Who is writing, for the audit trail (migration 008). Optional because the
+     * PostgREST path cannot carry it and a mutation from a script legitimately
+     * has no principal — the audit row then records a NULL actor, which is more
+     * honest than a placeholder.
+     */
+    actor?: { name: string; source?: string; session?: string };
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     /**

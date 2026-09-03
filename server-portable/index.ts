@@ -744,6 +744,10 @@ function buildServer(principal: Principal): McpServer {
           content,
           payload,
           chunks,
+          // The audit trail's actor. `principal.name` is the access key's name
+          // from auth.ts — the closest thing to a stable agent identity this
+          // deployment has, and what SMD-928 is expected to promote.
+          actor: { name: principal.name, source: String(payload.metadata.source ?? "mcp") },
           embedding,
         });
 
