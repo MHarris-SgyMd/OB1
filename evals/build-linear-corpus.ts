@@ -64,6 +64,29 @@ const OUT = process.env.OB1_CORPUS_OUT ?? "/tmp/linear-corpus-full.json";
 /** Set to "off" to emit descriptions only, for comparison against the old corpus. */
 const WITH_COMMENTS = (process.env.OB1_CORPUS_COMMENTS ?? "on").toLowerCase() !== "off";
 
+/**
+ * Drop documents shorter than this many characters. Defaults to 0 — keep
+ * everything — so the corpus matches Linear unless you ask otherwise.
+ *
+ * Worth raising for a retrieval benchmark. `eval-real.ts` asks "given the title,
+ * find the body", and a body of 3 characters cannot encode its title: it is not
+ * a hard query, it is not a query. In the 441-document build, 18 documents fall
+ * under 120 characters and the three shortest — 3, 15 and 21 characters — were
+ * the top three reported misses for both models. They set a noise floor rather
+ * than measuring anything.
+ *
+ * Left at 0 by default anyway, because a real brain does contain thin notes and
+ * silently discarding rows would make the document count disagree with Linear's.
+ */
+const MIN_CHARS = Number(process.env.OB1_CORPUS_MIN_CHARS ?? 0);
+if (!Number.isFinite(MIN_CHARS) || MIN_CHARS < 0) {
+  // `Number("abc")` is NaN, and `length >= NaN` is false for every document — so
+  // a typo here would not error, it would write an empty corpus and report
+  // percentiles over nothing.
+  console.error(`OB1_CORPUS_MIN_CHARS must be a non-negative number, got "${process.env.OB1_CORPUS_MIN_CHARS}".`);
+  process.exit(2);
+}
+
 if (!KEY) {
   console.error(
     `LINEAR_API_KEY is not set, and no .env file supplied it.\n\n` +
@@ -231,8 +254,16 @@ const items = nodes
     labels: n.labels.nodes.map((l) => l.name),
     completedAt: n.completedAt,
   }))
-  .filter((it) => it.text.length > 0)
+  .filter((it) => it.text.length > 0 && it.text.length >= MIN_CHARS)
   .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+if (items.length === 0) {
+  console.error(
+    `Every one of the ${nodes.length} issues fetched was filtered out.` +
+      (MIN_CHARS > 0 ? ` OB1_CORPUS_MIN_CHARS=${MIN_CHARS} is probably too high.` : "")
+  );
+  process.exit(1);
+}
 
 await Bun.write(outPath, JSON.stringify(items, null, 2));
 
@@ -250,12 +281,18 @@ console.log(`  characters   min ${lens[0]}  p50 ${pct(0.5)}  p90 ${pct(0.9)}  ma
 console.log(`  est. tokens  max ${Math.max(...toks)}  total ${toks.reduce((a, b) => a + b, 0).toLocaleString()}`);
 console.log(`  with comments        ${withComments} of ${items.length}`);
 console.log(`  over the ${DEFAULT_MAX_TOKENS}-token chunk threshold  ${chunkable} of ${items.length}`);
-if (dropped > 0) console.log(`  skipped (no description, no comments)  ${dropped}`);
+if (dropped > 0) {
+  const why = MIN_CHARS > 0 ? `empty, or under OB1_CORPUS_MIN_CHARS=${MIN_CHARS}` : "no description, no comments";
+  console.log(`  skipped (${why})  ${dropped}`);
+}
 // A one-line issue is not a retrieval document. Reported rather than filtered,
 // because the right floor depends on what you are measuring and silently
 // dropping rows would make the document count disagree with Linear's.
 const tiny = items.filter((i) => i.text.length < 120).length;
-if (tiny > 0) console.log(`  under 120 characters (probably too thin to score)  ${tiny}`);
+if (tiny > 0) {
+  console.log(`  under 120 characters (too thin to retrieve by title)  ${tiny}`);
+  console.log(`    they cap MRR at ${((items.length - tiny) / items.length).toFixed(3)} — set OB1_CORPUS_MIN_CHARS=120 to exclude them`);
+}
 if (truncatedThreads.length > 0) {
   console.log(`\n  ⚠  ${truncatedThreads.length} issue(s) have more than 100 comments and were cut:`);
   console.log(`     ${truncatedThreads.slice(0, 10).join(", ")}`);

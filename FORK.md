@@ -68,10 +68,10 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-five numbered changes on top of the pin, across 76 `[fork]` commits. Seven
-fix defects found in an audit of the pinned tree; the rest are migration work — a
-runtime-neutral build (Phase 3), the core schema as applicable migrations
-(Phase 1), and a swappable data layer (Phase 2).
+Twenty-five numbered changes on top of the pin. Seven fix defects found in an
+audit of the pinned tree; the rest are migration work — a runtime-neutral build
+(Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
+data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
 sections. Changes **18–25 are the numbered `###` sections** further down, which is
@@ -263,7 +263,7 @@ model that embeds a long capture whole. Costs ~5x the embedding latency and 2.5 
 
 Those figures replace 0.933/0.914 and "~3x", measured over 97 issues that had been
 silently truncated to ~500 characters at ingestion. The ranking survived and the
-gap roughly doubled; the latency multiple did not survive — see fix 25.
+ranking survived; the latency multiple did not — see fix 25.
 
 **This is a breaking change for an existing install.** The width moves from 768 to
 1024, so it needs a schema migration and a re-embed of every row. `preflight.ts`
@@ -877,25 +877,39 @@ comment threads over Linear's GraphQL API:
 | | old | new |
 | --- | ---: | ---: |
 | documents | 97 | 441 |
-| chars p50 / p90 / max | ~460 / ~470 / 483 | 810 / 2,789 / **15,812** |
+| chars p50 / p90 / max | 446 / 447 / 483 | 810 / 2,789 / **15,812** |
 | with comments | 0 | 131 (318 total) |
 | over the 1200-token chunk threshold | **0** | **15** |
 
 Re-running the head-to-head changed one number that mattered and confirmed
 another:
 
-| | old corpus | rebuilt |
-| --- | ---: | ---: |
-| qwen3-embedding:4b | 0.933 | **0.903** |
-| embeddinggemma | 0.914 | **0.873** |
-| gap | 0.019 | **0.030** |
-| latency | "~3x" | **~5x** (109.6s vs 22.4s) |
+| | old (97, truncated) | rebuilt (441) | rebuilt, ≥120 chars (423) |
+| --- | ---: | ---: | ---: |
+| qwen3-embedding:4b | 0.933 | 0.903 | **0.914** |
+| embeddinggemma | 0.914 | 0.873 | **0.894** |
+| gap | 0.019 | 0.030 | **0.020** |
+| latency | "~3x" | ~5x | **~5x** (106.8s vs 20.5s) |
 
-The ranking survived, so the default stands, and the gap roughly doubled — which
-is the long-capture argument finally appearing in a measurement. The latency
-claim did not survive: "~3x" was measured on 500-character stubs and the real
-multiple on full documents is about five. Corrected in `db/config.mjs`, `SETUP.md`
-and above.
+The ranking survived, so the default stands. The latency claim did not: "~3x" was
+measured on 500-character stubs and the real multiple on full documents is about
+five. Corrected in `db/config.mjs`, `SETUP.md` and above.
+
+**The third column is the interesting one, and it cost me a conclusion.** On the
+441-document build the gap looks like it doubled, 0.019 → 0.030, and the obvious
+reading is that the long-capture advantage finally showed up. It did not.
+Eighteen documents are under 120 characters — three of them 3, 15 and 21 — and a
+body that short cannot encode its own title, so those queries are unanswerable by
+construction. They were the top three misses for **both** models. Excluding them
+gives a gap of 0.020, indistinguishable from the truncated corpus's 0.019:
+`embeddinggemma` simply handles degenerate rows worse, and that read as a margin.
+
+So the honest summary is duller than the first draft of this section. Fixing the
+corpus did **not** reveal a hidden advantage for the bigger model. It confirmed
+the ranking, corrected the latency claim by a factor of nearly two, and left the
+"embeds a long capture whole" argument exactly where it was: an argument from
+architecture, unsupported by measurement. Which is worth writing down, because
+the exciting version was live in three files for about an hour.
 
 Both absolute scores fell, and that is arithmetic rather than regression: ranking
 one document first out of 441 is harder than out of 97. **The two sets are not

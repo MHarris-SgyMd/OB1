@@ -52,9 +52,18 @@ const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
  *
  * Those numbers replace an earlier 0.933/0.914 measured over 97 issues that had
  * been silently truncated to ~500 characters at ingestion. The ranking survived
- * the correction and the gap roughly doubled, from 0.019 to 0.030 — which is the
- * "embeds a long capture whole" argument finally showing up in a number, since
- * the old corpus was too short for it to matter.
+ * the correction, which is what matters for this default.
+ *
+ * The margin did not grow, and an earlier version of this comment said it had.
+ * Eighteen of the 441 documents are under 120 characters — three of them are 3,
+ * 15 and 21 characters — and a body that short cannot encode its own title, so
+ * those queries are unanswerable by construction. Excluding them (423 documents)
+ * gives 0.914 against 0.894: a gap of 0.020, statistically indistinguishable from
+ * the 0.019 measured on the truncated corpus. The apparent doubling to 0.030 was
+ * an artifact of degenerate rows, which `embeddinggemma` happened to handle worse.
+ *
+ * So the "embeds a long capture whole" advantage remains an argument from
+ * architecture, NOT something these measurements demonstrate.
  *
  * The cost did not survive intact. It is 2.5 GB, and the latency multiple is
  * **about 5x, not the 3x recorded here before**: 109.6s against 22.4s to embed

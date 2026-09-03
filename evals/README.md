@@ -516,23 +516,33 @@ The table in the next section was measured on the truncated 97-document corpus.
 After `build-linear-corpus.ts` rebuilt it — 441 documents, full descriptions plus
 comment threads — the head-to-head is:
 
-| model | dims | R@1 | R@5 | MRR | sec |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| **qwen3-embedding:4b** | 2560 | **84%** | **98%** | **0.903** | 109.6 |
-| embeddinggemma | 768 | 80% | 95% | 0.873 | 22.4 |
+| corpus | model | R@1 | R@5 | MRR | sec |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 441 docs (as built) | **qwen3-embedding:4b** | 84% | 98% | **0.903** | 109.6 |
+| 441 docs (as built) | embeddinggemma | 80% | 95% | 0.873 | 22.4 |
+| 423 docs (≥120 chars) | **qwen3-embedding:4b** | 85% | 99% | **0.914** | 106.8 |
+| 423 docs (≥120 chars) | embeddinggemma | 83% | 96% | 0.894 | 20.5 |
 
-Three things, and only the first is comfortable.
+**The ranking survived.** `qwen3-embedding:4b` wins on both, so the default stands.
 
-**The ranking survived.** `qwen3-embedding:4b` still wins, so the default stands.
+**The margin did not grow, and the first version of this section said it had.**
+On the 441-document build the gap looks like 0.030 against the old corpus's 0.019
+— apparently doubled. It is not. Eighteen documents are under 120 characters,
+three of them 3, 15 and 21 characters, and a body that short cannot encode its own
+title: those queries are unanswerable by construction, and they were the top three
+misses for both models. Removing them gives a gap of **0.020** — indistinguishable
+from the 0.019 measured on the truncated corpus. `embeddinggemma` simply handled
+the degenerate rows worse, and that showed up as a margin.
 
-**The gap roughly doubled**, 0.019 → 0.030. That is the "embeds a long capture
-whole" argument finally showing up in a number: the old corpus was too short for
-it to matter, so the advantage the model was chosen for could not appear.
+So the corrected reading is narrower than the exciting one: the **"embeds a long
+capture whole" advantage is still an argument from architecture, not something
+these numbers demonstrate.** Reproduce the clean figures with
+`OB1_CORPUS_MIN_CHARS=120`.
 
-**The latency cost was understated.** 109.6s against 22.4s is about **5x, not the
-~3x** recorded everywhere until now. The old figure came from 500-character stubs
-and the penalty grows with document length. Corrected in `db/config.mjs`,
-`SETUP.md` and `FORK.md`.
+**The latency cost was understated.** ~107s against ~21s is about **5x, not the
+~3x** recorded everywhere until now, and that holds on both corpora. The old
+figure came from 500-character stubs and the penalty grows with document length.
+Corrected in `db/config.mjs`, `SETUP.md` and `FORK.md`.
 
 Both absolute MRRs fell, and that is expected rather than a regression: ranking one
 document first out of 441 is strictly harder than out of 97, and these documents

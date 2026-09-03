@@ -102,8 +102,18 @@ export function envFiles(): string[] {
 export function loadEnv(): { file: string; keys: string[] }[] {
   const loaded: { file: string; keys: string[] }[] = [];
 
+  const explicit = process.env.OB1_ENV_FILE ? resolve(process.env.OB1_ENV_FILE) : null;
+
   for (const file of envFiles()) {
-    if (!existsSync(file)) continue;
+    if (!existsSync(file)) {
+      // The default paths are candidates and their absence is normal. A path the
+      // caller named is different: they believe their key is in it, and skipping
+      // it silently turns a typo into "my key does not work".
+      if (file === explicit) {
+        console.error(`  ⚠  OB1_ENV_FILE points at ${file}, which does not exist.`);
+      }
+      continue;
+    }
 
     let parsed: Record<string, string>;
     try {
