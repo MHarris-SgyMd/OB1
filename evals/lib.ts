@@ -19,6 +19,18 @@
  */
 
 import { applyEmbeddingPrompt } from "../db/config.mjs";
+import { loadEnv } from "./env.ts";
+
+/**
+ * Fill in credentials from a gitignored .env before reading any of them, so a
+ * hosted-provider run needs no key typed into the shell. A variable already in
+ * the environment wins; see env.ts.
+ *
+ * Called here rather than in each eval script because every one of them imports
+ * this module, and a second place to configure the same key is how the two
+ * disagree later — the defect this fork keeps finding.
+ */
+loadEnv();
 
 export const EVAL_BASE =
   process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";

@@ -49,6 +49,58 @@ measured nothing. `eval-retrieval.ts` adds three slices that discriminate:
 Queries are phrased in different words from the thought they should retrieve, so
 lexical overlap does not carry them.
 
+## The real corpus, and a caveat on every number measured against it
+
+`eval-real.ts` scores retrieval over closed Linear issues rather than thoughts we
+wrote ourselves: the issue body is the document, its title is the query. Nobody
+labels anything, and it is the question a tracker actually poses — "which issue
+was the one about X".
+
+The corpus is built by `build-linear-corpus.ts`:
+
+```bash
+cp .env.example .env      # then put LINEAR_API_KEY in it — .env is gitignored
+bun build-linear-corpus.ts
+OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json bun eval-real.ts qwen3-embedding:4b embeddinggemma
+```
+
+Credentials come from a `.env` file via `env.ts`, which every eval script picks up
+through `lib.ts` — so the hosted-provider key lives in the same place rather than
+in a second mechanism. A variable already set in the shell always wins, keeping CI
+and 1Password injection working unchanged. Files are consulted in order:
+`$OB1_ENV_FILE`, `evals/.env`, `<repo>/.env`, `deploy/.env`. Bun separately
+auto-loads a `.env` from whatever directory you ran from, and that takes
+precedence over all of them; the scripts print which files they read, naming keys
+but never values.
+
+The script is committed; **its output is not, and must not be**. The corpus is
+internal engineering data from a healthcare company: it stays out of git and away
+from any hosted embedding provider, which is the whole argument for the local path
+being a supported option. `.gitignore` covers `*-corpus.json`, and the builder
+refuses to write anywhere inside the repository regardless of what it is asked.
+
+### Why the builder exists
+
+The corpus these results were measured on was produced ad hoc, and inspecting it
+later turned up two defects:
+
+- **Truncated at ~500 characters.** Documents topped out at 483 characters, 80 of
+  97 sat in the 400–490 band, and 78 of 97 did not end on sentence punctuation —
+  one cuts off mid-clause at "More importantly, the".
+- **No comments.** Only `id`, `title`, `text`, `labels`. On a real tracker the
+  decision and the pushback live in the thread, not the description.
+
+Both matter more than they look. `qwen3-embedding:4b` was chosen over
+`embeddinggemma` on 483-character stubs, while `db/config.mjs` justifies it partly
+as "the only local model that embeds a long capture whole" — an advantage those
+inputs cannot possibly show. And nothing in that corpus reached the 1200-token
+chunking threshold, so the chunking path had no real documents to work on. That
+was an artifact of the truncation, not a property of Linear issues.
+
+**So the retrieval numbers below are a ranking on short stubs.** They are not
+wrong, but they are narrower than they read. Rebuild with the script and re-run
+before quoting any of them against full-length documents.
+
 ## Results, 2026-09-02, Ollama 0.33.2
 
 Twenty thoughts, twenty queries. R@1 per slice.
@@ -458,10 +510,60 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Re-measured on the rebuilt corpus, 2026-09-03
+
+The table in the next section was measured on the truncated 97-document corpus.
+After `build-linear-corpus.ts` rebuilt it — 441 documents, full descriptions plus
+comment threads — the head-to-head is:
+
+| corpus | model | R@1 | R@5 | MRR | sec |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 441 docs (as built) | **qwen3-embedding:4b** | 84% | 98% | **0.903** | 109.6 |
+| 441 docs (as built) | embeddinggemma | 80% | 95% | 0.873 | 22.4 |
+| 423 docs (≥120 chars) | **qwen3-embedding:4b** | 85% | 99% | **0.914** | 106.8 |
+| 423 docs (≥120 chars) | embeddinggemma | 83% | 96% | 0.894 | 20.5 |
+
+**The ranking survived.** `qwen3-embedding:4b` wins on both, so the default stands.
+
+**The margin did not grow, and the first version of this section said it had.**
+On the 441-document build the gap looks like 0.030 against the old corpus's 0.019
+— apparently doubled. It is not. Eighteen documents are under 120 characters,
+three of them 3, 15 and 21 characters, and a body that short cannot encode its own
+title: those queries are unanswerable by construction, and they were the top three
+misses for both models. Removing them gives a gap of **0.020** — indistinguishable
+from the 0.019 measured on the truncated corpus. `embeddinggemma` simply handled
+the degenerate rows worse, and that showed up as a margin.
+
+So the corrected reading is narrower than the exciting one: the **"embeds a long
+capture whole" advantage is still an argument from architecture, not something
+these numbers demonstrate.** Reproduce the clean figures with
+`OB1_CORPUS_MIN_CHARS=120`.
+
+**The latency cost was understated.** ~107s against ~21s is about **5x, not the
+~3x** recorded everywhere until now, and that holds on both corpora. The old
+figure came from 500-character stubs and the penalty grows with document length.
+Corrected in `db/config.mjs`, `SETUP.md` and `FORK.md`.
+
+Both absolute MRRs fell, and that is expected rather than a regression: ranking one
+document first out of 441 is strictly harder than out of 97, and these documents
+are longer and denser with near-duplicates. **The two sets of numbers are not
+comparable in either direction.** The old ones should not be quoted.
+
+One caveat on the new numbers. `eval-real.ts` embeds whole documents, and Ollama's
+default batch is 2048 tokens — so the 15 documents above that get silently cut at
+embed time. Both models suffer it equally, so the comparison holds, but the
+long-document tail is under-measured rather than measured. That is the failure
+`server-portable/chunk.ts` exists to fix, showing up inside the benchmark.
+
+**Only this head-to-head was re-run.** Everything below — the prompted-vs-bare
+finding, the 0.6b and bge-m3 placings, the whole extraction section — is still
+measured on the truncated corpus and is labelled as such where it appears.
+
 ## The default changed to `qwen3-embedding:4b@1024`
 
-Once every model was prompted the way its own card specifies, the real-corpus
-ordering is:
+Measured on the **truncated 97-document corpus** (superseded above for the
+two-model head-to-head; the prompted-vs-bare finding has not been re-run).
+Once every model was prompted the way its own card specifies, the ordering was:
 
 | model | MRR | sec | size | |
 | --- | --- | --- | --- | --- |

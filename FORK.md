@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-four numbered changes on top of the pin, across 71 `[fork]` commits. Seven
-fix defects found in an audit of the pinned tree; the rest are migration work — a
-runtime-neutral build (Phase 3), the core schema as applicable migrations
-(Phase 1), and a swappable data layer (Phase 2).
+Twenty-five numbered changes on top of the pin. Seven fix defects found in an
+audit of the pinned tree; the rest are migration work — a runtime-neutral build
+(Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
+data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–24 are the numbered `###` sections** further down, which is
+sections. Changes **18–25 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -133,6 +133,8 @@ server-portable/test-agents.ts   # fix 23  (new file)
 db/test-upgrade.ts               # fix 23  (new file — migrations applied incrementally)
 db/migrations/011_*.sql          # fix 24  (new file — trigram index on content)
 db/bench-trgm.ts                 # fix 24  (new file — measures what 011 costs and buys)
+evals/build-linear-corpus.ts     # fix 25  (new file — rebuilds the real corpus)
+evals/env.ts                     # fix 25  (new file — .env credentials, never printed)
 server-portable/test-update-delete.ts # fix 22 (new file)
 server-portable/test-audit.ts    # fix 21  (new file)
 db/test-support.ts               # fix 20  (new file — schema lifecycle, assert)
@@ -255,9 +257,13 @@ runs them all in CI's order against one shared database. Use it before pushing.
 
 ### 19. Default embedding model → `qwen3-embedding:4b` at 1024 dimensions
 
-Measured best on a real corpus: 0.933 MRR against `embeddinggemma`'s 0.914 over 97
-real issues, and the only local model that embeds a long capture whole. Costs ~3x
-the embedding latency and 2.5 GB.
+Measured best on a real corpus: **0.903 MRR against `embeddinggemma`'s 0.873 over
+441** real issues with full descriptions and comment threads, and the only local
+model that embeds a long capture whole. Costs ~5x the embedding latency and 2.5 GB.
+
+Those figures replace 0.933/0.914 and "~3x", measured over 97 issues that had been
+silently truncated to ~500 characters at ingestion. The ranking survived and the
+ranking survived; the latency multiple did not — see fix 25.
 
 **This is a breaking change for an existing install.** The width moves from 768 to
 1024, so it needs a schema migration and a re-embed of every row. `preflight.ts`
@@ -278,6 +284,8 @@ change:
   documents differently, and the server had one code path for both. Prompted it
   scores 0.933; bare, **0.860** — worse than the model it replaces. Switching the
   default without this would have been a regression dressed as an upgrade.
+  Both numbers are from the 97-issue corpus and this pair has not been re-run on
+  the rebuilt one; the ordering is not in question, the absolute values are old.
   Templates live in `db/config.mjs` keyed by model, so changing model changes
   prompt and preflight's existing model-change check already covers it.
   `embeddinggemma` gains 0.002 from its own format and nomic's prefixes measurably
@@ -843,6 +851,95 @@ One toolchain note: `test-schema.ts` runs on PGlite, which ships contrib
 extensions as separate bundles that must be handed in at construction. Without
 `extensions: { vector, pg_trgm }` the `CREATE EXTENSION` in 011 does not
 gracefully skip — it raises, and the migration fails to apply.
+
+### 25. The benchmark corpus was truncated, and nobody knew
+
+Every retrieval number this fork published came from `/tmp/linear-corpus.json`, a
+file built ad hoc in a session nobody kept. Inspecting it turned up two defects.
+
+**Truncated at ~500 characters.** Documents topped out at 483, 80 of 97 sat in the
+400–490 band, and **78 of 97 did not end on sentence punctuation** — SMD-775 cuts
+off mid-clause at "More importantly, the". A cap had been applied at ingestion and
+nothing recorded it.
+
+**No comments.** Fields were `id`, `title`, `text`, `labels`. On a real tracker
+the decision and the pushback live in the thread, not the description.
+
+Both narrowed the conclusions more than they looked. `qwen3-embedding:4b` was
+chosen partly as "the only local model that embeds a long capture whole" — on
+inputs where that cannot show. And nothing reached the 1200-token chunking
+threshold, so migration 007's `thought_chunks` had no real documents to work on:
+an artifact of the truncation, not a property of Linear issues.
+
+`evals/build-linear-corpus.ts` replaces it, fetching full descriptions plus
+comment threads over Linear's GraphQL API:
+
+| | old | new |
+| --- | ---: | ---: |
+| documents | 97 | 441 |
+| chars p50 / p90 / max | 446 / 447 / 483 | 810 / 2,789 / **15,812** |
+| with comments | 0 | 131 (318 total) |
+| over the 1200-token chunk threshold | **0** | **15** |
+
+Re-running the head-to-head changed one number that mattered and confirmed
+another:
+
+| | old (97, truncated) | rebuilt (441) | rebuilt, ≥120 chars (423) |
+| --- | ---: | ---: | ---: |
+| qwen3-embedding:4b | 0.933 | 0.903 | **0.914** |
+| embeddinggemma | 0.914 | 0.873 | **0.894** |
+| gap | 0.019 | 0.030 | **0.020** |
+| latency | "~3x" | ~5x | **~5x** (106.8s vs 20.5s) |
+
+The ranking survived, so the default stands. The latency claim did not: "~3x" was
+measured on 500-character stubs and the real multiple on full documents is about
+five. Corrected in `db/config.mjs`, `SETUP.md` and above.
+
+**The third column is the interesting one, and it cost me a conclusion.** On the
+441-document build the gap looks like it doubled, 0.019 → 0.030, and the obvious
+reading is that the long-capture advantage finally showed up. It did not.
+Eighteen documents are under 120 characters — three of them 3, 15 and 21 — and a
+body that short cannot encode its own title, so those queries are unanswerable by
+construction. They were the top three misses for **both** models. Excluding them
+gives a gap of 0.020, indistinguishable from the truncated corpus's 0.019:
+`embeddinggemma` simply handles degenerate rows worse, and that read as a margin.
+
+So the honest summary is duller than the first draft of this section. Fixing the
+corpus did **not** reveal a hidden advantage for the bigger model. It confirmed
+the ranking, corrected the latency claim by a factor of nearly two, and left the
+"embeds a long capture whole" argument exactly where it was: an argument from
+architecture, unsupported by measurement. Which is worth writing down, because
+the exciting version was live in three files for about an hour.
+
+Both absolute scores fell, and that is arithmetic rather than regression: ranking
+one document first out of 441 is harder than out of 97. **The two sets are not
+comparable in either direction.**
+
+Only that head-to-head was re-run. The prompted-vs-bare finding (0.933 against
+0.860) and every extraction number are still old-corpus and are now labelled as
+such where they appear — kept because those gaps are far too large to be
+artifacts, flagged because the absolute values are stale.
+
+Three things the builder does deliberately:
+
+- **Keeps the title out of the document text.** `eval-real.ts` uses the title as
+  the query, so including it would place the query verbatim inside its own answer
+  and inflate every score. The old corpus got this right; it would have been easy
+  to lose.
+- **Refuses to write inside the repository**, independently of `.gitignore`. This
+  repo is public and the corpus is internal healthcare-company engineering data.
+  `.gitignore` only protects patterns someone remembered to add, and a committed
+  corpus is not a mistake you undo in the next commit.
+- **Never prints a credential.** `evals/env.ts` loads keys from a gitignored
+  `.env` and reports which files it read and which key *names* each supplied. A
+  loader that echoes values puts secrets in a scrollback, then a CI log, then a
+  screenshot.
+
+One caveat carried into the new numbers: `eval-real.ts` embeds whole documents and
+Ollama's default batch is 2048 tokens, so the 15 documents above it are silently
+cut at embed time. Both models suffer it equally so the comparison holds, but the
+long-document tail is under-measured — the exact failure `chunk.ts` exists to fix,
+appearing inside the benchmark that measures it.
 
 ## Detached from the fork network
 
