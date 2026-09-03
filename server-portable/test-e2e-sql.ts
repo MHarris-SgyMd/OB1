@@ -132,7 +132,7 @@ console.log("[1] The server runs with no Supabase configuration at all");
   });
   const t = await r.text();
   const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  assert(b.result?.tools?.length === 6, `all six tools still registered (${b.result?.tools?.length})`);
+  assert(b.result?.tools?.length === 8, `all eight tools still registered (${b.result?.tools?.length})`);
 }
 
 console.log("\n[2] capture_thought writes through SQL");

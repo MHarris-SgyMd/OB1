@@ -23,14 +23,18 @@
  */
 
 import { SQL } from "bun";
+import { normaliseMutation } from "./store.ts";
 import type {
   CaptureResult,
   ListFilters,
+  MutationError,
+  MutationResult,
   ThoughtListItem,
   ThoughtMatch,
   ThoughtMeta,
   ThoughtRecord,
   ThoughtStore,
+  UpdateResult,
 } from "./store.ts";
 
 /** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
@@ -187,6 +191,41 @@ export class SqlStore implements ThoughtStore {
     const id = (rows[0]?.r as { id?: string } | undefined)?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
     return { id };
+  }
+
+  async updateThought(opts: {
+    id: string;
+    content?: string;
+    metadataPatch?: Record<string, unknown>;
+    embedding?: number[];
+    chunks?: { content: string; embedding: number[] }[];
+    ifUnchangedSince?: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<UpdateResult> {
+    const chunks = (opts.chunks ?? []).map((c) => ({
+      content: c.content,
+      embedding: toVector(c.embedding),
+    }));
+    const rows = await this.sql`
+      SELECT update_thought(
+        ${opts.id}::uuid,
+        ${opts.content ?? null}::text,
+        ${opts.metadataPatch ?? null}::jsonb,
+        ${opts.embedding ? toVector(opts.embedding) : null}::vector,
+        ${chunks.length ? chunks : null}::jsonb,
+        ${opts.ifUnchangedSince ?? null}::timestamptz,
+        ${opts.actor ?? null}::jsonb
+      ) AS r`;
+    return normaliseMutation(rows[0]?.r as Record<string, unknown>);
+  }
+
+  async deleteThought(opts: {
+    id: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<MutationResult> {
+    const rows = await this.sql`
+      SELECT delete_thought(${opts.id}::uuid, ${opts.actor ?? null}::jsonb) AS r`;
+    return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }
 
   async close(): Promise<void> {

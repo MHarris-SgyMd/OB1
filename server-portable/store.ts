@@ -64,6 +64,34 @@ export type CaptureResult = {
  * — each implementation normalises its own error shape so callers do not have to
  * know whether they are talking to PostgREST or to Postgres.
  */
+/**
+ * A refused mutation is a result, not an exception: "your read was stale" and
+ * "that id does not exist" are things the caller should act on, and throwing
+ * would make them indistinguishable from a fault at the tool boundary.
+ */
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT";
+export type MutationResult =
+  | { ok: true; id: string }
+  | { ok: false; error: MutationError; currentUpdatedAt?: string };
+export type UpdateResult = MutationResult & { updatedAt?: string };
+
+/**
+ * Both SQL functions return the same {ok, id|error} envelope; this turns it into
+ * the store's discriminated union. Shared so the two stores cannot disagree
+ * about what a refusal looks like — the class of bug the audit work hit twice.
+ */
+export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
+  if (!r) return { ok: false, error: "NOT_FOUND" };
+  if (r.ok === true) {
+    return { ok: true, id: String(r.id), updatedAt: r.updated_at ? String(r.updated_at) : undefined };
+  }
+  return {
+    ok: false,
+    error: (r.error as MutationError) ?? "NOT_FOUND",
+    currentUpdatedAt: r.current_updated_at ? String(r.current_updated_at) : undefined,
+  };
+}
+
 export interface ThoughtStore {
   readonly kind: "postgrest" | "sql";
 
@@ -107,6 +135,27 @@ export interface ThoughtStore {
      */
     chunks?: { content: string; embedding: number[] }[];
   }): Promise<CaptureResult>;
+
+  /**
+   * Edit a thought. `content` absent leaves the text, embedding and chunks
+   * alone; `metadataPatch` shallow-merges. `ifUnchangedSince` is checked as a
+   * predicate on the write, not before it, so it cannot lose a race.
+   */
+  updateThought(opts: {
+    id: string;
+    content?: string;
+    metadataPatch?: Record<string, unknown>;
+    embedding?: number[];
+    chunks?: { content: string; embedding: number[] }[];
+    ifUnchangedSince?: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<UpdateResult>;
+
+  /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
+  deleteThought(opts: {
+    id: string;
+    actor?: { name: string; source?: string; session?: string };
+  }): Promise<MutationResult>;
 
   close(): Promise<void>;
 }

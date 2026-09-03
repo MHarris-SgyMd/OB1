@@ -121,6 +121,8 @@ evals/                           # fix 17  (new dir — retrieval + extraction b
 db/config.d.mts                  # fix 19  (new file — types for config.mjs; .d.mts, not .d.ts)
 db/migrations/007_*.sql          # fix 18  (new file — thought_chunks)
 db/migrations/008_*.sql          # fix 21  (new file — thought_audit)
+db/migrations/009_*.sql          # fix 22  (new file — update/delete)
+server-portable/test-update-delete.ts # fix 22 (new file)
 server-portable/test-audit.ts    # fix 21  (new file)
 db/test-support.ts               # fix 20  (new file — schema lifecycle, assert)
 db/ci-parity.sh                  # fix 20  (new file — CI's order, one shared Postgres)
@@ -471,6 +473,50 @@ Postgres client returns the `HINT` field as UTF-16 bytes with interleaved nulls*
 (`"T\0o\0 \0p\0r\0u\0n\0e\0…"`). Guidance put in `USING HINT` is unreadable to
 the runtime this server uses, so it lives in the exception message instead. A
 hint nobody can read is worse than none, because it looks like it worked.
+
+### 22. `update_thought` and `delete_thought` — a captured mistake was permanent
+
+Ported from `integrations/update-thought-mcp` and `delete-thought-mcp` as
+migration 009 plus two tools (Linear SMD-927). The surface could write and read
+but never correct or remove: a typo, a mis-captured secret, a duplicate the
+fingerprint missed, all permanent through the documented interface.
+
+**Two defects in the extension were fixed rather than ported.**
+
+`update-thought-mcp` issues a plain UPDATE of content and metadata and **never
+recomputes `content_fingerprint`**, leaving it describing text the row no longer
+holds. Dedup then breaks in both directions: re-capturing the OLD text hits the
+stale fingerprint and merges into the edited row, and capturing the NEW text
+finds no match and creates a duplicate of it. Migration 003's entire purpose,
+undone by one edit.
+
+Its concurrency guard is also **a race**: it SELECTs `updated_at`, compares in
+application code, then UPDATEs, so a writer committing in between causes exactly
+the lost update `if_unchanged_since` exists to prevent. Here the comparison is a
+predicate in the UPDATE's own WHERE clause.
+
+Two things this fork needs that upstream has no equivalent for: a content change
+replaces the `thought_chunks` from migration 007 — otherwise the search index
+still describes the previous text, findable by words that are gone and not by the
+ones that are there — and both tools are gated on write scope, so a read key does
+not see them in `tools/list` at all.
+
+The delete is **hard**, which is only defensible because migration 008 preserves
+`previous_content` before the row goes. Without that it should have been a soft
+delete, and the issue said so.
+
+`capture_thought` now returns the new id. It did not before, which was invisible
+until these two tools existed — an agent that captured a typo had no id to correct
+it with and had to search for its own thought.
+
+Refusals are results, not exceptions: `NOT_FOUND`, `STALE_READ` and
+`DUPLICATE_CONTENT` come back as values with a message saying what to do, because
+at the tool boundary a thrown error is indistinguishable from a fault.
+
+One tooling bug this shook out: `db/ci-parity.sh` judged a suite failed if its
+output contained `error:` anywhere — and a suite that tests error messages says
+"tool error" in its own assertion labels, so `test-update-delete` was reported
+failed while passing 27/27. It now reads the tally rather than the prose.
 
 ## Detached from the fork network
 
