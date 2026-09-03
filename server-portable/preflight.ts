@@ -223,6 +223,23 @@ if (configFailed) {
         if (Number(rows[0].c) >= 2) add("atomic capture", "ok", "both upsert_thought overloads present");
         else add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
                  "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
+
+        /**
+         * The audit trail, treated as fatal for the same reason migration 004 is:
+         * without it the server runs and captures succeed, and the only symptom
+         * is history that was never recorded. Audit cannot describe events that
+         * predate it, so serving unaudited for a week is a week that can never
+         * be reconstructed — worse than a crashloop, which is at least visible.
+         *
+         * Checking the TRIGGER rather than the table: the table alone would pass
+         * while nothing wrote to it.
+         */
+        const audit = await sql`
+          SELECT count(*)::int AS c FROM pg_trigger
+          WHERE tgname = 'thoughts_audit' AND NOT tgisinternal`;
+        if (Number(audit[0].c) >= 1) add("audit trail", "ok", "thoughts_audit trigger present");
+        else add("audit trail", "fail", "the thoughts_audit trigger is missing — mutations would go unrecorded",
+                 "Apply db/migrations/008_thought_audit.sql.");
         // ob1_config records the width and model the schema was created with.
         // A same-width model from a different family produces numerically valid,
         // semantically meaningless vectors — search degrades and nothing errors.

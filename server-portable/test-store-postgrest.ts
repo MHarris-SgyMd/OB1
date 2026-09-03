@@ -66,6 +66,31 @@ console.log("[1] captureThought without chunks — the 3-arg RPC, unchanged");
   await sql.close();
 }
 
+console.log("\n[1b] The actor reaches the audit trail on THIS store too");
+{
+  // The gap this suite exists to catch: an earlier version set the audit actor
+  // with a transaction-local setting in store-sql only, so every audit row
+  // written through PostgREST recorded a NULL actor — present, plausible, wrong.
+  const { id } = await store.captureThought({
+    content: "a thought captured with an actor",
+    payload: { metadata: { source: "postgrest-test" } },
+    embedding: vec(5),
+    actor: { name: "importer", source: "postgrest-test" },
+  });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const [ev] = await sql`
+    SELECT action, actor_name, source FROM thought_audit WHERE thought_id = ${id}`;
+  assert(ev?.actor_name === "importer", `attributed to the key name (${ev?.actor_name})`);
+  assert(ev?.action === "capture", "recorded as a capture");
+  assert(ev?.source === "postgrest-test", `source carried (${ev?.source})`);
+
+  // And the actor must not leak into the thought's own metadata — it rides in
+  // the payload envelope, which upsert_thought reads but does not store.
+  const [t] = await sql`SELECT metadata FROM thoughts WHERE id = ${id}`;
+  assert(t.metadata?.actor === undefined, "the actor is not stored on the thought itself");
+  await sql.close();
+}
+
 console.log("\n[2] captureThought WITH chunks — the 4-arg RPC arrives intact");
 {
   // This is the argument shape that shipped unverified: p_chunks as a jsonb array

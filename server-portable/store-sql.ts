@@ -143,6 +143,7 @@ export class SqlStore implements ThoughtStore {
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     chunks?: { content: string; embedding: number[] }[];
+    actor?: { name: string; source?: string; session?: string };
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -158,18 +159,28 @@ export class SqlStore implements ThoughtStore {
     // kept for the ordinary case rather than passing an empty array, so a
     // deployment that has not applied migration 007 keeps working unchanged.
     const chunks = opts.chunks ?? [];
+    /**
+     * The actor rides in the payload envelope, which migration 008's
+     * upsert_thought reads into a transaction-local setting for the audit
+     * trigger. Doing it here rather than with an explicit `set_config` around
+     * the call means the SQL and PostgREST stores use one mechanism — an
+     * earlier version wrapped this in a transaction and left PostgREST
+     * unattributed.
+     */
+    const envelope = opts.actor ? { ...opts.payload, actor: opts.actor } : opts.payload;
+
     const rows = chunks.length
       ? await this.sql`
           SELECT upsert_thought(
             ${opts.content}::text,
-            ${opts.payload}::jsonb,
+            ${envelope}::jsonb,
             ${toVector(opts.embedding)}::vector,
             ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
           ) AS r`
       : await this.sql`
           SELECT upsert_thought(
             ${opts.content}::text,
-            ${opts.payload}::jsonb,
+            ${envelope}::jsonb,
             ${toVector(opts.embedding)}::vector
           ) AS r`;
 
