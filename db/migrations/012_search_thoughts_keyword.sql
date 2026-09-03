@@ -163,16 +163,25 @@
 -- N rows, with `resolve-agent-zylotrope` planted at the same frequency as a decoy
 -- that only an unescaped pattern matches:
 --
---   rows       index used by the function   plan of the equivalent query
---   -------    --------------------------   ----------------------------
---     1,000    no                           Seq Scan
---    10,000    yes                          Bitmap Heap Scan
---   100,000    yes                          Bitmap Heap Scan
+--   rows       first call   index used in 12 more   equivalent query
+--   -------    ----------   ---------------------   ----------------
+--     1,000    seq          12/12                   Seq Scan
+--    10,000    index        12/12                   Bitmap Heap Scan
+--   100,000    index        12/12                   Bitmap Heap Scan
 --
 -- "Index used" is `pg_stat_user_indexes.idx_scan` read before and after the call,
 -- not a plan — EXPLAIN of a plpgsql function shows a Function Scan and nothing
--- about what happens inside it. The 1,000-row "no" is the planner being right:
--- 011's own benchmark put the crossover between 1,000 and 10,000 rows.
+-- about what happens inside it.
+--
+-- The twelve extra calls are there because plpgsql may switch to a GENERIC plan
+-- after five executions of the same statement, built without knowing the
+-- pattern. If one ever chose a sequential scan, the function would be fast five
+-- times and then far slower for the rest of the session. It does not.
+--
+-- The 1,000-row row disagrees with itself and that is fine: below the crossover
+-- both plans cost the same — 2.9 ms either way, reproducibly — so the planner is
+-- entitled to pick either, and it picks both. 011's own benchmark put the
+-- crossover between 1,000 and 10,000 rows.
 --
 -- ── What the function costs over the bare pattern ────────────────────────────
 -- Median of 5, same run, wall clock including the client round-trip:

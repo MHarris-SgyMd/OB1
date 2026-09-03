@@ -178,7 +178,19 @@ escapes `_` and `%` before wrapping the needle, because unescaped they are ILIKE
 wildcards and `upsert_thought` would also match `upsert-thought`. But `_` is the
 most common character in the identifiers the feature exists to find, and nothing
 had checked that pg_trgm can extract grams across `\_`. It can: the index is used
-at 10,000 and 100,000 rows, and correctly not used at 1,000.
+at 10,000 and 100,000 rows, on the first call and on twelve more.
+
+Those twelve extra calls are there because plpgsql may switch to a **generic
+plan** after five executions of the same statement, built without knowing the
+pattern. If one ever chose a sequential scan the function would be fast five
+times and then far slower for the rest of the session, which no single-shot
+timing can see. At 1,000 rows the first call sequentially scans and the next
+twelve use the index — reproducibly, and it does not matter: below the crossover
+both plans cost 2.9 ms and the planner is entitled to pick either.
+
+That column reports a count rather than a verdict on purpose. Its first version
+compared the twelve calls against the single probe before them and printed
+`NO — PLAN CHANGED` at 1,000 rows, which was true and meaningless.
 
 That is established from `pg_stat_user_indexes.idx_scan` read before and after the
 call, not from a plan — `EXPLAIN` of a plpgsql function shows a Function Scan and
@@ -222,7 +234,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 69 assertions, PGlite, no container
+bun test-schema.ts                    # 108 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 30 assertions, real server, throwaway container
 ```
 

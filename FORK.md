@@ -1015,8 +1015,21 @@ wildcards, and `_` is the most common character in the identifiers this exists t
 find. Unescaped, `ILIKE '%upsert_thought%'` also matches `upsert-thought` and
 `upsertXthought` — a tool whose contract is exactness returning approximate rows
 with no signal. That raised a question nothing had answered: can pg_trgm still
-extract grams from a pattern containing `\_`? It can — `db/bench-keyword.ts`
-shows the index used at 10,000 and 100,000 rows and correctly not used at 1,000.
+extract grams from a pattern containing `\_`? It can — `db/bench-keyword.ts`:
+
+| rows | first call | index used in 12 more | equivalent query |
+| --- | --- | --- | --- |
+| 1,000 | seq | 12/12 | Seq Scan |
+| 10,000 | index | 12/12 | Bitmap Heap Scan |
+| 100,000 | index | 12/12 | Bitmap Heap Scan |
+
+The twelve extra calls exist because plpgsql may switch to a **generic plan**
+after five executions of the same statement, built without knowing the pattern.
+If one ever chose a sequential scan the function would be fast five times and
+then far slower for the rest of the session — a regression no single-shot timing
+can see. It does not happen. The 1,000-row row disagrees with itself,
+reproducibly, and that is fine: below the crossover both plans cost 2.9 ms, so
+the planner is entitled to pick either and does.
 
 **Not trimming the query is also a correctness issue,** and the test suite found
 it rather than the design. An earlier version trimmed the needle, so searching for

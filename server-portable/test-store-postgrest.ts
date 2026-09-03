@@ -149,6 +149,12 @@ console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
   assert(hits[0].occurrences === 1, `occurrences arrives as a number (${hits[0].occurrences})`);
   assert(typeof hits[0].id === "string" && hits[0].id.length === 36, "…with a uuid id");
 
+  // The two stores must agree on the SHAPE of a field, not merely have one. This
+  // path returned a locale- and timezone-formatted date where the SQL store
+  // returns ISO, and every assertion that only checked presence passed.
+  assert(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(hits[0].created_at),
+         `created_at is an ISO string, as the SQL store returns (got ${hits[0].created_at})`);
+
   // The p_filter argument, which is the jsonb one and therefore the one that
   // binds wrongly if it is pre-stringified.
   const kept = await store.keywordThoughts({ query: "PGRST202", limit: 10, offset: 0, filter: { kind: "kw" } });

@@ -60,6 +60,9 @@ const SCALES = (process.env.OB1_BENCH_SCALES ?? "1000,10000,100000")
 
 const REPEATS = Number(process.env.OB1_BENCH_REPEATS ?? 5);
 
+/** Calls made to see whether plpgsql switches to a generic plan. Must exceed 5. */
+const PLAN_CALLS = 12;
+
 /**
  * The needle, and the decoy that makes the escaping falsifiable.
  *
@@ -194,6 +197,7 @@ type Row = {
   noOccMs: number;
   midMs: number;
   usedIndex: boolean;
+  usedInLoop: number;
   escapedPlan: string;
   midPlan: string;
 };
@@ -278,6 +282,27 @@ for (const scale of SCALES) {
     )
   );
 
+  // ── Does the plan survive repeated calls in one session? ─────────────────
+  //
+  // plpgsql caches the plan for a statement inside a function and may switch to
+  // a GENERIC plan after five executions. A generic plan is built without
+  // knowing the pattern, so if one ever chose a sequential scan the function
+  // would be fast five times and then far slower for the rest of the session —
+  // a regression no single-shot timing can see.
+  //
+  // Reported as a COUNT, not as a verdict. The first version compared the twelve
+  // calls against the single probe above and printed "NO — PLAN CHANGED" at
+  // 1,000 rows, which was true and meaningless: below the crossover the two
+  // plans cost the same and the planner reasonably picks either. A boolean
+  // derived from one earlier sample turns that into an alarm. The number says
+  // what happened and lets the reader judge it.
+  let usedInLoop = 0;
+  for (let i = 0; i < PLAN_CALLS; i++) {
+    const b4 = await indexScans(sql);
+    await sql`SELECT id FROM search_thoughts_keyword(${IDENT}, 25, 0, '{}'::jsonb)`;
+    if ((await indexScans(sql)) > b4) usedInLoop++;
+  }
+
   // ~10% of rows: where the index helps least and the per-row work most.
   const mid = await time(() =>
     sql`SELECT id, occurrences, total_count FROM search_thoughts_keyword(${MID}, 25, 0, '{}'::jsonb)`
@@ -291,6 +316,7 @@ for (const scale of SCALES) {
     noOccMs: noOcc.ms,
     midMs: mid.ms,
     usedIndex,
+    usedInLoop,
     escapedPlan: await planOf(sql, escaped),
     midPlan: await planOf(sql, `%${MID}%`),
   });
@@ -302,12 +328,13 @@ for (const scale of SCALES) {
 // ── Report ───────────────────────────────────────────────────────────────────
 
 console.log("\n  1. Does an ESCAPED pattern still reach the trigram index?\n");
-console.log("     rows        idx_scan rose   plan (inlined equivalent)");
-console.log("     ─────────   ─────────────   ─────────────────────────");
+console.log(`     rows        first call   index used in ${PLAN_CALLS} more   plan (inlined equivalent)`);
+console.log("     ─────────   ──────────   ─────────────────────   ─────────────────────────");
 for (const r of results) {
   console.log(
     `     ${String(r.scale.toLocaleString()).padEnd(9)}   ` +
-      `${(r.usedIndex ? "yes" : "NO").padEnd(13)}   ${r.escapedPlan}`
+      `${(r.usedIndex ? "index" : "seq").padEnd(10)}   ` +
+      `${`${r.usedInLoop}/${PLAN_CALLS}`.padEnd(21)}   ${r.escapedPlan}`
   );
 }
 console.log(
@@ -315,7 +342,13 @@ console.log(
     "     after the function call, so it describes what the FUNCTION did. The plan\n" +
     "     beside it is EXPLAIN of the equivalent inlined query — the same pattern,\n" +
     "     but a reconstruction, because EXPLAIN of a plpgsql call shows only a\n" +
-    "     Function Scan."
+    "     Function Scan.\n\n" +
+    "     The third column exists because plpgsql may switch to a GENERIC plan\n" +
+    "     after five executions of the same statement, built without knowing the\n" +
+    "     pattern. If one ever chose a sequential scan, the function would be fast\n" +
+    "     five times and then slow for the rest of the session. Below the\n" +
+    "     crossover a mixed count is not a problem — both plans cost the same\n" +
+    "     there, and the planner is entitled to pick either."
 );
 
 console.log("\n  2. What the function costs over a bare indexed ILIKE\n");

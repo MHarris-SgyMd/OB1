@@ -97,14 +97,20 @@ function tokenize(text: string): string[] {
  *           — so lumping them in would have let the weakest cases carry the
  *           headline.
  * `camel` — interior capitals: getUserById.
+ * `word`  — none of the above: an ordinary rare word. Excluded from the default
+ *           query set, and only reachable under `--all-hapax`. It has its own
+ *           label rather than being folded into one of the others: an earlier
+ *           version coerced these to `code`, so `--all-hapax` would have
+ *           reported plain English words in the row labelled "digit or
+ *           underscore" and produced a table that was wrong rather than noisy.
  */
-type Shape = "code" | "path" | "camel";
-function shapeOf(t: string): Shape | null {
-  if (/^\d+$/.test(t)) return null;                  // a bare number is not an identifier
+type Shape = "code" | "path" | "camel" | "word";
+function shapeOf(t: string): Shape {
+  if (/^\d+$/.test(t)) return "word";                // a bare number is not an identifier
   if (/\d/.test(t) || /_/.test(t)) return "code";
   if (/[/.]/.test(t)) return "path";
   if (/[a-z][A-Z]/.test(t)) return "camel";
-  return null;
+  return "word";
 }
 
 const df = new Map<string, Set<string>>();
@@ -147,8 +153,8 @@ const substringHapax = (token: string): string | null => {
 let candidates = [...df.entries()]
   .filter(([, docs]) => docs.size === 1)
   .map(([token]) => ({ token, shape: shapeOf(token) }))
-  .filter((c): c is { token: string; shape: Shape } => ALL_HAPAX || c.shape !== null)
-  .map((c) => ({ ...c, shape: c.shape ?? ("code" as Shape), want: substringHapax(c.token) }))
+  .filter((c) => ALL_HAPAX || c.shape !== "word")
+  .map((c) => ({ ...c, want: substringHapax(c.token) }))
   .filter((c): c is { token: string; shape: Shape; want: string } => c.want !== null);
 
 if (candidates.length === 0) {
@@ -265,10 +271,11 @@ const SHAPE_NOTE: Record<Shape, string> = {
   code: "digit or underscore (SMD-506, foo_bar)",
   path: "slash or dot (UI/API, db/config.mjs)",
   camel: "interior capitals (getUserById)",
+  word: "ordinary rare word (--all-hapax only)",
 };
 console.log("  shape                                            n    R@1   not in top-" + String(TOPN).padEnd(3) + " MRR");
 console.log("  ──────────────────────────────────────────────  ───   ────  ───────────  ─────");
-for (const shape of ["code", "path", "camel"] as Shape[]) {
+for (const shape of ["code", "path", "camel", "word"] as Shape[]) {
   const g = rows.filter((r) => r.shape === shape);
   if (!g.length) continue;
   const first = g.filter((r) => r.vectorRank === 1).length;
