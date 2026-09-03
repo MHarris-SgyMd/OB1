@@ -118,6 +118,18 @@ db/config.mjs                    # fix 15  (new file)
 db/migrations/006_*.sql          # fix 15  (new file)
 server-portable/test-local-provider.ts # fix 16 (new file)
 evals/                           # fix 17  (new dir — retrieval + extraction benchmarks)
+db/config.d.mts                  # fix 19  (new file — types for config.mjs; .d.mts, not .d.ts)
+db/migrations/007_*.sql          # fix 18  (new file — thought_chunks)
+db/test-support.ts               # fix 20  (new file — schema lifecycle, assert)
+db/ci-parity.sh                  # fix 20  (new file — CI's order, one shared Postgres)
+server-portable/chunk.ts         # fix 18  (new file)
+server-portable/thoughts.ts      # fix 20  (new file — pure rules, lifted for testing)
+server-portable/test-support.ts  # fix 20  (new file — the MCP client)
+server-portable/test-thoughts.ts # fix 20  (new file)
+evals/lib.ts                     # fix 20  (new file — shared embedding path)
+evals/bench.ts                   # fix 20  (new file — compare a model to the record)
+evals/baselines.json             # fix 20  (new file — recorded results)
+.dockerignore                    # fix 20  (new file — root build context)
 scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 docs/01-getting-started.md       # fix 6
@@ -290,12 +302,19 @@ looked different on the surface:
 | schema reset across 9 test files | stale `thought_chunks` broke a later suite in CI only |
 | compose `${VAR:-fallback}` vs `config.mjs` | a stale fallback would silently override the code default |
 | **preflight's own copy of the defaults** | **the gate validated a configuration that was never going to run** |
+| `applyPrompt` (server vs `evals/lib.ts`) | introduced *while fixing* this same pattern, one commit earlier |
 
 The last one is the worst of them and survived until a deliberate look for it.
 `preflight.ts` exists to refuse to serve when misconfigured, and it held its own
 `"openai/text-embedding-3-small"` and `1536`, so after the default moved it checked
 `text-embedding-3-small @ 1536` while the server ran `qwen3-embedding:4b @ 1024`.
 Invisible in the container, because compose sets every one of those explicitly.
+
+The last row is the instructive one: it was introduced one commit after this
+section was written, by the person who wrote it, in a commit whose subject was
+removing duplication. Naming a pattern does not stop you repeating it — only a
+check does, which is why the row above it is now enforced by
+`scripts/check-fork-consistency.mjs` rather than by intent.
 
 The pattern is consistent enough to be a rule: **a default that appears in two
 files will be wrong in one of them, and the copy that goes stale is the one nobody
@@ -308,6 +327,73 @@ of pinning their own, so changing the default broke tests that were testing
 something else entirely — `test-e2e-sql` matched a provider by the literal string
 `openrouter.ai`, `test-preflight` hardcoded `1536`, `test-embedding-dimensions`
 keyed a stub off exact input text. A suite should pin what it does not test.
+
+### 20. Shared scaffolding, and pure logic lifted out of `index.ts`
+
+A refactor pass over code this fork owns entirely — `server-portable/`, `db/`,
+`evals/`, `compat/` are all new directories, so none of this can conflict on a
+rebase. It found two live defects before it removed a line, which is recorded
+above; what follows is the extraction itself.
+
+**`db/test-support.ts`** — `dropSchema()`, `applyMigrations()`, `resetSchema()`,
+`createAssert()` with `skip()`, and `requireDatabaseUrl()`. Nine suites had their
+own schema reset, eleven their own counting assert. Drop and apply are separate
+exports because `db/test-live.ts` only drops (it applies later, since `migrate.ts`
+is what it tests) and `test-preflight.ts` asserts the un-migrated state in between
+— two steps beat an option that exists for one caller. `dropSchema()` owns a
+function list as well as a table list, which closed a latent bug: `test-live` had
+never dropped the 4-argument `upsert_thought` migration 007 added, so its reset
+left one behind, masked by `CREATE OR REPLACE`.
+
+**`server-portable/test-support.ts`** — the MCP client five suites carried,
+including the SSE fallback that is easy to omit when copying and only fails on
+transports that use it.
+
+**`evals/lib.ts`** — the spec grammar (`model[!bare|!gemma][@dims]`), prompt
+application, the embedding call and cosine. Four harnesses had their own `embed`
+and were sending **three different query instructions**, none of them the server's.
+Since the same model scores 0.938 prompted and 0.860 bare, that made their numbers
+incomparable to each other as well as to production.
+
+**`server-portable/thoughts.ts`** — `normaliseType`, `thoughtTitle`, `thoughtUrl`.
+Extracted for testability, not size: `index.ts` exports only its fetch handler, so
+these were reachable only by booting a server, stubbing a provider and driving a
+capture over JSON-RPC, once per case. Nobody writes seven of those to check an
+alias table, so nobody wrote any — the table had been shipping unverified since it
+was added, and it exists because llama3.2 really did return `action_item`.
+`thoughtUrl` now takes its base as an argument instead of reading the environment,
+which is what lets the file be tested without one. `test-thoughts.ts` adds 40
+assertions and needs neither database nor provider.
+
+**Not split:** the six `registerTool` blocks are 430 of `index.ts`'s remaining 947
+lines. They are schema plus handler, cohesive, and already driven end to end over
+MCP. Splitting them would be motivated by a line count.
+
+**The codebase got slightly bigger, not smaller**, and it is worth being straight
+about that. Measured across the five refactor commits, excluding markdown:
+
+| | added | removed | net |
+| --- | --- | --- | --- |
+| existing suites and harnesses | 103 | 487 | **−384** |
+| new shared modules and tests | 467 | 9 | **+458** |
+| | | | **+74** |
+
+So 384 lines of duplication genuinely left the callers, and 458 arrived in five new
+files — of which 79 are `test-thoughts.ts`, coverage that did not exist before, and
+much of the rest is the comments explaining why each helper is shaped as it is. A
+line count was never the case for this: the case is that adding a table to the
+schema used to mean nine edits and now means one, and that four harnesses can no
+longer disagree about what prompt they send.
+
+Every suite reports exactly the count it reported before the pass — 63, 30, 37, 30,
+31, 15, 13, 10, 21, 61, plus 43, 41 and the new 40 — which is the only check that
+means anything when the thing being refactored is the tests.
+
+One process note, since it cost four reverts. Regex-over-the-file replacement
+failed three times: twice by over-matching into unrelated code, once by silently
+not matching and leaving dead code beside an unused import. What worked every time
+was line-anchored — locate the declaration, walk to its boundary by brace column,
+assert the span contains nothing unexpected, and refuse the file otherwise.
 
 ## Detached from the fork network
 
