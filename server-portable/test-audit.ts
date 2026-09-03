@@ -100,6 +100,23 @@ console.log("\n[2] The row records WHICH key wrote it");
   assert(new Set(names).size === 2, "two distinct actors distinguished");
 }
 
+console.log("\n[2b] A duplicate re-capture is not an event");
+{
+  // The fingerprint dedup exists so a bulk re-import is idempotent. A re-capture
+  // of identical content takes the ON CONFLICT branch and moves `updated_at` and
+  // nothing else — which produced an audit row with an empty diff per duplicate,
+  // so re-running a large import wrote thousands of rows saying nothing happened.
+  const before = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  await laptop.call("capture_thought", { content: "the first captured thought" });
+  await laptop.call("capture_thought", { content: "the first captured thought" });
+  const after = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  assert(after === before, `two identical re-captures wrote no audit rows (${before} → ${after})`);
+
+  // But a re-capture that genuinely changes metadata still is an event.
+  const [t] = await sql`SELECT count(*)::int AS c FROM thoughts WHERE content = 'the first captured thought'`;
+  assert(t.c === 1, "…and dedup still collapsed them to one thought");
+}
+
 console.log("\n[3] A delete preserves enough to reconstruct what was lost");
 {
   const [row] = await sql`SELECT id, content FROM thoughts WHERE content LIKE 'the first%'`;

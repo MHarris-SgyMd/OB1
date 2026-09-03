@@ -447,6 +447,25 @@ payload-validation guard dropped it, and `db/test-schema.ts` caught it on the
 next run. Anything redefining that function again must carry both 005's guard
 and 008's actor setting forward.
 
+Two things a second review pass caught, both the same shape — the feature
+working while quietly doing the wrong thing:
+
+**A duplicate re-capture was logged as an update that changed nothing.** The
+fingerprint dedup exists so a bulk re-import is idempotent, and a re-capture of
+identical content takes the `ON CONFLICT` branch, moving `updated_at` and nothing
+else. That wrote one audit row per duplicate with an empty diff, so re-running a
+10,000-thought import produced 10,000 rows saying nothing happened — unbounded
+growth on the operation designed to be repeatable, and a log too noisy to answer
+the question it exists for. The trigger now returns early when the diff is empty:
+`updated_at` moving alone is bookkeeping, not history.
+
+**`preflight.ts` reported OK on a database with no audit table.** Captures
+succeeded and went unrecorded, and the only symptom was history that never
+existed. Now a `fail`, matching how migration 004's absence is treated — and it
+checks the *trigger*, not the table, because the table alone would pass while
+nothing wrote to it. Serving unaudited for a week is a week that cannot be
+reconstructed, which is worse than a crashloop because it is invisible.
+
 One incidental finding, recorded because it changed the implementation: **Bun's
 Postgres client returns the `HINT` field as UTF-16 bytes with interleaved nulls**
 (`"T\0o\0 \0p\0r\0u\0n\0e\0…"`). Guidance put in `USING HINT` is unreadable to

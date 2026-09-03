@@ -233,6 +233,23 @@ BEGIN
       v_diff := v_diff || jsonb_build_object('embedding_present', NEW.embedding IS NOT NULL);
     END IF;
 
+    /**
+     * An update that changed nothing is not an event.
+     *
+     * The fingerprint dedup exists so a bulk re-import is idempotent, and a
+     * re-capture of identical content takes the ON CONFLICT branch — moving
+     * `updated_at` and nothing else. Recording that produced an audit row with
+     * an empty diff per duplicate, so re-running a 10,000-thought import wrote
+     * 10,000 rows saying nothing happened: unbounded growth on the exact
+     * operation designed to be repeatable, and a log too noisy to read for the
+     * question it exists to answer.
+     *
+     * `updated_at` moving on its own is bookkeeping, not history.
+     */
+    IF v_diff = '{}'::jsonb THEN
+      RETURN NULL;
+    END IF;
+
   ELSE  -- DELETE
     v_action := 'delete';
     v_id     := OLD.id;
