@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "ob1-db",
+      "devDependencies": {
+        "@electric-sql/pglite": "0.3.10",
+      },
+    },
+  },
+  "packages": {
+    "@electric-sql/pglite": ["@electric-sql/pglite@0.3.10", "", {}, "sha512-1XtXXprd848aR4hvjNqBc3Gc86zNGmd60x+MgOUShbHYxt+J76N8A81DqTEl275T8xBD0vdTgqR/dJ4yJyz0NQ=="],
+  }
+}

@@ -1,3 +1,9 @@
+// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
+// Same API, but it speaks SQL directly. The environment variable NAMES are
+// unchanged — set SUPABASE_URL to a postgres:// connection string, and
+// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
+// ob1-original-import: npm:@supabase/supabase-js@2
+// Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
 /**
  * consolidation-bio — Generate a canonical biographical profile from existing thoughts.
  *
@@ -19,7 +25,7 @@
  * See docs/05-tool-audit.md for the full tool and worker inventory.
  */
 
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "../../../compat/supabase-sql/index.ts";
 import {
   isRecord,
   asString,

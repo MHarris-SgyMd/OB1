@@ -17,6 +17,21 @@ Content fingerprint dedup solves all of that at the database level. Re-running a
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - The `thoughts` table must already exist
 
+> [!NOTE]
+> **If you followed the current getting-started guide, you already have this.**
+> Steps 1 and 2 below are the same SQL as core setup step 2.6 — this recipe
+> predates that step and was later folded into it. The statements are now
+> guarded with `IF NOT EXISTS`, so re-running them is harmless, but you can skip
+> straight to [Step 3](#step-3-backfill-existing-rows-optional) if your `thoughts`
+> table already has a `content_fingerprint` column.
+>
+> Check with:
+>
+> ```sql
+> SELECT column_name FROM information_schema.columns
+> WHERE table_name = 'thoughts' AND column_name = 'content_fingerprint';
+> ```
+
 ## How It Works
 
 The dedup chain has three parts:
@@ -41,9 +56,9 @@ Input: "  Hello   World  "
 Run this in your Supabase SQL Editor:
 
 ```sql
-ALTER TABLE thoughts ADD COLUMN content_fingerprint TEXT;
+ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS content_fingerprint TEXT;
 
-CREATE UNIQUE INDEX idx_thoughts_fingerprint
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thoughts_fingerprint
   ON thoughts (content_fingerprint)
   WHERE content_fingerprint IS NOT NULL;
 ```

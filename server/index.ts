@@ -33,6 +33,13 @@ type ThoughtRecord = {
 const CITATION_BASE_URL =
   Deno.env.get("OPEN_BRAIN_CITATION_BASE_URL") || "https://openbrain.local/thoughts";
 
+// thought_stats pagination. Supabase caps an unbounded select at 1000 rows, so
+// stats must page explicitly or they silently describe only the newest page.
+// STATS_MAX_ROWS bounds the work so a very large brain cannot exhaust the Edge
+// Function's time budget; hitting it is reported in the output, never hidden.
+const STATS_PAGE_SIZE = 1000;
+const STATS_MAX_ROWS = 100_000;
+
 function thoughtTitle(content: string, createdAt?: string): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
   const datePrefix = createdAt ? new Date(createdAt).toLocaleDateString() : "Open Brain";
@@ -88,11 +95,49 @@ Only extract what's explicitly there.`,
       ],
     }),
   });
-  const d = await r.json();
+
+  // The original swallowed every failure into the fallback below: an auth error,
+  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
+  // "uncategorized" and a success message to the user, with no way to tell a
+  // genuinely uncategorisable thought from a broken API key. Capture must still
+  // succeed — the content matters more than the tags — but the degradation is
+  // now recorded on the thought and surfaced in the confirmation.
+  const fallback = (reason: string): Record<string, unknown> => ({
+    topics: ["uncategorized"],
+    type: "observation",
+    metadata_extraction_failed: reason,
+  });
+
+  if (!r.ok) {
+    const msg = await r.text().catch(() => "");
+    console.error(`extractMetadata: OpenRouter ${r.status} ${msg.slice(0, 500)}`);
+    return fallback(`openrouter_${r.status}`);
+  }
+
+  let d: { choices?: [{ message?: { content?: string } }] };
   try {
-    return JSON.parse(d.choices[0].message.content);
+    d = await r.json();
   } catch {
-    return { topics: ["uncategorized"], type: "observation" };
+    console.error("extractMetadata: OpenRouter returned a non-JSON body");
+    return fallback("invalid_response_body");
+  }
+
+  const content = d?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    console.error("extractMetadata: OpenRouter response had no message content");
+    return fallback("no_message_content");
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.error("extractMetadata: model returned JSON that is not an object");
+      return fallback("unexpected_json_shape");
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    console.error("extractMetadata: model content was not valid JSON");
+    return fallback("unparseable_model_output");
   }
 }
 
@@ -378,22 +423,57 @@ function buildServer(): McpServer {
           .from("thoughts")
           .select("*", { count: "exact", head: true });
 
-        const { data } = await supabase
-          .from("thoughts")
-          .select("metadata, created_at")
-          .order("created_at", { ascending: false });
-
+        // Supabase caps an unbounded select at 1000 rows by default, so a single
+        // query silently aggregates only the newest page while `count` above
+        // reports the whole corpus — the two halves of the response then describe
+        // different datasets with no indication. Page explicitly instead, and
+        // tally as we go so we never hold the corpus in memory.
         const types: Record<string, number> = {};
         const topics: Record<string, number> = {};
         const people: Record<string, number> = {};
 
-        for (const r of data || []) {
-          const m = (r.metadata || {}) as Record<string, unknown>;
-          if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-          if (Array.isArray(m.topics))
-            for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-          if (Array.isArray(m.people))
-            for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+        let aggregated = 0;
+        let newest: string | null = null;
+        let oldest: string | null = null;
+        let truncated = false;
+
+        for (let offset = 0; ; offset += STATS_PAGE_SIZE) {
+          if (offset >= STATS_MAX_ROWS) {
+            truncated = true;
+            break;
+          }
+
+          const { data: page, error } = await supabase
+            .from("thoughts")
+            .select("metadata, created_at")
+            .order("created_at", { ascending: false })
+            .range(offset, offset + STATS_PAGE_SIZE - 1);
+
+          if (error) {
+            return {
+              content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+              isError: true,
+            };
+          }
+
+          if (!page || page.length === 0) break;
+
+          for (const r of page) {
+            const m = (r.metadata || {}) as Record<string, unknown>;
+            if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
+            if (Array.isArray(m.topics))
+              for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
+            if (Array.isArray(m.people))
+              for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+          }
+
+          // Ordered newest-first, so the first row seen is the newest overall and
+          // the last row of the final page is the oldest.
+          if (newest === null) newest = page[0].created_at;
+          oldest = page[page.length - 1].created_at;
+          aggregated += page.length;
+
+          if (page.length < STATS_PAGE_SIZE) break; // short page — corpus exhausted
         }
 
         const sort = (o: Record<string, number>): [string, number][] =>
@@ -404,16 +484,24 @@ function buildServer(): McpServer {
         const lines: string[] = [
           `Total thoughts: ${count}`,
           `Date range: ${
-            data?.length
-              ? new Date(data[data.length - 1].created_at).toLocaleDateString() +
+            newest && oldest
+              ? new Date(oldest).toLocaleDateString() +
                 " → " +
-                new Date(data[0].created_at).toLocaleDateString()
+                new Date(newest).toLocaleDateString()
               : "N/A"
           }`,
-          "",
-          "Types:",
-          ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
         ];
+
+        // Never report aggregates as corpus-wide when they are not. If we stopped
+        // at the safety cap, say so rather than quietly under-reporting.
+        if (truncated) {
+          lines.push(
+            `Note: breakdowns below cover the ${aggregated.toLocaleString()} most recent thoughts ` +
+              `(safety cap ${STATS_MAX_ROWS.toLocaleString()}), not all ${count?.toLocaleString() ?? "?"}.`
+          );
+        }
+
+        lines.push("", "Types:", ...sort(types).map(([k, v]) => `  ${k}: ${v}`));
 
         if (Object.keys(topics).length) {
           lines.push("", "Top topics:");
@@ -459,27 +547,86 @@ function buildServer(): McpServer {
           extractMetadata(content),
         ]);
 
-        const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+        const payload = { metadata: { ...metadata, source: "mcp" } };
+
+        // Single round-trip: content, metadata and embedding land in one
+        // statement. The two-step version below could leave a row committed with
+        // a NULL embedding if the follow-up UPDATE failed — the thought would be
+        // stored but invisible to every semantic search, with no error surfaced
+        // after the fact. Requires db/migrations/004_upsert_thought_with_embedding.sql.
+        const { data: atomicResult, error: atomicError } = await supabase.rpc("upsert_thought", {
           p_content: content,
-          p_payload: { metadata: { ...metadata, source: "mcp" } },
+          p_payload: payload,
+          p_embedding: embedding,
         });
 
-        if (upsertError) {
+        // PGRST202 = no function matching that name and argument list. Deployments
+        // that have not applied the migration fall back to the original two-step
+        // path so this stays a drop-in replacement.
+        const atomicUnavailable =
+          atomicError && (atomicError.code === "PGRST202" || /Could not find the function/i.test(atomicError.message ?? ""));
+
+        if (atomicError && !atomicUnavailable) {
           return {
-            content: [{ type: "text" as const, text: `Failed to capture: ${upsertError.message}` }],
+            content: [{ type: "text" as const, text: `Failed to capture: ${atomicError.message}` }],
             isError: true,
           };
         }
 
-        const thoughtId = upsertResult?.id;
-        const { error: embError } = await supabase
-          .from("thoughts")
-          .update({ embedding })
-          .eq("id", thoughtId);
+        if (atomicUnavailable) {
+          console.warn(
+            "capture_thought: 3-arg upsert_thought not found — falling back to the " +
+              "non-atomic two-step write. Apply db/migrations/004_upsert_thought_with_embedding.sql."
+          );
 
-        if (embError) {
+          const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+            p_content: content,
+            p_payload: payload,
+          });
+
+          if (upsertError) {
+            return {
+              content: [{ type: "text" as const, text: `Failed to capture: ${upsertError.message}` }],
+              isError: true,
+            };
+          }
+
+          const thoughtId = upsertResult?.id;
+          if (!thoughtId) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Failed to capture: upsert_thought returned no id, so the embedding could not be attached.",
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const { error: embError } = await supabase
+            .from("thoughts")
+            .update({ embedding })
+            .eq("id", thoughtId);
+
+          if (embError) {
+            // The row is committed but unsearchable. Say so plainly — the old code
+            // reported a generic failure that read as "nothing was saved".
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `Thought saved (id ${thoughtId}) but its embedding failed to attach: ` +
+                    `${embError.message}. It will NOT appear in semantic search until re-captured.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        } else if (!atomicResult?.id) {
           return {
-            content: [{ type: "text" as const, text: `Failed to save embedding: ${embError.message}` }],
+            content: [{ type: "text" as const, text: "Failed to capture: upsert_thought returned no id." }],
             isError: true,
           };
         }
@@ -492,6 +639,15 @@ function buildServer(): McpServer {
           confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
         if (Array.isArray(meta.action_items) && meta.action_items.length)
           confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+
+        // Tell the user when tags are placeholders rather than real extraction,
+        // so a broken OPENROUTER_API_KEY does not look like a successful capture.
+        if (typeof meta.metadata_extraction_failed === "string") {
+          confirmation +=
+            `\n\nNote: the thought was saved, but automatic tagging failed ` +
+            `(${meta.metadata_extraction_failed}) — topics and people are placeholders. ` +
+            `Check OPENROUTER_API_KEY and the function logs.`;
+        }
 
         return {
           content: [{ type: "text" as const, text: confirmation }],

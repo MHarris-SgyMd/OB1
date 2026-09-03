@@ -1,0 +1,198 @@
+{
+  "_comment": [
+    "Recorded results, so a new model can be compared by a script rather than by",
+    "reading prose. Every number here was produced by the harness named in 'via',",
+    "at OB1_EVAL_TEMP=0, against local Ollama.",
+    "",
+    "The retrieval corpus is 97 closed issues from a real Linear tracker and is NOT",
+    "committed \u2014 see eval-real.ts. Anyone re-running gets different absolute numbers",
+    "on their own corpus, which is the point; what transfers is the ORDERING and the",
+    "size of the gaps. Re-baseline with `bun bench.ts --rebaseline` after changing",
+    "the corpus, or these become a comparison against someone else's data.",
+    "qwen3-embedding:4b@1024 was 0.933 while the harness used its own instruction text; it is 0.938 now that the harness reads db/config.mjs, i.e. now that it measures the prompt the server actually sends."
+  ],
+  "corpus": {
+    "retrieval": "97 real Linear issues, title as query, body as document",
+    "extraction": "14 synthetic captures, scored per field, max 84"
+  },
+  "defaults": {
+    "embedding": "qwen3-embedding:4b",
+    "embeddingDim": 1024,
+    "metadata": "qwen2.5:7b"
+  },
+  "embedding": {
+    "via": "eval-real.ts",
+    "metric": "mrr",
+    "results": {
+      "qwen3-embedding:4b@1024": {
+        "mrr": 0.938,
+        "r1": 0.91,
+        "sec": 13.2,
+        "gb": 2.5
+      },
+      "qwen3-embedding:0.6b": {
+        "mrr": 0.918,
+        "r1": 0.87,
+        "sec": 5.2,
+        "gb": 0.64
+      },
+      "embeddinggemma": {
+        "mrr": 0.916,
+        "r1": 0.86,
+        "sec": 4.1,
+        "gb": 0.62
+      },
+      "qwen3-embedding:8b@1024": {
+        "mrr": 0.919,
+        "r1": 0.88,
+        "sec": 20.0,
+        "gb": 4.7
+      },
+      "snowflake-arctic-embed2": {
+        "mrr": 0.921,
+        "r1": 0.87,
+        "sec": 6.1,
+        "gb": 1.2
+      },
+      "granite-embedding": {
+        "mrr": 0.902,
+        "r1": 0.86,
+        "sec": 1.9,
+        "gb": 0.06
+      },
+      "bge-m3": {
+        "mrr": 0.901,
+        "r1": 0.86,
+        "sec": 5.2,
+        "gb": 1.2
+      },
+      "bge-large": {
+        "mrr": 0.894,
+        "r1": 0.82,
+        "sec": 3.0,
+        "gb": 0.67
+      },
+      "nomic-embed-text": {
+        "mrr": 0.89,
+        "r1": 0.82,
+        "sec": 1.9,
+        "gb": 0.27
+      },
+      "mxbai-embed-large": {
+        "mrr": 0.882,
+        "r1": 0.8,
+        "sec": 3.1,
+        "gb": 0.67
+      },
+      "all-minilm": {
+        "mrr": 0.869,
+        "r1": 0.79,
+        "sec": 1.7,
+        "gb": 0.045
+      }
+    }
+  },
+  "extraction": {
+    "via": "eval-extraction.ts",
+    "metric": "total",
+    "max": 84,
+    "results": {
+      "qwen3.8:27b": {
+        "total": 84,
+        "perCapture": 3.5,
+        "gb": 17,
+        "failures": 0
+      },
+      "gemma4+reasoning": {
+        "total": 83,
+        "perCapture": 7.7,
+        "gb": 9.6,
+        "failures": 0
+      },
+      "gpt-oss:20b": {
+        "total": 83,
+        "perCapture": 6.7,
+        "gb": 13,
+        "failures": 1
+      },
+      "granite4.2:30b": {
+        "total": 82,
+        "perCapture": 4.8,
+        "gb": 17,
+        "failures": 1
+      },
+      "qwen2.5:7b": {
+        "total": 81,
+        "perCapture": 1.26,
+        "gb": 4.7,
+        "failures": 0
+      },
+      "nemotron-3.5-lightning:30b-a3b": {
+        "total": 81,
+        "perCapture": 1.15,
+        "gb": 23,
+        "failures": 0
+      },
+      "qwen2.5:14b": {
+        "total": 81,
+        "perCapture": 1.9,
+        "gb": 9.0,
+        "failures": 1
+      },
+      "qwen3.5:4b": {
+        "total": 79,
+        "perCapture": 1.4,
+        "gb": 3.4,
+        "failures": 0
+      },
+      "qwen3.5:9b": {
+        "total": 79,
+        "perCapture": 2.3,
+        "gb": 6.6,
+        "failures": 0
+      },
+      "qwen3.5:2b": {
+        "total": 78,
+        "perCapture": 1.1,
+        "gb": 2.7,
+        "failures": 3
+      },
+      "qwen3.5:0.8b": {
+        "total": 77,
+        "perCapture": 0.56,
+        "gb": 1.0,
+        "failures": 0
+      },
+      "qwen3.5:35b-a3b": {
+        "total": 77,
+        "perCapture": 1.79,
+        "gb": 23,
+        "failures": 0
+      },
+      "lfm2.5:8b": {
+        "total": 75,
+        "perCapture": 0.54,
+        "gb": 5.2,
+        "failures": 0
+      },
+      "llama3.2": {
+        "total": 76,
+        "perCapture": 0.56,
+        "gb": 2.0,
+        "failures": 3
+      },
+      "deepseek-r1:8b": {
+        "total": 78,
+        "perCapture": 34,
+        "gb": 5.2,
+        "failures": 1
+      },
+      "functiongemma:270m": {
+        "total": 49,
+        "perCapture": 0.63,
+        "gb": 0.3,
+        "failures": 12
+      }
+    }
+  }
+}

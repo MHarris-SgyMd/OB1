@@ -188,10 +188,10 @@ New query → paste and Run:
 
 ```sql
 -- Add fingerprint column for deduplication
-ALTER TABLE thoughts ADD COLUMN content_fingerprint TEXT;
+ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS content_fingerprint TEXT;
 
 -- Unique index so duplicate content is detected
-CREATE UNIQUE INDEX idx_thoughts_fingerprint
+CREATE UNIQUE INDEX IF NOT EXISTS idx_thoughts_fingerprint
   ON thoughts (content_fingerprint)
   WHERE content_fingerprint IS NOT NULL;
 

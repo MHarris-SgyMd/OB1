@@ -1,0 +1,9 @@
+{
+  "name": "ob1-evals",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "retrieval": "bun eval-retrieval.ts nomic-embed-text embeddinggemma bge-m3 snowflake-arctic-embed2 mxbai-embed-large granite-embedding all-minilm",
+    "extraction": "bun eval-extraction.ts llama3.2 qwen2.5:7b phi4-mini gemma3:4b"
+  }
+}

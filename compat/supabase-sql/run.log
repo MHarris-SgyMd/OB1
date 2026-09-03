@@ -1,0 +1,91 @@
+▸ starting pgvector/pgvector:pg16 as ob1-test-pg-18657 on :59898 (via podman)
+▸ waiting for readiness .— ready
+▸ DATABASE_URL=postgres://postgres:ob1test@127.0.0.1:59898/ob1test
+
+[1] createClient keeps the supabase-js signature
+  ✓  exposes .from() and .rpc()
+  ✓  a project URL is rejected with an explanatory message
+
+[2] insert, and RETURNING via .select()
+  ✓  insert succeeds (no error)
+  ✓  returns the inserted row
+  ✓  …with the RETURNING columns
+  ✓  batch insert of heterogeneous rows
+
+[3] Errors resolve as { error }, they do not throw
+  ✓  a unique violation produces an error object
+  ✓  …and no data
+  ✓  …carrying the Postgres message (duplicate key value violates unique cons…)
+  ✓  …and the SQLSTATE (23505)
+
+[4] Filters
+  ✓  eq
+  ✓  neq
+  ✓  gte
+  ✓  lt
+  ✓  like
+  ✓  ilike is case-insensitive
+  ✓  in
+  ✓  is(false) uses IS, not =
+  ✓  contains() is jsonb @> containment
+  ✓  match() ANDs several equalities
+  ✓  chained filters AND together
+  ✓  or() combines flat terms with OR
+  ✓  …setup for the null branch
+  ✓  or() handles is.null as a literal, not a parameter
+  ✓  or() refuses nested grouping rather than half-parsing it
+  ✓  or() refuses an unknown operator
+  ✓  in([]) selects nothing, as PostgREST does
+
+[5] Modifiers
+  ✓  order descending
+  ✓  order ascending is the default direction
+  ✓  limit
+  ✓  range(0,1) returns 2 rows — inclusive, as PostgREST is
+  ✓  range offsets correctly
+
+[6] single() and maybeSingle()
+  ✓  single() returns an object, not an array
+  ✓  single() with no rows is an error
+  ✓  …with PostgREST's code (PGRST116)
+  ✓  maybeSingle() with no rows is null, not an error
+
+[7] count and head
+  ✓  head+count returns the count (3)
+  ✓  …and no rows, which is what head:true means
+  ✓  count honours filters
+
+[8] update, upsert, delete
+  ✓  update with a filter
+  ✓  upsert succeeds (ok)
+  ✓  …updating the conflicting row rather than failing
+  ✓  …and adding no row
+  ✓  delete returns the removed row
+  ✓  …and the row is gone
+
+[9] rpc
+  ✓  a scalar function returns its value (120)
+  ✓  named arguments are passed through
+  ✓  a set-returning function returns rows
+  ✓  a missing function resolves as an error rather than throwing
+
+[10] Injection safety and honest refusals
+  ✓  rejects a quoted identifier as a column name
+  ✓  rejects an expression as a column name
+  ✓  rejects an empty column as a column name
+  ✓  rejects an injected table name
+  ✓  a value containing SQL is treated as data
+  ✓  …and the table still exists
+  ✓  refuses PostgREST resource embedding
+  ✓  …saying so explicitly rather than guessing at a join
+
+[11] The generated SQL is inspectable
+  ✓  columns and table are quoted
+  ✓  filters are parameterised, not interpolated
+  ✓  modifiers compile as expected
+  ✓  the value travels as a parameter
+
+────────────────────────────────────────────────────
+61 assertions: 61 passed, 0 failed
+PASS
+

@@ -27,3 +27,11 @@ docs/walkthroughs/*/public/
 docs/assets/agent-memory/promotional/generated-backgrounds/**/result.json
 docs/assets/agent-memory/screenshots/**/.chrome-*/
 integrations/openclaw-agent-memory/dist/
+
+# Evaluation corpora built from real data — Linear issues, exported notes, anything
+# pointed at by OB1_EVAL_CORPUS. The harnesses default to /tmp for this reason, but
+# it is an easy convenience to drop one in the repo and this is a PUBLIC repository.
+# The synthetic corpus (evals/corpus.ts) is committed deliberately; these are not.
+*-corpus.json
+evals/corpus-*.json
+evals/*.local.json

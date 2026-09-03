@@ -1,0 +1,409 @@
+# Fork-local CI.
+#
+# Upstream runs no tests at all: 11 test files across ~85k lines of code and no
+# workflow invokes any of them. That is how server/test-stateless.mjs came to
+# assert the opposite of production for three months without anyone noticing.
+#
+# This workflow exists so the fork's patch series cannot rot the same way. It is
+# additive — it touches no upstream workflow — so it survives a rebase onto
+# upstream/main untouched.
+name: Fork Checks
+
+on:
+  push:
+    branches: [main, "siggymd/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      # bun.lock pins the full transitive tree; package.json pins the direct deps
+      # exactly to server/deno.json, so the tests exercise the same libraries the
+      # Edge Function deploys with. (`npm install && npm test` also works for
+      # anyone without bun — the suites are plain node-compatible ESM.)
+      - name: Install pinned test dependencies
+        working-directory: server
+        run: bun install --frozen-lockfile
+
+      # Three suites, each carrying a drift guard that reads server/index.ts and
+      # fails if the behaviour it asserts is no longer what the server implements.
+      - name: Stateless transport + auth contract
+        working-directory: server
+        run: bun test-stateless.mjs
+
+      - name: thought_stats pagination
+        working-directory: server
+        run: bun test-stats-pagination.mjs
+
+      - name: capture_thought atomicity
+        working-directory: server
+        run: bun test-capture-atomicity.mjs
+
+  repo-consistency:
+    name: Repo consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Applies the upstream gate's rules to the WHOLE repo, not just the
+      # directories a PR happens to touch. The upstream gate only validates
+      # changed dirs, so pre-existing violations never surface there.
+      - name: Check metadata, links, dependencies and SQL guards
+        run: node scripts/check-fork-consistency.mjs
+
+  deno-check:
+    name: Edge Function typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # The Node suites cannot import index.ts (Deno.env at module scope, jsr:
+      # imports), so this is the only thing that typechecks the file as deployed.
+      #
+      # --node-modules-dir=none resolves imports through deno.json exactly as
+      # Supabase does. Without it, a stray node_modules/ (bun creates one in
+      # server/ when running the test suites locally) flips Deno into manual
+      # node_modules mode and the check fails with "Could not find a matching
+      # package for 'npm:@supabase/supabase-js'". The flag makes this behave the
+      # same in CI and on a developer machine that has just run the tests.
+      - name: deno check server/index.ts
+        working-directory: server
+        run: deno check --node-modules-dir=none index.ts
+
+  portable-server:
+    name: Portable server (Bun + Workers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
+      # Imports the real server rather than a mirror of it, so there is no drift
+      # guard here and none is needed.
+      - name: Test against the real server
+        working-directory: server-portable
+        run: bun test-server.ts
+
+      # Scoped keys: a read-scoped key must not merely fail to write, it must not
+      # see capture_thought at all. Needs no database.
+      - name: Scoped access keys
+        working-directory: server-portable
+        run: bun test-auth.ts
+
+      # Pure logic — the alias table, title truncation, citation URLs. No database
+      # and no provider, so it runs in the fast job rather than the Postgres one.
+      - name: Thought vocabulary and presentation rules
+        working-directory: server-portable
+        run: bun test-thoughts.ts
+
+      - name: Typecheck
+        working-directory: server-portable
+        run: bunx tsc --noEmit
+
+      # Proves the Cloudflare target still builds under the real Workers bundler.
+      # Catches a dependency pulling in a node: builtin Workers cannot provide.
+      - name: Cloudflare Workers build
+        working-directory: server-portable
+        run: bunx wrangler deploy --dry-run --outdir=.cf-out
+        env:
+          CLOUDFLARE_API_TOKEN: ""
+          WRANGLER_SEND_METRICS: "false"
+
+  db-schema:
+    name: Schema migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # PGlite is real PostgreSQL 17 + pgvector in WASM, so this needs no service
+      # container: the migrations are applied and asserted against a real planner.
+      - name: Apply migrations and assert the schema
+        working-directory: db
+        run: bun test-schema.ts
+
+      # The embedding width is configurable and must hold at more than one value.
+      - name: Schema builds at a non-default embedding width
+        working-directory: db
+        run: bun test-schema.ts
+        env:
+          OB1_EMBEDDING_DIM: "768"
+          OB1_EMBEDDING_MODEL: nomic-embed-text
+
+  db-live:
+    name: Schema against real Postgres
+    runs-on: ubuntu-latest
+
+    # A service container, not with-postgres.sh — the runner provides the database
+    # and Actions handles readiness. The local script exists for developers, who
+    # mostly run podman.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # Covers what PGlite structurally cannot: the migration runner over TCP,
+      # driver-level jsonb binding (where the double-encoding bug lived), and
+      # whether the planner actually reaches for the HNSW index.
+      - name: Run the live suite
+        working-directory: db
+        run: bun test-live.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+  data-layer:
+    name: SQL data layer against real Postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: server-portable
+        run: bun install --frozen-lockfile
+
+      - name: Store conformance
+        working-directory: server-portable
+        run: bun test-store-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The one that matters: the real MCP server, driven over JSON-RPC, with
+      # OB1_STORE=sql and no Supabase configuration present at all.
+      - name: End-to-end over MCP with no Supabase
+        working-directory: server-portable
+        run: bun test-e2e-sql.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The fully local path: both model calls go to a configured endpoint with no
+      # credential, and a wrong-width vector is refused rather than stored.
+      - name: Local model provider, no OpenRouter
+        working-directory: server-portable
+        run: bun test-local-provider.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # OB1_EMBEDDING_DIMENSIONS: the opt-in that makes a model wider than
+      # pgvector's HNSW ceiling usable at all. Separate process because the server
+      # snapshots the environment at boot, so the flag cannot be flipped mid-run.
+      # The PostgREST store, which had no test at all — every other suite runs
+      # OB1_STORE=sql. Uses compat/supabase-sql as the fixture: real SQL against
+      # real Postgres, so a wrong RPC argument shape fails here as it would live.
+      - name: PostgREST store argument shapes
+        working-directory: server-portable
+        run: bun test-store-postgrest.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The assertion that a long capture is findable by its FINAL sentence — the
+      # one that failed before migration 007. The stub provider refuses over-batch
+      # input rather than truncating, so dropping chunking fails loudly here.
+      - name: Chunking keeps long captures searchable
+        working-directory: server-portable
+        run: bun test-chunking.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      - name: Embedding truncation via the dimensions parameter
+        working-directory: server-portable
+        run: bun test-embedding-dimensions.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The deploy gate. Without it a misconfigured server starts, answers the MCP
+      # handshake, passes every HTTP liveness probe, and fails only when a user
+      # captures their first thought.
+      - name: Preflight catches bad configurations
+        working-directory: server-portable
+        run: bun test-preflight.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+  deploy-stack:
+    name: Full stack, no Supabase
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Phase 4 exit test, literally: bring up Postgres, apply the schema and
+      # serve MCP, with no Supabase CLI installed and no supabase.com account.
+      - name: Bring up the compose stack
+        working-directory: deploy
+        run: |
+          # Mint a real scoped key: the config holds only the hash, so the raw
+          # key has to be captured here for smoke.sh to authenticate with.
+          KEY=$(openssl rand -hex 32)
+          HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
+          echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          MCP_ACCESS_KEYS=ci:write:$HASH
+          OPENROUTER_API_KEY=stub-not-called-by-smoke-test
+          SERVER_PORT=8010
+          POSTGRES_PORT=55433
+          EOF
+          docker compose -f compose.yaml up -d --build --wait --wait-timeout 240
+
+      - name: Smoke-test it over MCP
+        working-directory: deploy
+        run: ./smoke.sh
+
+      - name: Confirm no Supabase CLI anywhere in the stack
+        working-directory: deploy
+        run: |
+          if docker compose -f compose.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+            echo "A supabase binary is present in the server image." >&2
+            exit 1
+          fi
+          echo "No supabase binary in the running stack."
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose -f compose.yaml logs --tail 60
+
+      - name: Tear down
+        if: always()
+        working-directory: deploy
+        run: docker compose -f compose.yaml down -v
+
+  compat-shim:
+    name: supabase-js compatibility shim
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: compat/supabase-sql
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: compat/supabase-sql
+        run: bunx tsc --noEmit
+
+      # 24 files depend on this behaving exactly like supabase-js. A shim that is
+      # merely close is worse than none — they would inherit the differences with
+      # no failing test to find them.
+      - name: Conformance against real Postgres
+        working-directory: compat/supabase-sql
+        run: bun test-compat.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # Every migrated file must still parse, and the codemod must round-trip
+      # byte-for-byte so a migration is always reversible.
+      - name: Migrated files parse
+        run: |
+          fail=0
+          for f in $(grep -rl 'MIGRATED OFF SUPABASE' --include='*.ts' --include='*.mjs' --include='*.js' \
+                       --exclude-dir=node_modules --exclude-dir=.git . | grep -v scripts/); do
+            bun build "$f" --target=bun --external '*' --outfile /dev/null >/dev/null 2>&1 \
+              || { echo "does not parse: $f"; fail=1; }
+          done
+          exit $fail
+
+      - name: Codemod round-trips losslessly
+        run: |
+          bun scripts/migrate-to-sql-shim.mjs --revert >/dev/null
+          bun scripts/migrate-to-sql-shim.mjs --apply --all >/dev/null
+          if ! git diff --quiet; then
+            echo "apply→revert→apply is not idempotent:" >&2
+            git diff --stat >&2
+            exit 1
+          fi
+          echo "round-trip clean"

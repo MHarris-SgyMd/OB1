@@ -1,0 +1,4 @@
+MCP_ACCESS_KEY=your-access-key
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-secret-key
+OPENROUTER_API_KEY=your-openrouter-key

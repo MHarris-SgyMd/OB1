@@ -8,7 +8,7 @@
   },
   "version": "1.0.0",
   "requires": {
-    "open_brain": "optional",
+    "open_brain": true,
     "services": [],
     "tools": [
       "AI client with reusable skills/prompts or plain chat"
