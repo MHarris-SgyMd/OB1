@@ -962,6 +962,27 @@ so a run against `text-embedding-3-small` at $0.02/M is a small fraction of a ce
 Until it is run, treat "qwen2.5:7b is the best extraction model" and
 "embeddinggemma is the best embedding model" as scoped to *local* options.
 
+## What you actually need on disk
+
+Reproducing everything in this file means pulling around 30 models and roughly
+180 GB. **Running the recommended stack needs 7.2 GB** — the two defaults — and the
+full set of documented alternatives comes to 27 GB:
+
+| model | size | role |
+| --- | --- | --- |
+| `qwen3-embedding:4b` | 2.5 GB | **embedding default** |
+| `qwen2.5:7b` | 4.7 GB | **metadata default** |
+| `qwen3-embedding:0.6b` | 639 MB | embedding, value pick |
+| `embeddinggemma` | 621 MB | embedding, fastest |
+| `bge-m3` | 1.2 GB | embedding, multilingual notes |
+| `qwen3.8:27b` | 17 GB | metadata, perfect score |
+| `qwen3.5:0.8b` | 1.0 GB | metadata, fastest |
+
+Everything else measured here was pulled to be benchmarked and then removed; the
+numbers are the artefact, not the weights. Re-running a comparison means re-pulling
+those models, which is the intended trade — the alternative is carrying 150 GB of
+weights whose only purpose is to have already lost.
+
 ## Caveats
 
 - **Run once, results move.** At the provider default temperature the same model
