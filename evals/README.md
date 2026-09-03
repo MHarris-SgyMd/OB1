@@ -510,10 +510,50 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## Re-measured on the rebuilt corpus, 2026-09-03
+
+The table in the next section was measured on the truncated 97-document corpus.
+After `build-linear-corpus.ts` rebuilt it — 441 documents, full descriptions plus
+comment threads — the head-to-head is:
+
+| model | dims | R@1 | R@5 | MRR | sec |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **qwen3-embedding:4b** | 2560 | **84%** | **98%** | **0.903** | 109.6 |
+| embeddinggemma | 768 | 80% | 95% | 0.873 | 22.4 |
+
+Three things, and only the first is comfortable.
+
+**The ranking survived.** `qwen3-embedding:4b` still wins, so the default stands.
+
+**The gap roughly doubled**, 0.019 → 0.030. That is the "embeds a long capture
+whole" argument finally showing up in a number: the old corpus was too short for
+it to matter, so the advantage the model was chosen for could not appear.
+
+**The latency cost was understated.** 109.6s against 22.4s is about **5x, not the
+~3x** recorded everywhere until now. The old figure came from 500-character stubs
+and the penalty grows with document length. Corrected in `db/config.mjs`,
+`SETUP.md` and `FORK.md`.
+
+Both absolute MRRs fell, and that is expected rather than a regression: ranking one
+document first out of 441 is strictly harder than out of 97, and these documents
+are longer and denser with near-duplicates. **The two sets of numbers are not
+comparable in either direction.** The old ones should not be quoted.
+
+One caveat on the new numbers. `eval-real.ts` embeds whole documents, and Ollama's
+default batch is 2048 tokens — so the 15 documents above that get silently cut at
+embed time. Both models suffer it equally, so the comparison holds, but the
+long-document tail is under-measured rather than measured. That is the failure
+`server-portable/chunk.ts` exists to fix, showing up inside the benchmark.
+
+**Only this head-to-head was re-run.** Everything below — the prompted-vs-bare
+finding, the 0.6b and bge-m3 placings, the whole extraction section — is still
+measured on the truncated corpus and is labelled as such where it appears.
+
 ## The default changed to `qwen3-embedding:4b@1024`
 
-Once every model was prompted the way its own card specifies, the real-corpus
-ordering is:
+Measured on the **truncated 97-document corpus** (superseded above for the
+two-model head-to-head; the prompted-vs-bare finding has not been re-run).
+Once every model was prompted the way its own card specifies, the ordering was:
 
 | model | MRR | sec | size | |
 | --- | --- | --- | --- | --- |

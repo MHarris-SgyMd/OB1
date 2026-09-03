@@ -45,11 +45,22 @@ const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
  * than its own copy. They drifted before; one definition cannot.
  *
  * `qwen3-embedding:4b` at 1024 dimensions is the best configuration measured on
- * real data — 0.933 MRR against `embeddinggemma`'s 0.914 over 97 issues — and the
- * only local model that embeds a long capture whole. It costs about 3x the
- * embedding latency and 2.5 GB, and it is 2560 dimensions natively, so it relies
+ * real data — **0.903 MRR against `embeddinggemma`'s 0.873** over 441 Linear
+ * issues with full descriptions and comment threads — and the only local model
+ * that embeds a long capture whole. It is 2560 dimensions natively, so it relies
  * on Matryoshka truncation to fit under pgvector's 2000-dimension HNSW ceiling.
- * See evals/README.md; SETUP.md lists the cheaper alternatives.
+ *
+ * Those numbers replace an earlier 0.933/0.914 measured over 97 issues that had
+ * been silently truncated to ~500 characters at ingestion. The ranking survived
+ * the correction and the gap roughly doubled, from 0.019 to 0.030 — which is the
+ * "embeds a long capture whole" argument finally showing up in a number, since
+ * the old corpus was too short for it to matter.
+ *
+ * The cost did not survive intact. It is 2.5 GB, and the latency multiple is
+ * **about 5x, not the 3x recorded here before**: 109.6s against 22.4s to embed
+ * the same 441 documents. The old figure was measured on 500-character stubs, and
+ * the penalty grows with document length. See evals/README.md; SETUP.md lists the
+ * cheaper alternatives.
  */
 export const DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:4b";
 export const DEFAULT_EMBEDDING_DIM = 1024;
@@ -210,6 +221,12 @@ export const VERIFIED_NOT_MRL = new Set([
  * instruction and 0.860 without** — worse, unprompted, than `embeddinggemma`'s
  * 0.914. That is the difference between the best model tested and a regression, so
  * the templates are part of the model's identity here rather than an option.
+ *
+ * Those three figures come from the truncated 97-issue corpus and, unlike the
+ * head-to-head above, have NOT been re-measured on the rebuilt one. They are kept
+ * because the gap is far too large to be an artifact of document length, but the
+ * absolute values belong to the old corpus and should be re-run before they are
+ * quoted as current.
  *
  * `{q}` and `{d}` are replaced with the query and the document. A model absent
  * from this table is sent bare, which is correct for most of them:

@@ -23,13 +23,13 @@ produce exactly that many numbers. Changing either later means a schema migratio
 
 | Model | Width | Note |
 | --- | --- | --- |
-| **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.933 MRR vs `embeddinggemma`'s 0.914 over 97 real issues — and the only local model that embeds a long capture whole. Costs ~3x the latency and 2.5 GB. Truncation is automatic. |
+| **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.903 MRR vs `embeddinggemma`'s 0.873 over 441 real issues with full descriptions and comments — and the only local model that embeds a long capture whole. Costs ~5x the latency and 2.5 GB. Truncation is automatic. |
 | `qwen3-embedding:0.6b` | 1024 | 0.918 MRR at 639 MB — nearly the 4B's accuracy for a quarter the size. The value pick. |
 | `embeddinggemma` | 768 | 0.916 MRR at 621 MB, the fastest of the three. Was the default until real-corpus measurement moved it to third. |
 | `openai/text-embedding-3-small` | 1536 | Hosted. Cheap, and still unmeasured here — see [`evals/`](evals/README.md). |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
-| `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.933 MRR vs `embeddinggemma`'s 0.914). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~3x the embedding time. |
+| `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.903 MRR vs `embeddinggemma`'s 0.873 over 441 full-length issues). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~5x the embedding time. |
 | `openai/text-embedding-3-large` | 3072 | **Exceeds pgvector's HNSW limit of 2000.** The column works, but no index can be built, so every search becomes a full table scan. Truncatable to 1536 with `OB1_EMBEDDING_DIMENSIONS=on`. |
 
 #### Using a model that is too wide to index
@@ -119,7 +119,9 @@ The short version:
 
 - **`qwen3-embedding:4b` needs its query instruction**, and the server sends it
   automatically. This is not a detail: prompted it scores 0.933 MRR, unprompted
-  **0.860** — worse than a model a quarter its size. The templates live in
+  **0.860** — worse than a model a quarter its size. (Both figures are from the
+  older 97-issue corpus; the prompted-vs-bare pair has not been re-measured on the
+  rebuilt one, but the size of the gap is not in doubt.) The templates live in
   `db/config.mjs` keyed by model name, so changing model changes prompt, and
   preflight's existing model-change warning covers both.
 - **`embeddinggemma`** ties the best retrieval MRR (0.975) on the synthetic set and
