@@ -13,7 +13,10 @@
  */
 
 import { createClient } from "./index.ts";
+import { createAssert } from "../../db/test-support.ts";
 import { SQL } from "bun";
+
+const { assert, report } = createAssert();
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -21,9 +24,6 @@ if (!URL_) {
   process.exit(2);
 }
 
-let passed = 0, failed = 0;
-const assert = (c: unknown, l: string) =>
-  c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
 
 // Fixture table, shaped like the kinds of tables the recipes actually use.
 {
@@ -245,7 +245,4 @@ console.log("\n[11] The generated SQL is inspectable");
 
 await db.close();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

@@ -67,10 +67,17 @@ export async function resetSchema(url: string, opts: SchemaOptions): Promise<voi
  */
 export function createAssert(): {
   assert: (cond: unknown, label: string) => void;
+  /**
+   * Record a case that could not run. Distinct from a pass on purpose: a suite
+   * that silently counts an unrunnable case as green is worse than one that fails,
+   * because it reports confidence it does not have. Only the report line shows it.
+   */
+  skip: (label: string, reason?: string) => void;
   report: () => never;
 } {
   let passed = 0;
   let failed = 0;
+  let skipped = 0;
   return {
     assert(cond: unknown, label: string): void {
       if (cond) {
@@ -81,9 +88,16 @@ export function createAssert(): {
         failed++;
       }
     },
+    skip(label: string, reason?: string): void {
+      console.log(`  ·  ${label}${reason ? ` (${reason})` : ""}`);
+      skipped++;
+    },
     report(): never {
       console.log(`\n${"─".repeat(52)}`);
-      console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
+      console.log(
+        `${passed + failed} assertions: ${passed} passed, ${failed} failed` +
+          (skipped ? `, ${skipped} skipped` : "")
+      );
       console.log(failed > 0 ? "FAIL\n" : "PASS\n");
       process.exit(failed > 0 ? 1 : 0);
     },

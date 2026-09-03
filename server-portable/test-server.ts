@@ -1,3 +1,4 @@
+import { createAssert } from "../db/test-support.ts";
 /**
  * test-server.ts
  *
@@ -21,18 +22,7 @@
  * Run: bun test-server.ts
  */
 
-let passed = 0;
-let failed = 0;
-
-function assert(condition: unknown, label: string): void {
-  if (condition) {
-    console.log(`  ✓  ${label}`);
-    passed++;
-  } else {
-    console.error(`  ✗  ${label}`);
-    failed++;
-  }
-}
+const { assert, report } = createAssert();
 
 // Seed env before importing: the module itself no longer reads it at import
 // time, but the first request will, and Workers-style bindings are absent here.
@@ -193,7 +183,4 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
 
 server.stop();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

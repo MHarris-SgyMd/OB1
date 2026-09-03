@@ -13,6 +13,7 @@
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAssert } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -34,10 +35,8 @@ function subst(sql: string): string {
     .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
 }
 
-let passed = 0, failed = 0, skipped = 0;
-const assert = (c: unknown, l: string) =>
-  c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
-const skip = (l: string) => { console.log(`  ·  ${l} (no DATABASE_URL)`); skipped++; };
+const { assert, skip: skipRaw, report } = createAssert();
+const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
 const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub" };
 
@@ -139,7 +138,4 @@ else {
   assert(Array.isArray(parsed.checks) && parsed.checks.length > 5, "--json lists every check for a pipeline to consume");
 }
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

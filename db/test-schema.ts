@@ -21,6 +21,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAssert } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -32,17 +33,7 @@ function subst(sql: string): string {
     .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
 }
 
-let passed = 0;
-let failed = 0;
-function assert(cond: unknown, label: string): void {
-  if (cond) {
-    console.log(`  ✓  ${label}`);
-    passed++;
-  } else {
-    console.error(`  ✗  ${label}`);
-    failed++;
-  }
-}
+const { assert, report } = createAssert();
 
 /** A unit vector of EMBEDDING_DIM width that is `1` at one position and 0 elsewhere. */
 function unit(at: number): string {
@@ -313,7 +304,4 @@ console.log("\n[11] Non-object payloads are rejected, not silently emptied");
   assert(raised3, "the 3-arg overload rejects it too");
 }
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

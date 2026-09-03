@@ -13,7 +13,7 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
-import { resetSchema } from "../db/test-support.ts";
+import { createAssert, resetSchema } from "../db/test-support.ts";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
@@ -40,17 +40,7 @@ function subst(sql: string): string {
     .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
 }
 
-let passed = 0;
-let failed = 0;
-function assert(cond: unknown, label: string): void {
-  if (cond) {
-    console.log(`  ✓  ${label}`);
-    passed++;
-  } else {
-    console.error(`  ✗  ${label}`);
-    failed++;
-  }
-}
+const { assert, report } = createAssert();
 
 const unit = (i: number) => {
   const v = new Array(EMBEDDING_DIM).fill(0);
@@ -217,7 +207,4 @@ console.log("\n[8] Errors surface rather than being swallowed");
 
 await store.close();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

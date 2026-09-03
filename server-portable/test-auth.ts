@@ -12,11 +12,10 @@
  */
 
 import { authenticate, hashKey, parseKeyRecords, canWrite } from "./auth.ts";
+import { createAssert } from "../db/test-support.ts";
 
-let passed = 0;
-let failed = 0;
-const assert = (c: unknown, l: string) =>
-  c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
+const { assert, report } = createAssert();
+
 
 const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
@@ -169,7 +168,4 @@ console.log("\n[9] Rejection still uses the JSON-RPC envelope");
 
 server.stop();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

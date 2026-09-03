@@ -24,7 +24,7 @@
  */
 
 import { SQL } from "bun";
-import { resetSchema } from "../db/test-support.ts";
+import { createAssert, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,11 +39,7 @@ const NATIVE = 2560;                     // what the model emits unasked
 const EMB_MODEL = "qwen3-embedding:4b";
 const META_MODEL = "qwen2.5:7b";
 
-let passed = 0, failed = 0;
-function assert(cond: unknown, label: string): void {
-  if (cond) { console.log(`  ✓  ${label}`); passed++; }
-  else { console.error(`  ✗  ${label}`); failed++; }
-}
+const { assert, report } = createAssert();
 
 // Fresh schema at the truncated width.
 await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
@@ -167,7 +163,4 @@ console.log("\n[5] A provider that ignores `dimensions` fails loudly");
 }
 
 server.stop(); provider.stop();
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

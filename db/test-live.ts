@@ -29,6 +29,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAssert } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -49,17 +50,7 @@ function subst(sql: string): string {
     .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
 }
 
-let passed = 0;
-let failed = 0;
-function assert(cond: unknown, label: string): void {
-  if (cond) {
-    console.log(`  ✓  ${label}`);
-    passed++;
-  } else {
-    console.error(`  ✗  ${label}`);
-    failed++;
-  }
-}
+const { assert, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 async function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
@@ -234,7 +225,4 @@ console.log("\n[6] The unique partial index is enforced by the server");
 
 await sql.close();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();

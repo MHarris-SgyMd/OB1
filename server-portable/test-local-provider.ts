@@ -18,9 +18,11 @@
  */
 
 import { SQL } from "bun";
-import { resetSchema } from "../db/test-support.ts";
+import { createAssert, resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+const { assert, report } = createAssert();
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -36,9 +38,6 @@ function subst(sql: string): string {
   return sql.replace(/\{\{EMBEDDING_DIM\}\}/g, String(DIM)).replace(/\{\{EMBEDDING_MODEL\}\}/g, EMB_MODEL);
 }
 
-let passed = 0, failed = 0;
-const assert = (c: unknown, l: string) =>
-  c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
 
 // Schema at 768.
 await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
@@ -243,7 +242,4 @@ console.log("\n[7] A drifting `type` is normalised, not stored as a new category
 server.stop();
 provider.stop();
 
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+report();
