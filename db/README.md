@@ -15,6 +15,8 @@ Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
+- To run `test-upgrade.ts` or `bench-trgm.ts`: the same, and for the benchmark a
+  few minutes — it builds tables up to 100,000 rows
 
 ## Steps
 
@@ -52,9 +54,10 @@ bun migrate.ts --url ... --baseline
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `69 assertions: 69 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ten migrations applied, and
-`\d thoughts` shows seven columns and four indexes.
+`bun test-schema.ts` prints `78 assertions: 78 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eleven migrations applied, and
+`\d thoughts` shows seven columns and six indexes — five of our own plus the
+primary key, which `\d` also lists.
 
 ## The migrations
 
@@ -70,6 +73,7 @@ Against a real database, `bun migrate.ts` reports ten migrations applied, and
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
+| `011_text_search_trgm.sql` | `pg_trgm` plus a trigram GIN index on `thoughts.content`, for leading-wildcard `ILIKE` | Ported from `schemas/text-search-trgm` |
 
 ## What changed relative to the guide
 
@@ -97,10 +101,55 @@ connects as.
 
 ## Extensions
 
-The core schema needs **only `vector`**. `gen_random_uuid()` has been a Postgres
-built-in since 13 and `sha256()` since 11, so `pgcrypto` is not required — despite
-five files elsewhere in the repo creating it. `pg_trgm` is needed only by
-`schemas/text-search-trgm`.
+The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
+`gen_random_uuid()` has been a Postgres built-in since 13 and `sha256()` since 11,
+so `pgcrypto` is not required — despite five files elsewhere in the repo creating
+it.
+
+The two extensions differ in what they demand of the role applying the migration.
+`pg_trgm` is a *trusted* extension from PostgreSQL 13 onward, so a database owner
+can create it without superuser. `vector` is not, and 001 already needs the
+stronger privilege — so 011 adds no requirement that was not already there.
+
+## Benchmarking the trigram index
+
+`bench-trgm.ts` measures what migration 011 costs and buys, because the number
+SMD-925 arrived with was measured on somebody else's brain and does not transfer.
+
+```bash
+./with-postgres.sh bun bench-trgm.ts
+OB1_BENCH_CORPUS=/path/to/corpus.json ./with-postgres.sh bun bench-trgm.ts
+```
+
+Without a corpus it generates from a built-in vocabulary. Pointed at one it builds
+a bigram model of that text and samples from it, so the trigram distribution
+resembles the real one — duplicating rows verbatim would collapse the index's
+distinct-gram count and flatter it enormously. The corpus is only ever read.
+
+Markers are planted at known frequencies (5 rows, 10%, 90%) so selectivity is a
+controlled variable, and the two-character probe matches exactly the same rows as
+the rare-word probe — so the sub-trigram limit is isolated from selectivity rather
+than confounded with it. The number of matched rows is printed alongside each
+timing, because a probe that accidentally matches nothing otherwise looks like the
+best result in the table.
+
+The headline result on our own data, and the reason the migration header is as
+long as it is: **the crossover is somewhere between 1,000 and 10,000 rows.** Below
+it the index is not slower, it is simply never chosen. Above it a 5-row `ILIKE`
+improves by 380x at 10,000 rows and 1280x at 100,000 — but a word in 10% of rows
+gets only ~8x at either size, and a common word and any sub-trigram pattern are
+unaffected at every scale.
+
+Two things the script has to do that are easy to leave out, both of which produced
+confidently wrong numbers first:
+
+- **Drop the index before the baseline arm.** Since 011 landed, `resetSchema`
+  builds it, so "before" is no longer the default state of a fresh schema.
+- **`VACUUM`, not just `ANALYZE`, between the arms.** The write-amplification arm
+  leaves thousands of dead tuples that only the second read arm has to scan past,
+  and GIN's pending list — which every query scans in full on top of the index —
+  is only flushed by a vacuum. Skipping it reported the index as consistently
+  *slower* at 97 rows, which was entirely an artifact of the measurement.
 
 ## Testing
 
@@ -130,10 +179,13 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 59 properties, including:
+asserts 78 properties, including:
 
 - every migration applies, **and applies twice without error**
-- the table shape and all four index access methods match the guide
+- the table shape and all five index access methods match the guide, and the
+  trigram index is not merely present but reachable — with `enable_seqscan` off
+  the planner picks it for a leading-wildcard `ILIKE`, which a bare `gin (content)`
+  would not satisfy
 - both `upsert_thought` overloads resolve — the 3-arg form has no default on
   `p_embedding`, because a default would make the 2-arg call ambiguous and break
   every existing caller with `function is not unique`

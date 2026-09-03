@@ -17,6 +17,10 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
+// Migration 011 does CREATE EXTENSION pg_trgm. PGlite ships contrib extensions as
+// separate bundles that have to be handed in at construction — without this the
+// migration does not merely skip the index, it raises and [1] fails.
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { readdirSync, readFileSync } from "node:fs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
@@ -50,7 +54,7 @@ function blend(a: number, b: number, wa: number, wb: number): string {
 }
 
 const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
-const db = new PGlite({ extensions: { vector } });
+const db = new PGlite({ extensions: { vector, pg_trgm } });
 
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
 
@@ -125,6 +129,69 @@ console.log("\n[4] Indexes exist with the right access methods");
     /WHERE \(content_fingerprint IS NOT NULL\)/.test(fp),
     "…and partial, so pre-fingerprint rows do not collide on NULL"
   );
+
+  const trgm = byName["idx_thoughts_content_trgm"] ?? "";
+  assert(/USING gin/.test(trgm), "idx_thoughts_content_trgm is GIN");
+  // The opclass is the part that actually matters and the part a careless edit
+  // loses: `USING gin (content)` is a valid index that pg_trgm cannot use, and
+  // it would satisfy the assertion above on its own.
+  assert(/gin_trgm_ops/.test(trgm), "…with the gin_trgm_ops opclass, not a bare gin (content)");
+
+  const ext = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM pg_extension WHERE extname = 'pg_trgm'`
+  );
+  assert(ext.rows[0].c === 1, "the pg_trgm extension is installed");
+}
+
+// ── 4b. …and the planner can actually use it ─────────────────────────────────
+//
+// Everything in [4] is satisfied by an index that exists. None of it proves the
+// planner will choose it for the pattern it was built for — a wrong opclass, a
+// missing extension, or an expression mismatch all leave a perfectly valid index
+// that no ILIKE ever touches. The seed table here is far too small for the
+// planner to prefer an index on cost, so seqscan is disabled to ask the narrower
+// question: CAN this index serve this query at all?
+
+console.log("\n[4b] The trigram index is reachable by a leading-wildcard ILIKE");
+{
+  for (let i = 0; i < 40; i++) {
+    await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [
+      `trigram probe row ${i} discussing ${i % 7 === 0 ? "zylotrope" : "ordinary"} matters`,
+    ]);
+  }
+  await db.query(`ANALYZE thoughts`);
+
+  const plan = await db.query<{ "QUERY PLAN": string }>(
+    `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
+  );
+  const seqPlan = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
+  // Not an assertion about which plan wins — on 40 rows a seq scan is correct,
+  // and asserting otherwise would be asserting the planner is wrong.
+  assert(typeof seqPlan === "string" && seqPlan.length > 0, "an ILIKE over content plans without error");
+
+  await db.query(`SET enable_seqscan = off`);
+  const forced = await db.query<{ "QUERY PLAN": string }>(
+    `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
+  );
+  await db.query(`SET enable_seqscan = on`);
+  const text = forced.rows.map((r) => r["QUERY PLAN"]).join("\n");
+  assert(/idx_thoughts_content_trgm/.test(text),
+         `with seqscan off the planner reaches for the trigram index (got: ${text.replace(/\s+/g, " ").slice(0, 90)})`);
+
+  // The result has to be right, not just indexed.
+  const hits = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM thoughts WHERE content ILIKE '%zylotrope%'`
+  );
+  assert(hits.rows[0].c === 6, `and returns every planted row (${hits.rows[0].c} of 6)`);
+
+  // A two-character pattern produces no trigrams. It must still be CORRECT —
+  // silently returning nothing here would be the worst possible failure.
+  const short = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM thoughts WHERE content ILIKE '%zy%'`
+  );
+  assert(short.rows[0].c === 6, `a sub-trigram pattern is unindexable but still correct (${short.rows[0].c} of 6)`);
+
+  await db.query(`DELETE FROM thoughts WHERE content LIKE 'trigram probe row%'`);
 }
 
 // ── 5. The overload pair must not be ambiguous ───────────────────────────────
