@@ -67,8 +67,29 @@ export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODE
  * with no topics, people or type. The server degrades rather than failing, so it
  * was quiet — which is exactly the kind of quiet this fork keeps removing.
  *
- * qwen2.5:7b is the measured local winner on the extraction benchmark: 81/84 with
- * no structural failures at ~1.2s per capture. See evals/README.md.
+ * NOT the top scorer, and the asymmetry with the embedding default is deliberate.
+ * qwen3.8:27b is the only model to score a perfect 84/84, at 3.5s per capture and
+ * 18 GB. qwen2.5:7b scores 81/84 at 1.4s and 4.7 GB, with the same zero structural
+ * failures — the missing three points are field-level accuracy, not invented
+ * people or empty topics.
+ *
+ * Why pay for the best embedding model but not the best extraction model:
+ *
+ *   The embedding choice is PERMANENT. Its width is baked into the column, so
+ *   changing it means a migration and re-embedding every row. This one has no
+ *   schema dependency and can be swapped between two captures, so overpaying up
+ *   front buys much less.
+ *
+ *   Retrieval is the product. A weak embedding means a thought cannot be found;
+ *   weak extraction means list_thoughts filters and thought_stats tallies are a
+ *   little worse.
+ *
+ *   18 GB resident is the cost that disqualified the rerank tier (see
+ *   evals/README.md). Defaulting to it here would take the shipped footprint from
+ *   7.2 GB to 20.5 GB for three points on a secondary signal.
+ *
+ * Set OB1_METADATA_MODEL=qwen3.8:27b if you want the perfect score and can afford
+ * the memory; nothing needs re-embedding when you change your mind.
  */
 export const DEFAULT_METADATA_MODEL = "qwen2.5:7b";
 export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? DEFAULT_METADATA_MODEL;
