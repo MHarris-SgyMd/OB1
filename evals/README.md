@@ -235,6 +235,7 @@ At temperature 0:
 | gpt-oss:20b | 13 GB | 48/48 | 35/36 | 83/84 | 6.7s | 1 invented person |
 | granite4.2:30b | 17 GB | 47/48 | 35/36 | 82/84 | 4.8s | 1 invented person |
 | nemotron-3.5-lightning:30b-a3b | 23 GB | 46/48 | 35/36 | 81/84 | 1.15s | none |
+| qwen3.5:35b-a3b | 24 GB | 45/48 | 32/36 | 77/84 | 1.79s | none |
 | qwen3.5:9b | 6.6 GB | 45/48 | 34/36 | 79/84 | 2.3s | none |
 | qwen3.5:4b | 3.4 GB | 44/48 | 35/36 | 79/84 | 1.4s | none |
 | qwen3.5:2b | 2.7 GB | 46/48 | 32/36 | 78/84 | 1.1s | 3 invented people |
@@ -278,6 +279,23 @@ constantly.
 `qwen3.5:27b` was not pulled. `qwen3.8:27b` already scores a perfect 84/84 at the
 same size, so there is no headroom for a same-sized sibling to win — the only thing
 it could do is tie.
+
+**`qwen3.5:35b-a3b` was pulled, on a hypothesis that turned out to be wrong.** The
+reasoning was that ~3B active parameters is the shape that made `lfm2.5:8b` and
+`nemotron-3.5-lightning:30b-a3b` fast, so a 35B MoE might land near
+`qwen3.8:27b`'s accuracy at far lower latency. It does neither: 77/84, seven points
+below `qwen3.8:27b` and four below the 4.7 GB default, at **1.79s per capture
+against the default's 1.26s** — slower, despite the active-parameter count. It
+loses on accuracy, latency and 24 GB of disk simultaneously.
+
+The clearest way to see it: `qwen3.5:35b-a3b` and `qwen3.5:0.8b` score **the same
+77/84**, and one of them is 24 GB and the other is 1.0 GB. Its weakness is
+specific — 9/14 on action items and 32/36 on the hard slice, so it under-extracts
+implied to-dos rather than failing structurally.
+
+So "MoE means fast" does not hold as a rule. It held for `lfm2.5:8b` (0.54s) and
+`nemotron-3.5-lightning:30b-a3b` (1.15s) and not here, which is a reminder that
+architecture predicts less than measurement does.
 
 `lfm2.5:8b` is worth calling out separately: an MoE with roughly 1B active
 parameters, it is **2.2× faster than `qwen2.5:7b`** with zero structural failures,
