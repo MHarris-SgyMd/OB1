@@ -1,6 +1,11 @@
 
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
-import { EMBEDDING_PROMPTS, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM } from "../db/config.mjs";
+import {
+  EMBEDDING_PROMPTS,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDING_DIM,
+  resolveEmbeddingDimensions,
+} from "../db/config.mjs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -127,7 +132,7 @@ function embeddingDim(): number {
  * than add to. Opting in is a claim that you checked.
  */
 function embeddingDimensionsRequested(): boolean {
-  return /^(1|on|true|yes)$/i.test(env().OB1_EMBEDDING_DIMENSIONS ?? "");
+  return resolveEmbeddingDimensions(env().OB1_EMBEDDING_DIMENSIONS, embeddingDim(), embeddingModel());
 }
 function metadataModel(): string {
   return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;

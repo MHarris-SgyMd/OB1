@@ -188,23 +188,27 @@ export const EMBEDDING_PROMPTS = {
  * the best result measured on real data at 1024 — better than any model that fits
  * natively. That is what this flag is for.
  */
-export const EMBEDDING_DIMENSIONS = (() => {
-  const raw = ENV.OB1_EMBEDDING_DIMENSIONS;
+/**
+ * Resolve the truncation decision. A FUNCTION rather than only the constant
+ * below, because server-portable/index.ts reads its environment lazily so
+ * Cloudflare Workers bindings apply — it cannot use a value computed at module
+ * load. Both it and preflight.ts call this, so the rule exists once.
+ *
+ * Getting that wrong is not theoretical: the auto-enable below was added here
+ * while index.ts and preflight.ts kept their own copy of the old regex, and the
+ * container crashlooped on a default configuration that was in fact valid.
+ */
+export function resolveEmbeddingDimensions(raw, dim, model) {
   if (raw !== undefined && raw !== "") return /^(1|on|true|yes)$/i.test(raw);
-  // Unset: enable only when the configured model is KNOWN to support Matryoshka
-  // truncation and the configured width is narrower than its native one. That is
-  // exactly the case where truncation is a supported operation with a checkable
-  // outcome, so demanding an opt-in adds friction without adding safety — and the
-  // default model is 2560 native at a 1024 column, which would otherwise refuse
-  // every capture out of the box.
-  //
-  // A model NOT in MRL_MODELS, or one with no known native width, still requires
-  // the explicit flag. That is the case the opt-in exists for: providers truncate
-  // anything on request, and quietly degrading a model never trained for it is the
-  // failure this fork is trying to remove rather than automate.
-  const native = KNOWN_MODEL_DIMS[EMBEDDING_MODEL];
-  return MRL_MODELS.has(EMBEDDING_MODEL) && native !== undefined && EMBEDDING_DIM < native;
-})();
+  const native = KNOWN_MODEL_DIMS[model];
+  return MRL_MODELS.has(model) && native !== undefined && dim < native;
+}
+
+export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
+  ENV.OB1_EMBEDDING_DIMENSIONS,
+  EMBEDDING_DIM,
+  EMBEDDING_MODEL
+);
 
 export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL, truncate = EMBEDDING_DIMENSIONS) {
   const problems = [];

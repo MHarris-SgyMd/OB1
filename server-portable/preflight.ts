@@ -79,7 +79,8 @@ if (store !== "postgrest" && store !== "sql") {
 
 add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credential needed)" : ""}`);
 {
-  const truncate = /^(1|on|true|yes)$/i.test(env.OB1_EMBEDDING_DIMENSIONS ?? "");
+  const { resolveEmbeddingDimensions } = await import("../db/config.mjs");
+  const truncate = resolveEmbeddingDimensions(env.OB1_EMBEDDING_DIMENSIONS, embDim, embModel);
   add("embedding model", "ok",
       `${embModel} @ ${embDim} dimensions${truncate ? " (requesting truncation)" : ""}`);
 
@@ -261,7 +262,8 @@ if (!deep) {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (llmKey) headers.Authorization = `Bearer ${llmKey}`;
 
-    const wantsTruncation = /^(1|on|true|yes)$/i.test(env.OB1_EMBEDDING_DIMENSIONS ?? "");
+    const { resolveEmbeddingDimensions: resolveDims } = await import("../db/config.mjs");
+    const wantsTruncation = resolveDims(env.OB1_EMBEDDING_DIMENSIONS, embDim, embModel);
     const r = await fetch(`${llmBase}/embeddings`, {
       method: "POST",
       headers,

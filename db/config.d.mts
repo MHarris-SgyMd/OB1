@@ -45,6 +45,17 @@ export const VERIFIED_NOT_MRL: Set<string>;
  */
 export const EMBEDDING_PROMPTS: Record<string, { query: string; document: string }>;
 
+/**
+ * Resolve whether to request truncation, given the raw env value (or undefined),
+ * the configured width and the model. Explicit env wins; otherwise on only for a
+ * known-MRL model configured below its known native width.
+ */
+export function resolveEmbeddingDimensions(
+  raw: string | undefined,
+  dim: number,
+  model: string
+): boolean;
+
 /** Whether to send the OpenAI `dimensions` parameter. OB1_EMBEDDING_DIMENSIONS. */
 export const EMBEDDING_DIMENSIONS: boolean;
 
