@@ -14,6 +14,7 @@
  */
 
 import { SQL } from "bun";
+import { migrationValues, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,13 +68,28 @@ export type SchemaOptions = {
   model: string;
   /** Apply only these migrations, by filename prefix. Defaults to all of them. */
   only?: (name: string) => boolean;
+  /**
+   * Build the trigram index in 011. Defaults to false, matching the shipped
+   * default — a suite that wants it must ask, so the stock schema is what most
+   * suites exercise.
+   */
+  trgm?: boolean;
 };
 
-/** Substitute the template placeholders. Applying a migration raw fails. */
+/**
+ * Substitute the template placeholders. Applying a migration raw fails.
+ *
+ * Delegates to config.mjs rather than doing its own replacements. The version
+ * here was two hardcoded `.replace()` calls, which cannot fail on a variable it
+ * does not know about — it leaves `{{TRGM_INDEX}}` in the SQL and Postgres
+ * reports a syntax error with no hint where it came from. The shared one throws
+ * by name.
+ */
 export function substitute(sql: string, opts: SchemaOptions): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(opts.dim))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, opts.model);
+  return substituteMigration(
+    sql,
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? false })
+  );
 }
 
 /**

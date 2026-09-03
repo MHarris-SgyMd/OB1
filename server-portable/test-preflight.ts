@@ -134,6 +134,41 @@ else {
 
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
+  /**
+   * The trigram index is opt-in, and its flag is only read when 011 applies. So
+   * the state that actually needs catching is the one a migrator run cannot fix:
+   * the setting says on, the ledger says 011 is done, and nothing built an index.
+   * Left undetected that is a silent no-op on an explicit instruction.
+   *
+   * The schema above was built with the default (off), so simply asking for it
+   * reproduces the mismatch exactly — no sabotage needed.
+   */
+  const offOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/trigram index.*disabled/s.test(offOff.out), "with the flag unset, preflight reports the index disabled");
+
+  const wantOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "on" });
+  assert(wantOn.code === 0, "a trigram mismatch is a warning, not a refusal to serve");
+  assert(/OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist/.test(wantOn.out),
+         "…and names the disagreement between the setting and the database");
+  assert(/CREATE INDEX CONCURRENTLY/.test(wantOn.out), "…with the statement that fixes it");
+
+  // The mirror: build it, leave the flag off, and the warning must invert rather
+  // than the check simply going quiet whenever the two differ.
+  const idx = new SQL({ url: LIVE, max: 1 });
+  await idx.unsafe("CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops)");
+  await idx.close();
+
+  const nowOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "on" });
+  assert(/trigram index.*enabled and present/s.test(nowOn.out), "once built, the setting and the database agree");
+
+  const unwanted = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/exists but OB1_TRGM_INDEX is off/.test(unwanted.out),
+         "an index nobody asked for is reported too — it costs every capture");
+
+  const drop = new SQL({ url: LIVE, max: 1 });
+  await drop.unsafe("DROP INDEX IF EXISTS idx_thoughts_content_trgm");
+  await drop.close();
+
   const j = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json");
   const parsed = JSON.parse(j.out);
   assert(parsed.ok === true, "--json reports ok:true");

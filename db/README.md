@@ -15,6 +15,8 @@ Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
+- To run `test-upgrade.ts` or `bench-trgm.ts`: the same, and for the benchmark a
+  few minutes — it builds tables up to 100,000 rows
 
 ## Steps
 
@@ -50,11 +52,19 @@ will be duplicated. Or record them as applied without executing:
 bun migrate.ts --url ... --baseline
 ```
 
+`--baseline` is all-or-nothing: it marks **every** migration not already in the
+ledger as applied, without running any of them. That is what adoption wants, and
+it is the wrong tool for recording a single migration you applied by hand — on a
+database sitting at 009 it would mark 010 applied too, and the agent registry
+would never be created. For one migration, insert the one `schema_migrations`
+row; `--dry-run` prints the `sha256` to use beside each name.
+
 ## Expected outcome
 
-`bun test-schema.ts` prints `69 assertions: 69 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ten migrations applied, and
-`\d thoughts` shows seven columns and four indexes.
+`bun test-schema.ts` prints `80 assertions: 80 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eleven migrations applied, and
+`\d thoughts` shows seven columns and five indexes — four of our own plus the
+primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=on`.
 
 ## The migrations
 
@@ -70,6 +80,7 @@ Against a real database, `bun migrate.ts` reports ten migrations applied, and
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
+| `011_text_search_trgm.sql` | `pg_trgm`, plus an **opt-in** trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE` (`OB1_TRGM_INDEX=on`) | Ported from `schemas/text-search-trgm` |
 
 ## What changed relative to the guide
 
@@ -97,10 +108,68 @@ connects as.
 
 ## Extensions
 
-The core schema needs **only `vector`**. `gen_random_uuid()` has been a Postgres
-built-in since 13 and `sha256()` since 11, so `pgcrypto` is not required — despite
-five files elsewhere in the repo creating it. `pg_trgm` is needed only by
-`schemas/text-search-trgm`.
+The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
+`gen_random_uuid()` has been a Postgres built-in since 13 and `sha256()` since 11,
+so `pgcrypto` is not required — despite five files elsewhere in the repo creating
+it.
+
+`pg_trgm` is created unconditionally, but the index it exists for is **opt-in**
+via `OB1_TRGM_INDEX=on` — see the migration header for the measurements behind
+that default. The extension alone is inert: catalog rows, no storage on the table
+and no cost on any write. Creating it regardless is what makes enabling the index
+later a single statement instead of a statement plus a privilege.
+
+The two extensions differ in what they demand of the role applying the migration.
+Measured on PG16 (`pg_available_extension_versions.trusted`), `pg_trgm` is a
+*trusted* extension and `vector` is not — so a database owner can create pg_trgm
+without superuser, while 001 already needs the stronger privilege. 011 adds no
+requirement that was not already there.
+
+## Benchmarking the trigram index
+
+`bench-trgm.ts` measures what migration 011 costs and buys, because the number
+SMD-925 arrived with was measured on somebody else's brain and does not transfer.
+
+```bash
+./with-postgres.sh bun bench-trgm.ts
+OB1_BENCH_CORPUS=/path/to/corpus.json ./with-postgres.sh bun bench-trgm.ts
+```
+
+Without a corpus it generates from a built-in vocabulary. Pointed at one it builds
+a bigram model of that text and samples from it, so the trigram distribution
+resembles the real one — duplicating rows verbatim would collapse the index's
+distinct-gram count and flatter it enormously. The corpus is only ever read.
+
+Markers are planted at known frequencies (5 rows, 10%, 90%) so selectivity is a
+controlled variable, and the two-character probe matches exactly the same rows as
+the rare-word probe — so the sub-trigram limit is isolated from selectivity rather
+than confounded with it. The number of matched rows is printed alongside each
+timing, because a probe that accidentally matches nothing otherwise looks like the
+best result in the table.
+
+The headline result on our own data, and the reason the migration header is as
+long as it is: **the crossover is somewhere between 1,000 and 10,000 rows.** Below
+it the index is not slower, it is simply never chosen. Above it a 5-row `ILIKE`
+improves by ~350x at 10,000 rows and ~1370x at 100,000 — but a word in 10% of rows
+gets only 8-9x at either size, and a common word and any sub-trigram pattern are
+unaffected at every scale. The full table, with the write cost beside it, is in
+the header of `migrations/011_text_search_trgm.sql`.
+
+Two things the script has to do that are easy to leave out, both of which produced
+confidently wrong numbers first:
+
+- **Drop the index before the baseline arm.** Since 011 landed, `resetSchema`
+  builds it, so "before" is no longer the default state of a fresh schema.
+- **Never write to the table between the two read arms.** The first version
+  measured reads, then ran the write-amplification arm, then measured reads
+  again — so the second arm scanned a heap the first never saw (770 KB against
+  200 KB, for the same 97 live rows, because `VACUUM` reclaims tuples but only
+  returns *trailing* pages). Patching that with a vacuum just moved the bias
+  around: a plain `VACUUM` left the bloat, `VACUUM FULL` compacted below the
+  baseline, and applying `VACUUM FULL` to both arms rewrote a 60 MB table and
+  exhausted the container's 64 MB `/dev/shm` at the largest scale. The script now
+  runs three passes over three freshly loaded tables — one for reads, one per
+  write arm — so there is nothing to compact and nothing to correct for.
 
 ## Testing
 
@@ -130,10 +199,15 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 59 properties, including:
+asserts 80 properties, including:
 
 - every migration applies, **and applies twice without error**
-- the table shape and all four index access methods match the guide
+- the table shape and every index access method match the guide
+- the trigram index is **absent** under the shipped default and present once
+  `OB1_TRGM_INDEX` is on — a flag whose two states produce the same schema is not
+  a flag — and when present it is not merely there but reachable: with
+  `enable_seqscan` off the planner picks it for a leading-wildcard `ILIKE`, which
+  a bare `gin (content)` would not satisfy
 - both `upsert_thought` overloads resolve — the 3-arg form has no default on
   `p_embedding`, because a default would make the 2-arg call ambiguous and break
   every existing caller with `function is not unique`

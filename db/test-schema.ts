@@ -17,8 +17,12 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite/vector";
+// Migration 011 does CREATE EXTENSION pg_trgm. PGlite ships contrib extensions as
+// separate bundles that have to be handed in at construction — without this the
+// migration does not merely skip the index, it raises and [1] fails.
+import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { readdirSync, readFileSync } from "node:fs";
-import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, migrationValues, substituteMigration } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert } from "./test-support.ts";
@@ -26,11 +30,19 @@ import { createAssert } from "./test-support.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
 
-/** Migrations are templates; migrate.ts substitutes these at apply time. */
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
+/**
+ * Migrations are templates; migrate.ts substitutes these at apply time. The
+ * values come from config.mjs so this file cannot disagree with the runner about
+ * what a placeholder means, or quietly ignore one it has not heard of.
+ *
+ * `trgm` defaults to false here, matching the shipped default: [4] asserts the
+ * index is ABSENT from a stock schema, and [4b] re-applies 011 with it on.
+ */
+function subst(sql: string, trgm = false): string {
+  return substituteMigration(
+    sql,
+    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm })
+  );
 }
 
 const { assert, report } = createAssert();
@@ -50,7 +62,7 @@ function blend(a: number, b: number, wa: number, wb: number): string {
 }
 
 const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
-const db = new PGlite({ extensions: { vector } });
+const db = new PGlite({ extensions: { vector, pg_trgm } });
 
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
 
@@ -125,6 +137,99 @@ console.log("\n[4] Indexes exist with the right access methods");
     /WHERE \(content_fingerprint IS NOT NULL\)/.test(fp),
     "…and partial, so pre-fingerprint rows do not collide on NULL"
   );
+
+  // The trigram index is opt-in and this schema was built with the shipped
+  // default, so its ABSENCE is the assertion. Getting this backwards would mean
+  // every deployment silently paying ~70-95 microseconds per capture for an
+  // index no core query can reach.
+  assert(byName["idx_thoughts_content_trgm"] === undefined,
+         "idx_thoughts_content_trgm is absent by default (OB1_TRGM_INDEX unset)");
+
+  // The extension is created regardless, so enabling the index later is one
+  // statement rather than one statement plus a privilege grant.
+  const ext = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM pg_extension WHERE extname = 'pg_trgm'`
+  );
+  assert(ext.rows[0].c === 1, "…but the pg_trgm extension is installed either way");
+}
+
+// ── 4b. Turning the flag on builds it, and the planner can use it ────────────
+//
+// Two things at once, because the second is meaningless without the first.
+//
+// That the flag WORKS: re-applying 011 with OB1_TRGM_INDEX on must produce the
+// index that [4] just proved is absent without it. A flag whose two states
+// produce the same schema is not a flag.
+//
+// That the index is USABLE: existing is not the same as reachable. A wrong
+// opclass, a missing extension, or an expression mismatch all leave a perfectly
+// valid index that no ILIKE ever touches. The seed table is far too small for
+// the planner to prefer an index on cost, so seqscan is disabled to ask the
+// narrower question — CAN this index serve this query at all?
+
+console.log("\n[4b] OB1_TRGM_INDEX=on builds an index the planner can reach");
+{
+  // Re-applying the same migration, with the flag flipped. 011 is idempotent, so
+  // this is exactly what a deployment that enabled it from the start would get.
+  const file = readdirSync(MIGRATIONS).filter((f) => f.startsWith("011")).sort()[0];
+  await db.exec(subst(readFileSync(join(MIGRATIONS, file), "utf8"), true));
+
+  const built = await db.query<{ indexdef: string }>(
+    `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_thoughts_content_trgm'`
+  );
+  assert(built.rows.length === 1, "the flag builds the index that was absent a moment ago");
+  // The opclass is the part that actually matters and the part a careless edit
+  // loses: `USING gin (content)` is a valid index pg_trgm cannot use, and it
+  // would satisfy a bare "is GIN" assertion on its own.
+  assert(/USING gin/.test(built.rows[0]?.indexdef ?? ""), "…as GIN");
+  assert(/gin_trgm_ops/.test(built.rows[0]?.indexdef ?? ""),
+         "…with the gin_trgm_ops opclass, not a bare gin (content)");
+
+  for (let i = 0; i < 40; i++) {
+    await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [
+      `trigram probe row ${i} discussing ${i % 7 === 0 ? "zylotrope" : "ordinary"} matters`,
+    ]);
+  }
+  await db.query(`ANALYZE thoughts`);
+
+  const plan = await db.query<{ "QUERY PLAN": string }>(
+    `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
+  );
+  const seqPlan = plan.rows.map((r) => r["QUERY PLAN"]).join("\n");
+  // Not an assertion about which plan wins — on 40 rows a seq scan is correct,
+  // and asserting otherwise would be asserting the planner is wrong.
+  assert(typeof seqPlan === "string" && seqPlan.length > 0, "an ILIKE over content plans without error");
+
+  // try/finally, because PGlite is one long-lived connection: a throw between
+  // the two SETs would leave enable_seqscan off for every section after this
+  // one, and those would then fail for a reason that has nothing to do with them.
+  let forced;
+  try {
+    await db.query(`SET enable_seqscan = off`);
+    forced = await db.query<{ "QUERY PLAN": string }>(
+      `EXPLAIN SELECT id FROM thoughts WHERE content ILIKE '%zylotrope%'`
+    );
+  } finally {
+    await db.query(`SET enable_seqscan = on`);
+  }
+  const text = forced.rows.map((r) => r["QUERY PLAN"]).join("\n");
+  assert(/idx_thoughts_content_trgm/.test(text),
+         `with seqscan off the planner reaches for the trigram index (got: ${text.replace(/\s+/g, " ").slice(0, 90)})`);
+
+  // The result has to be right, not just indexed.
+  const hits = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM thoughts WHERE content ILIKE '%zylotrope%'`
+  );
+  assert(hits.rows[0].c === 6, `and returns every planted row (${hits.rows[0].c} of 6)`);
+
+  // A two-character pattern produces no trigrams. It must still be CORRECT —
+  // silently returning nothing here would be the worst possible failure.
+  const short = await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM thoughts WHERE content ILIKE '%zy%'`
+  );
+  assert(short.rows[0].c === 6, `a sub-trigram pattern is unindexable but still correct (${short.rows[0].c} of 6)`);
+
+  await db.query(`DELETE FROM thoughts WHERE content LIKE 'trigram probe row%'`);
 }
 
 // ── 5. The overload pair must not be ambiguous ───────────────────────────────

@@ -1,0 +1,157 @@
+-- 011 — a trigram GIN index on thoughts.content, for substring search
+--
+-- Source: schemas/text-search-trgm, promoted into core per SMD-925.
+--
+-- Requires: pg_trgm (011 creates it). Measured on PG16, pg_trgm is a TRUSTED
+-- extension and `vector` is not (pg_available_extension_versions.trusted), so a
+-- database owner can create pg_trgm without superuser while 001 already needs
+-- the stronger privilege. This migration therefore adds no requirement that was
+-- not already there.
+--
+-- ── What this is for ─────────────────────────────────────────────────────────
+-- A leading-wildcard pattern — `content ILIKE '%foo%'` — cannot use a B-tree or
+-- a tsvector index, because neither stores anything a match can start from.
+-- pg_trgm indexes every three-character sequence, so a pattern of three or more
+-- characters decomposes into grams the index can look up. Without it, substring
+-- search reads the whole table.
+--
+-- ── Measured, on this fork, on our corpus ────────────────────────────────────
+-- Upstream reports ~8s → ~100-150ms on an 89,000-row brain, about 50x. That
+-- number is real but not transferable: a seq scan costs what the table weighs,
+-- so the improvement is a function of scale, and it collapses as the pattern
+-- matches more rows. `db/bench-trgm.ts` reproduces the following (PG16, median
+-- of 5, rows sampled from a bigram model of our own corpus at ~500 chars each,
+-- with markers planted at known frequencies so selectivity is controlled):
+--
+--   rows      table    rare (5 rows)          selective (10%)     common (90%)
+--   -------   -------  --------------------   -----------------   ------------
+--        97   168 KB   0.25 → 0.26 ms         0.25 → 0.25 ms      no change
+--     1,000   736 KB   2.57 → 2.68 ms         2.66 → 2.68 ms      no change
+--    10,000   6.4 MB   26 → 0.08 ms  (347x)   27 → 3.20 ms (8.5x) no change
+--   100,000   63.1 MB  267 → 0.20 ms (1355x)  276 → 34 ms  (8.1x) no change
+--
+-- That is one run's verbatim output, not an average. Across runs the ratios move
+-- by a few percent and the sub-millisecond figures by more; read the order of
+-- magnitude and the plan change, not the last digit.
+--
+-- Four things that table says and the upstream one-liner does not:
+--
+--   1. The crossover is between 1,000 and 10,000 rows. Below it the planner
+--      correctly ignores the index — a seq scan over a table that fits in shared
+--      buffers is cheaper than any index lookup. At the size of the corpus this
+--      fork was benchmarked on, this index changes nothing at all.
+--
+--   2. Above the crossover, at high selectivity, it beats upstream's claim
+--      rather than matching it — the win scales with the table.
+--
+--   3. But selectivity is most of the story, not scale. Ten percent of rows is
+--      still a "rare word" by any ordinary reading, and it gets 8-9x, not ~1350x.
+--      Ninety percent gets nothing: the planner correctly declines the index,
+--      because reading most of the heap through a bitmap is worse than scanning.
+--
+--   4. A pattern under three characters gets nothing *in principle* — pg_trgm
+--      indexes three-character grams, so there is nothing to look up. The
+--      benchmark's two-char probe matches exactly the same 5 rows as the rare
+--      probe, and at 100,000 rows takes 267 ms against the rare probe's 0.20 ms.
+--      Same rows, same table; the pattern is one character too short.
+--
+-- ── What it costs ────────────────────────────────────────────────────────────
+-- SMD-925 argues "the only cost is index build time, which grows with the table
+-- — so this is cheapest now and never cheaper again". The first half is wrong.
+-- Build time is the one-off; the recurring costs are storage and write
+-- amplification, and both are ongoing:
+--
+--   storage       ~61 MB per 100,000 thoughts — very nearly the size of the
+--                 table itself, because ~500 characters of prose produce ~500
+--                 trigrams and almost all of them are distinct across the corpus.
+--
+--   writes        roughly +70 to +95 µs per row across runs, and flat as the
+--                 table grows. On a bare content INSERT that is 4x to 6x. That multiple
+--                 overstates the real effect — a capture also computes an
+--                 embedding and inserts into HNSW, so the trigram cost lands on
+--                 top of a much larger number — but the microseconds are real
+--                 and they are paid on every capture forever.
+--
+--   vacuum        GIN buffers new entries in a pending list (fastupdate, on by
+--                 default) that every query must scan in full on top of the
+--                 index. Between vacuums a busy table's lookups are slower than
+--                 the numbers above, which are measured on a vacuumed table.
+--
+--   build lock    CREATE INDEX, not CONCURRENTLY, so it holds a lock against
+--                 writes for the length of the build — ~5s at 100,000 rows
+--                 here. CONCURRENTLY is not available to us: migrate.ts wraps
+--                 each file in a transaction and CREATE INDEX CONCURRENTLY may
+--                 not run inside one. An operator upgrading a large live brain
+--                 should expect captures to block for that long.
+--
+--                 To avoid the lock, build it by hand outside the runner:
+--
+--                   CREATE INDEX CONCURRENTLY idx_thoughts_content_trgm
+--                     ON thoughts USING gin (content gin_trgm_ops);
+--
+--                 then record 011 as applied. Do NOT reach for `--baseline` to
+--                 do that: it marks EVERY unapplied migration as applied, not
+--                 the one you built, so a database sitting at 009 would skip
+--                 010 as well and lose the agent registry with no error. Insert
+--                 the single row instead — the sha256 is the first 12 hex
+--                 characters of the digest of this file after substitution,
+--                 which `bun migrate.ts --dry-run` prints beside the name.
+--
+--                 This is the one part of the issue's "cheapest now" argument
+--                 that holds: the lock is the cost that genuinely only grows.
+--
+-- ── The honest caveat ────────────────────────────────────────────────────────
+-- ── Why this is a flag and not just a migration ─────────────────────────────
+-- No query in this fork's core issues an ILIKE against `thoughts.content`.
+-- Search is `match_thoughts` (vector), `list_thoughts` filters on `metadata`,
+-- and `fetch` looks up by id. The function this index was written to accelerate,
+-- `search_thoughts_text`, lives in schemas/enhanced-thoughts, which has not been
+-- promoted. So as of this migration the index is reachable only by:
+--
+--   * a deployment that has also installed schemas/enhanced-thoughts, and
+--   * whatever keyword-search path core grows later.
+--
+-- So the index is OPT-IN. `OB1_TRGM_INDEX=on` builds it; unset or anything else
+-- leaves it out. Off is the honest default for a stock deployment: no core query
+-- can reach it, and the write cost is paid on every capture regardless.
+--
+-- ── Turning it on, and the one sharp edge ────────────────────────────────────
+-- The flag is read when this migration APPLIES. Migrations run once and are
+-- recorded in schema_migrations, so flipping OB1_TRGM_INDEX afterwards and
+-- re-running `bun migrate.ts` does nothing — 011 is already in the ledger. That
+-- would be a silent no-op, so `preflight.ts` compares the setting against the
+-- database and says so when they disagree, with the statement to run.
+--
+-- On an existing deployment, then, enabling it is one statement, outside the
+-- runner and without the transaction that makes CONCURRENTLY unavailable here:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm
+--     ON thoughts USING gin (content gin_trgm_ops);
+--
+-- and disabling it is `DROP INDEX CONCURRENTLY IF EXISTS idx_thoughts_content_trgm;`.
+-- Neither needs a migration, because neither changes what any query returns —
+-- only how fast a pattern match runs. That reversibility is the reason this is a
+-- flag rather than a decision the schema has to get right up front.
+
+-- The extension is created unconditionally, and that is deliberate even though
+-- the index is not. It is inert on its own — some catalog rows, no storage on the
+-- table, no cost on any write — and having it present is what makes enabling the
+-- index later a single statement rather than a statement plus a privilege the
+-- application role may not have.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+DO $$
+BEGIN
+  IF {{TRGM_INDEX}} THEN
+    -- Named as upstream's extension names it, deliberately. A deployment that
+    -- already installed schemas/text-search-trgm by hand has this exact index,
+    -- and IF NOT EXISTS then makes 011 a genuine no-op there rather than
+    -- building a second, identical, 60 MB copy under a different name.
+    CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm
+      ON thoughts
+      USING gin (content gin_trgm_ops);
+
+    COMMENT ON INDEX idx_thoughts_content_trgm IS
+      'Trigram GIN index on content, for leading-wildcard ILIKE. No effect below ~10k rows; no effect on patterns under 3 characters. See db/bench-trgm.ts.';
+  END IF;
+END $$;
