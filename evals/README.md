@@ -235,6 +235,10 @@ At temperature 0:
 | gpt-oss:20b | 13 GB | 48/48 | 35/36 | 83/84 | 6.7s | 1 invented person |
 | granite4.2:30b | 17 GB | 47/48 | 35/36 | 82/84 | 4.8s | 1 invented person |
 | nemotron-3.5-lightning:30b-a3b | 23 GB | 46/48 | 35/36 | 81/84 | 1.15s | none |
+| qwen3.5:9b | 6.6 GB | 45/48 | 34/36 | 79/84 | 2.3s | none |
+| qwen3.5:4b | 3.4 GB | 44/48 | 35/36 | 79/84 | 1.4s | none |
+| qwen3.5:2b | 2.7 GB | 46/48 | 32/36 | 78/84 | 1.1s | 3 invented people |
+| **qwen3.5:0.8b** | **1.0 GB** | 43/48 | 34/36 | 77/84 | **0.56s** | **none** |
 | **lfm2.5:8b** | 5.2 GB | 42/48 | 33/36 | 75/84 | **0.54s** | **none** |
 | functiongemma:270m | 301 MB | 27/48 | 22/36 | 49/84 | 8.8s | 11 with no topics, 1 bad JSON |
 
@@ -249,6 +253,31 @@ paid.
 `nemotron-3.5-lightning:30b-a3b` is the MoE story again: ~3B active, 81/84 with no
 failures at 1.15s per capture — matching `qwen2.5:7b`'s score and speed from a
 23 GB model. Interesting, but it buys nothing the 4.7 GB model does not already do.
+
+### The whole qwen3.5 ladder, and none of it displaces the default
+
+`qwen3.8` ships only a 27B, but `qwen3.5` has the full range — 0.8b, 2b, 4b, 9b,
+27b, a 35b-a3b MoE and a 122b. The small end is the interesting part, because
+extraction runs on the interactive path of every capture. An earlier version of
+this file dismissed the family as "unlikely to beat" `qwen3.8:27b` without testing
+it, which was a guess and is now removed.
+
+Measured, the newer family loses to the older one at every comparable size.
+`qwen3.5:4b` is 1.3 GB smaller than `qwen2.5:7b` and manages to be *both* lower
+scoring and slower. `qwen3.5:9b` is larger, slower and lower. `qwen3.5:2b` invents
+three people, which is disqualifying at any speed. That is the same pattern the
+embedding sweep produced twice — newer and bigger both lost — and it is the reason
+this directory exists.
+
+**`qwen3.5:0.8b` is the exception and the new fast option.** 77/84 with zero
+structural failures, at 0.56s per capture and **1.0 GB**. It displaces `lfm2.5:8b`
+in that role outright: two points better, the same speed, a fifth of the disk.
+Four points below the default for 2.5x the speed is a real trade if you capture
+constantly.
+
+`qwen3.5:27b` was not pulled. `qwen3.8:27b` already scores a perfect 84/84 at the
+same size, so there is no headroom for a same-sized sibling to win — the only thing
+it could do is tie.
 
 `lfm2.5:8b` is worth calling out separately: an MoE with roughly 1B active
 parameters, it is **2.2× faster than `qwen2.5:7b`** with zero structural failures,
@@ -355,7 +384,7 @@ Post-cutoff families that exist and were **not** evaluated, with why:
 
 | family | smallest tag | why not tested |
 | --- | --- | --- |
-| `qwen3.6`, `qwen3.5` | 18 GB | Siblings of the tested `qwen3.8:27b`; unlikely to beat it. |
+| `qwen3.6` | 18 GB (`:27b`) | Sibling of the tested `qwen3.8:27b`. Same floor, untested. |
 | `glm-5.3-flash` | — | **Cloud-only** (`:cloud`). No local weights published, so it is out of scope for a local brain. |
 | `deepseek-v4-flash`, `deepseek-v4-pro` | unknown | DeepSeek V4 exists; sizes not resolved. |
 | `minimax-m3`, `kimi-k3`, `qwen3.8-flash-next` | 105 GB+ where known | Beyond 64 GB. |

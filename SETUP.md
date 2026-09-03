@@ -172,8 +172,10 @@ The short version:
   dimensions, above pgvector's HNSW limit of 2000 — the column works but no index
   can be built. The largest usable one, `qwen3-embedding:0.6b`, scored below
   `embeddinggemma` despite more parameters and 16× the context.
-- **`lfm2.5:8b` is the fast option** — 0.54s per capture against 1.4s, zero
-  structural failures, six points less accurate. Worth it if you capture often.
+- **`qwen3.5:0.8b` is the fast option** — 0.56s per capture against 1.4s, zero
+  structural failures, four points less accurate, and **1.0 GB**. Worth it if you
+  capture often or are tight on memory. The rest of the `qwen3.5` ladder (2b, 4b,
+  9b) all score below the default, and the 2b invents people.
 - **`qwen2.5:7b` is the default, and is not the top scorer.** `qwen3.8:27b` is —
   the only model to reach a perfect 84/84, at 3.5s per capture and 18 GB. The
   default scores 81/84 at 1.4s and 4.7 GB with the same zero structural failures;
