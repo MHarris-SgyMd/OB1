@@ -226,6 +226,39 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 
 runs them all in CI's order against one shared database. Use it before pushing.
 
+## Detached from the fork network
+
+This repository was forked from `NateBJones-Projects/OB1` and then detached, for
+one concrete reason: on a fork, GitHub's "New pull request" targets the **parent**
+by default, so a mis-click puts internal work into a public PR on someone else's
+repository. Detaching removes that. It also stops `gh` resolving to the parent,
+which hid a red CI for eight commits (see above).
+
+**Nothing about the upstream relationship in git changed.** The `upstream` remote,
+the pin at `9543c29`, and the rebase procedure below all work exactly as before —
+detaching is GitHub metadata, not history. Provenance stays recorded here and in
+`LICENSE.md` (FSL-1.1-MIT, which is unaffected: internal use is permitted, and the
+Competing Use restriction is unchanged by where the repo sits).
+
+One consequence to know about. Fork status had been suppressing the
+`pull_request_target`, `issues` and `schedule` triggers, which is the only reason
+upstream's eleven workflows were dormant. Detaching makes them live —
+`ob1-gate-v2.yml` would fail every internal PR by enforcing contribution rules
+this fork deliberately does not follow, and `update-readme-contributions.yml`
+would start rewriting the README on a schedule. So they are **disabled at the repo
+level** rather than deleted:
+
+```bash
+./.github/disable-upstream-workflows.sh            # dry run
+./.github/disable-upstream-workflows.sh --apply
+```
+
+Disabling keeps the eleven files byte-identical to the pin, so rebases stay clean;
+deleting them would add eleven more conflicts for no benefit. It is reversible.
+Only `fork-checks.yml` is ours and stays enabled. Re-run the script after a rebase
+brings in a new upstream workflow, since a workflow must register before it can be
+disabled.
+
 ## Rebasing onto upstream
 
 Roughly quarterly, or when something lands that we want.
