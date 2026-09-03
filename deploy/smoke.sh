@@ -65,10 +65,10 @@ pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersi
 # 3. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
-# Eight for a write key. update_thought and delete_thought are scope-gated, so a
-# read key would legitimately show five — this smoke test authenticates as a writer.
-expected="capture_thought,delete_thought,fetch,list_thoughts,search,search_thoughts,thought_stats,update_thought"
-[ "$tools" = "$expected" ] && ok "all eight tools exposed" || bad "tool surface is '$tools'"
+# Nine for a write key. update_thought and delete_thought are scope-gated, so a
+# read key would legitimately show six — this smoke test authenticates as a writer.
+expected="capture_thought,delete_thought,fetch,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
+[ "$tools" = "$expected" ] && ok "all nine tools exposed" || bad "tool surface is '$tools'"
 
 # 4. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
@@ -84,6 +84,20 @@ esac
 listed=$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' \
   | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR" if r.get("isError") else "OK"))' 2>/dev/null)
 [ "$listed" = "OK" ] && ok "list_thoughts served" || bad "list_thoughts errored"
+
+# 6. Keyword search, which is the only read path that touches migration 012 and
+#    the pg_trgm extension. It needs no embedding provider — the smoke stack has
+#    no real OPENROUTER_API_KEY — so unlike search_thoughts it can run here. A
+#    needle that cannot plausibly be in a fresh brain: zero hits is the pass, an
+#    error is the failure, and "function does not exist" is what an unapplied 012
+#    looks like.
+kw=$(rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_thoughts_keyword","arguments":{"query":"zylotrope-smoke-needle"}}}' \
+  | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR: " if r.get("isError") else "")+r.get("content",[{}])[0].get("text",""))' 2>/dev/null | head -1)
+case "$kw" in
+  ERROR:*)         bad "search_thoughts_keyword failed — $kw" ;;
+  "No thoughts contain"*) ok "search_thoughts_keyword reached the database" ;;
+  *)               bad "search_thoughts_keyword returned nothing usable — $kw" ;;
+esac
 
 echo
 echo "$((pass+fail)) checks: $pass passed, $fail failed"

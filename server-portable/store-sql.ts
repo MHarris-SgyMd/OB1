@@ -31,6 +31,7 @@ import type {
   ListFilters,
   MutationError,
   MutationResult,
+  ThoughtKeywordMatch,
   ThoughtListItem,
   ThoughtMatch,
   ThoughtMeta,
@@ -77,6 +78,35 @@ export class SqlStore implements ThoughtStore {
       metadata: (r.metadata ?? {}) as Record<string, unknown>,
       similarity: Number(r.similarity),
       created_at: new Date(r.created_at as string).toISOString(),
+    }));
+  }
+
+  async keywordThoughts(opts: {
+    query: string;
+    limit: number;
+    offset: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtKeywordMatch[]> {
+    // Call the function rather than inlining the ILIKE, for the same reason
+    // matchThoughts calls match_thoughts: the wildcard escaping and the stable
+    // ORDER BY are correctness, and two copies of them is one copy too many.
+    const rows = await this.sql`
+      SELECT id, content, metadata, created_at, occurrences, total_count
+      FROM search_thoughts_keyword(
+        ${opts.query}::text,
+        ${opts.limit}::int,
+        ${opts.offset}::int,
+        ${opts.filter}::jsonb
+      )`;
+    return rows.map((r: Record<string, unknown>) => ({
+      id: String(r.id),
+      content: String(r.content),
+      metadata: (r.metadata ?? {}) as Record<string, unknown>,
+      created_at: new Date(r.created_at as string).toISOString(),
+      occurrences: Number(r.occurrences),
+      // bigint. Bun hands it back as a string, and Number(undefined) is NaN, so
+      // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
+      totalCount: Number(r.total_count ?? 0),
     }));
   }
 

@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { migrationValues, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, migrationValues, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,7 @@ const FUNCTIONS = [
   "upsert_thought(text, jsonb, vector)",
   "upsert_thought(text, jsonb, vector, jsonb)",
   "match_thoughts(vector, float, int, jsonb)",
+  "search_thoughts_keyword(text, int, int, jsonb)",
   "update_updated_at()",
 ];
 
@@ -69,9 +70,11 @@ export type SchemaOptions = {
   /** Apply only these migrations, by filename prefix. Defaults to all of them. */
   only?: (name: string) => boolean;
   /**
-   * Build the trigram index in 011. Defaults to false, matching the shipped
-   * default — a suite that wants it must ask, so the stock schema is what most
-   * suites exercise.
+   * Build the trigram index in 011. Defaults to `DEFAULT_TRGM_INDEX`, so most
+   * suites exercise the schema a stock deployment gets. Read from config rather
+   * than written as a literal here: SMD-944 flipped that default from off to on
+   * and a hardcoded copy would have silently kept the old one, which is the
+   * defined-twice failure this fork keeps removing.
    */
   trgm?: boolean;
 };
@@ -88,7 +91,7 @@ export type SchemaOptions = {
 export function substitute(sql: string, opts: SchemaOptions): string {
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? false })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX })
   );
 }
 

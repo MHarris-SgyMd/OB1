@@ -63,7 +63,7 @@ followed by `Started server`. `smoke.sh` prints `5 checks: 5 passed, 0 failed`.
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong
-`DATABASE_URL` starts cleanly, answers `initialize`, returns all six tools from
+`DATABASE_URL` starts cleanly, answers `initialize`, returns every tool from
 `tools/list`, and passes any HTTP liveness probe — then fails when a user captures
 their first thought, with the real error buried inside a tool response.
 

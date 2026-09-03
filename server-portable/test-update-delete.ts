@@ -84,7 +84,7 @@ console.log("\n[1] Both tools are registered for a write key");
   const names = (listed.result?.tools ?? []).map((t) => t.name);
   assert(names.includes("update_thought"), "update_thought present");
   assert(names.includes("delete_thought"), "delete_thought present");
-  assert(names.length === 8, `eight tools in total (${names.length})`);
+  assert(names.length === 9, `nine tools in total (${names.length})`);
 }
 
 console.log("\n[2] An update with neither content nor metadata is refused");
@@ -234,7 +234,7 @@ console.log("\n[7] A read-scoped key cannot see either tool");
   const names = (listed.result?.tools ?? []).map((t) => t.name);
   assert(!names.includes("update_thought"), "update_thought is not registered for a read key");
   assert(!names.includes("delete_thought"), "delete_thought is not registered either");
-  assert(names.length === 5, `five read-only tools (${names.length})`);
+  assert(names.length === 6, `six read-only tools (${names.length})`);
 
   // Not merely hidden — calling it must fail rather than being served.
   let msg = "";

@@ -3,7 +3,7 @@
  * preflight.ts — fail a bad deployment before it serves traffic.
  *
  * Phase 4 of the migration. Without this the server starts happily when
- * misconfigured: `initialize` succeeds, `tools/list` returns all six tools, and the
+ * misconfigured: `initialize` succeeds, `tools/list` returns every tool, and the
  * first real tool call returns "Error: OB1_STORE=sql requires DATABASE_URL" inside
  * a tool response. Every liveness probe reports green, including the container
  * healthcheck, because the HTTP layer genuinely is fine — the data layer is built
@@ -264,16 +264,21 @@ if (configFailed) {
                  "Apply db/migrations/010_agent_identity.sql.");
 
         /**
-         * The trigram index is opt-in, and the flag is read only when migration
-         * 011 applies. Migrations run once, so someone who sets OB1_TRGM_INDEX=on
-         * against a database that already has 011 in its ledger and re-runs the
-         * migrator gets a clean "skipped, already applied" and no index. That is
-         * a silent no-op on an explicit instruction, which is exactly the kind of
+         * The trigram flag is read only when migration 011 applies. Migrations
+         * run once, so someone who changes OB1_TRGM_INDEX against a database
+         * that already has 011 in its ledger and re-runs the migrator gets a
+         * clean "skipped, already applied" and no change to the index. That is a
+         * silent no-op on an explicit instruction, which is exactly the kind of
          * quiet this fork keeps removing — so the two are compared here.
          *
+         * This matters more since SMD-944 flipped the default to on: every
+         * deployment that applied 011 before then is in the mismatched state by
+         * default, with a working `search_thoughts_keyword` that sequentially
+         * scans. This check is the only thing that tells them.
+         *
          * A warning either way, never a failure: the index changes how fast a
-         * pattern match runs, never what it returns, and no core query issues one
-         * at all. Refusing to serve over it would be absurd.
+         * pattern match runs, never what it returns. Refusing to serve over it
+         * would be absurd.
          */
         const { TRGM_INDEX: wantTrgm } = await import("../db/config.mjs");
         const trgmIdx = await sql`
@@ -281,10 +286,10 @@ if (configFailed) {
           WHERE tablename = 'thoughts' AND indexname = 'idx_thoughts_content_trgm'`;
         const haveTrgm = Number(trgmIdx[0].c) >= 1;
         if (wantTrgm === haveTrgm) {
-          add("trigram index", "ok", haveTrgm ? "enabled and present" : "disabled (OB1_TRGM_INDEX unset)");
+          add("trigram index", "ok", haveTrgm ? "enabled and present" : "disabled (OB1_TRGM_INDEX=off)");
         } else if (wantTrgm) {
           add("trigram index", "warn",
-              "OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist — migration 011 already applied with it off, so the setting is doing nothing",
+              "OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist — migration 011 already applied with it off, so the setting is doing nothing and search_thoughts_keyword sequentially scans",
               "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops);");
         } else {
           add("trigram index", "warn",

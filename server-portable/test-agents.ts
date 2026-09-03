@@ -330,7 +330,7 @@ console.log("\n[11b] A server running against a database still at 009");
 
   const list = (await importer.rpc("tools/list")) as { error?: unknown; result?: { tools?: unknown[] } };
   assert(list.error === undefined, "tools/list still answers with no resolve_agent");
-  assert((list.result?.tools ?? []).length === 8, `…with the full write surface (${(list.result?.tools ?? []).length})`);
+  assert((list.result?.tools ?? []).length === 9, `…with the full write surface (${(list.result?.tools ?? []).length})`);
 
   // The one that matters: a failed lookup must not poison the request behind it.
   const out = await importer.call("capture_thought", { content: "captured against an unmigrated database" });

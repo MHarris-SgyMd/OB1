@@ -127,6 +127,40 @@ console.log("\n[3] Search ranks and filters exactly as the RPC defines");
   assert(capped.length === 1, "limit is honoured");
 }
 
+console.log("\n[3b] keywordThoughts is exact where matchThoughts is approximate");
+{
+  // The pair the whole feature exists for. These three rows differ by one
+  // character in a position an embedding cannot possibly distinguish, and the
+  // store must return exactly the one that contains the literal string.
+  for (const c of ["ticket SMD-944 is open", "ticket SMD-9440 is open", "ticket SMD-94 is open"]) {
+    await store.captureThought({ content: c, payload: { metadata: { kind: "ticket" } }, embedding: unit(2) });
+  }
+
+  const hits = await store.keywordThoughts({ query: "SMD-944 ", limit: 10, offset: 0, filter: {} });
+  assert(hits.length === 1 && hits[0].content === "ticket SMD-944 is open",
+         `an exact needle returns exactly its row (got ${hits.length}: ${hits.map((h) => h.content).join(" | ")})`);
+  assert(hits[0].totalCount === 1, `totalCount is mapped from total_count, not left undefined (${hits[0].totalCount})`);
+  assert(hits[0].occurrences === 1, `occurrences is a number (${hits[0].occurrences})`);
+  assert(typeof hits[0].created_at === "string" && hits[0].created_at.endsWith("Z"),
+         "created_at is normalised to an ISO string, as every other store method does");
+
+  // The prefix reaches all three, and totalCount says so on every row so a
+  // caller reading only the first still knows the size of the set.
+  const prefix = await store.keywordThoughts({ query: "SMD-94", limit: 2, offset: 0, filter: {} });
+  assert(prefix.length === 2, `limit bounds the page (got ${prefix.length})`);
+  assert(prefix.every((h) => h.totalCount === 3), `…while totalCount reports all 3 (${prefix.map((h) => h.totalCount).join(",")})`);
+
+  const filtered = await store.keywordThoughts({ query: "ticket", limit: 10, offset: 0, filter: { kind: "nope" } });
+  assert(filtered.length === 0, "the jsonb filter reaches the function");
+
+  assert((await store.keywordThoughts({ query: "", limit: 10, offset: 0, filter: {} })).length === 0,
+         "an empty query is zero rows, not the whole table");
+
+  for (const c of ["ticket SMD-944 is open", "ticket SMD-9440 is open", "ticket SMD-94 is open"]) {
+    await store.deleteThought({ id: (await store.keywordThoughts({ query: c, limit: 1, offset: 0, filter: {} }))[0].id });
+  }
+}
+
 console.log("\n[4] listThoughts reproduces the PostgREST filters");
 {
   const all = await store.listThoughts({ limit: 10 });

@@ -1136,6 +1136,57 @@ weights whose only purpose is to have already lost.
 - **Nothing measures index build time or memory at scale.** These are retrieval
   quality and extraction accuracy only.
 
+## Where vector search fails outright: exact tokens
+
+`eval-keyword.ts` measures the claim behind SMD-944 rather than restating it.
+Every other eval here asks which embedding model retrieves best. This one asks
+whether embeddings retrieve *at all* for a class of query, and compares them
+against `search_thoughts_keyword` (migration 012) running in a real Postgres.
+
+```bash
+../db/with-postgres.sh bun eval-keyword.ts qwen3-embedding:4b
+```
+
+The queries are tokens that appear in exactly one document **by substring** and
+are identifier-shaped; the answer is that document. Over 441 real issues, with
+the server's own query prompt:
+
+| instrument | R@1 | not in top-10 | MRR |
+| --- | --- | --- | --- |
+| vector (`qwen3-embedding:4b`) | 10% | 37/60 | 0.201 |
+| keyword (`search_thoughts_keyword`) | 100% | 0/60 | 1.000 |
+
+**The keyword row is 100% by construction and proves nothing on its own.** Every
+query is unique to one document, so a correct substring search cannot do worse.
+It is in the table to show that the vector row is not.
+
+Sliced by shape, because the first run's deepest misses were all slash-joined
+English words — `disabled/replaced`, `UI/API` — and an average over those would
+have let the least interesting cases carry the headline:
+
+| shape | n | R@1 | not in top-10 |
+| --- | --- | --- | --- |
+| digit or underscore — `SMD-506`, `temporal_activity` | 27 | 7% | 16/27 |
+| slash or dot — `UI/API`, `db/config.mjs` | 28 | 7% | 19/28 |
+| interior capitals — `getUserById` | 5 | 40% | 2/5 |
+
+The first row is the case the issue is about, and it is no better than the weak
+one. `additional_notes` ranked 277th of 441.
+
+### Two things this harness has to get right
+
+**Hapax means substring, not token.** The first version selected tokens appearing
+in exactly one document and its control rejected the run: `SMD-50` is a token in
+one document and a substring of three, because `SMD-500` exists. `risk_level` sits
+inside `risk_levels`. A query set built on token uniqueness would have made the
+keyword column an artefact of a definition.
+
+**The control asks the real function.** Every query is unique by construction, so
+`search_thoughts_keyword` must return exactly one row and it must be the right
+one. Anything else means the tokenizer and the SQL function disagree about what a
+token is, and the script exits without printing a comparison rather than
+publishing one against a query set that does not mean what its label says.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

@@ -158,7 +158,7 @@ async function toolsFor(key: string, via: "header" | "query"): Promise<string[]>
 console.log("\n[7] A read-only key cannot see the tool that writes");
 {
   const write = await toolsFor(WRITE_KEY, "header");
-  assert(write.length === 8, `write scope sees 8 tools (${write.length})`);
+  assert(write.length === 9, `write scope sees 9 tools (${write.length})`);
   // The two mutating tools specifically — the count alone would pass if one
   // write tool were swapped for another.
   assert(write.includes("update_thought") && write.includes("delete_thought"),
@@ -166,11 +166,11 @@ console.log("\n[7] A read-only key cannot see the tool that writes");
   assert(write.includes("capture_thought"), "…including capture_thought");
 
   const read = await toolsFor(READ_KEY, "header");
-  assert(read.length === 5, `read scope sees 5 tools (${read.length})`);
+  assert(read.length === 6, `read scope sees 6 tools (${read.length})`);
   assert(!read.includes("update_thought") && !read.includes("delete_thought"),
          "…and neither mutating tool is among them");
   assert(!read.includes("capture_thought"), "capture_thought is absent, not merely refused");
-  for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"]) {
+  for (const t of ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "thought_stats"]) {
     assert(read.includes(t), `read scope keeps "${t}"`);
   }
 }
@@ -180,7 +180,7 @@ console.log("\n[8] Scope applies through the ?key= URL form too");
   // This is the form that ends up in logs and browser history, so it is the one
   // that most needs to be limitable.
   const read = await toolsFor(READ_KEY, "query");
-  assert(read.length === 5 && !read.includes("capture_thought"),
+  assert(read.length === 6 && !read.includes("capture_thought"),
     "a read-only key in the URL still cannot see capture_thought");
   const write = await toolsFor(WRITE_KEY, "query");
   assert(write.includes("capture_thought"), "a write key in the URL still can");

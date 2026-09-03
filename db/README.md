@@ -15,8 +15,8 @@ Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
-- To run `test-upgrade.ts` or `bench-trgm.ts`: the same, and for the benchmark a
-  few minutes — it builds tables up to 100,000 rows
+- To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
+  for the benchmarks a few minutes — they build tables up to 100,000 rows
 
 ## Steps
 
@@ -61,10 +61,10 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `80 assertions: 80 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eleven migrations applied, and
-`\d thoughts` shows seven columns and five indexes — four of our own plus the
-primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=on`.
+`bun test-schema.ts` prints `108 assertions: 108 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports twelve migrations applied, and
+`\d thoughts` shows seven columns and six indexes — five of our own plus the
+primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`.
 
 ## The migrations
 
@@ -80,7 +80,8 @@ primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=on`.
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
-| `011_text_search_trgm.sql` | `pg_trgm`, plus an **opt-in** trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE` (`OB1_TRGM_INDEX=on`) | Ported from `schemas/text-search-trgm` |
+| `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
+| `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 
 ## What changed relative to the guide
 
@@ -113,11 +114,18 @@ The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
 so `pgcrypto` is not required — despite five files elsewhere in the repo creating
 it.
 
-`pg_trgm` is created unconditionally, but the index it exists for is **opt-in**
-via `OB1_TRGM_INDEX=on` — see the migration header for the measurements behind
-that default. The extension alone is inert: catalog rows, no storage on the table
-and no cost on any write. Creating it regardless is what makes enabling the index
-later a single statement instead of a statement plus a privilege.
+`pg_trgm` is created unconditionally. The index it exists for was opt-in until
+migration 012 gave it a caller — `search_thoughts_keyword` — and is now **on by
+default**, with `OB1_TRGM_INDEX=off` to omit it. The extension alone is inert:
+catalog rows, no storage on the table and no cost on any write. Creating it
+regardless is what makes enabling the index later a single statement instead of a
+statement plus a privilege.
+
+The flag is read only when 011 **applies**. Flipping it afterwards and re-running
+the migrator does nothing, so `preflight.ts` compares the setting against
+`pg_indexes` on every boot and prints the one statement to run. Every deployment
+that applied 011 before this change is in that state by default: keyword search
+works and sequentially scans until the index is built.
 
 The two extensions differ in what they demand of the role applying the migration.
 Measured on PG16 (`pg_available_extension_versions.trusted`), `pg_trgm` is a
@@ -125,7 +133,7 @@ Measured on PG16 (`pg_available_extension_versions.trusted`), `pg_trgm` is a
 without superuser, while 001 already needs the stronger privilege. 011 adds no
 requirement that was not already there.
 
-## Benchmarking the trigram index
+## Benchmarking the trigram index and the keyword function
 
 `bench-trgm.ts` measures what migration 011 costs and buys, because the number
 SMD-925 arrived with was measured on somebody else's brain and does not transfer.
@@ -155,8 +163,46 @@ gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
 
-Two things the script has to do that are easy to leave out, both of which produced
-confidently wrong numbers first:
+### bench-keyword.ts
+
+`bench-trgm.ts` measures a bare `content ILIKE '%needle%'`. `bench-keyword.ts`
+measures the three things migration 012 added on top of it, none of which the
+earlier benchmark can speak to:
+
+```bash
+./with-postgres.sh bun bench-keyword.ts
+```
+
+**Whether an escaped pattern still reaches the index.** `search_thoughts_keyword`
+escapes `_` and `%` before wrapping the needle, because unescaped they are ILIKE
+wildcards and `upsert_thought` would also match `upsert-thought`. But `_` is the
+most common character in the identifiers the feature exists to find, and nothing
+had checked that pg_trgm can extract grams across `\_`. It can: the index is used
+at 10,000 and 100,000 rows, and correctly not used at 1,000.
+
+That is established from `pg_stat_user_indexes.idx_scan` read before and after the
+call, not from a plan — `EXPLAIN` of a plpgsql function shows a Function Scan and
+says nothing about what happens inside it. The first version of that check read
+the counter immediately and reported "index not used" at every scale, while the
+timings said 0.59 ms for a query a sequential scan does in 267 ms. Statistics are
+flushed at most once a second; `pg_stat_force_next_flush()` fixes it. The
+measurement was wrong, not the function.
+
+**What the extras cost.** `total_count` is within noise of free, which is what the
+migration header argues: the ordering already materialises the whole match set, so
+the window adds no scan. The whole function is ~0.1 ms over the bare pattern at
+100,000 rows.
+
+**The ceiling.** A needle in ~10% of rows costs 75 ms at 100,000. Keyword search
+is fast for what it is for — exact, rare strings — and unremarkable otherwise.
+
+A decoy is planted that only an *unescaped* pattern can match, so a regression in
+the escaping doubles the row count and the script refuses to print rather than
+reporting a faster wrong query.
+
+### Two things bench-trgm.ts has to do
+
+Both easy to leave out, and both produced confidently wrong numbers first:
 
 - **Drop the index before the baseline arm.** Since 011 landed, `resetSchema`
   builds it, so "before" is no longer the default state of a fresh schema.
@@ -199,15 +245,26 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 80 properties, including:
+asserts 108 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
-- the trigram index is **absent** under the shipped default and present once
-  `OB1_TRGM_INDEX` is on — a flag whose two states produce the same schema is not
-  a flag — and when present it is not merely there but reachable: with
-  `enable_seqscan` off the planner picks it for a leading-wildcard `ILIKE`, which
-  a bare `gin (content)` would not satisfy
+- the trigram index is **present** under the shipped default, and the flag gates
+  it in both directions — a flag whose two states produce the same schema is not
+  a flag, and asserting only the on-direction would pass against a migration that
+  ignored the flag entirely. When present it is not merely there but reachable:
+  with `enable_seqscan` off the planner picks it for a leading-wildcard `ILIKE`,
+  which a bare `gin (content)` would not satisfy
+- `search_thoughts_keyword` is exact (`upsert_thought` does not match
+  `upsert-thought`, `100%` is not a wildcard), counts occurrences, reports a
+  `total_count` that agrees with an independent `count(*)`, and returns the right
+  rows for a two-character needle the index structurally cannot serve
+- **paging is stable when the plan changes underneath it.** The obvious version of
+  that test — page six tied rows and look for repeats — passes whether or not the
+  `ORDER BY` has a unique final key, because at that size Postgres returns ties in
+  the same order every time. The real test alternates `enable_seqscan` between
+  pages over 400 tied rows. Measured with the tiebreak removed: 2 repeats, 398 of
+  400 covered. With it: 0 and 400
 - both `upsert_thought` overloads resolve — the 3-arg form has no default on
   `p_embedding`, because a default would make the 2-arg call ambiguous and break
   every existing caller with `function is not unique`

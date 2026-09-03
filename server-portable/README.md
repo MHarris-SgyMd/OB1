@@ -1,6 +1,6 @@
 # server-portable
 
-A runtime-neutral build of the Open Brain MCP server. Same six tools, same wire
+A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
 behaviour as `../server/index.ts`, but with no dependency on Deno or on Supabase
 Edge Functions as a host.
 
@@ -156,7 +156,7 @@ detects the divergence but does not prevent it. Here there is nothing to diverge
 from, so the guards are unnecessary and absent.
 
 `test-e2e-sql.ts` goes further: it boots the real server with `OB1_STORE=sql`,
-deletes `SUPABASE_URL` from the environment, and drives the six tools over real
+deletes `SUPABASE_URL` from the environment, and drives the tools over real
 JSON-RPC against real Postgres. Only the model provider is stubbed, so the suite
 stays hermetic and free.
 

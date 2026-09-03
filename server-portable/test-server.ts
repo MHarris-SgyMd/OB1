@@ -160,6 +160,7 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
     "list_thoughts",
     "search",
     "search_thoughts",
+    "search_thoughts_keyword",
     "thought_stats",
     "update_thought",
   ];

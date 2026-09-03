@@ -26,6 +26,27 @@ export type ThoughtMatch = {
   created_at: string;
 };
 
+/**
+ * One hit from `search_thoughts_keyword` (migration 012).
+ *
+ * Deliberately NOT a ThoughtMatch with `similarity` reinterpreted. The two
+ * numbers are not comparable — a cosine similarity is bounded and continuous,
+ * an occurrence count is an unbounded integer — and sharing the type would
+ * invite exactly the blend the migration header declines to make. `totalCount`
+ * is the true size of the match set, so a caller can page and can tell a
+ * complete answer from a clamped one.
+ */
+export type ThoughtKeywordMatch = {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  /** Case-insensitive occurrences of the needle in this thought's content. */
+  occurrences: number;
+  /** Matches across the whole corpus, before limit and offset. */
+  totalCount: number;
+};
+
 export type ThoughtRecord = {
   id: string;
   content: string;
@@ -192,6 +213,20 @@ export interface ThoughtStore {
     limit: number;
     filter: Record<string, unknown>;
   }): Promise<ThoughtMatch[]>;
+
+  /**
+   * Exact substring search over `content`, case-insensitive. Migration 012.
+   *
+   * The store passes the query through untouched: `%` and `_` are escaped inside
+   * the SQL function, not here, so both backends escape identically and neither
+   * can be the one that forgets.
+   */
+  keywordThoughts(opts: {
+    query: string;
+    limit: number;
+    offset: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtKeywordMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
 

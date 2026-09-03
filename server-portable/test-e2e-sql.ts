@@ -132,7 +132,7 @@ console.log("[1] The server runs with no Supabase configuration at all");
   });
   const t = await r.text();
   const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  assert(b.result?.tools?.length === 8, `all eight tools still registered (${b.result?.tools?.length})`);
+  assert(b.result?.tools?.length === 9, `all nine tools still registered (${b.result?.tools?.length})`);
 }
 
 console.log("\n[2] capture_thought writes through SQL");
@@ -160,6 +160,66 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   assert(/alpha thought about migrations/.test(out), "the matching thought is present");
   assert(/100\.0% match/.test(out), "the exact match scores 100%");
   assert(!/beta thought/.test(out), "an orthogonal thought is excluded by the threshold");
+}
+
+console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
+{
+  // The whole argument for SMD-944, run end to end over MCP against real
+  // pgvector: a token that differs from its neighbour by one trailing character.
+  // The stub provider embeds by keyword, so "alpha" and "alphanumeric" are not
+  // meaningfully separable to it — which is exactly the situation with a real
+  // model and an error code.
+  await call("capture_thought", { content: "delta thought mentioning PGRST202 exactly once" });
+  await call("capture_thought", { content: "epsilon thought mentioning PGRST2020 twice: PGRST2020" });
+
+  const out = await call("search_thoughts_keyword", { query: "PGRST202 " });
+  assert(/Showing 1-1 of 1/.test(out), `the header states the whole match set (${out.split("\n")[0]})`);
+  assert(/delta thought mentioning PGRST202/.test(out), "the exact row is returned");
+  assert(!/epsilon/.test(out), "…and the one-character-longer token is not");
+  assert(/1 occurrence\b/.test(out), "occurrences are reported, singular");
+
+  const twice = await call("search_thoughts_keyword", { query: "PGRST2020" });
+  assert(/2 occurrences/.test(twice), "a repeated needle is counted");
+
+  // No match is an answer, not an error, and the message points at the other tool.
+  const none = await call("search_thoughts_keyword", { query: "zylotrope" });
+  assert(/No thoughts contain/.test(none), "a miss is a plain answer");
+  assert(/search_thoughts for a match by meaning/.test(none), "…that names the tool to try instead");
+
+  // The whitespace hint, which exists because the needle is deliberately not
+  // trimmed. Without it a pasted string with a stray space fails invisibly.
+  const padded = await call("search_thoughts_keyword", { query: " zylotrope " });
+  assert(/leading or trailing whitespace/.test(padded), "a padded miss says the whitespace was matched literally");
+
+  // Paging, over the tool surface rather than the function.
+  const page1 = await call("search_thoughts_keyword", { query: "thought", limit: 2, offset: 0 });
+  assert(/Showing 1-2 of \d+/.test(page1), `page one is labelled by position (${page1.split("\n")[0]})`);
+  assert(/offset=2 for the next page/.test(page1), "…and says how to get the next one");
+  const page2 = await call("search_thoughts_keyword", { query: "thought", limit: 2, offset: 2 });
+  assert(/Showing 3-4 of \d+/.test(page2), `page two continues the numbering (${page2.split("\n")[0]})`);
+
+  const empty = await call("search_thoughts_keyword", { query: "" });
+  assert(/Empty query/.test(empty), "an empty query is told apart from a miss");
+
+  // Bounds are enforced at the MCP boundary rather than silently clamped, so a
+  // caller learns its argument was wrong. A negative offset used to render
+  // "Result -4", because the numbering is arithmetic on the value passed in.
+  for (const [args, what] of [
+    [{ query: "thought", offset: -5 }, "a negative offset"],
+    [{ query: "thought", limit: 500 }, "an over-large limit"],
+    [{ query: "thought", limit: 2.5 }, "a fractional limit"],
+  ] as [Record<string, unknown>, string][]) {
+    let rejected = false;
+    try { await call("search_thoughts_keyword", args); } catch { rejected = true; }
+    assert(rejected, `${what} is refused at the tool boundary, not clamped in silence`);
+  }
+
+  // Clean up after itself. [5], [6] and [7] assert exact corpus counts, so a
+  // section that leaves two extra rows behind fails three later sections for a
+  // reason that has nothing to do with them.
+  const cleanup = new SQL({ url: URL_, max: 1 });
+  await cleanup`DELETE FROM thoughts WHERE content LIKE '%thought mentioning PGRST%'`;
+  await cleanup.close();
 }
 
 console.log("\n[4] search + fetch, the ChatGPT-compatible pair");
