@@ -18,7 +18,7 @@
  * benchmark cannot flatter a model the server prompts differently.
  */
 
-import { EMBEDDING_PROMPTS } from "../db/config.mjs";
+import { applyEmbeddingPrompt } from "../db/config.mjs";
 
 export const EVAL_BASE =
   process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
@@ -68,11 +68,7 @@ export function applyPrompt(spec: Spec, input: string, isQuery: boolean): string
   if (spec.mode === "gemma") {
     return isQuery ? `task: search result | query: ${input}` : `title: none | text: ${input}`;
   }
-  const tpl = (EMBEDDING_PROMPTS as Record<string, { query: string; document: string } | undefined>)[
-    spec.name
-  ];
-  if (!tpl) return input;
-  return isQuery ? tpl.query.replace("{q}", input) : tpl.document.replace("{d}", input);
+  return applyEmbeddingPrompt(spec.name, input, isQuery);
 }
 
 /** One embedding. `isQuery` selects the query template over the document one. */

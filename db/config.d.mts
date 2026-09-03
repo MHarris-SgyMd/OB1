@@ -49,6 +49,9 @@ export const VERIFIED_NOT_MRL: Set<string>;
  */
 export const EMBEDDING_PROMPTS: Record<string, { query: string; document: string }>;
 
+/** Apply a model's query/document template; returns `text` when it has none. */
+export function applyEmbeddingPrompt(model: string, text: string, isQuery: boolean): string;
+
 /**
  * Resolve whether to request truncation, given the raw env value (or undefined),
  * the configured width and the model. Explicit env wins; otherwise on only for a

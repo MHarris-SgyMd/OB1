@@ -237,6 +237,20 @@ export const EMBEDDING_PROMPTS = {
 };
 
 /**
+ * Apply a model's query/document template. Lives beside the table it reads so the
+ * server and the benchmark cannot diverge on HOW a template is applied, having
+ * already diverged once on WHICH template to use.
+ *
+ * Returns the text unchanged for a model with no entry, which is correct for most
+ * of them and is why the caller does not need to check first.
+ */
+export function applyEmbeddingPrompt(model, text, isQuery) {
+  const tpl = EMBEDDING_PROMPTS[model];
+  if (!tpl) return text;
+  return isQuery ? tpl.query.replace("{q}", text) : tpl.document.replace("{d}", text);
+}
+
+/**
  * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
  * parameter. Off by default: a silently shortened vector from a model that was not
  * trained for it is precisely the kind of quiet quality loss this fork tries to

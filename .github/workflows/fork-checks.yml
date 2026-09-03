@@ -120,6 +120,12 @@ jobs:
         working-directory: server-portable
         run: bun test-auth.ts
 
+      # Pure logic — the alias table, title truncation, citation URLs. No database
+      # and no provider, so it runs in the fast job rather than the Postgres one.
+      - name: Thought vocabulary and presentation rules
+        working-directory: server-portable
+        run: bun test-thoughts.ts
+
       - name: Typecheck
         working-directory: server-portable
         run: bunx tsc --noEmit

@@ -1,4 +1,5 @@
 
+import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 import {
   EMBEDDING_PROMPTS,
@@ -175,15 +176,7 @@ function citationBase(): string {
 const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
 
-function thoughtTitle(content: string, createdAt?: string): string {
-  const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
-  const datePrefix = createdAt ? new Date(createdAt).toLocaleDateString() : "Open Brain";
-  return firstLine ? `${datePrefix} - ${firstLine}` : `${datePrefix} thought`;
-}
 
-function thoughtUrl(id: string): string {
-  return `${citationBase().replace(/\/$/, "")}/${id}`;
-}
 
 /**
  * Chunk sizing. The default is deliberately well under Ollama's 2048-token batch
@@ -303,42 +296,6 @@ async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise
   return embedding;
 }
 
-/**
- * The `type` field is a closed set, but only the prompt says so — nothing enforced
- * it, so a model free to invent one did. Observed for real: llama3.2 returned
- * "action_item" for a reminder.
- *
- * Unenforced, that fragments the taxonomy silently. `list_thoughts` filtering on
- * `type=task` misses the row, and `thought_stats` accumulates a long tail of
- * one-off types that look like categories but are model noise. A smaller local
- * model drifts more than a hosted one, which makes this matter more now that the
- * local path is supported.
- *
- * Unknown values are coerced to `observation` — the same neutral default the
- * failure path uses — and the model's original answer is kept in `type_raw` so
- * drift is visible rather than discarded.
- */
-const THOUGHT_TYPES = ["observation", "task", "idea", "reference", "person_note"] as const;
-
-const TYPE_ALIASES: Record<string, (typeof THOUGHT_TYPES)[number]> = {
-  action_item: "task",
-  action: "task",
-  todo: "task",
-  note: "observation",
-  fact: "reference",
-  person: "person_note",
-  contact: "person_note",
-};
-
-function normaliseType(raw: unknown): { type: string; raw?: string } {
-  if (typeof raw !== "string" || raw.trim() === "") return { type: "observation" };
-  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if ((THOUGHT_TYPES as readonly string[]).includes(key)) return { type: key };
-  const aliased = TYPE_ALIASES[key];
-  if (aliased) return { type: aliased, raw: raw.trim() };
-  console.warn(`extractMetadata: model returned type "${raw}", which is not one of ${THOUGHT_TYPES.join(", ")}; recorded as observation`);
-  return { type: "observation", raw: raw.trim() };
-}
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
   const r = await fetch(`${llmBase()}/chat/completions`, {
@@ -458,7 +415,7 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
-          url: thoughtUrl(t.id),
+          url: thoughtUrl(citationBase(), t.id),
         }));
 
         return {
@@ -500,7 +457,7 @@ function buildServer(principal: Principal): McpServer {
           id: thought.id,
           title: thoughtTitle(thought.content, thought.created_at),
           text: thought.content,
-          url: thoughtUrl(thought.id),
+          url: thoughtUrl(citationBase(), thought.id),
           metadata: {
             ...thought.metadata,
             created_at: thought.created_at,
