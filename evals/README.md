@@ -49,6 +49,48 @@ measured nothing. `eval-retrieval.ts` adds three slices that discriminate:
 Queries are phrased in different words from the thought they should retrieve, so
 lexical overlap does not carry them.
 
+## The real corpus, and a caveat on every number measured against it
+
+`eval-real.ts` scores retrieval over closed Linear issues rather than thoughts we
+wrote ourselves: the issue body is the document, its title is the query. Nobody
+labels anything, and it is the question a tracker actually poses — "which issue
+was the one about X".
+
+The corpus is built by `build-linear-corpus.ts`:
+
+```bash
+LINEAR_API_KEY=lin_api_... bun build-linear-corpus.ts
+OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json bun eval-real.ts qwen3-embedding:4b embeddinggemma
+```
+
+The script is committed; **its output is not, and must not be**. The corpus is
+internal engineering data from a healthcare company: it stays out of git and away
+from any hosted embedding provider, which is the whole argument for the local path
+being a supported option. `.gitignore` covers `*-corpus.json`, and the builder
+refuses to write anywhere inside the repository regardless of what it is asked.
+
+### Why the builder exists
+
+The corpus these results were measured on was produced ad hoc, and inspecting it
+later turned up two defects:
+
+- **Truncated at ~500 characters.** Documents topped out at 483 characters, 80 of
+  97 sat in the 400–490 band, and 78 of 97 did not end on sentence punctuation —
+  one cuts off mid-clause at "More importantly, the".
+- **No comments.** Only `id`, `title`, `text`, `labels`. On a real tracker the
+  decision and the pushback live in the thread, not the description.
+
+Both matter more than they look. `qwen3-embedding:4b` was chosen over
+`embeddinggemma` on 483-character stubs, while `db/config.mjs` justifies it partly
+as "the only local model that embeds a long capture whole" — an advantage those
+inputs cannot possibly show. And nothing in that corpus reached the 1200-token
+chunking threshold, so the chunking path had no real documents to work on. That
+was an artifact of the truncation, not a property of Linear issues.
+
+**So the retrieval numbers below are a ranking on short stubs.** They are not
+wrong, but they are narrower than they read. Rebuild with the script and re-run
+before quoting any of them against full-length documents.
+
 ## Results, 2026-09-02, Ollama 0.33.2
 
 Twenty thoughts, twenty queries. R@1 per slice.
