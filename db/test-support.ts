@@ -27,6 +27,24 @@ const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");
  */
 const TABLES = ["thought_chunks", "thoughts", "schema_migrations", "ob1_config"];
 
+/**
+ * Functions the schema owns, by signature. `CREATE OR REPLACE` masks a stale one
+ * most of the time, which is exactly why this list is easy to let rot: db/test-live
+ * dropped three overloads of `upsert_thought` and never learned about the 4-argument
+ * form migration 007 added, so a "reset" left it behind. Dropping is part of owning
+ * the schema, not a special case for one suite.
+ *
+ * `vector` needs no dimension here — a typmod is not part of the signature Postgres
+ * matches on, so one entry covers every width the column has ever been.
+ */
+const FUNCTIONS = [
+  "upsert_thought(text, jsonb)",
+  "upsert_thought(text, jsonb, vector)",
+  "upsert_thought(text, jsonb, vector, jsonb)",
+  "match_thoughts(vector, float, int, jsonb)",
+  "update_updated_at()",
+];
+
 export type SchemaOptions = {
   /** Vector width to substitute for `{{EMBEDDING_DIM}}`. */
   dim: number;
@@ -43,11 +61,28 @@ export function substitute(sql: string, opts: SchemaOptions): string {
     .replace(/\{\{EMBEDDING_MODEL\}\}/g, opts.model);
 }
 
-/** Drop everything the schema owns and apply the migrations from scratch. */
-export async function resetSchema(url: string, opts: SchemaOptions): Promise<void> {
+/**
+ * Drop every table and function the schema owns.
+ *
+ * Separate from applying, because one suite legitimately needs to observe the
+ * empty state in between: test-preflight asserts that an un-migrated database
+ * exits 1 before it migrates. Composing two exported steps beats an option that
+ * exists for a single caller.
+ */
+export async function dropSchema(url: string): Promise<void> {
   const admin = new SQL({ url, max: 1 });
   try {
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
+    for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
+  } finally {
+    await admin.close();
+  }
+}
+
+/** Apply the migrations, substituting the templates. */
+export async function applyMigrations(url: string, opts: SchemaOptions): Promise<void> {
+  const admin = new SQL({ url, max: 1 });
+  try {
     const files = readdirSync(MIGRATIONS)
       .filter((f) => f.endsWith(".sql"))
       .filter((f) => opts.only?.(f) ?? true)
@@ -58,6 +93,12 @@ export async function resetSchema(url: string, opts: SchemaOptions): Promise<voi
   } finally {
     await admin.close();
   }
+}
+
+/** The common case: drop everything, then apply from scratch. */
+export async function resetSchema(url: string, opts: SchemaOptions): Promise<void> {
+  await dropSchema(url);
+  await applyMigrations(url, opts);
 }
 
 /**

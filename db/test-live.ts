@@ -29,7 +29,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert } from "./test-support.ts";
+import { createAssert, dropSchema } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -70,25 +70,7 @@ const unit = (i: number) => {
 };
 
 // Start from an empty database so the run is repeatable.
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
-
-  // constraint, not this table, so a stale one survives at the PREVIOUS test's
-
-  // vector width. Harmless locally, where each run gets a fresh container, and a
-
-  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
-
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  await admin`DROP FUNCTION IF EXISTS upsert_thought(text, jsonb)`;
-  await admin`DROP FUNCTION IF EXISTS upsert_thought(text, jsonb, vector)`;
-  await admin`DROP FUNCTION IF EXISTS match_thoughts(vector, float, int, jsonb)`;
-  await admin`DROP FUNCTION IF EXISTS update_updated_at()`;
-  await admin.close();
-}
+await dropSchema(URL_);
 
 const sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);

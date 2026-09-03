@@ -13,7 +13,7 @@
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert } from "../db/test-support.ts";
+import { applyMigrations, createAssert, dropSchema } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -29,11 +29,6 @@ const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? DEFAULT_EMBEDDING_
 const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
-}
 
 const { assert, skip: skipRaw, report } = createAssert();
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
@@ -102,29 +97,15 @@ console.log("\n[5] Against a real database");
 if (!LIVE) { skip("healthy configuration passes"); skip("missing schema is distinguished from bad credentials"); }
 else {
   const { SQL } = await import("bun");
-  const admin = new SQL({ url: LIVE, max: 1 });
-  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
-
-  // constraint, not this table, so a stale one survives at the PREVIOUS test's
-
-  // vector width. Harmless locally, where each run gets a fresh container, and a
-
-  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
-
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
+  // Drop and apply are separate calls on purpose: the two assertions between them
+  // observe the un-migrated state, which is the thing this section tests.
+  await dropSchema(LIVE);
 
   const before = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(before.code === 1, "an un-migrated database exits 1");
   assert(/bun migrate\.ts/.test(before.out), "…and tells you to run the migrations");
 
-  const { readdirSync, readFileSync } = await import("node:fs");
-  const dir = join(HERE, "..", "db", "migrations");
-  for (const f of readdirSync(dir).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(subst(readFileSync(join(dir, f), "utf8")));
-  }
-  await admin.close();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
   const after = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(after.code === 0, "a migrated database passes");
