@@ -160,32 +160,29 @@ export class SqlStore implements ThoughtStore {
     // deployment that has not applied migration 007 keeps working unchanged.
     const chunks = opts.chunks ?? [];
     /**
-     * One transaction, so the audit trigger from migration 008 sees the actor
-     * and so the audit row cannot commit without the mutation it describes.
-     *
-     * `set_config(..., true)` is the SET LOCAL form: scoped to this
-     * transaction, so it cannot leak to the next request sharing this pooled
-     * connection. A session-level setting would.
+     * The actor rides in the payload envelope, which migration 008's
+     * upsert_thought reads into a transaction-local setting for the audit
+     * trigger. Doing it here rather than with an explicit `set_config` around
+     * the call means the SQL and PostgREST stores use one mechanism — an
+     * earlier version wrapped this in a transaction and left PostgREST
+     * unattributed.
      */
-    const rows = await this.sql.begin(async (tx) => {
-      if (opts.actor) {
-        await tx`SELECT set_config('ob1.actor', ${JSON.stringify(opts.actor)}, true)`;
-      }
-      return chunks.length
-        ? await tx`
-            SELECT upsert_thought(
-              ${opts.content}::text,
-              ${opts.payload}::jsonb,
-              ${toVector(opts.embedding)}::vector,
-              ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
-            ) AS r`
-        : await tx`
-            SELECT upsert_thought(
-              ${opts.content}::text,
-              ${opts.payload}::jsonb,
-              ${toVector(opts.embedding)}::vector
-            ) AS r`;
-    });
+    const envelope = opts.actor ? { ...opts.payload, actor: opts.actor } : opts.payload;
+
+    const rows = chunks.length
+      ? await this.sql`
+          SELECT upsert_thought(
+            ${opts.content}::text,
+            ${envelope}::jsonb,
+            ${toVector(opts.embedding)}::vector,
+            ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
+          ) AS r`
+      : await this.sql`
+          SELECT upsert_thought(
+            ${opts.content}::text,
+            ${envelope}::jsonb,
+            ${toVector(opts.embedding)}::vector
+          ) AS r`;
 
     const id = (rows[0]?.r as { id?: string } | undefined)?.id;
     if (!id) throw new Error("upsert_thought returned no id.");

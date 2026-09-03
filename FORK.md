@@ -432,6 +432,21 @@ archaeology.
 `thought_id` is deliberately not a foreign key, so audit rows outlive their
 subject — the delete event being the one most worth keeping.
 
+The actor rides in `p_payload`, which has been an **envelope** since migration
+004 — that function reads only `p_payload->'metadata'` and ignores every other
+key — so `p_payload.actor` needed no new overload and works identically on both
+stores. The first version set the setting from `store-sql.ts` alone, which left
+every audit row written through PostgREST with a NULL actor: present, plausible,
+and wrong. `test-store-postgrest.ts` now asserts attribution on that path, and
+that the actor does not leak into the thought's own metadata.
+
+Redefining `upsert_thought` from a later migration has one trap worth naming:
+`CREATE OR REPLACE` takes the whole body, so **every change made to it in
+between is silently reverted**. Writing 008 without migration 005's
+payload-validation guard dropped it, and `db/test-schema.ts` caught it on the
+next run. Anything redefining that function again must carry both 005's guard
+and 008's actor setting forward.
+
 One incidental finding, recorded because it changed the implementation: **Bun's
 Postgres client returns the `HINT` field as UTF-16 bytes with interleaved nulls**
 (`"T\0o\0 \0p\0r\0u\0n\0e\0…"`). Guidance put in `USING HINT` is unreadable to

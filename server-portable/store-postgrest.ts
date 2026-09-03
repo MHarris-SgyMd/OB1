@@ -106,6 +106,7 @@ export class PostgrestStore implements ThoughtStore {
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     chunks?: { content: string; embedding: number[] }[];
+    actor?: { name: string; source?: string; session?: string };
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -114,9 +115,15 @@ export class PostgrestStore implements ThoughtStore {
     // exactly as before. Passing p_chunks unconditionally would make every
     // deployment that has not applied 007 fall through to the two-step path.
     const chunks = opts.chunks ?? [];
+    // The actor rides in the payload envelope — migration 008's upsert_thought
+    // reads it into the ob1.actor setting so the audit trigger can attribute
+    // this write. Without it, every audit row on this store would have recorded
+    // a NULL actor: present, plausible, and wrong.
+    const envelope = opts.actor ? { ...opts.payload, actor: opts.actor } : opts.payload;
+
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
-      p_payload: opts.payload,
+      p_payload: envelope,
       p_embedding: opts.embedding,
       ...(chunks.length
         ? { p_chunks: chunks.map((c) => ({ content: c.content, embedding: `[${c.embedding.join(",")}]` })) }
@@ -144,7 +151,7 @@ export class PostgrestStore implements ThoughtStore {
 
     const { data: upserted, error: upsertError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
-      p_payload: opts.payload,
+      p_payload: envelope,
     });
     if (upsertError) throw new Error(upsertError.message);
 
