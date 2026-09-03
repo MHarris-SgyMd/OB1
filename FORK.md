@@ -641,6 +641,34 @@ without error, and writes NULL into `canonical_agent_id` on every row. Reverting
 that one call fails eight assertions in `test-agents.ts`, which is the only
 reason to trust the rest of them.
 
+A review pass found two defects and one untested claim, all the same shape —
+something asserted in prose that nothing held:
+
+- **`OB1_AGENT_CACHE_TTL_MS=0` did not mean what it says.** Documented in three
+  places as "resolve on every request", it capped *failed* lookups at a fixed
+  ten seconds regardless — quietly false for exactly the answers an operator
+  setting 0 is trying to observe. The failure TTL is now bounded by the
+  configured one, so 0 means 0 and any nonzero value still caps a dead database
+  at ten seconds.
+- **`resolve_agent` reported `created: true` when it had not created anything.**
+  Two callers racing on an unregistered key both took the `ON CONFLICT` path and
+  both claimed to have made the agent. `RETURNING (xmax = 0)` is true only for a
+  row the statement actually inserted.
+- **Nothing tested the upgrade.** Every suite calls `resetSchema`, which builds
+  all ten migrations against an empty database — the one situation a real
+  deployment is never in. A migration that only worked on an empty table would
+  have passed the entire gate. `db/test-upgrade.ts` now applies them one at a
+  time onto a database with rows already in it, asserts the incremental schema
+  matches a from-scratch one, and covers 010-onto-populated-009 specifically:
+  prior rows read NULL, the append-only trigger still refuses UPDATE after the
+  `ALTER`, and re-applying adds nothing. `test-agents [11b]` covers the other
+  half — the new server against a database still at 009, where the point is not
+  that the lookup fails but that the request behind it still succeeds.
+
+Also dropped a partial index copied from upstream: on a table holding one row
+per configured credential, indexing the active subset of a set Postgres would
+sequentially scan anyway is maintenance with no reader.
+
 `preflight` treats a missing registry as a **warning**, where a missing audit
 trigger is fatal. The distinction is not squeamishness: without audit, history is
 lost and cannot be reconstructed; without 010, every mutation is still attributed

@@ -57,6 +57,20 @@ export const DEFAULT_CACHE_TTL_MS = 60000;
  */
 const FAILURE_TTL_MS = 10000;
 
+/**
+ * How long a NON-success answer is reused.
+ *
+ * Bounded by the configured TTL rather than fixed, because
+ * `OB1_AGENT_CACHE_TTL_MS=0` is documented as "resolve on every request" and a
+ * hard 10s here quietly made that false for exactly the answers an operator
+ * setting 0 is most likely to be debugging. Any nonzero setting still caps a
+ * failure at ten seconds, so a dead database costs one connection attempt per
+ * interval rather than one per request.
+ */
+function failureTtl(ttlMs: number): number {
+  return Math.min(ttlMs, FAILURE_TTL_MS);
+}
+
 export type AgentOutcome =
   /** Resolved, or resolvable later; `agentId` is undefined when the registry could not answer. */
   | { status: "ok"; agentId?: string }
@@ -78,6 +92,12 @@ function cacheKey(keyHash: string, label: string): string {
 }
 
 export class AgentResolver {
+  /**
+   * Never evicted, and it does not need to be: resolution happens only AFTER
+   * authentication succeeds, so a key must already be in MCP_ACCESS_KEYS to
+   * create an entry. The key space is the configured key set, not anything a
+   * caller controls, and an expired entry is overwritten rather than added to.
+   */
   private cache = new Map<string, Entry>();
 
   constructor(
@@ -114,19 +134,19 @@ export class AgentResolver {
         outcome = { status: "revoked", agentId: r.agentId, revokedAt: r.revokedAt, reason: r.reason };
         // Not cached for the full TTL: a revocation lifted by hand should take
         // effect about as fast as one applied.
-        ttl = Math.min(this.ttlMs, FAILURE_TTL_MS);
+        ttl = failureTtl(this.ttlMs);
       } else {
         // BAD_KEY_HASH, BAD_LABEL, MALFORMED_RESPONSE. A refusal of the ARGUMENT,
         // not of the caller — auth.ts already validated the digest's shape, so
         // reaching here means the schema and the server disagree. Serve without
         // an agent id rather than locking everyone out over a shape mismatch.
         outcome = { status: "ok", agentId: undefined };
-        ttl = FAILURE_TTL_MS;
+        ttl = failureTtl(this.ttlMs);
       }
     } catch {
       // Unreachable, unmigrated, or misconfigured. See the header.
       outcome = { status: "ok", agentId: undefined };
-      ttl = FAILURE_TTL_MS;
+      ttl = failureTtl(this.ttlMs);
     }
 
     if (ttl > 0) this.cache.set(key, { outcome, expires: this.now() + ttl });

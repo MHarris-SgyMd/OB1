@@ -167,12 +167,12 @@ COMMENT ON TABLE ob1_agent_keys IS
 COMMENT ON COLUMN ob1_agent_keys.revoked_at IS
   'NULL means active. Set it to refuse a key without editing MCP_ACCESS_KEYS and redeploying; takes effect within the server resolve cache TTL (OB1_AGENT_CACHE_TTL_MS, default 60s).';
 
+-- One index, not two. Upstream also carries a partial index on the active keys,
+-- which on a table holding one row per configured credential indexes a subset of
+-- a set Postgres would sequentially scan anyway. The lookup that matters is by
+-- key_hash, and that is the primary key.
 CREATE INDEX IF NOT EXISTS ob1_agent_keys_agent_idx
   ON ob1_agent_keys (canonical_agent_id);
-
-CREATE INDEX IF NOT EXISTS ob1_agent_keys_active_idx
-  ON ob1_agent_keys (canonical_agent_id)
-  WHERE revoked_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- thought_audit.canonical_agent_id
@@ -314,10 +314,12 @@ BEGIN
     -- ON CONFLICT rather than a bare INSERT: two clients presenting an
     -- unregistered key at the same moment would otherwise race, and one would
     -- get a unique violation on a purely bookkeeping write.
+    -- `xmax = 0` is true only for a row this statement actually INSERTed, so
+    -- the losing side of the race above reports created:false rather than two
+    -- callers both claiming to have made the same agent.
     INSERT INTO ob1_agents (label) VALUES (v_label)
     ON CONFLICT (label) DO UPDATE SET updated_at = now()
-    RETURNING canonical_agent_id INTO v_agent;
-    v_created := true;
+    RETURNING canonical_agent_id, (xmax = 0) INTO v_agent, v_created;
   END IF;
 
   INSERT INTO ob1_agent_keys (key_hash, canonical_agent_id, scope, last_used_at)

@@ -314,6 +314,38 @@ console.log("\n[11] The registry holds digests, never keys");
          "neither raw key appears, so the table is not a credential store");
 }
 
+console.log("\n[11b] A server running against a database still at 009");
+{
+  /**
+   * The upgrade order nobody controls: new server code deployed before the
+   * migration is applied. `resolve_agent` does not exist, so the identity
+   * lookup fails on every request.
+   *
+   * This has to be driven through the real server rather than asserted about
+   * the resolver, because the risk is not in agents.ts — it is that a failed
+   * query leaves the connection or the request in a state the NEXT call
+   * inherits. Dropping just the function reproduces a 009 database exactly.
+   */
+  await sql`DROP FUNCTION IF EXISTS resolve_agent(text, text, text)`;
+
+  const list = (await importer.rpc("tools/list")) as { error?: unknown; result?: { tools?: unknown[] } };
+  assert(list.error === undefined, "tools/list still answers with no resolve_agent");
+  assert((list.result?.tools ?? []).length === 8, `…with the full write surface (${(list.result?.tools ?? []).length})`);
+
+  // The one that matters: a failed lookup must not poison the request behind it.
+  const out = await importer.call("capture_thought", { content: "captured against an unmigrated database" });
+  assert(/Captured as/.test(out), `the capture itself succeeds (${out.slice(0, 40)})`);
+
+  const [ev] = await sql`
+    SELECT actor_name, canonical_agent_id FROM thought_audit
+     WHERE thought_id = (SELECT id FROM thoughts WHERE content = 'captured against an unmigrated database')`;
+  // "importer", not "ingest": the name comes from MCP_ACCESS_KEYS, which [4]
+  // never touched — it renamed the agent in the registry, and with resolve_agent
+  // gone the registry is not consulted at all.
+  assert(ev?.actor_name === "importer", `attribution falls back to the key name (${ev?.actor_name})`);
+  assert(ev?.canonical_agent_id === null, "…with no id, rather than a fabricated one");
+}
+
 // ── The resolver's own behaviour, with a fake store and an injected clock ────
 
 /** A store that only answers resolveAgent; nothing else is reached. */
@@ -368,6 +400,21 @@ console.log("\n[13] An unreachable registry degrades to no id, not to a refusal"
   // rather than one per request.
   await r.resolve(store, principal("laptop", H("a")));
   assert(calls === 1, `the failure is cached too (${calls} lookups)`);
+
+  /**
+   * …but a TTL of zero means zero.
+   *
+   * The first version capped failures at a fixed ten seconds regardless of the
+   * configured TTL, so `OB1_AGENT_CACHE_TTL_MS=0` — documented in three places
+   * as "resolve on every request" — quietly did not, for exactly the answers an
+   * operator setting 0 would be trying to observe.
+   */
+  let zeroCalls = 0;
+  const dead = fakeStore(async () => { throw new Error("connection refused"); }, () => zeroCalls++);
+  const noCache = new AgentResolver(0, () => 0);
+  await noCache.resolve(dead, principal("laptop", H("a")));
+  await noCache.resolve(dead, principal("laptop", H("a")));
+  assert(zeroCalls === 2, `with TTL 0 a failure is not cached either (${zeroCalls} lookups)`);
 }
 
 console.log("\n[14] A definitive revocation IS enforced, cached or not");

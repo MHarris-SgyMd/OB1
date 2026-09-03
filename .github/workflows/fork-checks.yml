@@ -279,6 +279,15 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # Migrations applied INCREMENTALLY, onto a database that already holds
+      # data — the one situation every other suite avoids by resetting first,
+      # and the only one a real deployment is ever in.
+      - name: Incremental upgrade
+        working-directory: db
+        run: bun test-upgrade.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # Stable agent identity: that a rename does not orphan history (which
       # binding to the key NAME could not survive), and that a digest revoked in
       # the database is refused even though MCP_ACCESS_KEYS still lists it.
