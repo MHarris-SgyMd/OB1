@@ -22,6 +22,7 @@ export const EMBEDDING_DIM: number;
 export const EMBEDDING_MODEL: string;
 
 /** Metadata-extraction model. No schema dependency; safe to change any time. */
+export const DEFAULT_METADATA_MODEL: string;
 export const METADATA_MODEL: string;
 
 /** pgvector's HNSW ceiling. Above this the column works but no index can exist. */

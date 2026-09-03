@@ -19,9 +19,26 @@
  * are defaults only; the server reads live configuration through its own lazy
  * `env()` so Workers bindings still apply.
  */
-const ENV = /** @type {Record<string, string|undefined>} */ (
+const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
   globalThis.process?.env ?? {}
 );
+
+/**
+ * An empty variable means unset, not "".
+ *
+ * `??` only catches undefined, so `OB1_EMBEDDING_DIM=` — trivially produced by a
+ * blank line in a .env file or a compose `${VAR}` that resolves to nothing — gave
+ * `Number("") === 0` and a config refused as "must be a positive integer, got 0".
+ * server-portable/index.ts already treated empty as unset because it tests
+ * truthiness, so the two disagreed about the same environment: the server would
+ * run at the default width while the migration runner refused to start.
+ */
+const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
+  get: (_t, k) => {
+    const v = RAW_ENV[/** @type {string} */ (k)];
+    return v === "" ? undefined : v;
+  },
+});
 
 /**
  * Defaults, exported so server-portable/index.ts uses these exact values rather
@@ -43,7 +60,18 @@ export const EMBEDDING_DIM = Number(ENV.OB1_EMBEDDING_DIM ?? DEFAULT_EMBEDDING_D
 export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
 
 /** Metadata extraction. No schema dependency, so safe to change at any time. */
-export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? "openai/gpt-4o-mini";
+/**
+ * Paired with DEFAULT_EMBEDDING_MODEL deliberately. Once the embedding default
+ * became local, leaving this hosted made the shipped pair incoherent: pointed at
+ * Ollama, every capture logged a 404 for `openai/gpt-4o-mini` and stored a thought
+ * with no topics, people or type. The server degrades rather than failing, so it
+ * was quiet — which is exactly the kind of quiet this fork keeps removing.
+ *
+ * qwen2.5:7b is the measured local winner on the extraction benchmark: 81/84 with
+ * no structural failures at ~1.2s per capture. See evals/README.md.
+ */
+export const DEFAULT_METADATA_MODEL = "qwen2.5:7b";
+export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? DEFAULT_METADATA_MODEL;
 
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;

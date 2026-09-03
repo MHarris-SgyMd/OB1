@@ -212,6 +212,27 @@ async function checkEmbeddingDefaults() {
     }
   }
 
+  const metas = [...compose.matchAll(/OB1_METADATA_MODEL:-([^}]+)\}/g)].map((m) => m[1].trim());
+  for (const m of metas) {
+    if (m !== cfg.DEFAULT_METADATA_MODEL) {
+      violations.push({
+        where: "deploy/compose.yaml",
+        msg: `OB1_METADATA_MODEL fallback "${m}" does not match db/config.mjs DEFAULT_METADATA_MODEL "${cfg.DEFAULT_METADATA_MODEL}"`,
+      });
+    }
+  }
+
+  // Shipping a local embedding default beside a hosted metadata default means
+  // every capture 404s against Ollama and silently stores no metadata.
+  const hosted = (n) => n.includes("/");
+  if (hosted(cfg.DEFAULT_EMBEDDING_MODEL) !== hosted(cfg.DEFAULT_METADATA_MODEL)) {
+    violations.push({
+      where: "db/config.mjs",
+      msg: `default embedding model "${cfg.DEFAULT_EMBEDDING_MODEL}" and metadata model ` +
+           `"${cfg.DEFAULT_METADATA_MODEL}" target different providers; one is hosted and one is local`,
+    });
+  }
+
   // A default the schema cannot index would be caught at migrate time, but only
   // by whoever ran it. Catching it here means it never lands.
   const problems = cfg.validateEmbeddingConfig(cfg.DEFAULT_EMBEDDING_DIM, cfg.DEFAULT_EMBEDDING_MODEL, cfg.EMBEDDING_DIMENSIONS);

@@ -26,7 +26,7 @@ produce exactly that many numbers. Changing either later means a schema migratio
 | **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.933 MRR vs `embeddinggemma`'s 0.914 over 97 real issues — and the only local model that embeds a long capture whole. Costs ~3x the latency and 2.5 GB. Truncation is automatic. |
 | `qwen3-embedding:0.6b` | 1024 | 0.918 MRR at 639 MB — nearly the 4B's accuracy for a quarter the size. The value pick. |
 | `embeddinggemma` | 768 | 0.916 MRR at 621 MB, the fastest of the three. Was the default until real-corpus measurement moved it to third. |
-| `openai/text-embedding-3-small` | 1536 | The hosted default. Cheap, unmeasured here. |
+| `openai/text-embedding-3-small` | 1536 | Hosted. Cheap, and still unmeasured here — see [`evals/`](evals/README.md). |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
 | `qwen3-embedding:4b` | 2560 → **1024** | **Best measured on real data** (0.933 MRR vs `embeddinggemma`'s 0.914). Too wide to index natively — needs `OB1_EMBEDDING_DIMENSIONS=on`, below. Costs ~3x the embedding time. |
@@ -254,8 +254,12 @@ cd server-portable && bun keygen.ts --name laptop --scope write
 Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS`, and keep the raw key
 somewhere safe — it is not recoverable.
 
-Then pick a model provider: either fill in `OPENROUTER_API_KEY`, or uncomment the
-`local-models` block and leave the key empty.
+The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
+embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
+needed. To use OpenRouter instead, set `OPENROUTER_API_KEY` and override both
+models — they are changed as a pair, since mixing a local embedding model with a
+hosted metadata model means every capture 404s and silently stores no topics,
+people or type. `scripts/check-fork-consistency.mjs` fails on that combination.
 
 ### 2. Bring it up
 
