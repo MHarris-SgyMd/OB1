@@ -463,6 +463,59 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 
 Then update the pin table at the top of this file.
 
+### Landing a rebase on `main`, which is protected
+
+`main` is the working default and carries a ruleset: nine required status checks,
+no deletion, **no force-push**, and no bypass actors — it applies to admins too.
+That is deliberate, and it interacts with a rebase in one specific way.
+
+A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
+cannot fast-forward onto `main`. Two ways forward:
+
+**Open a pull request (normal case).** Required status checks mean **no push
+directly to `main` succeeds**, merge commit or not — a push carries commits CI has
+never seen, so the rule cannot be satisfied:
+
+```
+remote: - 9 of 9 required status checks are expected.
+```
+
+That is not a quirk of the merge; it is what requiring checks means. Everything
+reaching `main` goes through a PR, which is two commands:
+
+```bash
+gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
+gh pr merge --merge --auto        # lands itself once the nine checks pass
+```
+
+History keeps both lines, which is what happened when the fork's work first landed
+on `main`, and is the right default: the rebase is a reconciliation, not a
+replacement.
+
+**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
+*be* the rebased history — cleaner, but it discards the record of how the fork
+diverged. This is a force-push and the ruleset will refuse it:
+
+```
+remote: - Cannot force-push to this branch
+```
+
+To do it anyway — as with any push that must bypass the checks — set the ruleset
+to `disabled`, push, and put it back:
+
+```bash
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
+git push --force-with-lease origin main
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+```
+
+Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
+is refused rather than silently discarding it.
+
+**Nothing forces the rewrite.** The pin is held by the annotated tag
+`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
+rewritten to record where upstream was. Reach for the merge.
+
 **Drop a patch rather than carry it** if upstream fixes the same defect. Check
 issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
 and possibly the auth work may arrive upstream.
