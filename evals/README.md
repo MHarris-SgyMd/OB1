@@ -59,9 +59,19 @@ was the one about X".
 The corpus is built by `build-linear-corpus.ts`:
 
 ```bash
-LINEAR_API_KEY=lin_api_... bun build-linear-corpus.ts
+cp .env.example .env      # then put LINEAR_API_KEY in it — .env is gitignored
+bun build-linear-corpus.ts
 OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json bun eval-real.ts qwen3-embedding:4b embeddinggemma
 ```
+
+Credentials come from a `.env` file via `env.ts`, which every eval script picks up
+through `lib.ts` — so the hosted-provider key lives in the same place rather than
+in a second mechanism. A variable already set in the shell always wins, keeping CI
+and 1Password injection working unchanged. Files are consulted in order:
+`$OB1_ENV_FILE`, `evals/.env`, `<repo>/.env`, `deploy/.env`. Bun separately
+auto-loads a `.env` from whatever directory you ran from, and that takes
+precedence over all of them; the scripts print which files they read, naming keys
+but never values.
 
 The script is committed; **its output is not, and must not be**. The corpus is
 internal engineering data from a healthcare company: it stays out of git and away

@@ -22,6 +22,14 @@
  * against it — had no real documents to work on. That was an artifact of the
  * truncation, not a property of the source material.
  *
+ * Put LINEAR_API_KEY in a .env file (see evals/.env.example — the file itself is
+ * gitignored) and run:
+ *
+ *   bun build-linear-corpus.ts
+ *
+ * A variable already in the environment always wins over the file, so CI and
+ * 1Password injection keep working unchanged:
+ *
  *   LINEAR_API_KEY=lin_api_... bun build-linear-corpus.ts
  *
  * ── This script is committed; its output is not ──────────────────────────────
@@ -38,10 +46,14 @@
 
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { estimateTokens } from "../server-portable/chunk.ts";
-import { DEFAULT_MAX_TOKENS } from "../server-portable/chunk.ts";
+import { DEFAULT_MAX_TOKENS, estimateTokens } from "../server-portable/chunk.ts";
+import { describeEnv, envFiles, loadEnv } from "./env.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Before anything reads process.env. A real environment variable still wins —
+// see env.ts — so this only fills in what the shell did not already provide.
+const ENV_SOURCES = loadEnv();
 
 const API = "https://api.linear.app/graphql";
 const KEY = process.env.LINEAR_API_KEY;
@@ -54,9 +66,15 @@ const WITH_COMMENTS = (process.env.OB1_CORPUS_COMMENTS ?? "on").toLowerCase() !=
 
 if (!KEY) {
   console.error(
-    "LINEAR_API_KEY is not set.\n\n" +
-      "  Create a personal API key at https://linear.app/settings/api and run:\n" +
-      "    LINEAR_API_KEY=lin_api_... bun build-linear-corpus.ts\n"
+    `LINEAR_API_KEY is not set, and no .env file supplied it.\n\n` +
+      `  Create a personal API key at https://linear.app/settings/api, then either\n` +
+      `  put it in a .env file (gitignored — copy evals/.env.example):\n\n` +
+      `    LINEAR_API_KEY=lin_api_...\n\n` +
+      `  or pass it for one run:\n\n` +
+      `    LINEAR_API_KEY=lin_api_... bun build-linear-corpus.ts\n\n` +
+      `  Looked for a .env in, in order:\n` +
+      envFiles().map((f) => `    ${f}`).join("\n") +
+      `\n\n  Read: ${describeEnv(ENV_SOURCES)}\n`
   );
   process.exit(2);
 }
@@ -145,6 +163,7 @@ async function page(after: string | null): Promise<{ nodes: Node[]; next: string
   };
 }
 
+console.log(`▸ config: ${describeEnv(ENV_SOURCES)}`);
 console.log(`▸ team ${TEAM}, state "${STATE}", comments ${WITH_COMMENTS ? "included" : "excluded"}`);
 
 const nodes: Node[] = [];
@@ -232,6 +251,11 @@ console.log(`  est. tokens  max ${Math.max(...toks)}  total ${toks.reduce((a, b)
 console.log(`  with comments        ${withComments} of ${items.length}`);
 console.log(`  over the ${DEFAULT_MAX_TOKENS}-token chunk threshold  ${chunkable} of ${items.length}`);
 if (dropped > 0) console.log(`  skipped (no description, no comments)  ${dropped}`);
+// A one-line issue is not a retrieval document. Reported rather than filtered,
+// because the right floor depends on what you are measuring and silently
+// dropping rows would make the document count disagree with Linear's.
+const tiny = items.filter((i) => i.text.length < 120).length;
+if (tiny > 0) console.log(`  under 120 characters (probably too thin to score)  ${tiny}`);
 if (truncatedThreads.length > 0) {
   console.log(`\n  ⚠  ${truncatedThreads.length} issue(s) have more than 100 comments and were cut:`);
   console.log(`     ${truncatedThreads.slice(0, 10).join(", ")}`);
