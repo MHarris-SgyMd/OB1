@@ -15,6 +15,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, type ThoughtStore } from "./store.ts";
 import { authenticate, canWrite, type Principal } from "./auth.ts";
+import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
  * Runtime-portable env access.
@@ -64,6 +65,12 @@ type Env = {
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
   OB1_LLM_API_KEY?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
+  /**
+   * How long a resolved agent identity is cached, in milliseconds. Also the
+   * delay before ob1_agent_keys.revoked_at takes effect. Default 60000; 0
+   * resolves on every request. See agents.ts.
+   */
+  OB1_AGENT_CACHE_TTL_MS?: string;
 };
 
 let ENV: Env | null = null;
@@ -85,6 +92,14 @@ let _store: Promise<ThoughtStore> | null = null;
 function db(): Promise<ThoughtStore> {
   if (!_store) _store = createStore(env());
   return _store;
+}
+
+// Built on first use, for the same reason as the store: reading env() at module
+// scope runs before initEnv() has seeded it.
+let _agents: AgentResolver | null = null;
+function agents(): AgentResolver {
+  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS));
+  return _agents;
 }
 
 // The model provider. Anything speaking the OpenAI /embeddings and
@@ -769,10 +784,16 @@ function buildServer(principal: Principal): McpServer {
           content,
           payload,
           chunks,
-          // The audit trail's actor. `principal.name` is the access key's name
-          // from auth.ts — the closest thing to a stable agent identity this
-          // deployment has, and what SMD-928 is expected to promote.
-          actor: { name: principal.name, source: String(payload.metadata.source ?? "mcp") },
+          // The audit trail's actor. `name` is the access key's name from
+          // auth.ts; `agentId` is the stable id migration 010 resolved it to,
+          // and is absent when the registry could not answer — see agents.ts.
+          // Both are recorded: the name is what the agent was CALLED at the time
+          // of writing, which a later rename would otherwise erase.
+          actor: {
+            name: principal.name,
+            agentId: principal.agentId,
+            source: String(payload.metadata.source ?? "mcp"),
+          },
           embedding,
         });
 
@@ -871,7 +892,7 @@ function buildServer(principal: Principal): McpServer {
           embedding: embedded?.embedding,
           chunks: embedded?.chunks,
           ifUnchangedSince: if_unchanged_since,
-          actor: { name: principal.name, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
         });
 
         if (!result.ok) return toolError(explainRefusal(result, id));
@@ -912,7 +933,7 @@ function buildServer(principal: Principal): McpServer {
       try {
         const result = await (await db()).deleteThought({
           id,
-          actor: { name: principal.name, source: "mcp" },
+          actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
         });
         if (!result.ok) return toolError(explainRefusal(result, id));
         return {
@@ -952,6 +973,18 @@ const corsHeaders = {
 // cache) instead of dying.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
 const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
+
+/**
+ * A key the environment still accepts but the registry has revoked.
+ *
+ * Worded differently from the generic failure on purpose. "Missing or invalid"
+ * sends the holder of a revoked key looking for a typo; naming the revocation
+ * tells them the key was valid and has been withdrawn, which is the one fact
+ * that changes what they do next. It leaks nothing an attacker could use —
+ * they already hold the key and already know it stopped working.
+ */
+const REVOKED_MESSAGE =
+  "Unauthorized: this access key has been revoked. Its history is retained; request a new key.";
 
 /**
  * Read the request body as text without consuming the original request's
@@ -997,12 +1030,15 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
  * strict MCP clients keep the connection alive instead of treating
  * the failure as a transport-level fault.
  */
-function unauthorizedResponse(id: string | number | null): Response {
+function unauthorizedResponse(
+  id: string | number | null,
+  message: string = UNAUTHORIZED_MESSAGE
+): Response {
   const body = {
     jsonrpc: "2.0",
     error: {
       code: JSON_RPC_UNAUTHORIZED_CODE,
-      message: UNAUTHORIZED_MESSAGE,
+      message,
     },
     id,
   };
@@ -1050,6 +1086,23 @@ app.all("*", async (c) => {
     const id = extractJsonRpcId(bodyText);
     return unauthorizedResponse(id);
   }
+
+  /**
+   * Resolve the stable agent id, and honour a revocation.
+   *
+   * At the request boundary rather than inside the write tools, because a
+   * revoked key must not read either — a leaked read-only connector URL is the
+   * likeliest thing anyone ever revokes.
+   *
+   * Cached, so the steady state adds no query; see agents.ts for what happens
+   * when the registry cannot answer, which is deliberately NOT a refusal.
+   */
+  const identity = await agents().resolve(db(), principal);
+  if (identity.status === "revoked") {
+    const bodyText = await readBodyText(c.req.raw);
+    return unauthorizedResponse(extractJsonRpcId(bodyText), REVOKED_MESSAGE);
+  }
+  principal.agentId = identity.agentId;
 
   // Fix: Claude Desktop connectors don't send the Accept header that
   // StreamableHTTPTransport requires. Build a patched request if missing.

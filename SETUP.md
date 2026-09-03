@@ -262,6 +262,13 @@ cd server-portable && bun keygen.ts --name laptop --scope write
 Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS`, and keep the raw key
 somewhere safe — it is not recoverable.
 
+The name becomes an agent on first use, with a stable id recorded against every
+write (`thought_audit.canonical_agent_id`). The id survives rotating the key —
+keep the name, change the digest — and renaming it — keep the digest, change the
+name. To revoke a key without editing this file and restarting, take its digest
+and run `SELECT revoke_agent_key('<digest>', 'why');` against the database; it
+takes effect within a minute and the agent's history stays queryable.
+
 The shipped defaults are **local**: `qwen3-embedding:4b` at 1024 dimensions for
 embeddings and `qwen2.5:7b` for metadata, both via Ollama, with no credential
 needed. To use OpenRouter instead, set `OPENROUTER_API_KEY` and override both
@@ -305,9 +312,9 @@ new thought's id, which is what the other two take.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied six migrations. `server` logs `preflight OK` and
+`migrate` exits 0 having applied ten migrations. `server` logs `preflight OK` and
 `Started server`. `smoke.sh` prints `5 checks: 5 passed, 0 failed`. A client shows
-six tools for a write key, five for a read key.
+eight tools for a write key, five for a read key.
 
 ## Where to run it for real
 

@@ -12,6 +12,7 @@
  */
 
 import { authenticate, hashKey, parseKeyRecords, canWrite } from "./auth.ts";
+import { actorPayload } from "./store.ts";
 import { createAssert } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -30,6 +31,14 @@ console.log("[1] Keys are stored as hashes, never as keys");
   assert(!KEYS.includes(READ_KEY), "the read key does not appear in the config value");
   assert(/^[0-9a-f]{64}$/.test(hashKey(WRITE_KEY)), "hashKey produces a SHA-256 hex digest");
   assert(hashKey(WRITE_KEY) !== hashKey(READ_KEY), "distinct keys hash distinctly");
+
+  // Migration 010 identifies an agent by digest, so the principal has to carry
+  // one — and it must be the DIGEST. Returning the presented key here would put
+  // a live credential into ob1_agent_keys, the one thing that table must never
+  // hold.
+  const p = authenticate(WRITE_KEY, { MCP_ACCESS_KEYS: KEYS });
+  assert(p?.keyHash === hashKey(WRITE_KEY), "the principal carries the digest of the presented key");
+  assert(p?.keyHash !== WRITE_KEY, "…which is not the key itself");
 }
 
 console.log("\n[2] Parsing rejects a config that stores raw keys");
@@ -37,6 +46,23 @@ console.log("\n[2] Parsing rejects a config that stores raw keys");
   const good = parseKeyRecords(KEYS);
   assert(good.problems.length === 0, "a well-formed config parses cleanly");
   assert(good.keys.length === 2, "…yielding both keys");
+
+  /**
+   * One raw key registered under two names.
+   *
+   * Dead config before migration 010 — authenticate() returns the first match
+   * and the second entry never fires. Once a digest identifies an agent it is a
+   * genuine ambiguity: two names claim one identity, and resolve_agent() would
+   * rename the same agent back and forth depending on which client spoke last.
+   */
+  const shared = hashKey("s".repeat(64));
+  const dup = parseKeyRecords(`laptop:write:${shared},phone:read:${shared}`);
+  assert(dup.problems.length > 0, "two names sharing one digest is rejected");
+  assert(/share one digest/.test(dup.problems[0] ?? ""), "…saying what the collision is");
+  assert(/keygen\.ts/.test(dup.problems[0] ?? ""), "…and how to mint a separate key");
+  // The mirror: it must be the SHARED digest that trips this, not merely having
+  // two keys. A check that rejected every multi-key config would also pass above.
+  assert(parseKeyRecords(KEYS).problems.length === 0, "two names with distinct digests still parse cleanly");
 
   const raw = parseKeyRecords(`laptop:write:${WRITE_KEY}`);
   assert(raw.problems.length > 0, "a raw key in the hash position is rejected");
@@ -72,8 +98,10 @@ console.log("\n[3] Authentication resolves a principal, or nothing");
 
 console.log("\n[4] Scopes");
 {
-  assert(canWrite({ name: "laptop", scope: "write" }), "write scope may write");
-  assert(!canWrite({ name: "chatgpt", scope: "read" }), "read scope may not write");
+  assert(canWrite({ name: "laptop", scope: "write", keyHash: hashKey(WRITE_KEY) }),
+         "write scope may write");
+  assert(!canWrite({ name: "chatgpt", scope: "read", keyHash: hashKey(READ_KEY) }),
+         "read scope may not write");
 }
 
 console.log("\n[5] Independent revocation");
@@ -170,6 +198,40 @@ console.log("\n[9] Rejection still uses the JSON-RPC envelope");
   assert(b?.error?.code === -32001, "…carrying -32001");
   assert(b?.id === 7, "…and echoing the id");
   assert(!JSON.stringify(b).includes("laptop"), "the response does not disclose configured key names");
+}
+
+console.log("\n[10] The audit actor is serialised in the shape the trigger reads");
+{
+  /**
+   * The trigger reads `actor->>'agent_id'`; the TypeScript field is `agentId`.
+   * Passing the object through unchanged type-checks, runs without error, and
+   * writes NULL into canonical_agent_id on every row — a failure nobody sees
+   * until they query the column. This is the translation that prevents it.
+   */
+  const full = actorPayload({ name: "laptop", source: "mcp", agentId: "abc-123" });
+  assert(full?.agent_id === "abc-123", "agentId is emitted as agent_id");
+  assert(!("agentId" in (full ?? {})), "…and the camelCase form is not also present");
+  assert(full?.name === "laptop" && full?.source === "mcp", "name and source pass through");
+
+  // Absent, not null: the trigger's `actor - 'agent_id'` strips a missing key
+  // cleanly, while an explicit null would land in actor_context as noise.
+  const bare = actorPayload({ name: "laptop" });
+  assert(!("agent_id" in (bare ?? {})), "no agent id means no agent_id key at all");
+  assert(actorPayload(undefined) === null, "no actor at all serialises to null");
+}
+
+console.log("\n[11] An unreachable agent registry does not deny service");
+{
+  /**
+   * Every request above ran against SUPABASE_URL=https://stub.invalid, so
+   * resolve_agent could never be called. Asserting it explicitly rather than
+   * leaving it implied: a resolver that threw, or that treated a failed lookup
+   * as a revocation, would have made all of [7] and [8] fail — but only this
+   * line says that outcome was the point rather than a coincidence.
+   */
+  const tools = await toolsFor(WRITE_KEY, "header");
+  assert(tools.includes("capture_thought"),
+         "the full tool surface is served with no registry reachable");
 }
 
 server.stop();

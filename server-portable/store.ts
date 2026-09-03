@@ -92,6 +92,97 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
   };
 }
 
+/**
+ * Who performed a mutation, as the audit trigger reads it. Carried on the
+ * `ob1.actor` transaction setting — see migration 008.
+ *
+ * One definition rather than the eight inline copies this used to be: adding
+ * `agentId` for migration 010 would otherwise have meant editing the same
+ * anonymous type in three files, and missing one would have silently dropped
+ * the attribution on whichever path was missed.
+ */
+export type Actor = {
+  /** The access key's name, from auth.ts. Never the key. */
+  name: string;
+  source?: string;
+  session?: string;
+  /**
+   * Stable id from ob1_agents. Absent when the registry is unreachable or
+   * migration 010 is not applied; the audit row then carries the name alone,
+   * which is exactly the pre-010 behaviour rather than a new failure.
+   */
+  agentId?: string;
+};
+
+/**
+ * The wire form of an Actor: exactly the keys the audit trigger reads.
+ *
+ * This function exists because the trigger reads `actor->>'agent_id'` and the
+ * TypeScript field is `agentId`. Passing the object through unchanged type-checks
+ * cleanly, runs without error, and writes NULL into canonical_agent_id on every
+ * row — the failure is invisible until someone queries the column months later
+ * and finds it empty. Both stores go through here so neither can drift.
+ */
+export function actorPayload(actor: Actor | undefined): Record<string, unknown> | null {
+  if (!actor) return null;
+  return {
+    name: actor.name,
+    ...(actor.source !== undefined ? { source: actor.source } : {}),
+    ...(actor.session !== undefined ? { session: actor.session } : {}),
+    ...(actor.agentId !== undefined ? { agent_id: actor.agentId } : {}),
+  };
+}
+
+/**
+ * What resolve_agent() answered. See migration 010 and agents.ts.
+ *
+ * The failure arm is two literal variants rather than one with `error: string`,
+ * so `error === "REVOKED"` narrows. With a plain string there, the revoked case
+ * kept none of its fields at the type level and the compiler could not tell a
+ * refusal that must reject the request from one that must not.
+ */
+export type AgentResolution =
+  | { ok: true; agentId: string; label: string; created: boolean; rotated: boolean; labelConflict: boolean }
+  | { ok: false; error: "REVOKED"; agentId: string; revokedAt: string; reason: string | null }
+  /** Anything else the function said, kept verbatim in `detail` rather than flattened away. */
+  | { ok: false; error: "UNRESOLVED"; detail: string };
+
+/**
+ * Turn resolve_agent()'s jsonb into an AgentResolution.
+ *
+ * Defensive about the shape rather than trusting it: a deployment running
+ * migration 010 from before a later change, or an older function left behind by
+ * an incomplete reset, would otherwise produce `agentId: undefined` that reads
+ * as a successful resolution everywhere downstream.
+ */
+export function normaliseAgentResolution(raw: unknown): AgentResolution {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (r.ok === true && typeof r.agent_id === "string") {
+    return {
+      ok: true,
+      agentId: r.agent_id,
+      label: String(r.label ?? ""),
+      created: r.created === true,
+      rotated: r.rotated === true,
+      labelConflict: r.label_conflict === true,
+    };
+  }
+  if (r.error === "REVOKED" && typeof r.agent_id === "string") {
+    return {
+      ok: false,
+      error: "REVOKED",
+      agentId: r.agent_id,
+      revokedAt: String(r.revoked_at ?? ""),
+      reason: typeof r.reason === "string" ? r.reason : null,
+    };
+  }
+  return {
+    ok: false,
+    error: "UNRESOLVED",
+    detail: typeof r.error === "string" ? r.error : "MALFORMED_RESPONSE",
+  };
+}
+
 export interface ThoughtStore {
   readonly kind: "postgrest" | "sql";
 
@@ -120,12 +211,15 @@ export interface ThoughtStore {
   captureThought(opts: {
     content: string;
     /**
-     * Who is writing, for the audit trail (migration 008). Optional because the
-     * PostgREST path cannot carry it and a mutation from a script legitimately
-     * has no principal — the audit row then records a NULL actor, which is more
-     * honest than a placeholder.
+     * Who is writing, for the audit trail (migrations 008 and 010). Optional
+     * because a mutation from a script legitimately has no principal — the audit
+     * row then records a NULL actor, which is more honest than a placeholder.
+     *
+     * Both stores carry it. An earlier version of this comment claimed the
+     * PostgREST path could not, which was wrong: the actor rides in the payload
+     * envelope, and `upsert_thought` has read one since migration 004.
      */
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     /**
@@ -148,14 +242,24 @@ export interface ThoughtStore {
     embedding?: number[];
     chunks?: { content: string; embedding: number[] }[];
     ifUnchangedSince?: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<UpdateResult>;
 
   /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */
   deleteThought(opts: {
     id: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<MutationResult>;
+
+  /**
+   * Resolve a key digest and its configured name to a stable agent id,
+   * registering the pair on first sight. Migration 010.
+   *
+   * On the store rather than in a helper because the two backends reach
+   * Postgres differently and this has to work on both — a Workers deployment
+   * speaking PostgREST needs the same identity a Bun deployment gets.
+   */
+  resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
 
   close(): Promise<void>;
 }

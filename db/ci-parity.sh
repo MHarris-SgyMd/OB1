@@ -43,6 +43,7 @@ main() {
   run server-portable    test-local-provider.ts
   run server-portable    test-audit.ts
   run server-portable    test-update-delete.ts
+  run server-portable    test-agents.ts
   run server-portable    test-store-postgrest.ts
   run server-portable    test-chunking.ts
   run server-portable    test-embedding-dimensions.ts

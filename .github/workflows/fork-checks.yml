@@ -279,6 +279,15 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # Stable agent identity: that a rename does not orphan history (which
+      # binding to the key NAME could not survive), and that a digest revoked in
+      # the database is refused even though MCP_ACCESS_KEYS still lists it.
+      - name: Agent identity
+        working-directory: server-portable
+        run: bun test-agents.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       # The PostgREST store, which had no test at all — every other suite runs
       # OB1_STORE=sql. Uses compat/supabase-sql as the fixture: real SQL against
       # real Postgres, so a wrong RPC argument shape fails here as it would live.

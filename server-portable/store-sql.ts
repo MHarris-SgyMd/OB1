@@ -23,8 +23,10 @@
  */
 
 import { SQL } from "bun";
-import { normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseMutation } from "./store.ts";
 import type {
+  Actor,
+  AgentResolution,
   CaptureResult,
   ListFilters,
   MutationError,
@@ -147,7 +149,7 @@ export class SqlStore implements ThoughtStore {
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
     chunks?: { content: string; embedding: number[] }[];
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -171,7 +173,7 @@ export class SqlStore implements ThoughtStore {
      * earlier version wrapped this in a transaction and left PostgREST
      * unattributed.
      */
-    const envelope = opts.actor ? { ...opts.payload, actor: opts.actor } : opts.payload;
+    const envelope = opts.actor ? { ...opts.payload, actor: actorPayload(opts.actor) } : opts.payload;
 
     const rows = chunks.length
       ? await this.sql`
@@ -200,7 +202,7 @@ export class SqlStore implements ThoughtStore {
     embedding?: number[];
     chunks?: { content: string; embedding: number[] }[];
     ifUnchangedSince?: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
@@ -214,18 +216,24 @@ export class SqlStore implements ThoughtStore {
         ${opts.embedding ? toVector(opts.embedding) : null}::vector,
         ${chunks.length ? chunks : null}::jsonb,
         ${opts.ifUnchangedSince ?? null}::timestamptz,
-        ${opts.actor ?? null}::jsonb
+        ${actorPayload(opts.actor)}::jsonb
       ) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }
 
   async deleteThought(opts: {
     id: string;
-    actor?: { name: string; source?: string; session?: string };
+    actor?: Actor;
   }): Promise<MutationResult> {
     const rows = await this.sql`
-      SELECT delete_thought(${opts.id}::uuid, ${opts.actor ?? null}::jsonb) AS r`;
+      SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
+  }
+
+  async resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution> {
+    const rows = await this.sql`
+      SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r`;
+    return normaliseAgentResolution(rows[0]?.r);
   }
 
   async close(): Promise<void> {
