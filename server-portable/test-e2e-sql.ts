@@ -30,8 +30,13 @@ if (!URL_) {
  * db/migrations/*.sql are templates — migrate.ts substitutes these at apply time.
  * Applying them raw fails with `syntax error at or near "{"`.
  */
+// Pinned, not inherited from the shipped defaults. This suite asserts the data
+// layer, not the model choice, and reading the default meant the schema it built
+// and the width the server expected drifted apart the moment the default changed.
 const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
 const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
+process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 function subst(sql: string): string {
   return sql
     .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))

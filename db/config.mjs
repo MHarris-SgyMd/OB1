@@ -12,13 +12,38 @@
  */
 
 /** Width of the `thoughts.embedding` column. */
-export const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
+/**
+ * Environment access that survives Cloudflare Workers, which has no `process`.
+ * This module is imported by server-portable/index.ts, which bundles for Workers,
+ * so a bare `process.env` at module scope would throw at load. The values below
+ * are defaults only; the server reads live configuration through its own lazy
+ * `env()` so Workers bindings still apply.
+ */
+const ENV = /** @type {Record<string, string|undefined>} */ (
+  globalThis.process?.env ?? {}
+);
+
+/**
+ * Defaults, exported so server-portable/index.ts uses these exact values rather
+ * than its own copy. They drifted before; one definition cannot.
+ *
+ * `qwen3-embedding:4b` at 1024 dimensions is the best configuration measured on
+ * real data — 0.933 MRR against `embeddinggemma`'s 0.914 over 97 issues — and the
+ * only local model that embeds a long capture whole. It costs about 3x the
+ * embedding latency and 2.5 GB, and it is 2560 dimensions natively, so it relies
+ * on Matryoshka truncation to fit under pgvector's 2000-dimension HNSW ceiling.
+ * See evals/README.md; SETUP.md lists the cheaper alternatives.
+ */
+export const DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:4b";
+export const DEFAULT_EMBEDDING_DIM = 1024;
+
+export const EMBEDDING_DIM = Number(ENV.OB1_EMBEDDING_DIM ?? DEFAULT_EMBEDDING_DIM);
 
 /** The model that must produce exactly EMBEDDING_DIM numbers. */
-export const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
 
 /** Metadata extraction. No schema dependency, so safe to change at any time. */
-export const METADATA_MODEL = process.env.OB1_METADATA_MODEL ?? "openai/gpt-4o-mini";
+export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? "openai/gpt-4o-mini";
 
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;
@@ -118,6 +143,41 @@ export const VERIFIED_NOT_MRL = new Set([
 ]);
 
 /**
+ * Asymmetric prompt templates, from each model's own card.
+ *
+ * Several embedding models are trained to see a query and a document differently,
+ * and sending both bare is not a small loss. Measured on 97 real issues,
+ * `qwen3-embedding:4b` at 1024 dimensions scores **0.933 MRR with its query
+ * instruction and 0.860 without** — worse, unprompted, than `embeddinggemma`'s
+ * 0.914. That is the difference between the best model tested and a regression, so
+ * the templates are part of the model's identity here rather than an option.
+ *
+ * `{q}` and `{d}` are replaced with the query and the document. A model absent
+ * from this table is sent bare, which is correct for most of them:
+ * `embeddinggemma` gains only 0.002 from its documented format, and applying
+ * nomic's `search_query:`/`search_document:` prefixes measurably HURT retrieval in
+ * this fork's benchmarks, so neither is listed.
+ *
+ * Changing a template silently invalidates every stored vector, exactly like
+ * changing the model. Keying off the model name rather than a free-form setting
+ * means the existing model-change detection in preflight already covers it.
+ */
+export const EMBEDDING_PROMPTS = {
+  "qwen3-embedding:0.6b": {
+    query: "Instruct: Given a search query, retrieve the note that answers it\nQuery: {q}",
+    document: "{d}",
+  },
+  "qwen3-embedding:4b": {
+    query: "Instruct: Given a search query, retrieve the note that answers it\nQuery: {q}",
+    document: "{d}",
+  },
+  "qwen3-embedding:8b": {
+    query: "Instruct: Given a search query, retrieve the note that answers it\nQuery: {q}",
+    document: "{d}",
+  },
+};
+
+/**
  * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
  * parameter. Off by default: a silently shortened vector from a model that was not
  * trained for it is precisely the kind of quiet quality loss this fork tries to
@@ -128,8 +188,23 @@ export const VERIFIED_NOT_MRL = new Set([
  * the best result measured on real data at 1024 — better than any model that fits
  * natively. That is what this flag is for.
  */
-export const EMBEDDING_DIMENSIONS =
-  /^(1|on|true|yes)$/i.test(process.env.OB1_EMBEDDING_DIMENSIONS ?? "");
+export const EMBEDDING_DIMENSIONS = (() => {
+  const raw = ENV.OB1_EMBEDDING_DIMENSIONS;
+  if (raw !== undefined && raw !== "") return /^(1|on|true|yes)$/i.test(raw);
+  // Unset: enable only when the configured model is KNOWN to support Matryoshka
+  // truncation and the configured width is narrower than its native one. That is
+  // exactly the case where truncation is a supported operation with a checkable
+  // outcome, so demanding an opt-in adds friction without adding safety — and the
+  // default model is 2560 native at a 1024 column, which would otherwise refuse
+  // every capture out of the box.
+  //
+  // A model NOT in MRL_MODELS, or one with no known native width, still requires
+  // the explicit flag. That is the case the opt-in exists for: providers truncate
+  // anything on request, and quietly degrading a model never trained for it is the
+  // failure this fork is trying to remove rather than automate.
+  const native = KNOWN_MODEL_DIMS[EMBEDDING_MODEL];
+  return MRL_MODELS.has(EMBEDDING_MODEL) && native !== undefined && EMBEDDING_DIM < native;
+})();
 
 export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL, truncate = EMBEDDING_DIMENSIONS) {
   const problems = [];

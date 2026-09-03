@@ -1,5 +1,6 @@
 
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
+import { EMBEDDING_PROMPTS, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM } from "../db/config.mjs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -83,8 +84,6 @@ function db(): Promise<ThoughtStore> {
 // Ollama's compatibility layer — so a fully local brain is a URL change, not a
 // code change.
 const DEFAULT_LLM_BASE = "https://openrouter.ai/api/v1";
-const DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small";
-const DEFAULT_EMBEDDING_DIM = 1536;
 const DEFAULT_METADATA_MODEL = "openai/gpt-4o-mini";
 
 function llmBase(): string {
@@ -229,13 +228,37 @@ async function embedCapture(content: string): Promise<{
   };
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
+/**
+ * Some embedding models are trained to see a query and a document differently, and
+ * sending both bare is not a small loss: `qwen3-embedding:4b` scores 0.933 MRR on
+ * 97 real issues with its query instruction and 0.860 without — unprompted, worse
+ * than a model a quarter its size. The templates live in db/config.mjs, keyed by
+ * model, so the migration runner and the server cannot disagree about them.
+ *
+ * A model with no entry is sent bare, which is right for most: `embeddinggemma`
+ * gains 0.002 from its documented format, and nomic's prefixes measurably hurt.
+ *
+ * This is baked into stored vectors. Changing the template invalidates them
+ * exactly as changing the model does — which is why it is keyed off the model name
+ * rather than exposed as its own setting, so preflight's existing model-change
+ * check already covers it.
+ */
+type EmbedKind = "query" | "document";
+function applyPrompt(text: string, kind: EmbedKind): string {
+  const tpl = (EMBEDDING_PROMPTS as Record<string, { query: string; document: string } | undefined>)[
+    embeddingModel()
+  ];
+  if (!tpl) return text;
+  return kind === "query" ? tpl.query.replace("{q}", text) : tpl.document.replace("{d}", text);
+}
+
+async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
   const r = await fetch(`${llmBase()}/embeddings`, {
     method: "POST",
     headers: llmHeaders(),
     body: JSON.stringify({
       model: embeddingModel(),
-      input: text,
+      input: applyPrompt(text, kind),
       ...(embeddingDimensionsRequested() ? { dimensions: embeddingDim() } : {}),
     }),
   });
@@ -419,7 +442,7 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ query }) => {
       try {
-        const qEmb = await getEmbedding(query);
+        const qEmb = await getEmbedding(query, "query");
         const data = await (await db()).matchThoughts({
           embedding: qEmb,
           threshold: 0.5,
@@ -510,7 +533,7 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ query, limit, threshold }) => {
       try {
-        const qEmb = await getEmbedding(query);
+        const qEmb = await getEmbedding(query, "query");
         const data = await (await db()).matchThoughts({
           embedding: qEmb,
           threshold,

@@ -411,6 +411,36 @@ real corpus. That is the argument for this directory existing. The public number
 were useful here as a *cross-check* — they are what exposed the lead-matching
 confound above — but they were not a substitute for measuring.
 
+## The default changed to `qwen3-embedding:4b@1024`
+
+Once every model was prompted the way its own card specifies, the real-corpus
+ordering is:
+
+| model | MRR | sec | size | |
+| --- | --- | --- | --- | --- |
+| **qwen3-embedding:4b @1024, instructed** | **0.933** | 13.4 | 2.5 GB | the default |
+| qwen3-embedding:0.6b, instructed | 0.918 | 5.2 | 639 MB | value pick |
+| embeddinggemma, its own prompt format | 0.916 | 4.1 | 621 MB | |
+| embeddinggemma, bare | 0.914 | 4.1 | 621 MB | previous default |
+| qwen3-embedding:4b @1024, **bare** | **0.860** | 13.4 | 2.5 GB | |
+
+**The last row is the reason this took more than a config change.** Qwen3-Embedding
+is trained for asymmetric prompting, and unprompted it is *worse than the model it
+replaces* — 0.860 against 0.914. The server previously used one code path for
+document and query embeddings, so switching the default without adding query
+instructions would have been a regression dressed as an upgrade.
+
+`embeddinggemma`, by contrast, gains 0.002 from its documented format, which is why
+it never mattered before and why the templates are keyed per model rather than
+applied globally. Nomic's `search_query:`/`search_document:` prefixes measurably
+hurt in this fork's earlier benchmarks and are deliberately absent.
+
+The trade is real: 3.3x the embedding latency and four times the disk for +0.019
+MRR. What tips it is the long-document result — `qwen3-embedding:4b` is the only
+local model that embeds a whole long capture, so it is the one that does not need
+chunking to work at all. `qwen3-embedding:0.6b` is the honest middle: 0.918 at
+639 MB, essentially `embeddinggemma`'s size and better than it.
+
 ## Does chunking actually work? Measured end to end
 
 `eval-chunking-e2e.ts`. The CI test for chunking uses a stub provider, which is

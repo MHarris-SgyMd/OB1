@@ -34,9 +34,18 @@ const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
 
 async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
   const [spec, dims] = model.split("@");
-  const instruct = spec.endsWith("!instruct");
-  const name = spec.replace(/!instruct$/, "");
+  // Asymmetric prompting, per each model's own card. Documents and queries get
+  // different treatment, which is the point — a bi-encoder trained this way
+  // underperforms badly when both sides are sent bare.
+  const instruct = spec.endsWith("!instruct");     // Qwen3-Embedding
+  const gemma = spec.endsWith("!gemma");           // EmbeddingGemma
+  const name = spec.replace(/!(instruct|gemma)$/, "");
   if (instruct && isQuery) input = `Instruct: Given a search query, retrieve the issue that matches it\nQuery: ${input}`;
+  if (gemma) {
+    input = isQuery
+      ? `task: search result | query: ${input}`
+      : `title: none | text: ${input}`;
+  }
   const r = await fetch(`${BASE}/embeddings`, {
     method: "POST", headers: HEADERS,
     body: JSON.stringify({ model: name, input, ...(dims ? { dimensions: Number(dims) } : {}) }),

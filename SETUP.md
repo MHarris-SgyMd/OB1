@@ -23,7 +23,9 @@ produce exactly that many numbers. Changing either later means a schema migratio
 
 | Model | Width | Note |
 | --- | --- | --- |
-| `embeddinggemma` | 768 | **Best measured local option** — see [`evals/`](evals/README.md). Runs via Ollama. |
+| **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.933 MRR vs `embeddinggemma`'s 0.914 over 97 real issues — and the only local model that embeds a long capture whole. Costs ~3x the latency and 2.5 GB. Truncation is automatic. |
+| `qwen3-embedding:0.6b` | 1024 | 0.918 MRR at 639 MB — nearly the 4B's accuracy for a quarter the size. The value pick. |
+| `embeddinggemma` | 768 | 0.916 MRR at 621 MB, the fastest of the three. Was the default until real-corpus measurement moved it to third. |
 | `openai/text-embedding-3-small` | 1536 | The hosted default. Cheap, unmeasured here. |
 | `bge-m3` | 1024 | Ties `embeddinggemma` on retrieval; pick it if your notes are multilingual. |
 | `nomic-embed-text` | 768 | The obvious small default, and measurably worse — 5th of 10. |
@@ -74,8 +76,8 @@ exposes at `/v1` — so a fully local brain is a URL change, not a code change:
 ```bash
 # deploy/.env
 OB1_LLM_BASE_URL=http://ollama:11434/v1
-OB1_EMBEDDING_MODEL=embeddinggemma
-OB1_EMBEDDING_DIM=768
+OB1_EMBEDDING_MODEL=qwen3-embedding:4b
+OB1_EMBEDDING_DIM=1024
 OB1_METADATA_MODEL=qwen2.5:7b
 # leave OPENROUTER_API_KEY empty
 ```
@@ -85,7 +87,7 @@ podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
 That profile adds an `ollama` service and a one-shot job that pulls both models
-(~2.3 GB on first run). No credential is sent to a loopback provider — the server
+(~7.2 GB on first run). No credential is sent to a loopback provider — the server
 omits the `Authorization` header entirely.
 
 **On macOS, install Ollama natively instead.** A Linux container on Apple Silicon
@@ -95,7 +97,7 @@ uses the GPU and host memory, leaving the podman VM untouched:
 ```bash
 brew install ollama
 OLLAMA_HOST=0.0.0.0:11434 ollama serve          # 0.0.0.0 so containers can reach it
-ollama pull embeddinggemma && ollama pull qwen2.5:7b
+ollama pull qwen3-embedding:4b && ollama pull qwen2.5:7b
 ```
 
 Then point the server at the host rather than the compose network, and skip the
@@ -108,14 +110,20 @@ OB1_LLM_BASE_URL=http://host.containers.internal:11434/v1   # docker: host.docke
 
 #### These two were chosen by measurement
 
-`embeddinggemma` and `qwen2.5:7b` are not the smallest or most obvious picks —
-they are what won a benchmark. The harnesses are in [`evals/`](evals/README.md) so
+`qwen3-embedding:4b` and `qwen2.5:7b` are not the smallest or most obvious picks —
+they are what won a benchmark, and the embedding model won it on a real corpus
+rather than a synthetic one. The harnesses are in [`evals/`](evals/README.md) so
 you can re-run them when better models appear, or against your own notes.
 
 The short version:
 
-- **`embeddinggemma`** ties the best retrieval MRR (0.975) and is the only
-  768-dimension model to do so, so it drops into a schema already built at 768.
+- **`qwen3-embedding:4b` needs its query instruction**, and the server sends it
+  automatically. This is not a detail: prompted it scores 0.933 MRR, unprompted
+  **0.860** — worse than a model a quarter its size. The templates live in
+  `db/config.mjs` keyed by model name, so changing model changes prompt, and
+  preflight's existing model-change warning covers both.
+- **`embeddinggemma`** ties the best retrieval MRR (0.975) on the synthetic set and
+  is the only 768-dimension model to do so.
   `nomic-embed-text` — the obvious small default, and what this guide recommended
   first — placed 5th of 10. The gap is almost entirely on **long thoughts with the
   decision at the end**: change only the final sentence of a long note and

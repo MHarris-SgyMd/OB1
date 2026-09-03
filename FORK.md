@@ -226,6 +226,41 @@ dimension mismatch. Every suite now drops `thought_chunks` first, and
 
 runs them all in CI's order against one shared database. Use it before pushing.
 
+### 19. Default embedding model → `qwen3-embedding:4b` at 1024 dimensions
+
+Measured best on a real corpus: 0.933 MRR against `embeddinggemma`'s 0.914 over 97
+real issues, and the only local model that embeds a long capture whole. Costs ~3x
+the embedding latency and 2.5 GB.
+
+**This is a breaking change for an existing install.** The width moves from 768 to
+1024, so it needs a schema migration and a re-embed of every row. `preflight.ts`
+refuses to serve against a mismatch rather than letting search quietly degrade, so
+an install that skips this fails loudly. Staying put is a supported choice — set
+`OB1_EMBEDDING_MODEL` and `OB1_EMBEDDING_DIM` explicitly and nothing changes.
+
+Two things had to be built first, and the second is why this was not a one-line
+change:
+
+- **Truncation is now automatic for known-MRL models.** `qwen3-embedding:4b` is
+  2560 dimensions natively, above pgvector's 2000 HNSW ceiling, so the default
+  would otherwise refuse every capture. `OB1_EMBEDDING_DIMENSIONS` still defaults
+  to off for anything not in `MRL_MODELS` or of unknown native width — the opt-in
+  exists to stop silent truncation of models never trained for it, and that
+  property is unchanged.
+- **Asymmetric prompting.** Qwen3-Embedding is trained to see queries and
+  documents differently, and the server had one code path for both. Prompted it
+  scores 0.933; bare, **0.860** — worse than the model it replaces. Switching the
+  default without this would have been a regression dressed as an upgrade.
+  Templates live in `db/config.mjs` keyed by model, so changing model changes
+  prompt and preflight's existing model-change check already covers it.
+  `embeddinggemma` gains 0.002 from its own format and nomic's prefixes measurably
+  hurt, so neither is listed — the table is per-model, not global.
+
+`scripts/check-fork-consistency.mjs` now fails if `deploy/compose.yaml`'s
+`${VAR:-fallback}` values drift from `db/config.mjs`. Compose substitutes those
+before the process starts, so a stale fallback silently overrides the code default
+rather than deferring to it.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

@@ -73,6 +73,7 @@ function assert(cond: unknown, label: string): void {
 /** A provider that honours `dimensions`, until told to ignore it. */
 let ignoreDimensions = false;
 let lastBody: Record<string, unknown> = {};
+let lastInput = "";
 const provider = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -80,10 +81,15 @@ const provider = Bun.serve({
     const body = (await req.json()) as Record<string, unknown>;
     if (url.pathname.endsWith("/embeddings")) {
       lastBody = body;
+      lastInput = String(body.input ?? "");
       const asked = Number(body.dimensions);
       const width = !ignoreDimensions && asked ? asked : NATIVE;
+      // Keyed off the text with any query instruction stripped, so a prompted
+      // query and its document still land on the same axis. Without this the stub
+      // would report a miss for what is actually correct behaviour.
+      const bare = String(body.input ?? "").replace(/^Instruct:[^\n]*\nQuery: /, "");
       const v = new Array(width).fill(0);
-      v[String(body.input ?? "").length % width] = 1;
+      v[bare.length % width] = 1;
       return Response.json({ data: [{ embedding: v }], model: body.model });
     }
     return Response.json({
@@ -150,7 +156,21 @@ console.log("\n[3] Search still works end to end at the truncated width");
   assert(/Found \d+ thought/.test(out), "search returns results over the narrowed vectors");
 }
 
-console.log("\n[4] A provider that ignores `dimensions` fails loudly");
+console.log("\n[4] Queries carry the model's instruction, documents do not");
+{
+  // qwen3-embedding is trained for asymmetric prompting: on 97 real issues it
+  // scores 0.933 MRR instructed and 0.860 bare — worse, unprompted, than a model a
+  // quarter its size. So this is correctness, not tuning.
+  await call("capture_thought", { content: "a document that must be embedded bare" });
+  const captured = lastInput;
+  assert(!/^Instruct:/.test(captured), `the document is sent bare (${captured.slice(0, 40)}…)`);
+
+  await call("search_thoughts", { query: "a question", limit: 1, threshold: 0.1 });
+  assert(/^Instruct: /.test(lastInput) && /\nQuery: a question$/.test(lastInput),
+         `the query is wrapped (${JSON.stringify(lastInput.slice(0, 56))})`);
+}
+
+console.log("\n[5] A provider that ignores `dimensions` fails loudly");
 {
   ignoreDimensions = true;
   let msg = "";

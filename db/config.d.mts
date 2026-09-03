@@ -11,7 +11,11 @@
  * the implementation by CI's typecheck, so the two cannot drift silently.
  */
 
-/** Width of `thoughts.embedding`. From OB1_EMBEDDING_DIM, default 1536. */
+/** Default model and width, shared with the server so the two cannot drift. */
+export const DEFAULT_EMBEDDING_MODEL: string;
+export const DEFAULT_EMBEDDING_DIM: number;
+
+/** Width of `thoughts.embedding`. From OB1_EMBEDDING_DIM. */
 export const EMBEDDING_DIM: number;
 
 /** Model that must produce exactly EMBEDDING_DIM numbers. */
@@ -34,6 +38,12 @@ export const MRL_MODELS: Set<string>;
 
 /** Models whose cards were checked and make no Matryoshka claim. */
 export const VERIFIED_NOT_MRL: Set<string>;
+
+/**
+ * Asymmetric query/document prompt templates keyed by model, with `{q}` and `{d}`
+ * placeholders. Absent means send the text bare, which is right for most models.
+ */
+export const EMBEDDING_PROMPTS: Record<string, { query: string; document: string }>;
 
 /** Whether to send the OpenAI `dimensions` parameter. OB1_EMBEDDING_DIMENSIONS. */
 export const EMBEDDING_DIMENSIONS: boolean;

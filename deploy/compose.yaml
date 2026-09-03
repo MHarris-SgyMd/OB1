@@ -45,8 +45,11 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       # The vector width is baked into the schema here and cannot change later
       # without re-embedding. migrate.ts refuses a model/width mismatch.
-      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1536}
-      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      # Must match db/config.mjs's DEFAULT_EMBEDDING_*. Compose substitutes its own
+      # fallback before the process ever starts, so a stale value here silently
+      # overrides the code default rather than deferring to it.
+      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
+      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
     # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
     # The one dependency in db/package.json is pglite, used solely by the tests.
     # This also keeps the mount read-only — `bun install` would need to write
@@ -74,8 +77,11 @@ services:
       # Not required when OB1_LLM_BASE_URL points at a local provider; preflight
       # decides, and fails the container if a remote endpoint has no credential.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1536}
-      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      # Must match db/config.mjs's DEFAULT_EMBEDDING_*. Compose substitutes its own
+      # fallback before the process ever starts, so a stale value here silently
+      # overrides the code default rather than deferring to it.
+      OB1_EMBEDDING_DIM: ${OB1_EMBEDDING_DIM:-1024}
+      OB1_EMBEDDING_MODEL: ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       OB1_PG_POOL: ${OB1_PG_POOL:-10}
       PORT: "8000"
@@ -118,7 +124,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        ollama pull ${OB1_EMBEDDING_MODEL:-embeddinggemma}
+        ollama pull ${OB1_EMBEDDING_MODEL:-qwen3-embedding:4b}
         ollama pull ${OB1_METADATA_MODEL:-qwen2.5:7b}
     restart: "no"
 

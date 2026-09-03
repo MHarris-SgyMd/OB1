@@ -180,6 +180,45 @@ for (const d of dirs) {
 }
 checkSqlGuards();
 
+/**
+ * The embedding default is stated in three places that must agree, and two of them
+ * silently win over the third. Compose substitutes `${VAR:-fallback}` before the
+ * process starts, so a stale fallback in compose.yaml overrides db/config.mjs
+ * rather than deferring to it — the configuration would look right in the source
+ * and be wrong in the container, which is the failure mode this whole fork keeps
+ * trying to make loud.
+ */
+async function checkEmbeddingDefaults() {
+  const cfg = await import("../db/config.mjs");
+  const compose = readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8");
+
+  const dims = [...compose.matchAll(/OB1_EMBEDDING_DIM:\s*\$\{OB1_EMBEDDING_DIM:-(\d+)\}/g)].map((m) => Number(m[1]));
+  const models = [...compose.matchAll(/OB1_EMBEDDING_MODEL:\s*\$\{OB1_EMBEDDING_MODEL:-([^}]+)\}/g)].map((m) => m[1].trim());
+
+  for (const d of dims) {
+    if (d !== cfg.DEFAULT_EMBEDDING_DIM) {
+      violations.push({
+        where: "deploy/compose.yaml",
+        msg: `OB1_EMBEDDING_DIM fallback ${d} does not match db/config.mjs DEFAULT_EMBEDDING_DIM ${cfg.DEFAULT_EMBEDDING_DIM}`,
+      });
+    }
+  }
+  for (const m of models) {
+    if (m !== cfg.DEFAULT_EMBEDDING_MODEL) {
+      violations.push({
+        where: "deploy/compose.yaml",
+        msg: `OB1_EMBEDDING_MODEL fallback "${m}" does not match db/config.mjs DEFAULT_EMBEDDING_MODEL "${cfg.DEFAULT_EMBEDDING_MODEL}"`,
+      });
+    }
+  }
+
+  // A default the schema cannot index would be caught at migrate time, but only
+  // by whoever ran it. Catching it here means it never lands.
+  const problems = cfg.validateEmbeddingConfig(cfg.DEFAULT_EMBEDDING_DIM, cfg.DEFAULT_EMBEDDING_MODEL, cfg.EMBEDDING_DIMENSIONS);
+  for (const p of problems) violations.push({ where: "db/config.mjs", msg: `default configuration is not usable: ${p}` });
+}
+await checkEmbeddingDefaults();
+
 // The upstream _template placeholder link is intentional.
 const filtered = violations.filter((v) => !v.where.includes("_template"));
 
