@@ -5,6 +5,7 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIM,
   DEFAULT_METADATA_MODEL,
+  DEFAULT_LLM_BASE_URL,
   resolveEmbeddingDimensions,
 } from "../db/config.mjs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -89,10 +90,9 @@ function db(): Promise<ThoughtStore> {
 // /chat/completions shapes works, which includes OpenRouter, OpenAI itself, and
 // Ollama's compatibility layer — so a fully local brain is a URL change, not a
 // code change.
-const DEFAULT_LLM_BASE = "https://openrouter.ai/api/v1";
 
 function llmBase(): string {
-  return (env().OB1_LLM_BASE_URL || DEFAULT_LLM_BASE).replace(/\/+$/, "");
+  return (env().OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, "");
 }
 
 /**

@@ -278,6 +278,37 @@ Three points for a 15x latency increase and a footgun is not a default. The
 harnesses stay (`evals/eval-cascade.ts`), so a corpus that behaves differently can
 re-derive it. Full numbers in `evals/README.md`.
 
+### The recurring defect in this fork: a value defined twice
+
+Worth naming, because it has now caused five separate failures and every one
+looked different on the surface:
+
+| what was duplicated | how it failed |
+| --- | --- |
+| embedding prompts (harness vs `config.mjs`) | benchmark measured an instruction the server never sends |
+| truncation rule (`index.ts`, `preflight.ts`, `config.mjs`) | container crashlooped on a valid default |
+| schema reset across 9 test files | stale `thought_chunks` broke a later suite in CI only |
+| compose `${VAR:-fallback}` vs `config.mjs` | a stale fallback would silently override the code default |
+| **preflight's own copy of the defaults** | **the gate validated a configuration that was never going to run** |
+
+The last one is the worst of them and survived until a deliberate look for it.
+`preflight.ts` exists to refuse to serve when misconfigured, and it held its own
+`"openai/text-embedding-3-small"` and `1536`, so after the default moved it checked
+`text-embedding-3-small @ 1536` while the server ran `qwen3-embedding:4b @ 1024`.
+Invisible in the container, because compose sets every one of those explicitly.
+
+The pattern is consistent enough to be a rule: **a default that appears in two
+files will be wrong in one of them, and the copy that goes stale is the one nobody
+runs directly.** Everything provider-facing now resolves through `db/config.mjs`,
+and `scripts/check-fork-consistency.mjs` fails the build when compose, the
+embedding model, the metadata model and the base URL stop agreeing.
+
+The same rule applies to the suites. Three of them read a shipped default instead
+of pinning their own, so changing the default broke tests that were testing
+something else entirely — `test-e2e-sql` matched a provider by the literal string
+`openrouter.ai`, `test-preflight` hardcoded `1536`, `test-embedding-dimensions`
+keyed a stub off exact input text. A suite should pin what it does not test.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

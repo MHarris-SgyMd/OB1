@@ -85,7 +85,7 @@ function axisFor(text: string): number {
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
-  if (url.includes("openrouter.ai")) {
+  if (url.startsWith(STUB_BASE)) {
     const body = JSON.parse(String(init?.body ?? "{}"));
     if (url.endsWith("/embeddings")) {
       const v = new Array(EMBEDDING_DIM).fill(0);
@@ -103,6 +103,13 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // ── Boot the real server with the SQL store ──────────────────────────────────
+// A provider host this suite owns, so the stub matches on something it controls
+// rather than on whatever the shipped default happens to be. Matching the literal
+// "openrouter.ai" meant the stub stopped intercepting the moment the default base
+// URL moved to Ollama, and the test hit the real provider.
+const STUB_BASE = "https://stub.invalid/v1";
+process.env.OB1_LLM_BASE_URL = STUB_BASE;
+
 process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";

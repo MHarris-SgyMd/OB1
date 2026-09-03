@@ -39,10 +39,23 @@ const add = (name: string, status: Status, detail: string, fix?: string) =>
 
 const env = process.env as Record<string, string | undefined>;
 const store = (env.OB1_STORE ?? "postgrest").toLowerCase();
-const embModel = env.OB1_EMBEDDING_MODEL || "openai/text-embedding-3-small";
-const embDim = Number(env.OB1_EMBEDDING_DIM ?? 1536);
-const metaModel = env.OB1_METADATA_MODEL || "openai/gpt-4o-mini";
-const llmBase = (env.OB1_LLM_BASE_URL || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+// Defaults come from db/config.mjs, not from copies. These four were hardcoded
+// here and went stale the moment the defaults changed, so preflight validated
+// openai/text-embedding-3-small @ 1536 while the server ran qwen3-embedding:4b @
+// 1024 — a gate checking a configuration that was never going to run. It was
+// invisible in the container only because compose sets every one of these
+// explicitly.
+const {
+  DEFAULT_EMBEDDING_MODEL: DEF_EMB,
+  DEFAULT_EMBEDDING_DIM: DEF_DIM,
+  DEFAULT_METADATA_MODEL: DEF_META,
+  DEFAULT_LLM_BASE_URL: DEF_BASE,
+} = await import("../db/config.mjs");
+
+const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
+const embDim = env.OB1_EMBEDDING_DIM ? Number(env.OB1_EMBEDDING_DIM) : DEF_DIM;
+const metaModel = env.OB1_METADATA_MODEL || DEF_META;
+const llmBase = (env.OB1_LLM_BASE_URL || DEF_BASE).replace(/\/+$/, "");
 const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
 
 /**

@@ -222,14 +222,26 @@ async function checkEmbeddingDefaults() {
     }
   }
 
-  // Shipping a local embedding default beside a hosted metadata default means
-  // every capture 404s against Ollama and silently stores no metadata.
-  const hosted = (n) => n.includes("/");
-  if (hosted(cfg.DEFAULT_EMBEDDING_MODEL) !== hosted(cfg.DEFAULT_METADATA_MODEL)) {
+  // The three provider-facing defaults move together or not at all. A local model
+  // name sent to a hosted endpoint is a 404 per capture — fatal for the embedding
+  // call, silent for the metadata one. Both halves of that have already shipped
+  // here once.
+  const hostedModel = (n) => n.includes("/");
+  const localBase = /(^|\/\/)(127\.0\.0\.1|localhost|ollama|host\.(docker|containers)\.internal)/.test(
+    cfg.DEFAULT_LLM_BASE_URL
+  );
+  if (hostedModel(cfg.DEFAULT_EMBEDDING_MODEL) !== hostedModel(cfg.DEFAULT_METADATA_MODEL)) {
     violations.push({
       where: "db/config.mjs",
       msg: `default embedding model "${cfg.DEFAULT_EMBEDDING_MODEL}" and metadata model ` +
            `"${cfg.DEFAULT_METADATA_MODEL}" target different providers; one is hosted and one is local`,
+    });
+  }
+  if (hostedModel(cfg.DEFAULT_EMBEDDING_MODEL) === localBase) {
+    violations.push({
+      where: "db/config.mjs",
+      msg: `DEFAULT_LLM_BASE_URL "${cfg.DEFAULT_LLM_BASE_URL}" does not match the model defaults ` +
+           `("${cfg.DEFAULT_EMBEDDING_MODEL}"); a local model name sent to a hosted endpoint 404s on every capture`,
     });
   }
 

@@ -18,8 +18,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
 
 /** db/migrations/*.sql are templates; migrate.ts substitutes these at apply time. */
-const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
-const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+// Derived from the shipped defaults, not a copy of them, and exported to the
+// environment so the preflight subprocess builds its expectation from the same
+// values this suite builds the schema from. Hardcoding them here meant the schema
+// said 1536 while preflight said 1024 the moment the default changed, and the gate
+// failed against a database that was in fact correct.
+const { DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL } = await import("../db/config.mjs");
+const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? DEFAULT_EMBEDDING_DIM);
+const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
+process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
+process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 function subst(sql: string): string {
   return sql
     .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))

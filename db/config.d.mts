@@ -14,6 +14,9 @@
 /** Default model and width, shared with the server so the two cannot drift. */
 export const DEFAULT_EMBEDDING_MODEL: string;
 export const DEFAULT_EMBEDDING_DIM: number;
+/** Provider base URL. Defaults to Ollama, matching the local model defaults. */
+export const DEFAULT_LLM_BASE_URL: string;
+export const LLM_BASE_URL: string;
 
 /** Width of `thoughts.embedding`. From OB1_EMBEDDING_DIM. */
 export const EMBEDDING_DIM: number;

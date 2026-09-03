@@ -54,6 +54,15 @@ const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
 export const DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:4b";
 export const DEFAULT_EMBEDDING_DIM = 1024;
 
+/**
+ * Ollama, because the model defaults are local. These three move together or not
+ * at all: pointing local model names at OpenRouter produces a 404 per capture, and
+ * the embedding one is fatal rather than degraded. Overriding the provider means
+ * overriding the models too, which SETUP.md says and
+ * scripts/check-fork-consistency.mjs enforces.
+ */
+export const DEFAULT_LLM_BASE_URL = "http://127.0.0.1:11434/v1";
+
 export const EMBEDDING_DIM = Number(ENV.OB1_EMBEDDING_DIM ?? DEFAULT_EMBEDDING_DIM);
 
 /** The model that must produce exactly EMBEDDING_DIM numbers. */
@@ -93,6 +102,7 @@ export const EMBEDDING_MODEL = ENV.OB1_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODE
  */
 export const DEFAULT_METADATA_MODEL = "qwen2.5:7b";
 export const METADATA_MODEL = ENV.OB1_METADATA_MODEL ?? DEFAULT_METADATA_MODEL;
+export const LLM_BASE_URL = (ENV.OB1_LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL).replace(/\/+$/, "");
 
 /** Widths pgvector supports for an HNSW index. Beyond this, indexing fails. */
 export const MAX_HNSW_DIM = 2000;
