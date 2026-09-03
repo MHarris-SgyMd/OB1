@@ -31,35 +31,11 @@
  *   OB1_EVAL_BASE=https://openrouter.ai/api/v1 OB1_EVAL_KEY=sk-or-… bun eval-retrieval.ts \
  *     openai/text-embedding-3-small qwen/qwen3-embedding-8b
  */
-const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
-const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
-const HEADERS: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
-};
 
 import { DOCS, QUERIES, SLICES } from "./corpus.ts";
+import { embed, cosine, EVAL_BASE } from "./lib.ts";
 
-async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
-  const [spec, dims] = model.split("@");
-  const instruct = spec.endsWith("!instruct");
-  const name = spec.replace(/!instruct$/, "");
-  if (instruct && isQuery) {
-    input = `Instruct: Given a search query, retrieve the note that answers it\nQuery: ${input}`;
-  }
-  const r = await fetch(`${BASE}/embeddings`, {
-    method: "POST", headers: HEADERS,
-    body: JSON.stringify({ model: name, input, ...(dims ? { dimensions: Number(dims) } : {}) }),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 80)}`);
-  return ((await r.json()) as { data: [{ embedding: number[] }] }).data[0].embedding;
-}
 
-function cosine(a: number[], b: number[]): number {
-  let d = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return d / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 async function evaluate(model: string) {
   const t0 = Date.now();

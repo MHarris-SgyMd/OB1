@@ -983,11 +983,19 @@ someone reading a table. Rebaselining is deliberately manual — a baseline writ
 automatically from a single run is how a benchmark quietly starts measuring the
 wrong thing.
 
-**Prompt templates come from `db/config.mjs`, the same table the server uses.**
-They used to be hardcoded here as `!instruct` and `!gemma` flags, which meant the
-benchmark could flatter a model the server prompts differently. Fixing that moved
-`qwen3-embedding:4b@1024` from 0.933 to **0.938** — not because the model improved,
-but because the harness had been measuring an instruction the server never sends.
+**Prompt templates come from `db/config.mjs`, the same table the server uses**, via
+`lib.ts`, which every harness now shares. They used to be hardcoded per harness,
+and by the time anyone looked the four files were sending *three different* query
+instructions — "retrieve the issue that matches it", "retrieve the note that
+answers it", "Given a question, retrieve the note" — none of which was what the
+server sends. Since the same model scores 0.938 prompted and 0.860 bare, the
+instruction text is a bigger lever than most of the models being compared, so
+numbers produced under three prompts were never comparable to each other.
+
+Unifying them left every recorded result unchanged except `eval-real.ts`'s, which
+moved from 0.933 to **0.938** — the model did not improve; the harness stopped
+measuring an instruction the server never sends. The long-document and synthetic
+results were identical before and after, so those conclusions stand as recorded.
 
 ## What you actually need on disk
 

@@ -22,6 +22,7 @@
  */
 
 import { join, dirname } from "node:path";
+import { parseSpec } from "./lib.ts";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -70,7 +71,7 @@ if (flags.has("--list") || !model) {
  * reliable than a naming convention — `qwen3-embedding:4b` and `embeddinggemma`
  * share no pattern, and a new family will share neither.
  */
-const bare = model.split("@")[0];
+const bare = parseSpec(model).name;
 async function detectKind(): Promise<"embedding" | "extraction"> {
   const r = await fetch(`${BASE}/embeddings`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -109,7 +110,7 @@ console.log(`\n  ${model} — detected as ${kind}, measuring against ${BASE}\n`)
 
 if (kind === "embedding") {
   const out = run("eval-real.ts", [model]);
-  const line = out.split("\n").find((l) => l.includes(model.split("@")[0]) && /0\.\d{3}/.test(l));
+  const line = out.split("\n").find((l) => l.includes(bare) && /0\.\d{3}/.test(l));
   if (!line) { console.error(out); process.exit(1); }
   const nums = line.match(/(\d+)%\s+(\d+)%\s+(0\.\d+)\s+([\d.]+)/);
   if (!nums) { console.error(out); process.exit(1); }

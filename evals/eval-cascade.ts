@@ -28,12 +28,6 @@
  * one query in twenty is not obviously a good trade.
  */
 
-const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
-const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
-const HEADERS: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
-};
 
 const EMBED = process.env.OB1_EVAL_EMBED ?? "embeddinggemma";
 const RERANK = process.env.OB1_EVAL_RERANK ?? "qwen2.5:7b";
@@ -48,21 +42,9 @@ const MARGIN = Number(process.env.OB1_EVAL_MARGIN ?? 0);
 
 /** Same corpus as eval-retrieval.ts, imported rather than duplicated. */
 import { DOCS, QUERIES, SLICES } from "./corpus.ts";
+import { embed, cosine, EVAL_BASE, EVAL_HEADERS } from "./lib.ts";
 
-async function embed(input: string): Promise<number[]> {
-  const r = await fetch(`${BASE}/embeddings`, {
-    method: "POST", headers: HEADERS,
-    body: JSON.stringify({ model: EMBED, input }),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 80)}`);
-  return ((await r.json()) as { data: [{ embedding: number[] }] }).data[0].embedding;
-}
 
-function cosine(a: number[], b: number[]): number {
-  let d = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return d / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 /**
  * Listwise rerank. The candidates are numbered and the model returns an ordering,
@@ -71,8 +53,8 @@ function cosine(a: number[], b: number[]): number {
  */
 async function rerank(query: string, cands: { id: string; text: string }[]): Promise<string[]> {
   const numbered = cands.map((c, i) => `[${i + 1}] ${c.text}`).join("\n");
-  const r = await fetch(`${BASE}/chat/completions`, {
-    method: "POST", headers: HEADERS,
+  const r = await fetch(`${EVAL_BASE}/chat/completions`, {
+    method: "POST", headers: EVAL_HEADERS,
     body: JSON.stringify({
       model: RERANK,
       temperature: 0,
@@ -147,7 +129,7 @@ function rrf(...lists: { id: string }[][]): string[] {
 }
 
 const vecs: Record<string, number[]> = {};
-for (const d of DOCS) vecs[d.id] = await embed(d.text);
+for (const d of DOCS) vecs[d.id] = await embed(EMBED, d.text);
 
 type Acc = { n: number; hit1: number; mrr: number };
 const mk = (): Record<string, Acc> =>
@@ -160,7 +142,7 @@ const margins: { q: string; margin: number; wasWrong: boolean }[] = [];
 
 for (const { q, want, slice } of QUERIES) {
   const a = Date.now();
-  const qv = await embed(q);
+  const qv = await embed(EMBED, q, true);
   const ranked = DOCS.map((d) => ({ id: d.id, s: cosine(qv, vecs[d.id]) })).sort((x, y) => y.s - x.s);
   msEmbed += Date.now() - a;
 

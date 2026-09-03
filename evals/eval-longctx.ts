@@ -27,12 +27,8 @@
  *   bun eval-longctx.ts embeddinggemma bge-m3 'qwen3-embedding:4b!instruct@1024'
  */
 
-const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
-const KEY = process.env.OB1_EVAL_KEY ?? "";
-const HEADERS: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
-};
+import { embed, cosine, EVAL_BASE } from "./lib.ts";
+
 
 /** Roughly 1.35 tokens per word for this kind of prose, checked against Ollama. */
 const TOK_PER_WORD = 1.35;
@@ -85,24 +81,7 @@ function build(tokens: number, tail: string): string {
   return parts.join(" ");
 }
 
-async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
-  const [spec, dims] = model.split("@");
-  const instruct = spec.endsWith("!instruct");
-  const name = spec.replace(/!instruct$/, "");
-  if (instruct && isQuery) input = `Instruct: Given a question, retrieve the note that answers it\nQuery: ${input}`;
-  const r = await fetch(`${BASE}/embeddings`, {
-    method: "POST", headers: HEADERS,
-    body: JSON.stringify({ model: name, input, ...(dims ? { dimensions: Number(dims) } : {}) }),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 100)}`);
-  return ((await r.json()) as { data: [{ embedding: number[] }] }).data[0].embedding;
-}
 
-function cosine(a: number[], b: number[]): number {
-  let d = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return d / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 /** Ollama reports the served window, which is not always the card's number. */
 async function servedContext(model: string): Promise<string> {

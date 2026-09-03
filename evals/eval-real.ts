@@ -21,55 +21,12 @@
  *   bun eval-real.ts embeddinggemma bge-m3 nomic-embed-text
  */
 
-const BASE = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
-const KEY = process.env.OB1_EVAL_KEY ?? "";
-const HEADERS: Record<string, string> = {
-  "Content-Type": "application/json",
-  ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
-};
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus.json";
 
-/** The server's own prompt table, so benchmark and production agree. */
-import { EMBEDDING_PROMPTS as PROMPTS } from "../db/config.mjs";
+import { embed, cosine, EVAL_BASE, EVAL_HEADERS } from "./lib.ts";
 
 type Item = { id: string; title: string; text: string; labels: string[] };
 const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
-
-async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
-  const [spec, dims] = model.split("@");
-  // Asymmetric prompting comes from db/config.mjs — the same table the SERVER
-  // uses — so a benchmark cannot flatter a model the server will prompt
-  // differently, or vice versa. These were hardcoded here as `!instruct` and
-  // `!gemma` flags, duplicating that table, which is the drift this fork has
-  // already had to fix twice elsewhere.
-  //
-  // `!bare` forces prompting off, which is how the cost of omitting it was
-  // measured: qwen3-embedding:4b scores 0.933 prompted and 0.860 bare.
-  // `!gemma` stays as a one-off for EmbeddingGemma's documented format, which is
-  // NOT in the server's table because it is worth only +0.002 and the server
-  // therefore does not send it.
-  const forceBare = spec.endsWith("!bare");
-  const gemma = spec.endsWith("!gemma");
-  const name = spec.replace(/!(instruct|gemma|bare)$/, "");
-  if (gemma) {
-    input = isQuery ? `task: search result | query: ${input}` : `title: none | text: ${input}`;
-  } else if (!forceBare) {
-    const tpl = (PROMPTS as Record<string, { query: string; document: string } | undefined>)[name];
-    if (tpl) input = isQuery ? tpl.query.replace("{q}", input) : tpl.document.replace("{d}", input);
-  }
-  const r = await fetch(`${BASE}/embeddings`, {
-    method: "POST", headers: HEADERS,
-    body: JSON.stringify({ model: name, input, ...(dims ? { dimensions: Number(dims) } : {}) }),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 90)}`);
-  return ((await r.json()) as { data: [{ embedding: number[] }] }).data[0].embedding;
-}
-
-function cosine(a: number[], b: number[]): number {
-  let d = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return d / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 type Res = {
   model: string; dims: number; r1: number; r5: number; mrr: number; seconds: number;
@@ -115,8 +72,8 @@ const TOPK = Number(process.env.OB1_EVAL_TOPK ?? 5);
 
 async function rerank(query: string, cands: { id: string; text: string }[]): Promise<string[]> {
   const numbered = cands.map((c, i) => `[${i + 1}] ${c.text.slice(0, 700)}`).join("\n\n");
-  const r = await fetch(`${BASE}/chat/completions`, {
-    method: "POST", headers: HEADERS,
+  const r = await fetch(`${EVAL_BASE}/chat/completions`, {
+    method: "POST", headers: EVAL_HEADERS,
     body: JSON.stringify({
       model: RERANK, temperature: 0, reasoning_effort: "none",
       response_format: { type: "json_object" },
