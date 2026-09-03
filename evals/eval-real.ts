@@ -29,22 +29,33 @@ const HEADERS: Record<string, string> = {
 };
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus.json";
 
+/** The server's own prompt table, so benchmark and production agree. */
+import { EMBEDDING_PROMPTS as PROMPTS } from "../db/config.mjs";
+
 type Item = { id: string; title: string; text: string; labels: string[] };
 const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
 
 async function embed(model: string, input: string, isQuery = false): Promise<number[]> {
   const [spec, dims] = model.split("@");
-  // Asymmetric prompting, per each model's own card. Documents and queries get
-  // different treatment, which is the point — a bi-encoder trained this way
-  // underperforms badly when both sides are sent bare.
-  const instruct = spec.endsWith("!instruct");     // Qwen3-Embedding
-  const gemma = spec.endsWith("!gemma");           // EmbeddingGemma
-  const name = spec.replace(/!(instruct|gemma)$/, "");
-  if (instruct && isQuery) input = `Instruct: Given a search query, retrieve the issue that matches it\nQuery: ${input}`;
+  // Asymmetric prompting comes from db/config.mjs — the same table the SERVER
+  // uses — so a benchmark cannot flatter a model the server will prompt
+  // differently, or vice versa. These were hardcoded here as `!instruct` and
+  // `!gemma` flags, duplicating that table, which is the drift this fork has
+  // already had to fix twice elsewhere.
+  //
+  // `!bare` forces prompting off, which is how the cost of omitting it was
+  // measured: qwen3-embedding:4b scores 0.933 prompted and 0.860 bare.
+  // `!gemma` stays as a one-off for EmbeddingGemma's documented format, which is
+  // NOT in the server's table because it is worth only +0.002 and the server
+  // therefore does not send it.
+  const forceBare = spec.endsWith("!bare");
+  const gemma = spec.endsWith("!gemma");
+  const name = spec.replace(/!(instruct|gemma|bare)$/, "");
   if (gemma) {
-    input = isQuery
-      ? `task: search result | query: ${input}`
-      : `title: none | text: ${input}`;
+    input = isQuery ? `task: search result | query: ${input}` : `title: none | text: ${input}`;
+  } else if (!forceBare) {
+    const tpl = (PROMPTS as Record<string, { query: string; document: string } | undefined>)[name];
+    if (tpl) input = isQuery ? tpl.query.replace("{q}", input) : tpl.document.replace("{d}", input);
   }
   const r = await fetch(`${BASE}/embeddings`, {
     method: "POST", headers: HEADERS,

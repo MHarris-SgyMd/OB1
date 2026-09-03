@@ -962,6 +962,33 @@ so a run against `text-embedding-3-small` at $0.02/M is a small fraction of a ce
 Until it is run, treat "qwen2.5:7b is the best extraction model" and
 "embeddinggemma is the best embedding model" as scoped to *local* options.
 
+## Evaluating a new model
+
+```bash
+bun bench.ts --list                    # what is already recorded, ranked
+bun bench.ts <model>                   # measure it and compare
+bun bench.ts qwen3-embedding:4b@1024   # @N requests Matryoshka truncation
+bun bench.ts <model>!bare              # force prompting off, to measure its cost
+```
+
+`bench.ts` detects whether a model is an embedder or a chat model by asking the
+provider rather than guessing from its name, runs the right harness, and reports
+three things: the score, where it lands in the recorded field, and **whether the
+difference is large enough to mean anything**. The corpus is 97 queries, so one
+query changing hands moves MRR by about 0.01; anything inside that is reported as
+indistinguishable rather than as a rank.
+
+Baselines live in `baselines.json`, so the comparison is a script rather than
+someone reading a table. Rebaselining is deliberately manual — a baseline written
+automatically from a single run is how a benchmark quietly starts measuring the
+wrong thing.
+
+**Prompt templates come from `db/config.mjs`, the same table the server uses.**
+They used to be hardcoded here as `!instruct` and `!gemma` flags, which meant the
+benchmark could flatter a model the server prompts differently. Fixing that moved
+`qwen3-embedding:4b@1024` from 0.933 to **0.938** — not because the model improved,
+but because the harness had been measuring an instruction the server never sends.
+
 ## What you actually need on disk
 
 Reproducing everything in this file means pulling around 30 models and roughly
