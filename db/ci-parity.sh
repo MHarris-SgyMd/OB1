@@ -48,6 +48,13 @@ main() {
   run server-portable    test-embedding-dimensions.ts
   run server-portable    test-preflight.ts
   run compat/supabase-sql test-compat.ts
+
+  # Suites that need no database. They are here because CI runs them and this
+  # script exists to be CI's local equivalent — leaving them out let two stale
+  # tool-count assertions reach a pull request while this reported all green.
+  run server-portable    test-server.ts
+  run server-portable    test-auth.ts
+  run server-portable    test-thoughts.ts
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"

@@ -513,8 +513,12 @@ Refusals are results, not exceptions: `NOT_FOUND`, `STALE_READ` and
 `DUPLICATE_CONTENT` come back as values with a message saying what to do, because
 at the tool boundary a thrown error is indistinguishable from a fault.
 
-One tooling bug this shook out: `db/ci-parity.sh` judged a suite failed if its
-output contained `error:` anywhere — and a suite that tests error messages says
+Two tooling gaps this shook out. `db/ci-parity.sh` **only ran the
+Postgres-backed suites**, so `test-server`, `test-auth` and `test-thoughts` were
+never part of the local gate — and three stale tool-count assertions in them
+reached a pull request while this script reported all green. It now runs
+everything CI runs, which is what it was always claiming to be. It also judged a
+suite failed if its output contained `error:` anywhere — and a suite that tests error messages says
 "tool error" in its own assertion labels, so `test-update-delete` was reported
 failed while passing 27/27. It now reads the tally rather than the prose.
 
