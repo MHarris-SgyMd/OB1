@@ -15,11 +15,10 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
+import { resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
   console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun test-e2e-sql.ts");
@@ -56,24 +55,7 @@ function assert(cond: unknown, label: string): void {
 }
 
 // Fresh schema.
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
-
-  // constraint, not this table, so a stale one survives at the PREVIOUS test's
-
-  // vector width. Harmless locally, where each run gets a fresh container, and a
-
-  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
-
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(subst(readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")));
-  }
-  await admin.close();
-}
+await resetSchema(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
 // ── Stub only the model provider ─────────────────────────────────────────────
 // A deterministic embedding keyed off the text, so search ordering is predictable.

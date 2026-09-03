@@ -22,13 +22,12 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { resetSchema } from "../db/test-support.ts";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
   console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun test-store-postgrest.ts");
@@ -42,21 +41,7 @@ function assert(cond: unknown, label: string): void {
   else { console.error(`  ✗  ${label}`); failed++; }
 }
 
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  await admin`DROP TABLE IF EXISTS ob1_config CASCADE`;
-  for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(
-      readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")
-        .replace(/\{\{EMBEDDING_DIM\}\}/g, String(DIM))
-        .replace(/\{\{EMBEDDING_MODEL\}\}/g, "stub")
-    );
-  }
-  await admin.close();
-}
+await resetSchema(URL_, { dim: DIM, model: "stub" });
 
 /** One-hot vectors, so similarity is exact and ranking is predictable. */
 const vec = (axis: number): number[] => Array.from({ length: DIM }, (_, i) => (i === axis ? 1 : 0));

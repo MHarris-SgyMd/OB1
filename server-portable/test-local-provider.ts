@@ -18,11 +18,10 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
+import { resetSchema } from "../db/test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
   console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun test-local-provider.ts");
@@ -42,25 +41,7 @@ const assert = (c: unknown, l: string) =>
   c ? (console.log(`  ✓  ${l}`), passed++) : (console.error(`  ✗  ${l}`), failed++);
 
 // Schema at 768.
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
-
-  // constraint, not this table, so a stale one survives at the PREVIOUS test's
-
-  // vector width. Harmless locally, where each run gets a fresh container, and a
-
-  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
-
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  await admin`DROP TABLE IF EXISTS ob1_config CASCADE`;
-  for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(subst(readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")));
-  }
-  await admin.close();
-}
+await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
 
 // ── A stand-in for Ollama's /v1 surface ─────────────────────────────────────
 type Seen = { path: string; auth: string | null; model: string; jsonMode: boolean };

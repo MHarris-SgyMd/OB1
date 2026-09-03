@@ -13,9 +13,9 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
+import { resetSchema } from "../db/test-support.ts";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -65,24 +65,7 @@ const blend = () => {
 };
 
 // Fresh schema.
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  // thought_chunks first: dropping `thoughts` CASCADE removes the foreign-key
-
-  // constraint, not this table, so a stale one survives at the PREVIOUS test's
-
-  // vector width. Harmless locally, where each run gets a fresh container, and a
-
-  // dimension-mismatch failure in CI, where one Postgres is shared across steps.
-
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  for (const f of readdirSync(MIGRATIONS).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
-  }
-  await admin.close();
-}
+await resetSchema(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
 const store = new SqlStore(URL_, { max: 4 });
 

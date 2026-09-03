@@ -20,43 +20,19 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { estimateTokens } from "./chunk.ts";
+import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { mcpClient } from "./test-support.ts";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const URL_ = process.env.DATABASE_URL;
-if (!URL_) {
-  console.error("DATABASE_URL is not set. Try: ../db/with-postgres.sh bun test-chunking.ts");
-  process.exit(2);
-}
+const URL_ = requireDatabaseUrl("test-chunking.ts");
 
 const DIM = 64;
 const BATCH = 1200;          // the stub's ceiling, mirroring Ollama's 2048
 const EMB_MODEL = "stub-embed";
 
-let passed = 0, failed = 0;
-function assert(cond: unknown, label: string): void {
-  if (cond) { console.log(`  ✓  ${label}`); passed++; }
-  else { console.error(`  ✗  ${label}`); failed++; }
-}
+const { assert, report } = createAssert();
 
-{
-  const admin = new SQL({ url: URL_, max: 1 });
-  await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
-  await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
-  await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
-  await admin`DROP TABLE IF EXISTS ob1_config CASCADE`;
-  for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
-    await admin.unsafe(
-      readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")
-        .replace(/\{\{EMBEDDING_DIM\}\}/g, String(DIM))
-        .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMB_MODEL)
-    );
-  }
-  await admin.close();
-}
+await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
 
 /**
  * Sentinels, each owning one axis of the vector. A text containing a sentinel
@@ -110,20 +86,7 @@ const worker = (await import("./index.ts")).default as { fetch: (r: Request) => 
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 
-let rpcId = 1;
-async function call(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  const r = await fetch(BASE, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": "chunk-key" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }),
-  });
-  const t = await r.text();
-  const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  const text = (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n");
-  if (b.error) throw new Error(JSON.stringify(b.error));
-  if (b.result?.isError) throw new Error(text);
-  return text;
-}
+const { call } = mcpClient(BASE, "chunk-key");
 
 /** Filler carrying no sentinel, so only the planted phrases can be matched. */
 const FILLER = "We went round the same arguments as last quarter without much new evidence. " +
@@ -233,7 +196,5 @@ console.log("\n[6] Deleting a thought removes its chunks");
 }
 
 server.stop(); provider.stop();
-console.log(`\n${"─".repeat(52)}`);
-console.log(`${passed + failed} assertions: ${passed} passed, ${failed} failed  (${embedCalls} embedding calls)`);
-console.log(failed > 0 ? "FAIL\n" : "PASS\n");
-process.exit(failed > 0 ? 1 : 0);
+console.log(`\n  ${embedCalls} embedding calls`);
+report();
