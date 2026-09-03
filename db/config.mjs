@@ -283,6 +283,67 @@ export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
   EMBEDDING_MODEL
 );
 
+/**
+ * Whether migration 011 builds the trigram index on `thoughts.content`.
+ *
+ * Off by default, and the default is the interesting part. Measured on this
+ * fork's own corpus (db/bench-trgm.ts), the index does nothing below ~10,000
+ * rows — the planner correctly declines it — and nothing at any scale for a
+ * common word or a pattern under three characters. What it always does is cost:
+ * roughly +70 to +95 microseconds on every capture, and about as much storage as
+ * the table itself.
+ *
+ * And no query in this fork's core issues an ILIKE against `thoughts.content` at
+ * all. Search is vector, list filters on metadata, fetch is a lookup by id. The
+ * function the index was written for, `search_thoughts_text`, lives in
+ * schemas/enhanced-thoughts, which is not promoted.
+ *
+ * So the honest default for a stock deployment is off. Turn it on if you have
+ * installed schemas/enhanced-thoughts, if you query the table with ILIKE
+ * yourself, or when core grows a keyword-search path.
+ */
+export const DEFAULT_TRGM_INDEX = false;
+
+/** Parse OB1_TRGM_INDEX. Same accepted spellings as OB1_EMBEDDING_DIMENSIONS. */
+export function resolveTrgmIndex(raw) {
+  if (raw === undefined || raw === "") return DEFAULT_TRGM_INDEX;
+  return /^(1|on|true|yes)$/i.test(raw);
+}
+
+export const TRGM_INDEX = resolveTrgmIndex(ENV.OB1_TRGM_INDEX);
+
+/**
+ * The values substituted into `{{...}}` in db/migrations/*.sql.
+ *
+ * Here rather than in the runner because there are three callers — migrate.ts,
+ * db/test-support.ts and db/test-schema.ts — and until this existed each kept its
+ * own pair of hardcoded `.replace()` calls. Two of them would have silently
+ * ignored a new variable: a `{{TRGM_INDEX}}` nobody substitutes is not an error
+ * in a `.replace()` chain, it is a literal left in the SQL. This fork's recurring
+ * defect is a value defined twice, and adding a third variable to three copies is
+ * how that happens again.
+ */
+export function migrationValues(overrides = {}) {
+  return {
+    EMBEDDING_DIM: String(overrides.dim ?? EMBEDDING_DIM),
+    EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
+    TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
+  };
+}
+
+/**
+ * Substitute a migration template. Throws on an unknown variable rather than
+ * leaving it in place, so a typo fails loudly at apply time instead of reaching
+ * Postgres as a syntax error with no clue where it came from.
+ */
+export function substituteMigration(sql, values, file = "a migration") {
+  return sql.replace(/\{\{([A-Z_]+)\}\}/g, (_m, key) => {
+    const value = values[key];
+    if (value === undefined) throw new Error(`${file}: unknown template variable {{${key}}}`);
+    return value;
+  });
+}
+
 export function validateEmbeddingConfig(dim = EMBEDDING_DIM, model = EMBEDDING_MODEL, truncate = EMBEDDING_DIMENSIONS) {
   const problems = [];
   if (!Number.isInteger(dim) || dim < 1) {

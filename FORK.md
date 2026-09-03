@@ -694,13 +694,13 @@ It is idempotent, and a repeat call keeps the first timestamp **and** the first
 reason — the second reason is invariably the vaguer of the two, because whoever
 writes it already believes the key is dead.
 
-### 24. A trigram index on `thoughts.content` — and what it is actually worth
+### 24. An opt-in trigram index on `thoughts.content` — and what it is worth
 
 Ported from `schemas/text-search-trgm` as migration 011 (Linear SMD-925). The
-executable part is six lines — one `CREATE EXTENSION`, one `CREATE INDEX`, one
-`COMMENT` — with no API surface. So the interesting part is not the change. It is
-that measuring it contradicted the issue on three points, and that measuring it
-correctly took several tries.
+executable part is a `CREATE EXTENSION` and a `CREATE INDEX` behind a flag, with
+no API surface. So the interesting part is not the change. It is that measuring
+it contradicted the issue on three points, that measuring it correctly took
+several tries, and that the measurement is what turned it into a flag.
 
 **The number did not transfer, and then it overshot.** SMD-925 quotes upstream:
 a rare-word `ILIKE` falling from ~8s to ~100–150ms on an 89,000-row brain, about
@@ -771,13 +771,45 @@ in `schemas/enhanced-thoughts` and has not been promoted. This fork's core has n
 index is reachable only by a deployment that also installed `enhanced-thoughts`,
 or by whatever keyword-search path core grows later.
 
-It is applied anyway, and the reasoning is worth being explicit about rather than
-implying the index is free: the migration is one `DROP INDEX` from reversible,
-the ledger is the right place to record a schema decision, and the build lock
-genuinely does get worse with time. But the honest summary is that 011 buys a
-capability, not a speedup — nothing in this fork got faster today, and every
-capture got 60–96 µs slower. If core never grows keyword search, dropping the
-index is the correct follow-up.
+**So the index is opt-in, and off by default.** `OB1_TRGM_INDEX=on` builds it;
+unset leaves the extension in place and the index out. That resolves the tension
+directly rather than arguing around it: a stock deployment pays nothing for a
+capability it cannot reach, and a deployment that has installed
+`schemas/enhanced-thoughts`, or queries the table with `ILIKE` itself, gets the
+index by setting one variable.
+
+The extension is created either way, deliberately. On its own it is inert —
+catalog rows, no storage on the table, no cost on any write — and having it
+present is what makes enabling the index later a single statement rather than a
+statement plus a privilege the application role may not have.
+
+**The sharp edge, and what catches it.** The flag is read when 011 *applies*.
+Migrations run once and are recorded in `schema_migrations`, so setting
+`OB1_TRGM_INDEX=on` against a database that already has 011 and re-running the
+migrator prints `applied 0, skipped 11` and builds nothing. That is a silent
+no-op on an explicit instruction, so `preflight.ts` compares the setting against
+`pg_indexes` and reports the disagreement in either direction, with the statement
+that fixes it:
+
+```
+⚠  trigram index  OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist
+                  → CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm
+                      ON thoughts USING gin (content gin_trgm_ops);
+```
+
+A warning, never a failure: the index changes how fast a pattern match runs,
+never what it returns. The inverse — an index present while the flag is off — is
+reported too, because that one is costing every capture for something the
+configuration says it does not want.
+
+Adding the flag meant adding a third `{{...}}` variable to the migration
+templates, and substitution was implemented **three times**: `migrate.ts`,
+`db/test-support.ts` and `db/test-schema.ts`, the latter two as bare
+`.replace()` chains. A `.replace()` cannot fail on a variable it has never heard
+of — it leaves `{{TRGM_INDEX}}` in the SQL and Postgres reports a syntax error
+with no hint where it came from. This is the fork's named recurring defect, so
+substitution now lives once in `db/config.mjs` and throws on an unknown variable
+by name.
 
 **Measuring it was harder than building it.** The migration is 39 lines. The
 benchmark produced three confidently wrong answers before it produced a right

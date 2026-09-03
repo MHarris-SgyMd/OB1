@@ -101,6 +101,7 @@
 --                 that holds: the lock is the cost that genuinely only grows.
 --
 -- ── The honest caveat ────────────────────────────────────────────────────────
+-- ── Why this is a flag and not just a migration ─────────────────────────────
 -- No query in this fork's core issues an ILIKE against `thoughts.content`.
 -- Search is `match_thoughts` (vector), `list_thoughts` filters on `metadata`,
 -- and `fetch` looks up by id. The function this index was written to accelerate,
@@ -110,20 +111,47 @@
 --   * a deployment that has also installed schemas/enhanced-thoughts, and
 --   * whatever keyword-search path core grows later.
 --
--- It is applied anyway because the migration is trivially reversible (`DROP
--- INDEX`), because the ledger is the right place to record a schema decision,
--- and because the build lock genuinely does get worse with time. It is worth
--- re-reading that trade against the write cost above before assuming it is free.
+-- So the index is OPT-IN. `OB1_TRGM_INDEX=on` builds it; unset or anything else
+-- leaves it out. Off is the honest default for a stock deployment: no core query
+-- can reach it, and the write cost is paid on every capture regardless.
+--
+-- ── Turning it on, and the one sharp edge ────────────────────────────────────
+-- The flag is read when this migration APPLIES. Migrations run once and are
+-- recorded in schema_migrations, so flipping OB1_TRGM_INDEX afterwards and
+-- re-running `bun migrate.ts` does nothing — 011 is already in the ledger. That
+-- would be a silent no-op, so `preflight.ts` compares the setting against the
+-- database and says so when they disagree, with the statement to run.
+--
+-- On an existing deployment, then, enabling it is one statement, outside the
+-- runner and without the transaction that makes CONCURRENTLY unavailable here:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm
+--     ON thoughts USING gin (content gin_trgm_ops);
+--
+-- and disabling it is `DROP INDEX CONCURRENTLY IF EXISTS idx_thoughts_content_trgm;`.
+-- Neither needs a migration, because neither changes what any query returns —
+-- only how fast a pattern match runs. That reversibility is the reason this is a
+-- flag rather than a decision the schema has to get right up front.
 
+-- The extension is created unconditionally, and that is deliberate even though
+-- the index is not. It is inert on its own — some catalog rows, no storage on the
+-- table, no cost on any write — and having it present is what makes enabling the
+-- index later a single statement rather than a statement plus a privilege the
+-- application role may not have.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- Named as upstream's extension names it, deliberately. A deployment that
--- already installed schemas/text-search-trgm by hand has this exact index, and
--- IF NOT EXISTS then makes 011 a genuine no-op there rather than building a
--- second, identical, 60 MB copy under a different name.
-CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm
-  ON thoughts
-  USING gin (content gin_trgm_ops);
+DO $$
+BEGIN
+  IF {{TRGM_INDEX}} THEN
+    -- Named as upstream's extension names it, deliberately. A deployment that
+    -- already installed schemas/text-search-trgm by hand has this exact index,
+    -- and IF NOT EXISTS then makes 011 a genuine no-op there rather than
+    -- building a second, identical, 60 MB copy under a different name.
+    CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm
+      ON thoughts
+      USING gin (content gin_trgm_ops);
 
-COMMENT ON INDEX idx_thoughts_content_trgm IS
-  'Trigram GIN index on content, for leading-wildcard ILIKE. No effect below ~10k rows; no effect on patterns under 3 characters. See db/bench-trgm.ts.';
+    COMMENT ON INDEX idx_thoughts_content_trgm IS
+      'Trigram GIN index on content, for leading-wildcard ILIKE. No effect below ~10k rows; no effect on patterns under 3 characters. See db/bench-trgm.ts.';
+  END IF;
+END $$;

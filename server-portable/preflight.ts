@@ -262,6 +262,35 @@ if (configFailed) {
         else add("agent identity", "warn",
                  "resolve_agent is missing — writes are attributed by key name only, and a rename would orphan the history",
                  "Apply db/migrations/010_agent_identity.sql.");
+
+        /**
+         * The trigram index is opt-in, and the flag is read only when migration
+         * 011 applies. Migrations run once, so someone who sets OB1_TRGM_INDEX=on
+         * against a database that already has 011 in its ledger and re-runs the
+         * migrator gets a clean "skipped, already applied" and no index. That is
+         * a silent no-op on an explicit instruction, which is exactly the kind of
+         * quiet this fork keeps removing — so the two are compared here.
+         *
+         * A warning either way, never a failure: the index changes how fast a
+         * pattern match runs, never what it returns, and no core query issues one
+         * at all. Refusing to serve over it would be absurd.
+         */
+        const { TRGM_INDEX: wantTrgm } = await import("../db/config.mjs");
+        const trgmIdx = await sql`
+          SELECT count(*)::int AS c FROM pg_indexes
+          WHERE tablename = 'thoughts' AND indexname = 'idx_thoughts_content_trgm'`;
+        const haveTrgm = Number(trgmIdx[0].c) >= 1;
+        if (wantTrgm === haveTrgm) {
+          add("trigram index", "ok", haveTrgm ? "enabled and present" : "disabled (OB1_TRGM_INDEX unset)");
+        } else if (wantTrgm) {
+          add("trigram index", "warn",
+              "OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist — migration 011 already applied with it off, so the setting is doing nothing",
+              "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops);");
+        } else {
+          add("trigram index", "warn",
+              "idx_thoughts_content_trgm exists but OB1_TRGM_INDEX is off — every capture pays for an index this configuration says it does not want",
+              "DROP INDEX CONCURRENTLY IF EXISTS idx_thoughts_content_trgm;  (or set OB1_TRGM_INDEX=on)");
+        }
         // ob1_config records the width and model the schema was created with.
         // A same-width model from a different family produces numerically valid,
         // semantically meaningless vectors — search degrades and nothing errors.

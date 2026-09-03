@@ -22,7 +22,7 @@ import { vector } from "@electric-sql/pglite/vector";
 // migration does not merely skip the index, it raises and [1] fails.
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { readdirSync, readFileSync } from "node:fs";
-import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
+import { EMBEDDING_DIM, EMBEDDING_MODEL, migrationValues, substituteMigration } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert } from "./test-support.ts";
@@ -30,11 +30,19 @@ import { createAssert } from "./test-support.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
 
-/** Migrations are templates; migrate.ts substitutes these at apply time. */
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
+/**
+ * Migrations are templates; migrate.ts substitutes these at apply time. The
+ * values come from config.mjs so this file cannot disagree with the runner about
+ * what a placeholder means, or quietly ignore one it has not heard of.
+ *
+ * `trgm` defaults to false here, matching the shipped default: [4] asserts the
+ * index is ABSENT from a stock schema, and [4b] re-applies 011 with it on.
+ */
+function subst(sql: string, trgm = false): string {
+  return substituteMigration(
+    sql,
+    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm })
+  );
 }
 
 const { assert, report } = createAssert();
@@ -130,30 +138,53 @@ console.log("\n[4] Indexes exist with the right access methods");
     "…and partial, so pre-fingerprint rows do not collide on NULL"
   );
 
-  const trgm = byName["idx_thoughts_content_trgm"] ?? "";
-  assert(/USING gin/.test(trgm), "idx_thoughts_content_trgm is GIN");
-  // The opclass is the part that actually matters and the part a careless edit
-  // loses: `USING gin (content)` is a valid index that pg_trgm cannot use, and
-  // it would satisfy the assertion above on its own.
-  assert(/gin_trgm_ops/.test(trgm), "…with the gin_trgm_ops opclass, not a bare gin (content)");
+  // The trigram index is opt-in and this schema was built with the shipped
+  // default, so its ABSENCE is the assertion. Getting this backwards would mean
+  // every deployment silently paying ~70-95 microseconds per capture for an
+  // index no core query can reach.
+  assert(byName["idx_thoughts_content_trgm"] === undefined,
+         "idx_thoughts_content_trgm is absent by default (OB1_TRGM_INDEX unset)");
 
+  // The extension is created regardless, so enabling the index later is one
+  // statement rather than one statement plus a privilege grant.
   const ext = await db.query<{ c: number }>(
     `SELECT count(*)::int AS c FROM pg_extension WHERE extname = 'pg_trgm'`
   );
-  assert(ext.rows[0].c === 1, "the pg_trgm extension is installed");
+  assert(ext.rows[0].c === 1, "…but the pg_trgm extension is installed either way");
 }
 
-// ── 4b. …and the planner can actually use it ─────────────────────────────────
+// ── 4b. Turning the flag on builds it, and the planner can use it ────────────
 //
-// Everything in [4] is satisfied by an index that exists. None of it proves the
-// planner will choose it for the pattern it was built for — a wrong opclass, a
-// missing extension, or an expression mismatch all leave a perfectly valid index
-// that no ILIKE ever touches. The seed table here is far too small for the
-// planner to prefer an index on cost, so seqscan is disabled to ask the narrower
-// question: CAN this index serve this query at all?
+// Two things at once, because the second is meaningless without the first.
+//
+// That the flag WORKS: re-applying 011 with OB1_TRGM_INDEX on must produce the
+// index that [4] just proved is absent without it. A flag whose two states
+// produce the same schema is not a flag.
+//
+// That the index is USABLE: existing is not the same as reachable. A wrong
+// opclass, a missing extension, or an expression mismatch all leave a perfectly
+// valid index that no ILIKE ever touches. The seed table is far too small for
+// the planner to prefer an index on cost, so seqscan is disabled to ask the
+// narrower question — CAN this index serve this query at all?
 
-console.log("\n[4b] The trigram index is reachable by a leading-wildcard ILIKE");
+console.log("\n[4b] OB1_TRGM_INDEX=on builds an index the planner can reach");
 {
+  // Re-applying the same migration, with the flag flipped. 011 is idempotent, so
+  // this is exactly what a deployment that enabled it from the start would get.
+  const file = readdirSync(MIGRATIONS).filter((f) => f.startsWith("011")).sort()[0];
+  await db.exec(subst(readFileSync(join(MIGRATIONS, file), "utf8"), true));
+
+  const built = await db.query<{ indexdef: string }>(
+    `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_thoughts_content_trgm'`
+  );
+  assert(built.rows.length === 1, "the flag builds the index that was absent a moment ago");
+  // The opclass is the part that actually matters and the part a careless edit
+  // loses: `USING gin (content)` is a valid index pg_trgm cannot use, and it
+  // would satisfy a bare "is GIN" assertion on its own.
+  assert(/USING gin/.test(built.rows[0]?.indexdef ?? ""), "…as GIN");
+  assert(/gin_trgm_ops/.test(built.rows[0]?.indexdef ?? ""),
+         "…with the gin_trgm_ops opclass, not a bare gin (content)");
+
   for (let i = 0; i < 40; i++) {
     await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [
       `trigram probe row ${i} discussing ${i % 7 === 0 ? "zylotrope" : "ordinary"} matters`,

@@ -351,10 +351,10 @@ for (const scale of SCALES) {
    * The cost is two extra loads per scale, which is the cheapest part of the run.
    */
   /**
-   * resetSchema applies every migration, and since SMD-925 landed that includes
-   * 011 — so the "before" state no longer exists after a reset and has to be
-   * recreated. Without this the baseline arm measures a table that already has
-   * the index, and the script reports no improvement at any scale.
+   * Belt and braces. The index is opt-in as of SMD-925, so a default reset does
+   * not build it — but this script's entire output is a before/after, and
+   * "before" silently becoming "after" is the one failure that would look like a
+   * clean result rather than an error. Cheap to assert, so it is asserted.
    */
   const dropIndex = async (c: SQL): Promise<void> => {
     await c`DROP INDEX IF EXISTS idx_thoughts_content_trgm`;
@@ -363,11 +363,13 @@ for (const scale of SCALES) {
     if (n.c !== 0) throw new Error("the trigram index survived the drop — the baseline arm would be invalid");
   };
   const load = async (withIndex: boolean): Promise<SQL> => {
-    await resetSchema(URL_, OPTS);
+    // `trgm` drives migration 011's opt-in flag, so the index is built by the
+    // schema rather than bolted on afterwards — the "with index" write arm has
+    // to measure inserts into the index a real deployment would have, and
+    // building it after the load would also mean the arm measured a
+    // freshly-built index rather than one grown row by row.
+    await resetSchema(URL_, { ...OPTS, trgm: withIndex });
     const c = new SQL({ url: URL_, max: 1 });
-    // Drop before loading rather than after: resetSchema applies 011, so a load
-    // that keeps the index pays to maintain it for rows nothing will measure,
-    // which at 100,000 rows is most of a minute across the three passes.
     if (!withIndex) await dropIndex(c);
     await insertRows(c, generate(model, scale));
     await c`ANALYZE thoughts`;

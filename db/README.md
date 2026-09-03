@@ -61,10 +61,10 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `78 assertions: 78 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `80 assertions: 80 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eleven migrations applied, and
-`\d thoughts` shows seven columns and six indexes — five of our own plus the
-primary key, which `\d` also lists.
+`\d thoughts` shows seven columns and five indexes — four of our own plus the
+primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=on`.
 
 ## The migrations
 
@@ -80,7 +80,7 @@ primary key, which `\d` also lists.
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
-| `011_text_search_trgm.sql` | `pg_trgm` plus a trigram GIN index on `thoughts.content`, for leading-wildcard `ILIKE` | Ported from `schemas/text-search-trgm` |
+| `011_text_search_trgm.sql` | `pg_trgm`, plus an **opt-in** trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE` (`OB1_TRGM_INDEX=on`) | Ported from `schemas/text-search-trgm` |
 
 ## What changed relative to the guide
 
@@ -112,6 +112,12 @@ The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
 `gen_random_uuid()` has been a Postgres built-in since 13 and `sha256()` since 11,
 so `pgcrypto` is not required — despite five files elsewhere in the repo creating
 it.
+
+`pg_trgm` is created unconditionally, but the index it exists for is **opt-in**
+via `OB1_TRGM_INDEX=on` — see the migration header for the measurements behind
+that default. The extension alone is inert: catalog rows, no storage on the table
+and no cost on any write. Creating it regardless is what makes enabling the index
+later a single statement instead of a statement plus a privilege.
 
 The two extensions differ in what they demand of the role applying the migration.
 Measured on PG16 (`pg_available_extension_versions.trusted`), `pg_trgm` is a
@@ -193,13 +199,15 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 78 properties, including:
+asserts 80 properties, including:
 
 - every migration applies, **and applies twice without error**
-- the table shape and all five index access methods match the guide, and the
-  trigram index is not merely present but reachable — with `enable_seqscan` off
-  the planner picks it for a leading-wildcard `ILIKE`, which a bare `gin (content)`
-  would not satisfy
+- the table shape and every index access method match the guide
+- the trigram index is **absent** under the shipped default and present once
+  `OB1_TRGM_INDEX` is on — a flag whose two states produce the same schema is not
+  a flag — and when present it is not merely there but reachable: with
+  `enable_seqscan` off the planner picks it for a leading-wildcard `ILIKE`, which
+  a bare `gin (content)` would not satisfy
 - both `upsert_thought` overloads resolve — the 3-arg form has no default on
   `p_embedding`, because a default would make the 2-arg call ambiguous and break
   every existing caller with `function is not unique`

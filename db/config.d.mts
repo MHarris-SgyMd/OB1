@@ -66,6 +66,26 @@ export function resolveEmbeddingDimensions(
 /** Whether to send the OpenAI `dimensions` parameter. OB1_EMBEDDING_DIMENSIONS. */
 export const EMBEDDING_DIMENSIONS: boolean;
 
+/** Whether migration 011 builds the trigram index. Off by default. */
+export const DEFAULT_TRGM_INDEX: boolean;
+export const TRGM_INDEX: boolean;
+/** Parse OB1_TRGM_INDEX; returns DEFAULT_TRGM_INDEX when unset or empty. */
+export function resolveTrgmIndex(raw: string | undefined): boolean;
+
+/** Values substituted into `{{...}}` in db/migrations/*.sql. */
+export function migrationValues(overrides?: {
+  dim?: number;
+  model?: string;
+  trgm?: boolean;
+}): Record<string, string>;
+
+/** Substitute a migration template; throws on an unknown `{{VARIABLE}}`. */
+export function substituteMigration(
+  sql: string,
+  values: Record<string, string>,
+  file?: string
+): string;
+
 /**
  * Fatal configuration problems. Callers exit non-zero on a non-empty result, so
  * anything survivable belongs in embeddingConfigWarnings instead.

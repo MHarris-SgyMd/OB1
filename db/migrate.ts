@@ -20,7 +20,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { EMBEDDING_DIM, EMBEDDING_MODEL, validateEmbeddingConfig } from "./config.mjs";
+import {
+  EMBEDDING_DIM,
+  EMBEDDING_MODEL,
+  TRGM_INDEX,
+  migrationValues,
+  substituteMigration,
+  validateEmbeddingConfig,
+} from "./config.mjs";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -42,20 +49,15 @@ if (!url) {
 
 type Migration = { name: string; sql: string; sha: string };
 
-/** Values substituted into the migration templates. */
-const SUBSTITUTIONS: Record<string, string> = {
-  EMBEDDING_DIM: String(EMBEDDING_DIM),
-  EMBEDDING_MODEL: EMBEDDING_MODEL,
-};
+/**
+ * Values substituted into the migration templates. Defined in config.mjs, not
+ * here, because db/test-support.ts and db/test-schema.ts substitute the same
+ * templates and each used to carry its own hardcoded pair of replacements.
+ */
+const SUBSTITUTIONS = migrationValues();
 
 function substitute(sql: string, file: string): string {
-  return sql.replace(/\{\{([A-Z_]+)\}\}/g, (_m, key: string) => {
-    const value = SUBSTITUTIONS[key];
-    if (value === undefined) {
-      throw new Error(`${file}: unknown template variable {{${key}}}`);
-    }
-    return value;
-  });
+  return substituteMigration(sql, SUBSTITUTIONS, file);
 }
 
 function loadMigrations(): Migration[] {
@@ -90,6 +92,10 @@ if (migrations.length === 0) {
 }
 
 console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
+// Printed because it is the one setting that changes what the schema CONTAINS
+// rather than how wide a column is, and because it only takes effect the first
+// time 011 applies — see the note in that migration's header.
+console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
 
 const sql = new SQL({ url, max: 1 });
 
