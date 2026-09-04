@@ -251,13 +251,23 @@ if (configFailed) {
         try {
           const probe = new Array(embDim).fill(0);
           probe[0] = 1;
-          const rows = await built.matchThoughts({
-            embedding: probe,
-            threshold: -1,
-            limit: 1,
-            filter: null as unknown as Record<string, unknown>,
-          });
-          if (rows.length >= 1) {
+          // Zero rows for a NULL filter proves 007's body only if the same
+          // call WITH an empty filter returns something: a table whose rows all
+          // lack an embedding (the 2-arg capture fallback leaves them that way)
+          // returns nothing under either body, and must not be read as "014
+          // missing" — that warning could never be cleared.
+          const anyEmbedded = await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
+          const rows = anyEmbedded.length
+            ? await built.matchThoughts({
+                embedding: probe,
+                threshold: -1,
+                limit: 1,
+                filter: null as unknown as Record<string, unknown>,
+              })
+            : [];
+          if (!anyEmbedded.length) {
+            add("filtered search", "skip", `${rowCount} row(s) but none with an embedding to probe with; run once with OB1_STORE=sql to read the catalog`);
+          } else if (rows.length >= 1) {
             add("filtered search", "ok",
                 "match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — run once with OB1_STORE=sql to see them)");
           } else {
@@ -387,12 +397,30 @@ if (configFailed) {
          * A WARNING throughout: without the setting the tool still answers,
          * with the recall it had before 014.
          */
-        const { versionAtLeast } = await import("../db/config.mjs");
+        const { versionAtLeast, HNSW_MAX_SCAN_TUPLES, HNSW_SCAN_MEM_MULTIPLIER } = await import("../db/config.mjs");
         const mt = await sql`
-          SELECT array_to_string(p.proconfig, ',') AS cfg FROM pg_proc p
+          SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
         const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
+        // 014's body is recognisable by its boolean local; 007's has none. A
+        // GUC inherited from the database can make 014's body correct, and
+        // cannot do anything for 007's, whose LIMIT sits before the filter.
+        const bodyIs014 = /\bv_unfiltered\b/.test(String(mt[0]?.src ?? ""));
+        // Whether the ledger records 014 decides the remedy's wording: when it
+        // does, "apply 014" is a no-op — the migrator skips it — and the SET
+        // clauses have to be put back by hand or by the migration that dropped
+        // them. No ledger means the schema was applied outside the runner.
+        let ledgerHas014 = false;
+        try {
+          const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
+          ledgerHas014 = Number(led[0]?.c ?? 0) > 0;
+        } catch {
+          /* no ledger */
+        }
+        const putBack =
+          `Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET hnsw.max_scan_tuples = ${HNSW_MAX_SCAN_TUPLES} SET hnsw.scan_mem_multiplier = ${HNSW_SCAN_MEM_MULTIPLIER} SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.`;
+        const applyIt = "Apply db/migrations/014_filtered_match_thoughts.sql.";
         const pgv = await sql`
           SELECT e.extversion, a.default_version
           FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
@@ -417,8 +445,8 @@ if (configFailed) {
               "Apply the migrations; 001 creates the extension.");
         } else if (installedOld && libraryNew) {
           add("filtered search", "warn",
-              `match_thoughts does not carry hnsw.iterative_scan, and pg_extension records pgvector ${installed} while the server's library is ${available} — migration 014 is not applied, and the extension record lags the binary`,
-              "ALTER EXTENSION vector UPDATE;  then apply db/migrations/014_filtered_match_thoughts.sql.");
+              `match_thoughts does not carry hnsw.iterative_scan${ledgerHas014 ? " although migration 014 is recorded as applied — a later redefinition dropped its SET clauses" : " — migration 014 is not applied"}, and pg_extension records pgvector ${installed} while the server's library is ${available}, so the extension record lags the binary`,
+              `ALTER EXTENSION vector UPDATE;  then ${ledgerHas014 ? putBack : applyIt}`);
         } else if (installedOld) {
           add("filtered search", "warn",
               `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${exposure} — near zero for a filter matching under 1% of the corpus`,
@@ -426,30 +454,17 @@ if (configFailed) {
         } else {
           const inherited = await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`;
           const v = String(inherited[0]?.v ?? "off");
-          if (v === "relaxed_order" || v === "strict_order") {
+          if ((v === "relaxed_order" || v === "strict_order") && bodyIs014) {
             add("filtered search", "ok",
                 `match_thoughts scans iteratively under a metadata filter, inheriting hnsw.iterative_scan=${v} from the database or role rather than its own SET clause (pgvector ${installed})`);
+          } else if (ledgerHas014) {
+            add("filtered search", "warn",
+                `match_thoughts does not carry hnsw.iterative_scan although migration 014 is recorded as applied — a later redefinition dropped its SET clauses${!bodyIs014 ? " and its body" : ""} — so ${exposure}`,
+                bodyIs014 ? putBack : "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts.");
           } else {
-            // Which remedy is right depends on whether 014 is recorded: if it
-            // is, "apply 014" is a no-op — the migrator skips it — and the
-            // clause has to be put back by hand.
-            let recorded = false;
-            try {
-              const led = await sql`
-                SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
-              recorded = Number(led[0]?.c ?? 0) > 0;
-            } catch {
-              /* no ledger: the schema was applied by hand, treat as not recorded */
-            }
-            if (recorded) {
-              add("filtered search", "warn",
-                  `match_thoughts does not carry hnsw.iterative_scan although migration 014 is recorded as applied — a later redefinition dropped its SET clauses — so ${exposure}`,
-                  "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET hnsw.max_scan_tuples = 100000 SET hnsw.scan_mem_multiplier = 8 SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.");
-            } else {
-              add("filtered search", "warn",
-                  `match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied — so ${exposure}`,
-                  "Apply db/migrations/014_filtered_match_thoughts.sql.");
-            }
+            add("filtered search", "warn",
+                `match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied${v !== "off" ? `, and the inherited hnsw.iterative_scan=${v} cannot help 007's body, whose LIMIT sits before the filter` : ""} — so ${exposure}`,
+                applyIt);
           }
         }
 

@@ -163,14 +163,28 @@
 --     chunk-count-based on `chunked`) is a follow-up with its own measurement,
 --     which must include the unfiltered row-identity control the eval runs.
 --
---   * These are function-level SETs, and CREATE OR REPLACE FUNCTION rewrites
---     proconfig wholesale, so an operator's `ALTER FUNCTION ... SET
---     hnsw.max_scan_tuples = 400000` is discarded by the next redefinition of
---     match_thoughts without any error — and the function's own SET overrides
---     a database- or role-level value. A tuned bound therefore has to be
---     re-applied after every migration that touches this function, or carried
---     into that migration. db/test-schema.ts [8b] pins the shipped values so a
---     change to them is deliberate.
+--   * The two bounds are TEMPLATE VALUES, not literals: `{{HNSW_MAX_SCAN_TUPLES}}`
+--     and `{{HNSW_SCAN_MEM_MULTIPLIER}}` come from OB1_HNSW_MAX_SCAN_TUPLES and
+--     OB1_HNSW_SCAN_MEM_MULTIPLIER in the environment the migrator runs under,
+--     defaulting to 100000 and 8 (db/config.mjs), the same way 011 takes
+--     OB1_TRGM_INDEX. This is the durable home for a tuned bound. The function's
+--     SETs override any database- or role-level value, and CREATE OR REPLACE
+--     rewrites proconfig wholesale, so a bound set by hand with ALTER FUNCTION
+--     is discarded by the next redefinition without any error — but a bound set
+--     in the environment is substituted into every future migration that
+--     redefines this function through the migrator. The migrator hashes the
+--     template, not the substituted text, so the ledger does not drift when the
+--     value changes; re-applying an already-applied 014 with a new value is,
+--     however, a no-op — change the value in a later migration, or ALTER FUNCTION
+--     for the interim. db/test-schema.ts [8b] pins the substituted values and
+--     proves the placeholder is live by applying 014 with a different one.
+--
+--   * match_count is now load-bearing for cost. 007 capped each CTE at ~40
+--     candidates whatever was asked; this function honours v_fetch, so a call
+--     with match_count 5000 walks each CTE to 20,000 passing candidates and
+--     groups 40,000 rows. Both servers' search_thoughts tools therefore bound
+--     `limit` to 1–100, as search_thoughts_keyword already did. A direct SQL
+--     or PostgREST caller owns its own match_count.
 --
 --   * A NULL filter is unfiltered. 007 evaluated `NULL = '{}'::jsonb OR
 --     t.metadata @> NULL`, which is NULL, which excluded every row: a caller
@@ -227,8 +241,8 @@ LANGUAGE plpgsql
 -- filtered path off the iterative walk in the first place. The header has the
 -- measurements behind each value and says when to change them.
 SET hnsw.iterative_scan = relaxed_order
-SET hnsw.max_scan_tuples = 100000
-SET hnsw.scan_mem_multiplier = 8
+SET hnsw.max_scan_tuples = {{HNSW_MAX_SCAN_TUPLES}}
+SET hnsw.scan_mem_multiplier = {{HNSW_SCAN_MEM_MULTIPLIER}}
 SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE

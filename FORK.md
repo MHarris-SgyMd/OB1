@@ -1343,9 +1343,19 @@ document lacks and scores against the exact answer within it.
   both complete. Arithmetic for the cap: `v_fetch / selectivity`; pgvector's
   default covers a 0.1% filter to `match_count` 5 on a million rows, 100,000
   covers 25. Both are function-level SETs, which a later `CREATE OR REPLACE`
-  rewrites wholesale and which override database-level values, so an operator
-  who tunes them must re-apply after any migration touching this function;
-  `test-schema.ts` pins the shipped values so changing them is deliberate.
+  rewrites wholesale and which override database-level values — so the durable
+  home for a tuned bound is not `ALTER FUNCTION` but the environment: the values
+  are template placeholders filled from `OB1_HNSW_MAX_SCAN_TUPLES` and
+  `OB1_HNSW_SCAN_MEM_MULTIPLIER` when the migrator runs, the way 011 takes
+  `OB1_TRGM_INDEX`, and every later redefinition through the migrator carries
+  them. `test-schema.ts` pins the substituted values and proves the placeholder
+  is live by applying 014 with a different one.
+- `search_thoughts` now bounds `limit` to 1–100 in both servers, as the keyword
+  tool already did. 007 capped each CTE near 40 candidates whatever was asked;
+  this function honours `v_fetch`, so an unbounded count became unbounded scan
+  work — `limit: 5000` would walk each CTE to 20,000 passing candidates. The
+  fourth review pass caught it. Direct SQL and PostgREST callers own their own
+  `match_count`.
 - `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
   This is what makes an in-scan filter correct: without it the scan stops at its
   first `ef_search` candidates, filter or no filter. A function-level SET is
@@ -1416,11 +1426,19 @@ the ledger, since "apply 014" is a no-op when 014 is recorded and the clause was
 dropped afterwards. On the PostgREST store, where the catalog cannot be read, it
 probes instead: one RPC with a NULL filter returns a row under 014's body and
 nothing under 007's, so the body is verified and the message says the SET
-clauses are not. (The first version of that check was an unconditional warning
-that could never be cleared; the third review pass caught it.) The destructive
-guard the evals carried — refuse to drop a schema on a non-loopback host — now
-lives in `dropSchema` itself, so all eighteen resetting callers inherit it, and
-it refuses an EMPTY host too, because the client resolves that through `PGHOST`.
+clauses are not — and it first confirms that some row has an embedding at all,
+since a table of embedding-less rows returns nothing under either body. (The
+first version of that check was an unconditional warning that could never be
+cleared; the third review pass caught it, and the fourth caught the
+embedding-less case.) An inherited database-level GUC is accepted only when the
+function body is 014's; it cannot repair 007's LIMIT-before-filter. The
+migrator, for its part, checks the server's pgvector library version before
+applying anything — in `--dry-run` too — rather than matching the English text
+of the error 014 produces on an old library. The destructive guard the evals
+carried — refuse to drop a schema on a non-loopback host — now lives in
+`dropSchema` itself, so all eighteen resetting callers inherit it; it refuses
+an EMPTY host too, because the client resolves that through `PGHOST`, and it
+honours the old `OB1_EVAL_ALLOW_REMOTE_DB=1` alongside `OB1_ALLOW_REMOTE_DB=1`.
 `test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts

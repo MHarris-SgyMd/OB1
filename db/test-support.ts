@@ -112,17 +112,19 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * empty hostname is whatever the shell says it is — not loopback.
  *
  * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
- * to mean.
+ * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
+ * honoured too so a shell profile that set it keeps working.
  */
 export function assertThrowawayDatabase(url: string): void {
-  if (process.env.OB1_ALLOW_REMOTE_DB === "1") return;
+  if (process.env.OB1_ALLOW_REMOTE_DB === "1" || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
   let host: string | null = null;
   try {
     host = new URL(url).hostname.toLowerCase();
   } catch {
     /* unparseable: refuse below */
   }
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+  // 0.0.0.0 as a CLIENT target is the local machine; it was accepted before.
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
   if (host && LOOPBACK.has(host)) return;
   const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
   console.error(

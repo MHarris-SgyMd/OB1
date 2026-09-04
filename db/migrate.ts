@@ -24,10 +24,14 @@ import { createHash } from "node:crypto";
 import {
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
+  HNSW_MAX_SCAN_TUPLES,
+  HNSW_SCAN_MEM_MULTIPLIER,
   TRGM_INDEX,
+  hnswBoundIssues,
   migrationValues,
   substituteMigration,
   validateEmbeddingConfig,
+  versionAtLeast,
 } from "./config.mjs";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
@@ -114,6 +118,37 @@ const applied = new Map<string, string>(
   )
 );
 
+/**
+ * Migration 014 declares HNSW settings that exist from pgvector 0.8.0. On an
+ * older library the CREATE fails — by design, see its header — but "invalid
+ * configuration parameter name" says nothing about versions, is localised, and
+ * only appears once 001–013 have applied. So the floor is checked here, before
+ * anything runs and in --dry-run too, against the version the server's library
+ * REPORTS (pg_available_extensions.default_version), which is the loaded code
+ * regardless of what pg_extension records for this database. Unknown means
+ * proceed: a server whose control file is unreadable will still say so on 014.
+ */
+if (migrations.some((m) => m.name >= "014" && !applied.has(m.name))) {
+  const [ext] = await sql`SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'vector'`;
+  const library = ext?.default_version == null ? null : String(ext.default_version);
+  if (library !== null && !versionAtLeast(library, 0, 8)) {
+    console.error(
+      `\n  Migration 014 needs pgvector 0.8.0 or later; this server's pgvector library is ${library}` +
+        (ext?.installed_version ? ` (installed in this database: ${ext.installed_version})` : "") +
+        `.\n  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n` +
+        `  Nothing has been applied by this run.`
+    );
+    await sql.close();
+    process.exit(1);
+  }
+}
+for (const issue of hnswBoundIssues()) {
+  console.error(`  ✗  ${issue}`);
+  await sql.close();
+  process.exit(1);
+}
+console.log(`  HNSW scan bounds: max_scan_tuples ${HNSW_MAX_SCAN_TUPLES}, scan_mem_multiplier ${HNSW_SCAN_MEM_MULTIPLIER} (OB1_HNSW_*)`);
+
 let ran = 0;
 let skipped = 0;
 let drifted = 0;
@@ -157,27 +192,14 @@ for (const m of migrations) {
   } catch (err) {
     const message = (err as Error).message;
     console.error(`  ✗  ${m.name}  FAILED: ${message}`);
-    // pgvector rejects an unknown hnsw.* setting with "invalid configuration
-    // parameter name" — the prefix is reserved. That is the version floor 014
-    // introduced showing itself, and the raw error says nothing about versions.
-    if (/invalid configuration parameter name "hnsw\./.test(message)) {
-      let installed = "unknown";
-      let available = "unknown";
-      try {
-        const [row] = await sql`
-          SELECT e.extversion, a.default_version
-          FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
-          WHERE e.extname = 'vector'`;
-        installed = String(row?.extversion ?? installed);
-        available = String(row?.default_version ?? available);
-      } catch {
-        /* the hint below is still right without the numbers */
-      }
+    // The version floor is checked before the loop; this is the fallback for a
+    // server whose control file did not report a version. The reserved-prefix
+    // error can only mean the LOADED library is older than 0.8.0, so the one
+    // remedy is a server upgrade — an ALTER EXTENSION UPDATE cannot help.
+    if (/hnsw\./.test(message) && /configuration parameter|Konfigurationsparameter|paramètre|parámetro/i.test(message)) {
       console.error(
-        `\n  This migration needs pgvector 0.8.0 or later (installed: ${installed}, available on this server: ${available}).\n` +
-          (available !== "unknown" && available !== installed
-            ? `  The server has a newer library than this database's extension record: run\n    ALTER EXTENSION vector UPDATE;\n  and re-run the migrator.\n`
-            : `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run the migrator.\n`) +
+        `\n  This migration needs pgvector 0.8.0 or later, and the loaded library rejected an hnsw.* setting.\n` +
+          `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run the migrator.\n` +
           `  Migrations before this one are applied and recorded; nothing needs undoing.`
       );
     }

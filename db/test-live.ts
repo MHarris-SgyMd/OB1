@@ -17,11 +17,15 @@
  *
  *   3. The real planner on a real index. Whether HNSW is actually chosen.
  *
- * Requires DATABASE_URL pointing at a Postgres 15+ with pgvector, on a database
- * this file may freely modify. It creates and drops objects.
+ * Requires DATABASE_URL pointing at a Postgres 15+ with pgvector 0.8+, on a
+ * database this file may freely modify. It DROPS and recreates the schema, so
+ * `dropSchema` refuses any host that is not loopback unless
+ * OB1_ALLOW_REMOTE_DB=1 is set — that refusal is the safety net, the variable
+ * is the override, and the override is a thing you have to mean.
  *
  *   ./with-postgres.sh bun test-live.ts        # starts a throwaway container
- *   DATABASE_URL=... bun test-live.ts          # against one you already have
+ *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
+ *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  */
 
 import { SQL } from "bun";
@@ -38,7 +42,7 @@ if (!URL_) {
   console.error(
     "DATABASE_URL is not set.\n" +
       "  ./with-postgres.sh bun test-live.ts   (starts a throwaway container)\n" +
-      "  DATABASE_URL=postgres://… bun test-live.ts"
+      "  DATABASE_URL=postgres://… bun test-live.ts   (loopback host; OB1_ALLOW_REMOTE_DB=1 for anything else)"
   );
   process.exit(2);
 }

@@ -530,6 +530,8 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
+    HNSW_MAX_SCAN_TUPLES: String(overrides.hnswMaxScanTuples ?? HNSW_MAX_SCAN_TUPLES),
+    HNSW_SCAN_MEM_MULTIPLIER: String(overrides.hnswScanMemMultiplier ?? HNSW_SCAN_MEM_MULTIPLIER),
   };
 }
 
@@ -625,4 +627,60 @@ export function versionAtLeast(version, major, minor = 0, patch = 0) {
   if (a !== major) return a > major;
   if (b !== minor) return b > minor;
   return c >= patch;
+}
+
+/**
+ * The two bounds on match_thoughts' iterative HNSW walk (migration 014),
+ * declared as function-level SETs and substituted into the migration from
+ * here, so an operator's value survives every later redefinition of the
+ * function that goes through the migrator. CREATE OR REPLACE rewrites
+ * proconfig wholesale, so an `ALTER FUNCTION ... SET` made by hand does not.
+ *
+ * The defaults are the measured ones (014's header): 100,000 tuples covers a
+ * 0.1% filter to match_count 25 on a million rows, and a memory multiplier of
+ * 8 keeps `work_mem * multiplier` above the tuple cap at the default 4 MB
+ * work_mem — below that the memory bound stops the walk first, near 19,000
+ * tuples, which is what pgvector's own defaults do. Raise the tuple cap for a
+ * corpus whose common filters are rarer than v_fetch / 100,000.
+ *
+ * Parsed leniently at module scope — this module loads inside the server,
+ * where a throw here would be a crash on boot — and validated by
+ * `hnswBoundIssues()`, which the migrator calls before applying anything.
+ */
+export const DEFAULT_HNSW_MAX_SCAN_TUPLES = 100000;
+export const DEFAULT_HNSW_SCAN_MEM_MULTIPLIER = 8;
+
+/**
+ * @param {string|undefined} raw
+ * @param {number} fallback
+ * @returns {number}
+ */
+function positiveOr(raw, fallback) {
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+export const HNSW_MAX_SCAN_TUPLES = positiveOr(ENV.OB1_HNSW_MAX_SCAN_TUPLES, DEFAULT_HNSW_MAX_SCAN_TUPLES);
+export const HNSW_SCAN_MEM_MULTIPLIER = positiveOr(ENV.OB1_HNSW_SCAN_MEM_MULTIPLIER, DEFAULT_HNSW_SCAN_MEM_MULTIPLIER);
+
+/**
+ * What is wrong with OB1_HNSW_MAX_SCAN_TUPLES / OB1_HNSW_SCAN_MEM_MULTIPLIER,
+ * as messages; empty when nothing is. The lenient parse above silently falls
+ * back to the default, which is the right behaviour for the server and the
+ * wrong one for the migrator — a typo there must not bake a default into the
+ * function while the operator believes their value was applied.
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string[]}
+ */
+export function hnswBoundIssues(env = ENV) {
+  const out = [];
+  const tuples = env.OB1_HNSW_MAX_SCAN_TUPLES;
+  if (tuples !== undefined && tuples !== "" && !(Number.isInteger(Number(tuples)) && Number(tuples) > 0)) {
+    out.push(`OB1_HNSW_MAX_SCAN_TUPLES must be a positive integer, got ${JSON.stringify(tuples)}`);
+  }
+  const mult = env.OB1_HNSW_SCAN_MEM_MULTIPLIER;
+  if (mult !== undefined && mult !== "" && !(Number.isFinite(Number(mult)) && Number(mult) >= 1)) {
+    out.push(`OB1_HNSW_SCAN_MEM_MULTIPLIER must be a number of at least 1, got ${JSON.stringify(mult)}`);
+  }
+  return out;
 }

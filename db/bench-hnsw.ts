@@ -421,10 +421,11 @@ for (const n of SCALES) {
   // the filter is a parameter, the GIN index is unavailable, and the iterative
   // HNSW scan does all the work, bounded by hnsw.max_scan_tuples and by
   // work_mem * hnsw.scan_mem_multiplier. This arm strips the function's own
-  // plan_cache_mode so the session can force the generic plan, measures the
-  // thin and empty filters through it, and then re-applies 014 to restore the
-  // shipped function. It exists to show what the forced custom plan buys, and
-  // to show the bounds doing their job when the walk does happen.
+  // plan_cache_mode so the session can force the generic plan and measures the
+  // thin and empty filters through it. It runs last for its scale — the next
+  // scale resets the schema — so nothing needs restoring. It exists to show
+  // what the forced custom plan buys, and to show the bounds doing their job
+  // when the walk does happen.
   process.stdout.write("  generic plan      ");
   await sql.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET plan_cache_mode`);
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
@@ -435,7 +436,6 @@ for (const n of SCALES) {
     process.stdout.write(".");
   }
   await sql.unsafe(`SET plan_cache_mode = auto`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
   console.log(" done");
 }
 
