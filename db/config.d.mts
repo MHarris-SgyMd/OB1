@@ -59,6 +59,13 @@ export function applyEmbeddingPrompt(model: string, text: string, isQuery: boole
  */
 export const CHUNK_CONTEXT_PROMPTS: { document: string; chunk: string };
 
+/**
+ * Whether a generated blurb is worth prepending: non-empty, and under 60% of the
+ * length of what it situates. Shared with the benchmark so the two cannot decide
+ * differently about the same blurb.
+ */
+export function usableChunkContext(context: string | null | undefined, chunk: string): boolean;
+
 /** Join a blurb to its window. An empty context returns the window unchanged. */
 export function composeChunkForEmbedding(context: string | null | undefined, chunk: string): string;
 

@@ -334,6 +334,33 @@ export const CHUNK_CONTEXT_PROMPTS = {
 };
 
 /**
+ * Whether a generated blurb is worth prepending.
+ *
+ * Here rather than in the server for the same reason as the composition rule
+ * below: `evals/eval-contextual.ts` decides which blurbs a run would actually
+ * embed, and if it applied a looser rule than production it would be measuring
+ * text the server would have thrown away. The threshold was written twice
+ * before this function existed, which is the defect this file exists to prevent.
+ *
+ * A blurb at or over 60% of the length of what it situates is not context, it is
+ * a second copy: it roughly doubles the embedded text and dilutes the window
+ * with a paraphrase of itself. The measured harm from contextualization already
+ * tracks blurb length — see DEFAULT_CHUNK_CONTEXT — so the long ones are exactly
+ * the ones worth refusing.
+ *
+ * Dilution is not the worst of it. Windows are sized to leave headroom under the
+ * provider's batch, and a blurb of comparable length spends that headroom: with
+ * this rule removed, `server-portable/test-chunk-context.ts` [5] stops failing
+ * an assertion and starts failing the CAPTURE, because the composed text no
+ * longer fits. A rule that looks like quality control is also the thing keeping
+ * a runaway blurb from making a long thought unstorable.
+ */
+export function usableChunkContext(context, chunk) {
+  const ctx = (context ?? "").trim();
+  return ctx.length > 0 && ctx.length < chunk.length * 0.6;
+}
+
+/**
  * How a blurb and a window become the text that gets embedded.
  *
  * One line, and it still belongs here. The server composes it at capture, the

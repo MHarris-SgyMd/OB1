@@ -1190,6 +1190,20 @@ a startup **failure**, not a warning: 007 and 009's functions would not select
 the key, so every blurb would be generated, embedded, and dropped with nothing
 recording it.
 
+**A defect the review found next door.** `deploy/compose.yaml` forwards an
+explicit whitelist of environment variables, not the whole environment, so a
+setting present in `.env` and absent from the `environment:` block reaches
+nothing — the operator sets it, restarts, and the stack behaves exactly as
+before, with no error and a `.env.example` that documents the setting as real.
+Six variables were in that state, including the one added here:
+`OB1_CHUNK_CONTEXT`, `OB1_CHUNK_TOKENS`, `OB1_CHUNK_OVERLAP`,
+`OB1_EMBEDDING_DIMENSIONS`, `OB1_LLM_API_KEY` and `OB1_AGENT_CACHE_TTL_MS`. All
+six are forwarded now, and `scripts/check-fork-consistency.mjs` fails on a
+seventh: a variable documented in `.env.example` and mentioned nowhere in
+compose. Deliberately one-directional — compose legitimately sets things the
+example does not mention, because those are properties of the stack rather than
+choices anyone makes in `.env`.
+
 **One harness limit worth recording.** The behavioural half of the migration test
 lives in `db/test-live.ts` rather than `test-schema.ts` because PGlite cannot run
 it: writing chunk rows through the 4-argument `upsert_thought` crashes the WASM

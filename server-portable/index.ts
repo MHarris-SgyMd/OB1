@@ -9,6 +9,7 @@ import {
   DEFAULT_LLM_BASE_URL,
   CHUNK_CONTEXT_PROMPTS,
   composeChunkForEmbedding,
+  usableChunkContext,
   resolveChunkContext,
   resolveEmbeddingDimensions,
 } from "../db/config.mjs";
@@ -249,7 +250,14 @@ async function contextualiseChunk(document: string, chunk: string): Promise<stri
       headers: llmHeaders(),
       body: JSON.stringify({
         model: metadataModel(),
-        temperature: 0,
+        // The same two settings extractMetadata sends, for the same reason: this
+        // is the other LLM call on the interactive capture path, and a thinking
+        // model left to reason costs 5.5x the latency there. `qwen3.8:27b` is
+        // suggested in db/config.mjs as an OB1_METADATA_MODEL, so the case is
+        // real rather than hypothetical — and reasoning text arriving in a blurb
+        // would be embedded along with it.
+        temperature: metadataTemperature(),
+        ...metadataReasoning(),
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -259,10 +267,13 @@ async function contextualiseChunk(document: string, chunk: string): Promise<stri
     }
     const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
     const out = (d?.choices?.[0]?.message?.content ?? "").trim();
-    // A blurb longer than what it situates is not context, it is a second copy:
-    // it doubles the embedded text and dilutes the window with a paraphrase of
-    // itself. Rejecting it here means the corpus records NULL, which is true.
-    if (!out || out.length >= chunk.length * 0.6) return "";
+    // The rule lives in db/config.mjs so the benchmark applies the same one. A
+    // blurb this file accepted and the harness rejected would mean every
+    // measured number described text the server does not embed.
+    if (!usableChunkContext(out, chunk)) {
+      if (out) console.error(`contextualiseChunk: rejected a ${out.length}-char blurb for a ${chunk.length}-char window`);
+      return "";
+    }
     return out;
   } catch (e) {
     console.error(`contextualiseChunk: ${(e as Error).message}`);
@@ -309,6 +320,16 @@ let wholeContentRefused = false;
  * than truncating it — which hosted APIs do, where Ollama truncates — must not
  * turn a capture that used to succeed into one that fails, so that failure falls
  * back to the old head-window behaviour.
+ *
+ * ONLY NEW CAPTURES. A long thought stored before this change still has its head
+ * window in `thoughts.embedding`, and nothing upgrades it: there is no backfill,
+ * and preflight cannot even report the split the way it reports chunk context.
+ * The obvious detector — `thoughts.embedding` equal to chunk 0's — has a false
+ * positive it cannot distinguish, because a provider that refuses over-length
+ * input produces exactly that state legitimately, for every long capture,
+ * forever. A check that nags a hosted deployment about rows that are correct is
+ * worse than no check, so this one is written down instead. Re-capture a long
+ * thought to give it the better vector.
  *
  * Windows are embedded concurrently; they are independent, and serialising them
  * would multiply the latency of a long capture for no benefit.
@@ -1069,8 +1090,9 @@ function buildServer(principal: Principal): McpServer {
         if (contextFailures > 0) {
           confirmation +=
             `\n\nNote: ${contextFailures} of ${chunks.length} search chunks were embedded without ` +
-            `their situating context (the generating call failed). They are stored and searchable; ` +
-            `re-capture to regenerate, or check the model at OB1_LLM_BASE_URL.`;
+            `their situating context — the call failed, or returned a blurb too long to be one. ` +
+            `They are stored and searchable; re-capture to regenerate, or check the model at ` +
+            `OB1_LLM_BASE_URL.`;
         }
 
         // Tell the user when tags are placeholders rather than real extraction,

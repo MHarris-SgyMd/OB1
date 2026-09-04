@@ -75,7 +75,13 @@
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chunkContent, DEFAULT_MAX_TOKENS } from "../server-portable/chunk.ts";
-import { DEFAULT_EMBEDDING_MODEL, DEFAULT_METADATA_MODEL, CHUNK_CONTEXT_PROMPTS, composeChunkForEmbedding } from "../db/config.mjs";
+import {
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_METADATA_MODEL,
+  CHUNK_CONTEXT_PROMPTS,
+  composeChunkForEmbedding,
+  usableChunkContext,
+} from "../db/config.mjs";
 import { embed, cosine, EVAL_BASE, EVAL_HEADERS } from "./lib.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -195,16 +201,6 @@ async function complete(prompt: string): Promise<string> {
   }
 }
 
-/**
- * A blurb is only useful if it is SHORTER than what it situates and actually
- * says something. A model that echoes the chunk back doubles the embedding cost
- * and dilutes the vector with a copy of itself, which would show up as a wash
- * rather than as the failure it is — so it is rejected here and counted.
- */
-function usable(blurb: string, target: string): boolean {
-  return blurb.length > 0 && blurb.length < target.length * 0.6;
-}
-
 let rejected = 0;
 async function blurb(key: string, prompt: string, target: string): Promise<string> {
   const cacheKey = `${CTX_MODEL}::${key}`;
@@ -213,7 +209,7 @@ async function blurb(key: string, prompt: string, target: string): Promise<strin
     cacheDirty = true;
   }
   const out = cache[cacheKey];
-  if (!usable(out, target)) {
+  if (!usableChunkContext(out, target)) {
     rejected++;
     return "";
   }

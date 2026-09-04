@@ -50,10 +50,17 @@ function axisFor(text: string): number {
   return i >= 0 ? i : SENTINELS.length;
 }
 
-/** Set for the run that exercises a provider which cannot produce a blurb. */
-let failContext = false;
+/**
+ * `fail` is a provider that errors; `toolong` is one that answers with something
+ * far longer than the window, which `usableChunkContext` refuses. The second is
+ * the quiet one — without the length rule that blurb gets embedded, roughly
+ * doubling the text and burying the window in a paraphrase of itself.
+ */
+let contextMode: "good" | "fail" | "toolong" = "good";
 let contextCalls = 0;
 const embedded: string[] = [];
+/** Every chat request body, so the request SHAPE can be asserted, not just its answer. */
+const chatBodies: Record<string, unknown>[] = [];
 
 const provider = Bun.serve({
   port: 0,
@@ -77,7 +84,13 @@ const provider = Bun.serve({
     );
     if (prompt.includes("<chunk>")) {
       contextCalls++;
-      if (failContext) return Response.json({ error: { message: "no" } }, { status: 503 });
+      chatBodies.push(body);
+      if (contextMode === "fail") return Response.json({ error: { message: "no" } }, { status: 503 });
+      if (contextMode === "toolong") {
+        return Response.json({
+          choices: [{ message: { content: `Notes about the ${CONTEXT_SENTINEL} programme. `.repeat(400) } }],
+        });
+      }
       return Response.json({
         choices: [{ message: { content: `Notes about the ${CONTEXT_SENTINEL} programme.` } }],
       });
@@ -173,7 +186,7 @@ console.log("\n[3] A short capture is untouched by the flag");
 
 console.log("\n[4] A provider that cannot produce a blurb degrades, and says so");
 {
-  failContext = true;
+  contextMode = "fail";
   contextCalls = 0;
   const res = await call("capture_thought", {
     content: `${LONG} An entirely different closing sentence, so this is a separate thought.`,
@@ -203,6 +216,51 @@ console.log("\n[4] A provider that cannot produce a blurb degrades, and says so"
     FROM thought_chunks`;
   assert(split.with_ctx > 0 && split.bare > 0,
          `the corpus is now mixed, which is what preflight reports (${split.with_ctx} with, ${split.bare} without)`);
+}
+
+console.log("\n[5] A blurb too long to be one is refused, not embedded");
+{
+  contextMode = "toolong";
+  const before = embedded.length;
+  await call("capture_thought", {
+    content: `${LONG} A third distinct ending sentence about the quarterly planning cycle.`,
+  });
+
+  const [row] = await sql`SELECT id FROM thoughts WHERE content LIKE ${"%third distinct ending%"}`;
+  const rows = await sql`SELECT context FROM thought_chunks WHERE thought_id = ${row.id}`;
+  assert(rows.length > 1 && rows.every((r: { context: string | null }) => r.context === null),
+         `an over-long blurb is stored as NULL, like a failure (${rows.length} windows)`);
+
+  /**
+   * The assertion the column cannot make. A rejected blurb must not reach the
+   * provider: if the length rule were dropped, this capture would embed roughly
+   * twice the text with the window buried inside a paraphrase, and every
+   * column-level check above would still pass.
+   *
+   * In this stub it does not even get that far — dropping the rule makes the
+   * composed text exceed the batch and the capture fails outright, which is the
+   * sharper reason the rule is load-bearing rather than cosmetic. Windows are
+   * sized for headroom under the provider's ceiling and a blurb spends it.
+   */
+  const sent = embedded.slice(before);
+  assert(sent.length > 0, `the capture still embedded its windows (${sent.length} calls)`);
+  assert(sent.every((e) => !e.includes(CONTEXT_SENTINEL)),
+         "…and none of them carried the rejected blurb");
+}
+
+console.log("\n[6] The contextualization call is shaped like the other capture-path call");
+{
+  /**
+   * `reasoning_effort` is the one that matters. A thinking model left to reason
+   * costs 5.5x the latency on the capture path — the measurement that made it
+   * the default for extractMetadata — and its reasoning can arrive inside the
+   * blurb, where it would be embedded. The two calls drifted apart once already.
+   */
+  assert(chatBodies.length > 0, `contextualization requests were captured (${chatBodies.length})`);
+  assert(chatBodies.every((b) => b.reasoning_effort === "none"),
+         "every blurb request disables reasoning, as extractMetadata does");
+  assert(chatBodies.every((b) => b.temperature === 0),
+         "…and is deterministic, for the same reason");
 }
 
 await sql.close();

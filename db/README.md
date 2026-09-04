@@ -158,6 +158,14 @@ so every blurb would be generated, embedded, and then dropped with no record.
 There is no backfill. Re-contextualizing an existing corpus is a bulk pass over
 every chunked thought, which wants the claim/lease table from SMD-946.
 
+The same applies to the whole-content vector that change 27 restored: a long
+thought captured before it still has its head window in `thoughts.embedding`,
+and re-capturing is the only way to upgrade it. Preflight does **not** report
+that split, unlike the chunk-context one, because it cannot be told apart from a
+legitimate state — a provider that refuses over-length input falls back to the
+head window for every long capture, forever, and a check that nags a correct
+deployment is worse than no check.
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.

@@ -54,6 +54,12 @@ services:
       # owns the default, and a `:-off` written in would be a second copy of it —
       # the defect this fork keeps finding. Unset simply means unset.
       OB1_TRGM_INDEX: ${OB1_TRGM_INDEX:-}
+      # Migration 013 records this in ob1_config, so preflight can tell what the
+      # schema was migrated under. Same no-fallback rule as above.
+      OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+      # migrate.ts calls validateEmbeddingConfig, which reads this. Without it the
+      # runner and the server could disagree about whether a width is legal.
+      OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
     # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
     # The one dependency in db/package.json is pglite, used solely by the tests.
     # This also keeps the mount read-only — `bun install` would need to write
@@ -90,6 +96,14 @@ services:
       # notice the setting and the database disagreeing. Omitting it here would
       # make the check silently compare against a default the migrator did not use.
       OB1_TRGM_INDEX: ${OB1_TRGM_INDEX:-}
+      # Read per capture. Preflight refuses to start if this is on against a
+      # database without migration 013, so a stale value here fails loudly.
+      OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+      OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
+      OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
+      OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
+      OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
+      OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       OB1_PG_POOL: ${OB1_PG_POOL:-10}
       PORT: "8000"

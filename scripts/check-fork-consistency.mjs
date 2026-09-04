@@ -252,6 +252,45 @@ async function checkEmbeddingDefaults() {
 }
 await checkEmbeddingDefaults();
 
+/**
+ * A setting documented in deploy/.env.example that deploy/compose.yaml never
+ * forwards.
+ *
+ * Compose passes an explicit whitelist, not the whole environment, so a variable
+ * present in .env and absent from the `environment:` block reaches nothing. The
+ * operator sets it, restarts, and the stack behaves exactly as before — with no
+ * error, no warning, and a .env file that documents the setting as real. Six
+ * variables were in that state when this check was written, including one added
+ * the same day: OB1_CHUNK_TOKENS, OB1_CHUNK_OVERLAP, OB1_CHUNK_CONTEXT,
+ * OB1_EMBEDDING_DIMENSIONS, OB1_LLM_API_KEY and OB1_AGENT_CACHE_TTL_MS.
+ *
+ * Deliberately one-directional: compose may legitimately set variables the
+ * example does not mention (OB1_STORE, OB1_PG_POOL, PORT), because those are
+ * properties of the stack rather than choices the operator makes in .env.
+ */
+function checkComposeForwardsDocumentedEnv() {
+  const example = readFileSync(join(ROOT, "deploy", ".env.example"), "utf8");
+  const compose = readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8");
+
+  // Both a live `OB1_X=` line and a commented `# OB1_X=` one count as documented:
+  // most of these ship commented out precisely because they have a default.
+  const documented = new Set(
+    [...example.matchAll(/^#?\s*(OB1_[A-Z0-9_]+)=/gm)].map((m) => m[1])
+  );
+  const forwarded = new Set([...compose.matchAll(/\b(OB1_[A-Z0-9_]+)\b/g)].map((m) => m[1]));
+
+  for (const name of [...documented].sort()) {
+    if (!forwarded.has(name)) {
+      violations.push({
+        where: "deploy/compose.yaml",
+        msg: `${name} is documented in deploy/.env.example but never forwarded to a service, ` +
+             `so setting it in deploy/.env does nothing and says nothing`,
+      });
+    }
+  }
+}
+checkComposeForwardsDocumentedEnv();
+
 // The upstream _template placeholder link is intentional.
 const filtered = violations.filter((v) => !v.where.includes("_template"));
 
