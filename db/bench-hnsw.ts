@@ -46,16 +46,23 @@
  *      reported 50/50 recall for a function that returns nothing at 1%.
  *
  *   C. Plan shape. The live function body is read from the catalog
- *      (`pg_get_functiondef`), its plpgsql variables rewritten as parameters,
- *      and the result PREPAREd and EXPLAINed under both a custom and a generic
- *      plan — plpgsql may use either, and 014 declares no plan mode. That
- *      inspects the SQL actually deployed rather than a copy of it kept here,
- *      and it fails loudly if the function no longer has the shape the rewrite
- *      expects.
+ *      (`pg_get_functiondef`), each filtered branch's statement is extracted
+ *      with its plpgsql variables rewritten as parameters, and the result is
+ *      PREPAREd and EXPLAINed under both a custom and a generic plan — plpgsql
+ *      may use either, and 014 declares no plan mode. The walk branch is
+ *      explained on the 10% filter and the exact branch on the 1% filter,
+ *      which is where the function routes them (the exact branch takes any
+ *      filter matching at most 1,000 thoughts). That inspects the SQL actually
+ *      deployed rather than a copy of it kept here, and it fails loudly if the
+ *      function no longer has the shape the rewrite expects.
  *
- *   D. The generic plan, forced for the session, on the thin and empty
- *      filters — the plan plpgsql may switch to after five calls, timed on the
- *      filters where the chunk side's HNSW walk does the most work.
+ *   D. The walk, forced onto the thin and empty filters. The function itself
+ *      answers those exactly and never walks for them, so the bounds it seeds
+ *      are reached only on tables past ~2.5 million rows at the default count
+ *      (the header's arithmetic). To show what they do when the walk IS
+ *      reached, this section runs the walk branch's statement directly — the
+ *      text section C extracted — under a forced generic plan, on the filters
+ *      where the walk has the most to do to return the least.
  *
  * ── Running ──────────────────────────────────────────────────────────────────
  *
@@ -70,6 +77,7 @@
 
 import { SQL } from "bun";
 import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
@@ -191,9 +199,12 @@ const tierFilter = (key: string) => JSON.stringify({ tiers: [key] });
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
-async function unfiltered(sql: SQL, queries: number[][]): Promise<{ counts: Record<number, string>; ms10: number }> {
+/** Row counts asked for in section A; the last is the function's own ceiling, timed too. */
+const ASKS = [10, 20, 50, 100, 200, 500];
+
+async function unfiltered(sql: SQL, queries: number[][]): Promise<{ counts: Record<number, string>; ms10: number; msMax: number }> {
   const counts: Record<number, string> = {};
-  for (const count of [10, 20, 50, 100]) {
+  for (const count of ASKS) {
     let min = Infinity;
     let max = -Infinity;
     for (const q of queries.slice(0, 10)) {
@@ -205,14 +216,18 @@ async function unfiltered(sql: SQL, queries: number[][]): Promise<{ counts: Reco
     }
     counts[count] = min === max ? String(min) : `${min}–${max}`;
   }
-  // The default path's latency, over every query so the median means something.
-  const times: number[] = [];
-  for (const q of queries) {
-    const t0 = performance.now();
-    await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '{}'::jsonb)`);
-    times.push(performance.now() - t0);
-  }
-  return { counts, ms10: median(times) };
+  // The default path's latency, over every query so the median means something,
+  // and the ceiling's: what asking for the most the function will return costs.
+  const time = async (count: number) => {
+    const times: number[] = [];
+    for (const q of queries) {
+      const t0 = performance.now();
+      await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`);
+      times.push(performance.now() - t0);
+    }
+    return median(times);
+  };
+  return { counts, ms10: await time(K), msMax: await time(ASKS[ASKS.length - 1]) };
 }
 
 /**
@@ -242,7 +257,16 @@ async function oracle(sql: SQL, q: number[], filter: string): Promise<Set<string
 
 type FilteredResult = { returned: number; overlap: number; empty: number; ms: number; exact: number };
 
-async function filtered(sql: SQL, queries: number[][], filter: string, wants: Set<string>[]): Promise<FilteredResult> {
+/** The function call the arms measure; section D substitutes the extracted walk statement. */
+const viaFunction = (q: number[], filter: string) => `SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`;
+
+async function filtered(
+  sql: SQL,
+  queries: number[][],
+  filter: string,
+  wants: Set<string>[],
+  statement: (q: number[], filter: string) => string = viaFunction
+): Promise<FilteredResult> {
   let returned = 0;
   let overlap = 0;
   let empty = 0;
@@ -251,9 +275,7 @@ async function filtered(sql: SQL, queries: number[][], filter: string, wants: Se
   for (const [i, q] of queries.entries()) {
     const want = wants[i];
     const t0 = performance.now();
-    const got = (
-      await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`)
-    ).map((r: { id: string }) => r.id);
+    const got = (await sql.unsafe(statement(q, filter))).map((r: { id: string }) => r.id);
     times.push(performance.now() - t0);
     returned += got.length;
     overlap += got.filter((id) => want.has(id)).length;
@@ -275,15 +297,20 @@ async function filtered(sql: SQL, queries: number[][], filter: string, wants: Se
  * four parameters and the two DECLAREd locals — and refuses anything it does
  * not recognise rather than explaining a statement that is not the function's.
  */
-async function extractBody(sql: SQL): Promise<string> {
+type Branch = "walk" | "exact";
+
+async function extractBody(sql: SQL, branch: Branch): Promise<string> {
   const [{ def }] = await sql.unsafe(
     `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
   );
-  // 014 has two RETURN QUERY branches; section C explains the FILTERED one.
-  const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|END IF;|END;)/g)].map((x) => x[1]);
-  const filteredBlock = blocks.find((b) => /@>\s*filter/.test(b));
-  if (!filteredBlock) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s) and none filters on metadata; the bench's rewrite does not apply`);
-  let body = filteredBlock;
+  // 014 has three RETURN QUERY branches: unfiltered, the exact answer for a
+  // thin filter, and the HNSW walk for a broad one. The two filtered ones
+  // both test `metadata @> filter`; only the walk LIMITs its candidate CTEs.
+  const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|ELSIF|END IF;|END;)/g)].map((x) => x[1]);
+  const filteredBlocks = blocks.filter((b) => /@>\s*filter/.test(b));
+  const block = filteredBlocks.find((b) => /LIMIT\s+v_fetch/.test(b) === (branch === "walk"));
+  if (!block) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s), ${filteredBlocks.length} filtered, and no ${branch} branch; the bench's rewrite does not apply`);
+  let body = block;
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
   const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
@@ -329,11 +356,22 @@ function shapeOf(plan: string, ms: number): PlanShape {
   const access = (alias: string, vectorIdx: string): string => {
     const a = `${alias}(?:_\\d+)?\\b`;
     if (new RegExp(`Index Scan using ${vectorIdx} on ${a}`).test(plan)) return "HNSW index scan";
-    if (new RegExp(`Bitmap Heap Scan on ${a}`).test(plan)) return "GIN bitmap + sort";
-    if (new RegExp(`Seq Scan on ${a}`).test(plan)) return "seq scan + sort";
+    if (new RegExp(`Index (Only )?Scan using thought_chunks_(thought_id_idx|pkey) on ${a}`).test(plan)) return "chunk lookups by parent";
+    if (alias.startsWith("thought_chunks") && new RegExp(`Bitmap Heap Scan on ${a}`).test(plan) && /Bitmap Index Scan on thought_chunks_(thought_id_idx|pkey)/.test(plan)) return "chunk lookups by parent (bitmap)";
+    if (new RegExp(`Bitmap Heap Scan on ${a}`).test(plan)) return "GIN bitmap";
+    if (new RegExp(`Seq Scan on ${a}`).test(plan)) return "seq scan";
     return "?";
   };
-  const chunkDriver = /Bitmap Heap Scan on thoughts p(?:_\d+)?\b/.test(plan) ? "GIN bitmap on parent + PK lookups" : access("thought_chunks c", "thought_chunks_embedding_idx");
+  // The walk's chunk CTE may come at the parent's GIN index and look chunks up
+  // from there; the exact branch's reads `matched` (a GIN bitmap on `thoughts
+  // t`) and probes the chunk table's thought_id index (or primary key) with
+  // the matched ids as an array — as an index scan or a bitmap, whichever the
+  // planner picks; the exact branch's alias for the chunk table is `k`.
+  const chunkDriver = /Bitmap Heap Scan on thoughts p(?:_\d+)?\b/.test(plan)
+    ? "GIN bitmap on parent + PK lookups"
+    : /thought_chunks k\b/.test(plan)
+      ? access("thought_chunks k", "thought_chunks_embedding_idx")
+      : access("thought_chunks c", "thought_chunks_embedding_idx");
   return {
     thoughts: access("thoughts t", "thoughts_embedding_idx"),
     chunks: chunkDriver,
@@ -342,8 +380,8 @@ function shapeOf(plan: string, ms: number): PlanShape {
   };
 }
 
-async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: PlanShape; generic: PlanShape }> {
-  const body = await extractBody(sql);
+async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<{ custom: PlanShape; generic: PlanShape }> {
+  const body = await extractBody(sql, branch);
   const out: Record<string, PlanShape> = {};
   for (const mode of ["force_custom_plan", "force_generic_plan"]) {
     const rows = await sql.begin(async (tx: SQL) => {
@@ -402,11 +440,12 @@ type Result = {
   arm: Arm;
   counts: Record<number, string>;
   ms10: number;
+  msMax: number;
   cells: Cell[];
-  plan?: { custom: PlanShape; generic: PlanShape };
+  plan?: Record<Branch, { tier: string; matches: number; custom: PlanShape; generic: PlanShape }>;
 };
 const results: Result[] = [];
-const generic: (FilteredResult & { scale: number; key: string; share: number; matches: number })[] = [];
+const walk: (FilteredResult & { scale: number; key: string; share: number; matches: number })[] = [];
 
 // The after arm asserts the bounds 014 seeds are in force. A role that does not
 // own the database cannot seed them, and finding that out after a 100,000-row
@@ -457,51 +496,62 @@ for (const n of SCALES) {
       await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
       await reconnect(); // the database-level bounds 014 just seeded are read at connect
       const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
-      const [row] = await sql`
-        SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
-        WHERE d.datname = current_database() AND s.setrole = 0`;
-      const cfg: string[] = row?.cfg ?? [];
-      const has = (k: string, v: string) => cfg.includes(`${k}=${v}`);
-      if (!has("hnsw.max_scan_tuples", t) || !has("hnsw.scan_mem_multiplier", m)) {
-        throw new Error(`session did not pick up the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m}; database has ${cfg.join(", ") || "none"})`);
+      const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+      const cfg = parseSetConfig(row?.cfg);
+      if (cfg["hnsw.max_scan_tuples"] !== t || cfg["hnsw.scan_mem_multiplier"] !== m) {
+        throw new Error(`session did not pick up the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m}; database has ${JSON.stringify(cfg)})`);
       }
       console.log(`  bounds in force: max_scan_tuples=${t}, scan_mem_multiplier=${m}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
-    const { counts, ms10 } = await unfiltered(sql, queries);
+    const { counts, ms10, msMax } = await unfiltered(sql, queries);
     const cells: Cell[] = [];
     for (const t of tiers) {
       const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
       cells.push({ ...r, key: t.key, share: t.share, matches: t.matches });
       process.stdout.write(".");
     }
-    // Plans only for the function under test: see shapeOf.
-    const plan = arm === "after (014)" ? await plans(sql, queries[0], tierFilter("t1")) : undefined;
-    results.push({ scale: n, arm, counts, ms10, cells, plan });
+    // Plans only for the function under test: see shapeOf. Each filtered
+    // branch on the tier the function routes there — 10% is above the
+    // 1,000-row exact threshold at both scales, 1% below it.
+    const tierOf = (key: string) => tiers.find((t) => t.key === key)!;
+    const plan =
+      arm === "after (014)"
+        ? {
+            walk: { tier: "10%", matches: tierOf("t10").matches, ...(await plans(sql, queries[0], tierFilter("t10"), "walk")) },
+            exact: { tier: "1%", matches: tierOf("t1").matches, ...(await plans(sql, queries[0], tierFilter("t1"), "exact")) },
+          }
+        : undefined;
+    results.push({ scale: n, arm, counts, ms10, msMax, cells, plan });
     console.log(" done");
   }
 
-  // D. The generic plan, forced. plpgsql may switch a statement to its generic
-  // plan after five calls when that plan does not estimate costlier, and the
-  // function declares no plan mode, so this is a plan the function can run.
-  // Under it the filter is a parameter: the thoughts side still reaches the
-  // GIN index, but the chunk side, whose filter lives on the parent row,
-  // walks its own HNSW index and looks each candidate's parent up — bounded by
-  // hnsw.max_scan_tuples and by work_mem * hnsw.scan_mem_multiplier. This arm
-  // forces the generic plan for the session and measures the thin and empty
-  // filters through it. It runs last for its scale — the next scale resets the
-  // schema — so nothing needs restoring. It exists to show that the plan the
-  // planner may switch to is a complete one, and to show the bounds doing
-  // their job when the walk does happen.
-  process.stdout.write("  generic plan      ");
+  // D. The walk, forced. The function answers thin filters exactly and never
+  // walks for them, so at these scales the bounds it seeds are not reached
+  // through the function at all. This section runs the walk branch's own
+  // statement — extracted from the catalog as section C does — under the
+  // function's scan mode and a forced generic plan (the filter a parameter, so
+  // the chunk side, whose filter lives on the parent row, walks its HNSW index
+  // and looks each candidate's parent up), on the thin and empty filters. It
+  // shows what the seeded bounds do when the walk IS reached: on a table past
+  // ~2.5 million rows, or for a filter just above the exact threshold. It runs
+  // last for its scale — the next scale resets the schema — so nothing needs
+  // restoring.
+  process.stdout.write("  the walk, forced  ");
+  const walkBody = await extractBody(sql, "walk");
+  await sql.unsafe(`SET hnsw.iterative_scan = relaxed_order`);
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
+  await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb) AS ${walkBody}`);
+  const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`;
   const thin = tiers.filter((t) => t.share <= 0.001);
   for (const t of thin) {
-    const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-    generic.push({ scale: n, key: t.key, share: t.share, matches: t.matches, ...r });
+    const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);
+    walk.push({ scale: n, key: t.key, share: t.share, matches: t.matches, ...r });
     process.stdout.write(".");
   }
-  await sql.unsafe(`SET plan_cache_mode = auto`);
+  await sql.unsafe(`DEALLOCATE bench_walk`);
+  await sql.unsafe(`RESET plan_cache_mode`);
+  await sql.unsafe(`RESET hnsw.iterative_scan`);
   console.log(" done");
 }
 
@@ -509,13 +559,11 @@ await sql.close();
 
 // ── Report ──────────────────────────────────────────────────────────────────
 
-console.log("\n### A. Unfiltered: rows returned for rows requested, and the default path's latency\n");
-console.log("| rows | arm | asked 10 | asked 20 | asked 50 | asked 100 | median ms, asked 10 |");
-console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: |");
+console.log("\n### A. Unfiltered: rows returned for rows requested, and the latency of the default path and of the ceiling\n");
+console.log(`| rows | arm | ${ASKS.map((a) => `asked ${a}`).join(" | ")} | median ms, asked ${K} | median ms, asked ${ASKS[ASKS.length - 1]} |`);
+console.log(`| ---: | --- | ${ASKS.map(() => "---:").join(" | ")} | ---: | ---: |`);
 for (const r of results) {
-  console.log(
-    `| ${r.scale.toLocaleString()} | ${r.arm} | ${r.counts[10]} | ${r.counts[20]} | ${r.counts[50]} | ${r.counts[100]} | ${r.ms10.toFixed(2)} |`
-  );
+  console.log(`| ${r.scale.toLocaleString()} | ${r.arm} | ${ASKS.map((a) => r.counts[a]).join(" | ")} | ${r.ms10.toFixed(2)} | ${r.msMax.toFixed(2)} |`);
 }
 
 console.log(`\n### B. Filtered: of ${K} asked, mean returned and mean overlap with the exact top-${K}\n`);
@@ -531,30 +579,36 @@ for (const r of results) {
   }
 }
 
-console.log("\n### C. Plan shape of the current function for a 1% filter (custom plan / generic plan)\n");
+console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown.\n");
-console.log("| rows | thoughts candidates | chunk candidates | exec ms |");
-console.log("| ---: | --- | --- | ---: |");
+console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms |");
+console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
   if (!r.plan) continue;
-  const { custom, generic } = r.plan;
-  console.log(
-    `| ${r.scale.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${custom.chunks} / ${generic.chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} |`
-  );
+  for (const branch of ["walk", "exact"] as Branch[]) {
+    const { tier, matches, custom, generic } = r.plan[branch];
+    console.log(
+      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches} | ${custom.thoughts} / ${generic.thoughts} | ${custom.chunks} / ${generic.chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} |`
+    );
+  }
 }
 if (PRINT_PLANS) {
   for (const r of results) {
     if (!r.plan) continue;
-    console.log(`\n#### ${r.scale.toLocaleString()} rows, ${r.arm}, generic plan\n`);
-    console.log(r.plan.generic.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
+    for (const branch of ["walk", "exact"] as Branch[]) {
+      for (const mode of ["custom", "generic"] as const) {
+        console.log(`\n#### ${r.scale.toLocaleString()} rows, ${branch} branch, ${mode} plan\n`);
+        console.log(r.plan[branch][mode].text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
+      }
+    }
   }
 }
 
-console.log("\n### D. The generic plan, forced: thin and empty filters\n");
-console.log("What a cached generic plan does with these filters, and what the two scan bounds do if the planner walks the HNSW index.\n");
+console.log("\n### D. The walk branch, forced onto thin and empty filters (generic plan)\n");
+console.log("The function answers these exactly and never walks for them; this runs the walk's own statement on them to show what the two scan bounds do when the walk is reached.\n");
 console.log("| rows | filter matches | matching rows | returned | in exact top-10 | exact has | median ms |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
-for (const g of generic) {
+for (const g of walk) {
   const share = g.key === "none" ? "nothing" : `${g.share * 100}%`;
   console.log(
     `| ${g.scale.toLocaleString()} | ${share} | ${g.matches} | ${g.returned.toFixed(1)} | ${g.overlap.toFixed(1)} | ${g.exact.toFixed(1)} | ${g.ms.toFixed(2)} |`

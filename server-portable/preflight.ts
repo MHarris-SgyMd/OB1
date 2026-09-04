@@ -276,9 +276,14 @@ if (configFailed) {
             add("filtered search", "ok",
                 `match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — ${CATALOG_HINT})`);
           } else {
+            // Over PostgREST the body cannot be read, and a NULL-filter miss has
+            // two causes the SQL path tells apart by the body's sentinel: 014
+            // not applied, or a later redefinition that kept the in-scan filter
+            // and changed NULL handling. Re-running 014 over the second would
+            // revert it, so the remedy names both (tenth review pass).
             add("filtered search", "warn",
-                `match_thoughts returned nothing for a NULL filter, which every body before 014 does — the migrations are not applied through 014, so ${EXPOSURE}`,
-                APPLY_014);
+                `match_thoughts returned nothing for a NULL filter, which every body before 014 does — either the migrations are not applied through 014 (then ${EXPOSURE}) or a later migration redefined match_thoughts and changed how a NULL filter is treated; over PostgREST the two cannot be told apart (${CATALOG_HINT})`,
+                `If the ledger stops before 014: ${APPLY_014} If a later migration redefined match_thoughts, verify it kept the filter inside the scan rather than re-running 014 over it.`);
           }
         } catch (e) {
           // A failed probe is not evidence either way — a width mismatch or a
@@ -399,10 +404,14 @@ if (configFailed) {
          */
         try {
           const { versionAtLeast, HNSW_SEED_MAX_SCAN_TUPLES, HNSW_SEED_SCAN_MEM_MULTIPLIER } = await import("../db/config.mjs");
+          // The one signature the servers call, resolved as the call would
+          // resolve it; to_regprocedure is NULL rather than an error when it
+          // is not defined, so "not defined" stays a verdict and not a throw.
+          // (By name and arity, an earlier draft read the first of however
+          // many 4-argument overloads existed.)
           const mt = await sql`
             SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
-            JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
+            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
           // The body's semantics are declared by a sentinel comment in the body
           // itself, `ob1:filter-inside-scan`, which 014 carries and any successor
           // that keeps the in-scan filter must carry forward. In prosrc, not in
@@ -458,14 +467,17 @@ if (configFailed) {
           const bounds = await sql`
             SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
           const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
-          // Whether the bounds were ever SET — anywhere this session resolves
-          // them from: ALTER DATABASE, ALTER ROLE, ALTER SYSTEM, a parameter
-          // group — not whether they are large, and not merely whether a
-          // database-level row exists. An operator who lowered one on purpose
-          // is tuning; one who set it on the role because the platform refuses
-          // ALTER DATABASE has set it. pg_settings.source is 'default' only
-          // when nothing has. The probe above loaded pgvector, so hnsw.* rows
-          // are present; if the probe did not run, load it here.
+          // Whether the bounds are SET for THIS connection — from anywhere it
+          // resolves them: ALTER DATABASE, ALTER ROLE on the server's role,
+          // ALTER SYSTEM, a parameter group — not whether they are large, and
+          // not merely whether a database-level row exists. An operator who
+          // lowered one on purpose is tuning; one who set it on the role
+          // because the platform refuses ALTER DATABASE has set it for the
+          // role that matters here. (The migrator asks a different question —
+          // set for EVERY role — and so does not count a role-level value.)
+          // pg_settings.source is 'default' only when nothing has. The probe
+          // above loaded pgvector, so hnsw.* rows are present; if the probe did
+          // not run, load it here.
           await sql`SELECT '[1]'::vector`;
           const srcRows = await sql`
             SELECT name, source FROM pg_settings WHERE name IN ('hnsw.max_scan_tuples', 'hnsw.scan_mem_multiplier')`;
@@ -486,7 +498,7 @@ if (configFailed) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
             if (boundsUnset) {
               add("filtered search", "warn",
-                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are at pgvector's defaults, set nowhere (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — a thin filter routed to the HNSW walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are at pgvector's defaults, set nowhere this connection resolves them from (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — on a large table a broad filter's walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
                   seedBounds);
             } else if (staleRecord) {
               add("filtered search", "warn",

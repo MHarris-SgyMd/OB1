@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `139 assertions: 139 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `145 assertions: 145 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fourteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -85,7 +85,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
-| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, and honours `match_count` above the default. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
+| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
 
 ## What changed relative to the guide
 
@@ -244,13 +244,17 @@ makes the target the global nearest neighbour, which no post-filter can lose;
 the first draft did that and reported perfect recall for a function that returns
 nothing at 1%. The exact answer is computed once per query and tier and both
 arms are scored against it. Two tiers exist for the scan's failure shape rather
-than the filter's: one with fewer matching rows than the candidate budget, so
-the iterative scan cannot stop early, and one matching nothing. Section C reads
-the live function body from the catalog, rewrites its plpgsql variables as
-parameters and EXPLAINs the result under both custom and generic planning,
-because plpgsql may use either; section D then forces the generic plan and
-re-times the thin and empty filters through it, since that is where the scan
-does the most work to return the least. The headline table is in the header of
+than the filter's: one with fewer matching rows than the candidate budget, and
+one matching nothing — under 014 both take the exact branch, which is the
+point. Section A also times asking for the function's ceiling (500 rows).
+Section C reads the live function body from the catalog, extracts each
+filtered branch's statement with its plpgsql variables rewritten as parameters,
+and EXPLAINs it under both custom and generic planning on the filter the
+function routes to it (the walk on 10%, the exact branch on 1%), because
+plpgsql may use either plan. Section D runs the walk's own statement on the
+thin and empty filters — which the function never walks for — under a forced
+generic plan, to show what the seeded scan bounds do when the walk is reached
+on a table large enough to reach it. The headline table is in the header of
 `migrations/014_filtered_match_thoughts.sql`; the real-corpus version is
 `evals/eval-filtered.ts`.
 
@@ -330,8 +334,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 139 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 43 assertions, real server, throwaway container
+bun test-schema.ts                    # 145 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 45 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -356,7 +360,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 139 properties, including:
+asserts 145 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -391,15 +395,18 @@ asserts 139 properties, including:
 - **the filter is applied inside the candidate scan** (migration 014): with sixty
   nearer rows of one kind in front of them, both rows of the filtered kind come
   back — including one reachable only through its chunk — a NULL filter is
-  unfiltered, `match_count = 50` returns 50, and `pg_proc.proconfig` carries
+  unfiltered, `match_count = 50` returns 50, the ceiling is the one
+  `config.mjs` defines, and `pg_proc.proconfig` carries
   `hnsw.iterative_scan=relaxed_order` and nothing else — not the two walk
   bounds, which live on the database so `ALTER DATABASE` tuning is never
-  overridden, and not a forced plan mode, which the two-branch body made
+  overridden, and not a forced plan mode, which the branch-per-path body made
   unnecessary. A later `CREATE OR REPLACE` that drops the SET clause, or adds a
   bound or a plan mode to the function, fails here rather than in search. The
-  two branches are held to the same answer on the same rows; the bounds'
-  seeding is asserted, and that re-applying 014 leaves an operator's value
-  alone
+  exact branch is held to the unfiltered answer on the same rows, and [8c]
+  holds the walk branch — reached only above 1,000 matching rows — to an exact
+  scan; the bounds' seeding is asserted, that re-applying 014 leaves an
+  operator's database-level value alone, and that a value set only for the
+  session (standing in for `ALTER ROLE`) does not stop the seed
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
 - a non-object `p_payload` raises rather than silently storing `{}`
 - `thought_chunks.context` exists and is nullable, and **both** functions that

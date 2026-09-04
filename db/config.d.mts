@@ -139,3 +139,13 @@ export function isLocalHostname(host: string, serviceNames?: string[]): boolean;
 /** What migration 014 seeds as the HNSW walk's bounds; tuned with ALTER DATABASE, not here. */
 export const HNSW_SEED_MAX_SCAN_TUPLES: number;
 export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
+/** The two bound names, in remedy order. */
+export const HNSW_BOUNDS: string[];
+/** match_thoughts clamps match_count to this inside the function (014). */
+export const MATCH_COUNT_CEILING: number;
+/** pg_settings.source values that reach every role: server configuration or the database. */
+export const SHARED_SETTING_SOURCES: string[];
+/** SELECT of the current database's pg_db_role_setting row as `cfg` (setconfig). */
+export const DB_LEVEL_SETTINGS_SQL: string;
+/** `["a=1"]` → `{a: "1"}`. */
+export function parseSetConfig(cfg: string[] | null | undefined): Record<string, string>;

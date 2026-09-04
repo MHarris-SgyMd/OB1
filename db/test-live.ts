@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { EMBEDDING_DIM, versionAtLeast } from "./config.mjs";
+import { DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, dropSchema, seededRandom } from "./test-support.ts";
@@ -195,11 +195,8 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   // What the DATABASE has, not the shipped literals: 014 leaves an operator's
   // earlier value alone, and a non-owner role cannot seed at all. Assert that
   // whatever pg_db_role_setting holds is what a fresh session sees.
-  const [seeded] = await sql`
-    SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
-    WHERE d.datname = current_database() AND s.setrole = 0`;
-  const dbSettings: string[] = seeded?.cfg ?? [];
-  const want = Object.fromEntries(dbSettings.filter((c) => c.startsWith("hnsw.")).map((c) => c.split("=") as [string, string]));
+  const [seeded] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const want = parseSetConfig(seeded?.cfg);
   const [{ t, mm }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS mm`;
   if (want["hnsw.max_scan_tuples"] && want["hnsw.scan_mem_multiplier"]) {
     assert(t === want["hnsw.max_scan_tuples"] && mm === want["hnsw.scan_mem_multiplier"],
@@ -207,14 +204,17 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   } else {
     skip("a fresh session sees the database-level bounds", "not seeded on this database — the migrating role does not own it");
   }
-  // 1,000 random rows through a real HNSW index, 1% of them tagged. Under 007
+  // 2,000 random rows through a real HNSW index, 1% of them tagged. Under 007
   // the tagged rows were almost never among the 40 nearest, so a filtered
-  // search returned almost nothing — db/bench-hnsw.ts has the numbers. Here
-  // the function must return exactly what a full scan returns.
+  // search returned almost nothing — db/bench-hnsw.ts has the numbers. The
+  // tagged filter matches 20 rows, under the exact threshold, so it MUST return
+  // what a full scan returns; the untagged filter matches 1,980, above it, so
+  // it takes the HNSW walk with the predicate inside the scan and is held to
+  // the exact answer within the index's approximation.
   await sql`DELETE FROM thoughts`;
   const { unitVector } = seededRandom(968);
   const random = () => `[${unitVector(EMBEDDING_DIM).join(",")}]`;
-  const N = 1000;
+  const N = 2000;
   for (let i = 0; i < N; i += 100) {
     const values = Array.from({ length: 100 }, (_, k) => {
       const tagged = (i + k) % 100 === 7; // exactly 1%
@@ -224,27 +224,35 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   }
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
 
+  const exactTop = (qv: string, filter: string) =>
+    sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+      await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+      return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector LIMIT 10`);
+    });
   let agree = 0;
+  let walkOverlap = 0;
+  let walkShort = 0;
   const QUERIES = 10;
   for (let q = 0; q < QUERIES; q++) {
     const qv = random();
-    const exact = await sql.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL enable_indexscan = off`);
-      await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
-      return tx.unsafe(
-        `SELECT id FROM thoughts WHERE metadata @> '{"tagged": true}' ORDER BY embedding <=> '${qv}'::vector LIMIT 10`
-      );
-    });
+    const thin = new Set((await exactTop(qv, '{"tagged": true}')).map((r: { id: string }) => r.id));
     const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '{"tagged": true}'::jsonb)`);
-    const want = new Set(exact.map((r: { id: string }) => r.id));
-    if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
+    if (got.length === 10 && got.every((r: { id: string }) => thin.has(r.id))) agree++;
+    const broad = new Set((await exactTop(qv, '{"tagged": false}')).map((r: { id: string }) => r.id));
+    const walked = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '{"tagged": false}'::jsonb)`);
+    if (walked.length !== 10) walkShort++;
+    walkOverlap += walked.filter((r: { id: string }) => broad.has(r.id)).length;
   }
-  assert(agree === QUERIES, `a 1% filter returns the exact top-10 on ${agree}/${QUERIES} random queries`);
+  assert(agree === QUERIES, `a 1% filter (20 rows, the exact branch) returns the exact top-10 on ${agree}/${QUERIES} random queries`);
+  assert(walkShort === 0, `a 99% filter (1,980 rows, the walk branch) returns 10 rows on every query (${walkShort} short)`);
+  assert(walkOverlap >= 85, `…and ${walkOverlap}/100 of them are the exact top-10 (HNSW is approximate; random vectors are its hardest case)`);
 
   // match_count is clamped inside the function, as 012 clamps its p_limit: the
   // cost of a call is now proportional to it, and direct callers are unbounded.
-  const many = await sql.unsafe(`SELECT count(*)::int AS c FROM match_thoughts('${random()}'::vector, -1.0, 500, '{}'::jsonb)`);
-  assert(Number(many[0].c) === 100, `match_count 500 over ${N} rows returns 100 — the function's own ceiling (got ${many[0].c})`);
+  // The ceiling is the one config.mjs defines, so the doc and the body agree.
+  const many = await sql.unsafe(`SELECT count(*)::int AS c FROM match_thoughts('${random()}'::vector, -1.0, ${MATCH_COUNT_CEILING * 2}, '{}'::jsonb)`);
+  assert(Number(many[0].c) === MATCH_COUNT_CEILING, `match_count ${MATCH_COUNT_CEILING * 2} over ${N} rows returns ${MATCH_COUNT_CEILING} — the function's own ceiling (got ${many[0].c})`);
 
   const [{ cfg }] = await sql`
     SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc

@@ -535,6 +535,8 @@ export function migrationValues(overrides = {}) {
     // preflight's report and the schema test cannot disagree about it.
     HNSW_SEED_MAX_SCAN_TUPLES: String(HNSW_SEED_MAX_SCAN_TUPLES),
     HNSW_SEED_SCAN_MEM_MULTIPLIER: String(HNSW_SEED_SCAN_MEM_MULTIPLIER),
+    MATCH_COUNT_CEILING: String(MATCH_COUNT_CEILING),
+    SHARED_SETTING_SOURCES: SHARED_SETTING_SOURCES.map((s) => `'${s}'`).join(", "),
   };
 }
 
@@ -666,3 +668,45 @@ export function isLocalHostname(host, serviceNames = []) {
  */
 export const HNSW_SEED_MAX_SCAN_TUPLES = 100000;
 export const HNSW_SEED_SCAN_MEM_MULTIPLIER = 8;
+/** The two settings, in the order the remedies print them. */
+export const HNSW_BOUNDS = ["hnsw.max_scan_tuples", "hnsw.scan_mem_multiplier"];
+
+/**
+ * match_thoughts clamps match_count to this INSIDE the function (migration
+ * 014, templated as {{MATCH_COUNT_CEILING}}). 500 covers every caller in the
+ * repo: enhanced-mcp asks for up to 500 under a date filter, rest-api up to
+ * 200, agent-memory-api up to 200. The servers' own search_thoughts tools
+ * clamp their `limit` to 100 separately — a tool-level choice about what to
+ * hand a model, not this cost bound. The bench measures asked-500.
+ */
+export const MATCH_COUNT_CEILING = 500;
+
+/**
+ * `pg_settings.source` values under which a setting reaches EVERY role in the
+ * database — the server's configuration (postgresql.conf, ALTER SYSTEM, a
+ * managed parameter group, the command line, the environment) or the database
+ * itself. A role-level value ('user', 'database user') reaches one role, and a
+ * session value nobody else; neither is a reason for 014 to skip seeding the
+ * database-level default, which sits BELOW a role's value in precedence and
+ * ABOVE the server's — so seeding over a role-level value undoes nothing, and
+ * seeding over ALTER SYSTEM would silently undo it (tenth review pass).
+ */
+export const SHARED_SETTING_SOURCES = ["environment variable", "configuration file", "command line", "global", "override", "database"];
+
+/**
+ * The database-level settings row for the current database, as `setconfig`
+ * (`name=value` strings). One text because the tenth review pass found it
+ * written five times in three idioms. Parse with parseSetConfig.
+ */
+export const DB_LEVEL_SETTINGS_SQL =
+  "SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0";
+
+/** `["a=1","b=x"]` → `{a: "1", b: "x"}`; a value may itself contain `=`. */
+export function parseSetConfig(cfg) {
+  const out = {};
+  for (const kv of cfg ?? []) {
+    const eq = kv.indexOf("=");
+    if (eq > 0) out[kv.slice(0, eq)] = kv.slice(eq + 1);
+  }
+  return out;
+}

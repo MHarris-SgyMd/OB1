@@ -229,6 +229,14 @@ const OWN: OwnQ[] = [];
     OWN.push({ doc, label, want: exactTop(doc.query, EVAL.filter((m) => m.labels.includes(label))) });
   }
 }
+// A corpus with no labelled documents — an export whose issues carry
+// `labels: []`, which build-linear-corpus.ts does not refuse — would sail
+// through: the row-identity control passes on 0 of 0, and every table below
+// prints NaN as a measurement, exit 0 (tenth review pass). Refuse instead.
+if (!EVAL.length || !OTHER.length || !OWN.length) {
+  console.error(`  nothing to measure: ${EVAL.length} stored documents, ${OTHER.length} other-label queries, ${OWN.length} own-label queries — the corpus needs labelled issues`);
+  process.exit(2);
+}
 
 // ── The arms ────────────────────────────────────────────────────────────────
 
@@ -286,7 +294,7 @@ if (moved) {
   console.error("  The unfiltered path changed. 014 claims it does not; nothing below is trustworthy until that is understood.");
   process.exit(1);
 }
-const mrr = (ranks: number[]) => ranks.reduce((s, r) => s + (r ? 1 / r : 0), 0) / ranks.length;
+const mrr = (ranks: number[]) => (ranks.length ? ranks.reduce((s, r) => s + (r ? 1 / r : 0), 0) / ranks.length : NaN);
 const unfilteredRank = (r: Run) => EVAL.map((d) => r.unfiltered.get(d.id)!.indexOf(d.id) + 1);
 console.log(`  unfiltered title→document MRR ${mrr(unfilteredRank(after)).toFixed(3)} (the eval-real number, as a sanity check)`);
 

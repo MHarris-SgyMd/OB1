@@ -180,16 +180,28 @@ else {
   await ledger.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('014_filtered_match_thoughts.sql', 'test')`);
   await ledger.close();
   const dropped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(dropped.code === 0, "a recorded 014 whose function lost its clauses still starts");
-  // Re-applying 007 replaces the BODY as well as the clauses, and the check
-  // says which: a 014 body that merely lost its SETs gets the ALTER FUNCTION
-  // remedy, a pre-014 body gets the body re-run.
-  assert(/recorded as applied — a later redefinition (replaced its body|dropped its SET clauses)/.test(dropped.out), "…and is described as a later redefinition, not a missing migration");
-  assert(/Re-run the body of db\/migrations\/014|ALTER FUNCTION match_thoughts/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
+  assert(dropped.code === 0, "a recorded 014 whose function was replaced still starts");
+  // Re-applying 007 replaces the BODY as well as the clause, so this is the
+  // "replaced its body" wording with the body re-run as the remedy.
+  assert(/recorded as applied — a later redefinition replaced its body/.test(dropped.out), "…and is described as a later redefinition, not a missing migration");
+  assert(/Re-run the body of db\/migrations\/014/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
+  // The other branch: 014's body intact, its SET clause gone — what a successor
+  // that redefined the function without the clause leaves. (An earlier draft
+  // asserted this wording with a regex alternative that could never match the
+  // singular the check prints, on a fixture that never reached the branch.)
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
+  const reset = new SQL({ url: LIVE, max: 1 });
+  await reset.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET ALL`);
+  await reset.close();
+  const noClause = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
+  assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
+  assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy");
   const unledger = new SQL({ url: LIVE, max: 1 });
   await unledger.unsafe(`DROP TABLE schema_migrations`);
   await unledger.close();
-  // 007 also re-created the chunk writers without the context column; restore 013 and 014.
+  // 007 also re-created the chunk writers without the context column, and the
+  // RESET above took 014's clause: restore 013 and 014.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
 
   /**

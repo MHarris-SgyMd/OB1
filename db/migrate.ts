@@ -22,12 +22,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
+  DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
+  HNSW_BOUNDS,
   HNSW_SEED_MAX_SCAN_TUPLES,
   HNSW_SEED_SCAN_MEM_MULTIPLIER,
+  SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   migrationValues,
+  parseSetConfig,
   substituteMigration,
   validateEmbeddingConfig,
   versionAtLeast,
@@ -51,7 +55,27 @@ if (!url) {
   process.exit(2);
 }
 
-type Migration = { name: string; sql: string; sha: string };
+type Migration = {
+  name: string;
+  sql: string;
+  sha: string;
+  /** From a `-- requires: pgvector >= X.Y.Z` line in the file's header, if any. */
+  requiresPgvector: [number, number, number] | null;
+  /** The file seeds database-level settings through a DO block that can only warn. */
+  seedsSettings: boolean;
+};
+
+/**
+ * A migration that needs a newer pgvector than the server may have says so in
+ * its header — `-- requires: pgvector >= 0.8.0` — and the migrator judges the
+ * floor from that line, so a later migration with the same need declares it
+ * rather than being named here (the tenth review pass found 014's filename
+ * hard-coded into four places of this loop).
+ */
+function requiresPgvector(template: string): [number, number, number] | null {
+  const m = /^--\s*requires:\s*pgvector\s*>=\s*(\d+)\.(\d+)(?:\.(\d+))?\s*$/m.exec(template);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : null;
+}
 
 /**
  * Values substituted into the migration templates. Defined in config.mjs, not
@@ -72,6 +96,8 @@ function loadMigrations(): Migration[] {
       const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
       return {
         name,
+        requiresPgvector: requiresPgvector(template),
+        seedsSettings: /ALTER DATABASE %I SET hnsw\./.test(template),
         sql: substitute(template, name),
         // Hash the TEMPLATE, not the substituted SQL. Otherwise choosing a
         // different embedding dimension would look like an edited migration and
@@ -121,41 +147,46 @@ const applied = new Map<string, string>(
  * Migration 014 declares HNSW settings that exist from pgvector 0.8.0. On an
  * older library its CREATE fails — by design, see its header — but "invalid
  * configuration parameter name" says nothing about versions, is localised, and
- * only appears once 001–013 have applied. So the floor is judged here, against
- * the version the server's library REPORTS (pg_available_extensions.
- * default_version — the loaded code, whatever pg_extension records for this
- * database), and enforced in the loop: pending migrations before 014 still
- * apply and are recorded, --baseline still seeds the ledger (it executes no
- * SQL), and 014 itself is refused with a message that names the version.
- * --dry-run reports the refusal the same way. Unknown means proceed: a server
- * whose control file is unreadable will still say so on 014.
+ * only appears once 001–013 have applied. So the floor each migration declares
+ * is judged here, against the version the server's library REPORTS
+ * (pg_available_extensions.default_version — the loaded code, whatever
+ * pg_extension records for this database), and enforced in the loop: pending
+ * migrations before it still apply and are recorded, --baseline still seeds
+ * the ledger (it executes no SQL), and the migration itself is refused with a
+ * message that names both versions. --dry-run reports the refusal the same
+ * way. Unknown means proceed: a server whose control file is unreadable will
+ * still say so on the migration.
  */
-const NEEDS_PGVECTOR_08 = (name: string) => name.startsWith("014_");
 /** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
 const quoteIdent = (name: unknown) => (name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`);
-let pgvectorTooOld: string | null = null;
-if (migrations.some((m) => NEEDS_PGVECTOR_08(m.name) && !applied.has(m.name))) {
+let pgvectorLibrary: string | null = null;
+if (migrations.some((m) => m.requiresPgvector && !applied.has(m.name))) {
   try {
     const [ext] = await sql`SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`;
-    const library = ext?.default_version == null ? null : String(ext.default_version);
-    if (library !== null && !versionAtLeast(library, 0, 8)) pgvectorTooOld = library;
+    pgvectorLibrary = ext?.default_version == null ? null : String(ext.default_version);
   } catch {
     // Not every role may read pg_available_extensions. Unknown means proceed;
-    // an old library still fails 014 itself, and the catch below explains it.
+    // an old library still fails the migration itself, and the catch below
+    // explains it.
   }
 }
+/** The version a migration requires, when the server's library is known to be older. */
+const tooOldFor = (m: Migration): string | null =>
+  m.requiresPgvector && pgvectorLibrary !== null && !versionAtLeast(pgvectorLibrary, ...m.requiresPgvector)
+    ? m.requiresPgvector.join(".")
+    : null;
 const PGVECTOR_REMEDY =
   "  Upgrade pgvector on the server to 0.8.0 or later — the compose stack pins pgvector/pgvector:0.8.6-pg16;\n" +
   "  on RDS, Aurora, Neon, Cloud SQL or Timescale, take the platform's newer pgvector — then, in this database,\n" +
   "    ALTER EXTENSION vector UPDATE;\n" +
   "  and re-run. Migrations before it are applied and recorded; nothing needs undoing.";
-const floorMessage = (name: string) =>
-  `\n  ${name} needs pgvector 0.8.0 or later; this server's pgvector library is ${pgvectorTooOld ?? "older than 0.8.0"}.\n${PGVECTOR_REMEDY}`;
+const floorMessage = (m: Migration) =>
+  `\n  ${m.name} needs pgvector ${tooOldFor(m)} or later; this server's pgvector library is ${pgvectorLibrary}.\n${PGVECTOR_REMEDY}`;
 
 let ran = 0;
 let skipped = 0;
 let drifted = 0;
-let floorBlocked: string | null = null;
+let floorBlocked: Migration | null = null;
 
 for (const m of migrations) {
   const prior = applied.get(m.name);
@@ -173,9 +204,9 @@ for (const m of migrations) {
     continue;
   }
   if (dryRun) {
-    if (pgvectorTooOld && NEEDS_PGVECTOR_08(m.name)) {
-      console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorTooOld} < 0.8.0`);
-      floorBlocked = m.name;
+    if (tooOldFor(m)) {
+      console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorLibrary} < ${tooOldFor(m)}`);
+      floorBlocked = m;
       continue;
     }
     console.log(`  →  ${m.name}  would apply (${m.sha})`);
@@ -191,8 +222,8 @@ for (const m of migrations) {
 
   // The version floor, enforced only where it bites: earlier pending migrations
   // have already applied above, and --baseline never reaches here.
-  if (pgvectorTooOld && NEEDS_PGVECTOR_08(m.name)) {
-    console.error(`  ✗  ${m.name}  refused` + floorMessage(m.name));
+  if (tooOldFor(m)) {
+    console.error(`  ✗  ${m.name}  refused` + floorMessage(m));
     await sql.close();
     process.exit(1);
   }
@@ -217,7 +248,7 @@ for (const m of migrations) {
     const sqlstate = (err as { errno?: string }).errno;
     console.error(`  ✗  ${m.name}  FAILED: ${message}`);
     if (/hnsw\./.test(message) && sqlstate === "42602") {
-      console.error(`\n  ${m.name} needs pgvector 0.8.0 or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
+      console.error(`\n  ${m.name} needs pgvector ${m.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
     } else if (/hnsw\./.test(message) && sqlstate === "42501") {
       console.error(
         `\n  A non-superuser may set hnsw.* settings only after pgvector's library is loaded in the session.\n` +
@@ -228,26 +259,26 @@ for (const m of migrations) {
     process.exit(1);
   }
 
-  // 014 seeds two database-level settings from a DO block that can only RAISE
-  // WARNING when the role does not own the database — and this client surfaces
-  // no warnings. So look at the result rather than trust the protocol. Outside
-  // the try above: the migration is applied and recorded by now, and a catalog
-  // this role cannot read must not turn that into "FAILED".
-  if (NEEDS_PGVECTOR_08(m.name)) {
+  // A migration that seeds database-level settings does so from a DO block
+  // that can only RAISE WARNING when the role does not own the database — and
+  // this client surfaces no warnings. So look at the result rather than trust
+  // the protocol. Outside the try above: the migration is applied and recorded
+  // by now, and a catalog this role cannot read must not turn that into
+  // "FAILED".
+  if (m.seedsSettings) {
     try {
-      // "Set" anywhere: a bound on the role or in server config counts (visible
-      // as a non-default source in THIS session, which 014 made pgvector-aware),
-      // and so does the database-level row 014 itself may just have written —
-      // which this session, opened before the ALTER DATABASE, does not yet see
-      // in pg_settings. Either is set; neither is unset.
+      // "Set" means set where every role sees it: server configuration or the
+      // database (SHARED_SETTING_SOURCES, as THIS session resolved them at
+      // connect), or the database-level row the migration itself may just have
+      // written — which this session, opened before the ALTER DATABASE, does
+      // not yet see in pg_settings. A role-level value on the migrating role
+      // is neither: it reaches this role alone (tenth review pass).
       const [row] = await sql`SELECT current_database() AS db`;
-      const unsetHere = (await sql`
-        SELECT name FROM pg_settings WHERE name IN ('hnsw.max_scan_tuples', 'hnsw.scan_mem_multiplier') AND source = 'default'`) as { name: string }[];
-      const [dbRow] = await sql`
-        SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
-        WHERE d.datname = current_database() AND s.setrole = 0`;
-      const dbLevel: string[] = dbRow?.cfg ?? [];
-      const missing = unsetHere.map((r) => r.name).filter((name) => !dbLevel.some((c) => c.startsWith(name + "=")));
+      const shared = (await sql`
+        SELECT name FROM pg_settings WHERE name = ANY(${HNSW_BOUNDS}) AND source = ANY(${SHARED_SETTING_SOURCES})`) as { name: string }[];
+      const [dbRow] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+      const dbLevel = parseSetConfig(dbRow?.cfg);
+      const missing = HNSW_BOUNDS.filter((name) => !shared.some((r) => r.name === name) && !(name in dbLevel));
       if (missing.length) {
         console.error(
           `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
@@ -255,7 +286,7 @@ for (const m of migrations) {
             `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
             `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES};\n` +
             `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};\n` +
-            `     Until then thin filters walk with pgvector's defaults and can return short; preflight warns about it.`
+            `     Until then a broad filter's walk runs with pgvector's defaults, which return short on large tables; preflight warns about it.`
         );
       }
     } catch (e) {
@@ -269,16 +300,15 @@ await sql.close();
 const verb = dryRun ? "would apply" : baseline ? "baselined" : "applied";
 console.log(`\n${verb} ${ran}, skipped ${skipped}${drifted ? `, DRIFTED ${drifted}` : ""}`);
 
-if (floorBlocked) {
-  console.error(floorMessage(floorBlocked));
-  process.exit(1);
-}
-
+// Both conditions can hold in one --dry-run (the live path exits inside the
+// loop). Say everything before exiting: a floor message that hid the drift
+// remedy sent the operator to upgrade pgvector and back here for the sha.
+if (floorBlocked) console.error(floorMessage(floorBlocked));
 if (drifted > 0) {
   console.error(
     "\nA migration file changed after it was applied. Migrations are append-only:\n" +
       "add a new file rather than editing an old one. If the edit was intentional and\n" +
       "the database already reflects it, update schema_migrations.sha256 by hand."
   );
-  process.exit(1);
 }
+if (floorBlocked || drifted > 0) process.exit(1);
