@@ -491,8 +491,10 @@ export const TRGM_INDEX = resolveTrgmIndex(ENV.OB1_TRGM_INDEX);
  * dilution. Anyone running a smaller embedding model, or capturing transcripts
  * rather than issue threads, should measure before accepting this default.
  *
- * Turning it on costs one LLM call per chunk at capture — 1.6s each at
- * `qwen2.5:7b` locally, on the 3.4% of captures long enough to chunk.
+ * Turning it on costs one LLM call per chunk at capture — 1.2 to 2.2 seconds
+ * each at `qwen2.5:7b` locally across four runs, on the 3.4% of captures long
+ * enough to chunk. Quoted as a range because it is one: a single figure here
+ * would invite someone to treat run-to-run variance as a regression.
  */
 export const DEFAULT_CHUNK_CONTEXT = false;
 

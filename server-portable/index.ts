@@ -333,6 +333,15 @@ let wholeContentRefused = false;
  *
  * Windows are embedded concurrently; they are independent, and serialising them
  * would multiply the latency of a long capture for no benefit.
+ *
+ * WITH THE FLAG ON, that concurrency has a cost worth knowing before turning it
+ * on. The blurbs are generated concurrently too, and each prompt carries the
+ * WHOLE document — so a six-window capture fires six simultaneous generation
+ * requests, each several thousand tokens, at whatever OB1_LLM_BASE_URL points
+ * at. On a local box running a large model that is a real spike. It is left
+ * concurrent rather than bounded because the alternative is six sequential
+ * generations on the interactive capture path, and neither is obviously right:
+ * anyone turning this on has already been told to measure it first.
  */
 async function embedCapture(content: string): Promise<{
   embedding: number[];

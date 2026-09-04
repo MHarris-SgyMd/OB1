@@ -1284,6 +1284,20 @@ over-batch request that Ollama answers by silently truncating. Sound when
 written, and no longer true of the configured default — which is the argument for
 the ceiling probe being part of this harness rather than a fact anyone remembers.
 
+### One confound, checked rather than assumed
+
+Every contextualization prompt embeds the whole document, so a blurb model whose
+context is smaller than the documents would be writing from a fragment — the
+exact failure chunking exists to fix, reintroduced in the call that produces the
+fix, and invisible in the output. `qwen2.5:7b` on Ollama reads back sentinels at
+both ends of a 31,669-character prompt, twice the longest real document, so the
+tables above are unaffected.
+
+The harness no longer takes that on trust: it runs the probe before generating
+anything and **exits without printing a comparison** if either end is lost.
+Forced to fail, it reports `start LOST, end seen` — the front of the prompt goes
+first, which is precisely the half carrying the document.
+
 ### Reproducibility
 
 Every number above was re-derived from an empty cache after the prompt-keyed

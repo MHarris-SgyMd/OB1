@@ -39,6 +39,9 @@
 --   rather than not at all: a weaker window vector has more to gain from the
 --   extra subject signal than it loses to dilution.
 --
+--   Cost, when it is on: one LLM call per chunk at capture, 1.2 to 2.2 seconds
+--   each at `qwen2.5:7b` locally across four runs.
+--
 -- Design
 --   * ADDITIVE and NULLABLE. An existing chunk row keeps working untouched, and
 --     NULL is the honest reading of one written before this existed: not "no

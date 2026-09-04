@@ -109,7 +109,15 @@ if (resolve(CACHE).startsWith(REPO_ROOT + "/")) {
 }
 
 type Item = { id: string; title: string; text: string; labels: string[] };
-const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
+let ITEMS: Item[];
+try {
+  ITEMS = JSON.parse(await Bun.file(CORPUS).text());
+} catch {
+  console.error(`Cannot read the corpus at ${CORPUS}.`);
+  console.error("Build it with `bun build-linear-corpus.ts` (needs LINEAR_API_KEY; the output");
+  console.error("stays in /tmp, out of git), or point OB1_EVAL_CORPUS at your own.");
+  process.exit(2);
+}
 
 type Doc = Item & { windows: string[] };
 const DOCS: Doc[] = ITEMS.map((it) => ({
@@ -248,6 +256,50 @@ async function blurb(key: string, prompt: string, target: string): Promise<strin
     return "";
   }
   return out;
+}
+
+/**
+ * Does the blurb model see the WHOLE document?
+ *
+ * Every contextualization prompt embeds the entire document, and a generation
+ * context smaller than that is silently truncated by the provider — which is the
+ * exact failure this feature exists to fix, reintroduced one layer up, in the
+ * call that produces the fix. Blurbs would be written from a fragment and the
+ * table below would report contextual retrieval failing for a reason that has
+ * nothing to do with contextual retrieval.
+ *
+ * Sentinels at both ends of the longest document, and the model is asked to read
+ * both back. `qwen2.5:7b` on Ollama passes at 31,669 characters — twice the
+ * longest real document — so the numbers published in evals/README.md are not
+ * affected. A smaller model, or a provider with a tighter default, would be, and
+ * this refuses to publish rather than let that reach a table.
+ */
+{
+  const framed = `START-TOKEN=marzipan\n\n${longest.text}\n\nEND-TOKEN=zylotrope`;
+  const seen = (
+    await complete(
+      `<document>\n${framed}\n</document>\n\nThe document begins with START-TOKEN= and ends with ` +
+        `END-TOKEN=. Reply with exactly: <start value> <end value>. Nothing else.`
+    )
+  ).toLowerCase();
+  const ok = seen.includes("marzipan") && seen.includes("zylotrope");
+  if (!ok) {
+    console.error(
+      `\n  ${CTX_MODEL} could not read back both ends of a ${framed.length}-character prompt ` +
+        `(start ${seen.includes("marzipan") ? "seen" : "LOST"}, end ${seen.includes("zylotrope") ? "seen" : "LOST"}).`
+    );
+    console.error(
+      "  Its context is smaller than the documents being situated, so every blurb would be"
+    );
+    console.error(
+      "  written from a fragment. Raise the model's context or pick a larger one — publishing"
+    );
+    console.error("  a comparison from here would measure the truncation, not the technique.");
+    process.exit(2);
+  }
+  // Not counted as a blurb: it is a probe, and leaving it in the per-call average
+  // would quietly inflate the cost figure this harness reports.
+  llmCalls--;
 }
 
 process.stderr.write(`  … generating blurbs with ${CTX_MODEL}\n`);
