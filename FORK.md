@@ -1232,6 +1232,16 @@ candidate CTE's top `v_fetch` rows by distance — `LIMIT GREATEST(match_count *
 explicit LIMIT capped the candidate set before the filter ran, whatever
 `ef_search` said. A filter matching 1% of the corpus saw 1% of 40 candidates.
 
+**Who it reached, stated plainly because the first two drafts of this section
+overstated it.** The server's own `search_thoughts` has no filter input and
+passes `{}` on every call, in both `server/index.ts` and `server-portable/`.
+So the filtered-recall defect never touched first-party search; it reached
+direct SQL callers, PostgREST RPC callers, and community code that sends its own
+filter — the enhanced-mcp integration's `metadata_filter`, the local-brain
+recipe's search function. The overfetch defect below did reach first-party
+callers, above ten results. The third review pass caught the framing; the
+Linear ticket carries the same correction.
+
 **Measured first, on random vectors.** `db/bench-hnsw.ts`, 64-dimensional unit
 vectors, planted filter tiers, 10 rows asked, against an exact scan of the same
 rows with index scans disabled:
@@ -1401,8 +1411,17 @@ inherited setting, so a database-level GUC is not reported as a missing
 migration. The lookup matches its siblings (name, namespace, argument count)
 rather than casting a signature through `search_path`. It warns if none of
 those hold — the defined-twice class this file keeps naming, in the form of a
-later `CREATE OR REPLACE` that forgets the SET clause — and, on the PostgREST
-store where nothing can be read, says that it cannot check. `test-schema.ts` [8b]
+later `CREATE OR REPLACE` that forgets the SET clause — and words the remedy by
+the ledger, since "apply 014" is a no-op when 014 is recorded and the clause was
+dropped afterwards. On the PostgREST store, where the catalog cannot be read, it
+probes instead: one RPC with a NULL filter returns a row under 014's body and
+nothing under 007's, so the body is verified and the message says the SET
+clauses are not. (The first version of that check was an unconditional warning
+that could never be cleared; the third review pass caught it.) The destructive
+guard the evals carried — refuse to drop a schema on a non-loopback host — now
+lives in `dropSchema` itself, so all eighteen resetting callers inherit it, and
+it refuses an EMPTY host too, because the client resolves that through `PGHOST`.
+`test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
 a 1% filter over 1,000 random rows agrees with an exact scan on a real server.

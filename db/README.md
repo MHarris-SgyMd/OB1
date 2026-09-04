@@ -5,12 +5,13 @@ Phase 1 of the Supabase migration. The Open Brain core schema currently exists a
 where nothing can apply it, version it, or check it. This directory is that DDL
 made executable.
 
-Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector.
+Nothing here is Supabase-specific. It targets any Postgres 15+ with pgvector 0.8.0 or
+later — migration 014 declares HNSW settings that older pgvector rejects.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+
-- To apply against a real database: Postgres 15+ with the `vector` extension
+- To apply against a real database: Postgres 15+ with the `vector` extension at 0.8.0+
   available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted)
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
@@ -61,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `130 assertions: 130 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `133 assertions: 133 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fourteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -329,7 +330,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 130 assertions, PGlite, no container
+bun test-schema.ts                    # 133 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 41 assertions, real server, throwaway container
 ```
 
@@ -355,7 +356,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 130 properties, including:
+asserts 133 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

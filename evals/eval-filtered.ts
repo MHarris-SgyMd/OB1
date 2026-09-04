@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * eval-filtered.ts — what a filtered `search_thoughts` returns on real data,
- * before and after migration 014.
+ * eval-filtered.ts — what a filtered `match_thoughts` call returns on real
+ * data, before and after migration 014.
  *
  * SMD-968: `match_thoughts` chose its candidates first and applied the metadata
  * filter afterwards, so a filter matching a small share of the corpus saw a
@@ -10,6 +10,12 @@
  * come from — 441 real issues with their real labels — using the function as
  * deployed, in a real Postgres, with the rows stored the way the server stores
  * them (whole-content vector plus bare windows for the long ones).
+ *
+ * Who sends a filter: not the server's own `search_thoughts`, whose input has
+ * no filter and which passes `{}` on every call. The filter argument is reached
+ * by direct SQL, by PostgREST RPC callers, and by community code — the
+ * enhanced-mcp integration's `metadata_filter`, the local-brain recipe's search
+ * function. This eval measures the function they call.
  *
  * ── The task, and why it is not "title finds its document" ──────────────────
  *
@@ -62,8 +68,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chunkContent, DEFAULT_MAX_TOKENS } from "../server-portable/chunk.ts";
 import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
-import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "../db/test-support.ts";
-import { embed, cosine, parseSpec, requireLoopbackDatabase } from "./lib.ts";
+import { applyMigrations, assertThrowawayDatabase, requireDatabaseUrl, resetSchema, seededRandom } from "../db/test-support.ts";
+import { embed, cosine, parseSpec } from "./lib.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
@@ -80,7 +86,8 @@ for (const [what, p] of [["corpus", CORPUS], ["embedding cache", CACHE]] as cons
   }
 }
 const DB_URL = requireDatabaseUrl("evals/eval-filtered.ts");
-requireLoopbackDatabase(DB_URL, CORPUS);
+// dropSchema enforces this too; checking here fails before the embedding work.
+assertThrowawayDatabase(DB_URL);
 
 /**
  * Read and parse a JSON file, telling a missing file apart from a broken one.

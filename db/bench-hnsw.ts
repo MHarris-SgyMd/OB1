@@ -77,8 +77,16 @@ const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
   .split(",")
   .map((s) => Number(s.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
-/** Random queries per selectivity. */
+/** Random queries per selectivity. Validated: a typo here would surface only after the load. */
 const Q = Number(process.env.OB1_BENCH_QUERIES ?? 50);
+if (!Number.isInteger(Q) || Q < 1) {
+  console.error(`OB1_BENCH_QUERIES must be a positive integer (got ${JSON.stringify(process.env.OB1_BENCH_QUERIES)})`);
+  process.exit(2);
+}
+if (SCALES.length === 0) {
+  console.error(`OB1_BENCH_SCALES must name at least one positive row count (got ${JSON.stringify(process.env.OB1_BENCH_SCALES)})`);
+  process.exit(2);
+}
 /** Result size for the filtered arm. The server's default is 10. */
 const K = 10;
 /** Share of thoughts that also get chunk rows, so the chunk CTE is exercised. */
@@ -87,10 +95,12 @@ const CHUNKS_PER = 2;
 
 /**
  * Planted selectivities. `tiers` is one key so a filter is one containment
- * test, the same shape `search_thoughts` sends for `{"type": "decision"}`.
- * The tiers nest (a row in t001 is also in t01, t1, t10, t50) so every
- * selectivity is a superset of the next and the comparison is between filter
- * sizes only. `none` matches no row at all.
+ * test — the shape a direct caller sends as `{"type": "decision"}`. (The
+ * server's own `search_thoughts` sends no filter; the filter argument is
+ * reached by direct SQL, PostgREST RPC callers and community code such as the
+ * enhanced-mcp integration's `metadata_filter`.) The tiers nest (a row in t001
+ * is also in t01, t1, t10, t50) so every selectivity is a superset of the next
+ * and the comparison is between filter sizes only. `none` matches no row.
  */
 const TIERS: { key: string; share: number }[] = [
   { key: "t50", share: 0.5 },
@@ -314,12 +324,20 @@ async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: P
     const rows = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets.
-      const [{ cfg }] = await tx.unsafe(
-        `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
+      // proconfig is read as an array and applied through set_config with bound
+      // parameters: a joined string split on commas would break the first time
+      // a list-valued setting such as `search_path = public, extensions` is
+      // added to the function, and it would break after the full load.
+      const entries = await tx.unsafe(
+        `SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
       );
-      for (const kv of String(cfg ?? "").split(",").filter(Boolean)) {
-        const [k, v] = kv.split("=");
-        await tx.unsafe(`SET LOCAL ${k} = ${v}`);
+      for (const { kv } of entries as { kv: string }[]) {
+        const eq = kv.indexOf("=");
+        if (eq < 0) throw new Error(`unexpected proconfig entry ${JSON.stringify(kv)}`);
+        // plan_cache_mode is the one setting the bench must NOT inherit here:
+        // this section exists to show both plans.
+        if (kv.slice(0, eq) === "plan_cache_mode") continue;
+        await tx.unsafe(`SELECT set_config($1, $2, true)`, [kv.slice(0, eq), kv.slice(eq + 1)]);
       }
       await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
       await tx.unsafe(`PREPARE bench_mt(vector(${DIM}), float, int, jsonb) AS ${body}`);

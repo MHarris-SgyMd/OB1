@@ -407,6 +407,21 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   const none = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"z"}'::jsonb)`, [unit(0)]);
   assert(none.rows[0].c === 0, "a filter nothing matches still returns nothing");
 
+  // The unfiltered path must not depend on metadata being an object, or on it
+  // being present at all. 001 declares the column nullable with no type check,
+  // and the `||` merges in 005 and 013 can turn an object into an array. A
+  // "simplification" to `metadata @> COALESCE(filter, '{}')` would drop these
+  // rows from every unfiltered search: `NULL @> '{}'` is NULL and
+  // `'[1]' @> '{}'` is false. The boolean local in 014's body is load-bearing.
+  await db.exec(`UPDATE thoughts SET metadata = NULL WHERE content = 'crowd 0'`);
+  await db.exec(`UPDATE thoughts SET metadata = '[1]'::jsonb WHERE content = 'crowd 1'`);
+  const odd = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [unit(0)]);
+  const oddNames = odd.rows.map((r) => r.content);
+  assert(oddNames.includes("crowd 0"), "a row with NULL metadata is returned by an unfiltered search");
+  assert(oddNames.includes("crowd 1"), "a row with array metadata is returned by an unfiltered search");
+  const oddFiltered = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
+  assert(oddFiltered.rows[0].c === 10, `…and a filter simply does not match them, without error (got ${oddFiltered.rows[0].c} of the 58 remaining kind "a")`);
+
   // 007 evaluated `NULL = '{}' OR metadata @> NULL` → NULL → every row excluded.
   const nul = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, NULL::jsonb)`, [unit(0)]);
   assert(nul.rows[0].c === 10, `a NULL filter is unfiltered (got ${nul.rows[0].c} rows, 007 gave 0)`);

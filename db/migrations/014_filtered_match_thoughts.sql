@@ -25,6 +25,14 @@
 --      69 to 77. 007's header calling the factor "a recall budget, not a guess"
 --      was true only at match_count <= 10.
 --
+--   Who this reached. The server's own search_thoughts tool has no filter
+--   input and passes `{}` on every call (server/index.ts and
+--   server-portable/index.ts both), so defect 1 never touched first-party
+--   search. It reached direct SQL callers, PostgREST RPC callers, and community
+--   code that sends a filter of its own — integrations/enhanced-mcp's
+--   `metadata_filter`, recipes/local-brain-no-mcp's search function. Defect 2
+--   did reach first-party callers, above match_count 10.
+--
 --   Measured before this migration — db/bench-hnsw.ts, 10,000 random rows,
 --   pgvector 0.8.6, 50 random queries per filter, 10 rows asked, against an
 --   exact scan over the same rows:
@@ -124,6 +132,36 @@
 --     planner still prefers the HNSW index under a filter, so these are a floor
 --     under a path that is now rarely taken — but they are the reason that path
 --     returns everything when it is.
+--
+--   * Two invariants the body leans on, stated because SMD-945 and SMD-958 will
+--     rewrite it. First, `v_unfiltered` is a BOOLEAN LOCAL, not a rewrite of
+--     the filter: under the forced custom plan it is a known constant, so on
+--     the default path `true OR …` folds away and the chunk-side join can be
+--     removed, and on the filtered path `false OR …` leaves a strict predicate
+--     the planner can route to the GIN index. A tempting simplification —
+--     `WHERE t.metadata @> COALESCE(filter, '{}')` — is wrong twice: it drops
+--     every row whose metadata is NULL or not an object from UNFILTERED search
+--     (`NULL @> '{}'` is NULL, `'[1]' @> '{}'` is false), and with no
+--     containment statistics the planner would route the default path to the
+--     GIN bitmap and lose the join removal. Second, therefore: `thoughts.metadata`
+--     is nullable and unconstrained (001 declares `jsonb DEFAULT '{}'` with no
+--     NOT NULL and no jsonb_typeof CHECK; 004 stores `p_payload->'metadata'`
+--     unchecked; the `||` merges in 005 and 013 can turn an object into an
+--     array). The unfiltered path must not care. db/test-schema.ts [8b] plants a
+--     NULL row and an array row and asserts both come back unfiltered.
+--
+--   * `v_fetch := GREATEST(match_count * 4, 20)` is 007's factor, kept on
+--     purpose. 007 justified it as a recall budget against the ef_search cap,
+--     which no longer applies; the reasons it still earns its place are that
+--     under relaxed_order the CTE has no Sort node — `LIMIT v_fetch` slices an
+--     approximately ordered yield, and the slack is what absorbs candidates the
+--     scan delivers slightly out of order — and that the chunked CTE's rows
+--     collapse to one per thought, so several of its candidates are the same
+--     answer. The cost is real on the walk path: the scan finds 4x the
+--     filter-passing rows the caller asked for, and the tuple-cap arithmetic
+--     above inherits the factor. Sizing it differently (smaller on `direct`,
+--     chunk-count-based on `chunked`) is a follow-up with its own measurement,
+--     which must include the unfiltered row-identity control the eval runs.
 --
 --   * These are function-level SETs, and CREATE OR REPLACE FUNCTION rewrites
 --     proconfig wholesale, so an operator's `ALTER FUNCTION ... SET

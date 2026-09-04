@@ -45,8 +45,8 @@
  */
 
 import { SQL } from "bun";
-import { embed, cosine, requireLoopbackDatabase } from "./lib.ts";
-import { resetSchema } from "../db/test-support.ts";
+import { embed, cosine } from "./lib.ts";
+import { assertThrowawayDatabase, resetSchema } from "../db/test-support.ts";
 
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
 const MODEL = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "qwen3-embedding:4b";
@@ -62,7 +62,8 @@ if (!DB_URL) {
   process.exit(2);
 }
 // Drops the schema, then loads internal data into it: a loopback host or nothing.
-requireLoopbackDatabase(DB_URL, CORPUS);
+// dropSchema enforces this too; checking here fails before the embedding work.
+assertThrowawayDatabase(DB_URL);
 
 type Item = { id: string; title: string; text: string };
 const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());

@@ -96,6 +96,46 @@ export function substitute(sql: string, opts: SchemaOptions): string {
 }
 
 /**
+ * Refuse to drop a database that is not obviously a throwaway.
+ *
+ * Every suite and bench in this repo resets the schema — eighteen callers — and
+ * two of them then load internal engineering data into what they cleared.
+ * Pointed at anything real by a stale `DATABASE_URL` in a shell, one command
+ * destroys that database with no prompt. The check lived beside two of the
+ * callers before the third review pass; it lives in `dropSchema` now so every
+ * destructive caller inherits it.
+ *
+ * Three details the first version got wrong. The host is lowercased, so
+ * `LocalHost` is not refused. IPv6 loopback is `[::1]` as WHATWG URL reports
+ * it, brackets kept. And an EMPTY host is refused rather than trusted: Bun's SQL
+ * client resolves `postgres:///db` through PGHOST, exactly as libpq does, so an
+ * empty hostname is whatever the shell says it is — not loopback.
+ *
+ * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
+ * to mean.
+ */
+export function assertThrowawayDatabase(url: string): void {
+  if (process.env.OB1_ALLOW_REMOTE_DB === "1") return;
+  let host: string | null = null;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    /* unparseable: refuse below */
+  }
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+  if (host && LOOPBACK.has(host)) return;
+  const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
+  console.error(
+    `  Refusing to drop the schema at ${shown}.\n\n` +
+      `  This command DROPS every table Open Brain owns in that database. That is\n` +
+      `  safe against a throwaway container and destructive against anything else.\n` +
+      `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
+      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+  );
+  process.exit(2);
+}
+
+/**
  * Drop every table and function the schema owns.
  *
  * Separate from applying, because one suite legitimately needs to observe the
@@ -104,6 +144,7 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * exists for a single caller.
  */
 export async function dropSchema(url: string): Promise<void> {
+  assertThrowawayDatabase(url);
   const admin = new SQL({ url, max: 1 });
   try {
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);

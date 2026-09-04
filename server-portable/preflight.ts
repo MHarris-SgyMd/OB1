@@ -212,18 +212,12 @@ if (configFailed) {
           "OB1_CHUNK_CONTEXT is on, but the PostgREST store cannot be checked against the schema from here — if migration 013 is not applied, every blurb is embedded and none is recorded",
           "Confirm db/migrations/013_chunk_context.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
     }
-    // Migration 014 is the other silent one: without it a filtered search
-    // returns fewer rows than match, with no error anywhere. Same rule as above.
-    if (built.kind !== "sql") {
-      add("filtered search", "warn",
-          "the PostgREST store cannot be checked against the schema from here — if migration 014 is not applied, a filtered search_thoughts silently returns fewer rows than match, near zero for a filter matching under 1% of the corpus",
-          "Confirm db/migrations/014_filtered_match_thoughts.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
-    }
-
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
+    let rowCount: number | null = null;
     try {
       const n = await built.countThoughts();
+      rowCount = n;
       add("schema", "ok", `thoughts table reachable, ${n} row(s)`);
     } catch (e) {
       const msg = (e as Error).message;
@@ -231,6 +225,51 @@ if (configFailed) {
           /does not exist|relation/i.test(msg)
             ? "Apply the migrations: cd db && bun migrate.ts --url $DATABASE_URL"
             : "Check credentials and network reachability to the database.");
+    }
+
+    /**
+     * Migration 014 through PostgREST, where the catalog cannot be read. The
+     * body can still be told apart from 007's: 007 evaluated a NULL filter as
+     * `NULL = '{}' OR metadata @> NULL`, which excluded every row, and 014
+     * treats NULL as unfiltered. So one RPC with `filter := null` against a
+     * non-empty table returns a row under 014 and nothing under 007. That
+     * proves the body, not the SET clauses — those need OB1_STORE=sql — and
+     * the message says so. With no rows there is nothing to probe with, and
+     * that is reported as a skip rather than as a permanent warning nobody can
+     * clear (which is what the first version of this check was).
+     *
+     * The gap it guards is narrow: the server's own search_thoughts sends no
+     * filter, so 007's recall loss reached only direct SQL, PostgREST RPC
+     * callers and community code with a metadata filter of their own.
+     */
+    if (built.kind !== "sql") {
+      if (rowCount === null) {
+        add("filtered search", "skip", "not probed — the schema check above failed first");
+      } else if (rowCount === 0) {
+        add("filtered search", "skip", "no rows to probe with; run once with OB1_STORE=sql to read the catalog");
+      } else {
+        try {
+          const probe = new Array(embDim).fill(0);
+          probe[0] = 1;
+          const rows = await built.matchThoughts({
+            embedding: probe,
+            threshold: -1,
+            limit: 1,
+            filter: null as unknown as Record<string, unknown>,
+          });
+          if (rows.length >= 1) {
+            add("filtered search", "ok",
+                "match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — run once with OB1_STORE=sql to see them)");
+          } else {
+            add("filtered search", "warn",
+                "match_thoughts returned nothing for a NULL filter, which is 007's behaviour — migration 014 is not applied, so a filtered match_thoughts call (direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter) silently returns fewer rows than match",
+                "Apply db/migrations/014_filtered_match_thoughts.sql.");
+          }
+        } catch (e) {
+          add("filtered search", "warn", `could not probe match_thoughts: ${(e as Error).message}`,
+              "Run preflight once with OB1_STORE=sql against the same database.");
+        }
+      }
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
@@ -324,9 +363,11 @@ if (configFailed) {
          * the whole fix, and it is the kind of thing a later CREATE OR REPLACE
          * of match_thoughts silently drops — the redefinition succeeds, the
          * signature is unchanged, every unfiltered search still works, and a
-         * filtered one returns 0.4 rows of 10 asked at 1% selectivity
-         * (db/bench-hnsw.ts). So the check reads the catalog, not the
-         * migration ledger.
+         * filtered call returns 0.8 rows of 10 asked at 1% selectivity on
+         * 10,000 rows (db/bench-hnsw.ts). So the check reads the catalog, not
+         * the migration ledger — though the ledger is consulted at the end to
+         * word the remedy: "apply 014" is useless advice when 014 is recorded
+         * as applied and a later redefinition dropped the clause.
          *
          * The function's own SET is read FIRST, because it is the fact: the
          * `hnsw.*` settings come from pgvector's loaded shared library, not from
@@ -357,24 +398,31 @@ if (configFailed) {
           FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
           WHERE e.extname = 'vector'`;
         const installed = pgv.length ? String(pgv[0].extversion) : null;
-        const available = pgv.length ? String(pgv[0].default_version ?? pgv[0].extversion) : null;
-        if (declared && installed && !versionAtLeast(installed, 0, 8)) {
+        // default_version is NULL when the server's control file is unreadable;
+        // then nothing is known about the library and no "update" can be advised.
+        const available = pgv.length && pgv[0].default_version != null ? String(pgv[0].default_version) : null;
+        const installedOld = installed !== null && !versionAtLeast(installed, 0, 8);
+        const libraryNew = available !== null && versionAtLeast(available, 0, 8);
+        const exposure =
+          "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
+        if (declared && installedOld && libraryNew) {
           add("filtered search", "warn",
               `match_thoughts scans iteratively under a metadata filter (${declared}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
               "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
         } else if (declared) {
-          add("filtered search", "ok", `match_thoughts scans iteratively under a metadata filter (${declared}, pgvector ${installed ?? "unknown"})`);
+          add("filtered search", "ok",
+              `match_thoughts scans iteratively under a metadata filter (${declared}, pgvector ${installed ?? "unknown"}${installedOld ? " per a catalog record the loaded library has outgrown" : ""})`);
         } else if (installed === null) {
           add("filtered search", "warn", "the vector extension is not installed, so match_thoughts cannot be checked",
               "Apply the migrations; 001 creates the extension.");
-        } else if (!versionAtLeast(installed, 0, 8) && !versionAtLeast(available ?? installed, 0, 8)) {
-          add("filtered search", "warn",
-              `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and a filtered search_thoughts silently returns fewer rows than match — near zero for a filter matching under 1% of the corpus`,
-              "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
-        } else if (!versionAtLeast(installed, 0, 8)) {
+        } else if (installedOld && libraryNew) {
           add("filtered search", "warn",
               `match_thoughts does not carry hnsw.iterative_scan, and pg_extension records pgvector ${installed} while the server's library is ${available} — migration 014 is not applied, and the extension record lags the binary`,
               "ALTER EXTENSION vector UPDATE;  then apply db/migrations/014_filtered_match_thoughts.sql.");
+        } else if (installedOld) {
+          add("filtered search", "warn",
+              `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${exposure} — near zero for a filter matching under 1% of the corpus`,
+              "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
         } else {
           const inherited = await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`;
           const v = String(inherited[0]?.v ?? "off");
@@ -382,9 +430,26 @@ if (configFailed) {
             add("filtered search", "ok",
                 `match_thoughts scans iteratively under a metadata filter, inheriting hnsw.iterative_scan=${v} from the database or role rather than its own SET clause (pgvector ${installed})`);
           } else {
-            add("filtered search", "warn",
-                "match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied, or a later redefinition dropped its SET clause — so a filtered search_thoughts silently returns fewer rows than match",
-                "Apply db/migrations/014_filtered_match_thoughts.sql.");
+            // Which remedy is right depends on whether 014 is recorded: if it
+            // is, "apply 014" is a no-op — the migrator skips it — and the
+            // clause has to be put back by hand.
+            let recorded = false;
+            try {
+              const led = await sql`
+                SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
+              recorded = Number(led[0]?.c ?? 0) > 0;
+            } catch {
+              /* no ledger: the schema was applied by hand, treat as not recorded */
+            }
+            if (recorded) {
+              add("filtered search", "warn",
+                  `match_thoughts does not carry hnsw.iterative_scan although migration 014 is recorded as applied — a later redefinition dropped its SET clauses — so ${exposure}`,
+                  "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET hnsw.max_scan_tuples = 100000 SET hnsw.scan_mem_multiplier = 8 SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.");
+            } else {
+              add("filtered search", "warn",
+                  `match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied — so ${exposure}`,
+                  "Apply db/migrations/014_filtered_match_thoughts.sql.");
+            }
           }
         }
 

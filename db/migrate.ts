@@ -2,8 +2,9 @@
 /**
  * migrate.ts — apply db/migrations/*.sql in order, once each.
  *
- * Works against any Postgres 15+ with pgvector. Uses Bun's built-in SQL client,
- * so there is no driver dependency.
+ * Works against any Postgres 15+ with pgvector 0.8.0 or later — migration 014
+ * declares HNSW settings that older pgvector rejects. Uses Bun's built-in SQL
+ * client, so there is no driver dependency.
  *
  *   bun db/migrate.ts --url postgres://user:pass@host:5432/dbname
  *   DATABASE_URL=... bun db/migrate.ts
@@ -154,7 +155,32 @@ for (const m of migrations) {
     console.log(`  ✓  ${m.name}  applied`);
     ran++;
   } catch (err) {
-    console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    console.error(`  ✗  ${m.name}  FAILED: ${message}`);
+    // pgvector rejects an unknown hnsw.* setting with "invalid configuration
+    // parameter name" — the prefix is reserved. That is the version floor 014
+    // introduced showing itself, and the raw error says nothing about versions.
+    if (/invalid configuration parameter name "hnsw\./.test(message)) {
+      let installed = "unknown";
+      let available = "unknown";
+      try {
+        const [row] = await sql`
+          SELECT e.extversion, a.default_version
+          FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
+          WHERE e.extname = 'vector'`;
+        installed = String(row?.extversion ?? installed);
+        available = String(row?.default_version ?? available);
+      } catch {
+        /* the hint below is still right without the numbers */
+      }
+      console.error(
+        `\n  This migration needs pgvector 0.8.0 or later (installed: ${installed}, available on this server: ${available}).\n` +
+          (available !== "unknown" && available !== installed
+            ? `  The server has a newer library than this database's extension record: run\n    ALTER EXTENSION vector UPDATE;\n  and re-run the migrator.\n`
+            : `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run the migrator.\n`) +
+          `  Migrations before this one are applied and recorded; nothing needs undoing.`
+      );
+    }
     await sql.close();
     process.exit(1);
   }
