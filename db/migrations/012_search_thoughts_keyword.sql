@@ -256,6 +256,35 @@
 -- Hybrid ranking — fusing this with `match_thoughts` — is deliberately not here.
 -- Get exact match right first; blending is a follow-up with its own evaluation.
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- No GRANT, no SECURITY DEFINER — and upstream has both
+-- ═══════════════════════════════════════════════════════════════════════════
+-- `schemas/enhanced-thoughts` ends its version with
+--
+--   GRANT EXECUTE ON FUNCTION search_thoughts_text(...) TO authenticated, service_role;
+--
+-- and a comment warning not to add `anon`, because that would expose the whole
+-- brain to anyone holding the project's publishable key. That warning is sound
+-- ON SUPABASE and does not apply here: `authenticated` and `service_role` are
+-- GoTrue/Supabase-managed roles that do not exist off it, and this fork has one
+-- application role that owns the database. A GRANT to a role that is absent is a
+-- migration that fails to apply. Migrations 004, 008 and 010 each say the same
+-- thing about their own functions, and `db/test-schema.ts` [10] asserts it
+-- repo-wide — a copied `GRANT TO service_role` fails that suite.
+--
+-- No SECURITY DEFINER either, matching 010: this function reads exactly what its
+-- caller could already read, so definer rights would buy nothing and would add
+-- the search_path attack surface that makes them worth avoiding.
+--
+-- ── One trap for whoever edits this next ─────────────────────────────────────
+-- `CREATE OR REPLACE FUNCTION` cannot change a function's return type, and the
+-- `RETURNS TABLE` below IS the return type. Adding, removing or renaming an
+-- output column here raises `cannot change return type of existing function`
+-- against any database that already applied this file. A later migration that
+-- needs a different shape must `DROP FUNCTION search_thoughts_keyword(text, int,
+-- int, jsonb)` first. This is the same class of trap migration 008 documents for
+-- `upsert_thought`, where `CREATE OR REPLACE` silently replaced a whole body.
+
 CREATE OR REPLACE FUNCTION search_thoughts_keyword(
   p_query   text,
   p_limit   int   DEFAULT 25,

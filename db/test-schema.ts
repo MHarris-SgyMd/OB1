@@ -371,7 +371,28 @@ console.log("\n[9] updated_at trigger fires on update, created_at does not move"
 
 console.log("\n[10] Migrations carry nothing Supabase-specific");
 {
-  const all = files.map((f) => subst((readFileSync(join(MIGRATIONS, f), "utf8")))).join("\n");
+  /**
+   * Comments are stripped before scanning, and that is not a convenience.
+   *
+   * These are text searches over the migration files, so they cannot tell a
+   * statement from prose ABOUT a statement. Migration 012's header quotes the
+   * `GRANT EXECUTE ... TO authenticated, service_role` that upstream's version
+   * ends with, in order to explain why this fork does not have it — and that
+   * quotation failed this assertion. A guard that forbids DISCUSSING the thing
+   * it forbids pushes the explanation out of the file, which is the opposite of
+   * what these headers are for.
+   *
+   * Stripping first makes the check strictly sharper, not laxer: it still sees
+   * every executable statement, and it stops seeing text that only describes
+   * one. `--` to end of line, and `/* *\/` blocks; no migration here puts either
+   * sequence inside a string literal, and one that did would be a reason to
+   * parse rather than to widen this.
+   */
+  const executable = (sql: string) =>
+    sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  const all = files
+    .map((f) => executable(subst(readFileSync(join(MIGRATIONS, f), "utf8"))))
+    .join("\n");
   assert(!/auth\.uid\(\)/.test(all), "no auth.uid() — GoTrue does not exist off Supabase");
   assert(!/auth\.role\(\)/.test(all), "no auth.role() — the core RLS policy is dropped deliberately");
   assert(!/\bTO service_role\b/.test(all), "no GRANT TO service_role — that role is Supabase-managed");
