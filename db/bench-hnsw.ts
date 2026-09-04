@@ -278,11 +278,15 @@ async function extractBody(sql: SQL): Promise<string> {
   if (!m) throw new Error("match_thoughts has no single RETURN QUERY; the bench's rewrite does not apply");
   let body = m[1];
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
+  const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
     const d = /^\s*(\w+)\s+\w+\s*:=\s*(.+);\s*$/.exec(line);
-    if (!d) continue;
-    const [, name, expr] = d;
-    body = body.replace(new RegExp(`\\b${name}\\b`, "g"), `(${expr})`);
+    if (d) locals.push([d[1], d[2]]);
+  }
+  // Locals may reference earlier locals (v_fetch is built from v_count), so
+  // substitute until none remain rather than in one pass over the list.
+  for (let pass = 0; pass < locals.length + 1; pass++) {
+    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), `(${expr})`);
   }
   body = body
     .replace(/\bquery_embedding\b/g, `$1::vector(${DIM})`)
@@ -356,7 +360,18 @@ async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: P
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-const sql = new SQL({ url: URL_, max: 1 });
+let sql = new SQL({ url: URL_, max: 1 });
+/**
+ * Database-level settings (014 seeds the walk's two bounds with ALTER DATABASE)
+ * are read at session START. RESET ALL does not fetch them — it restores the
+ * connect-time value — so a session that predates the migration keeps
+ * pgvector's defaults. The first draft did exactly that and measured section D
+ * under bounds it did not have. Reconnect instead.
+ */
+async function reconnect(): Promise<void> {
+  await sql.close();
+  sql = new SQL({ url: URL_, max: 1 });
+}
 
 type Arm = "before (001–013)" | "after (014)";
 type Cell = FilteredResult & { key: string; share: number; matches: number };
@@ -375,9 +390,7 @@ let banner = false;
 for (const n of SCALES) {
   console.log(`▸ ${n.toLocaleString()} rows — loading`);
   await resetSchema(URL_, { ...OPTS, only: (f) => f < "014" });
-  // 014 seeds the walk's bounds at DATABASE level, which sessions read at
-  // connect; this session may predate them, so re-read its defaults.
-  await sql.unsafe(`RESET ALL`);
+  await reconnect();
   if (!banner) {
     // The extension exists only once the schema does, so the banner waits.
     const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
@@ -407,7 +420,9 @@ for (const n of SCALES) {
   for (const arm of ["before (001–013)", "after (014)"] as Arm[]) {
     if (arm === "after (014)") {
       await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
-      await sql.unsafe(`RESET ALL`); // pick up the database-level bounds 014 just seeded
+      await reconnect(); // the database-level bounds 014 just seeded are read at connect
+      const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
+      if (t !== "100000" || m !== "8") throw new Error(`session did not pick up 014's bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m})`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10 } = await unfiltered(sql, queries);

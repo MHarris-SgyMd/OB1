@@ -73,6 +73,17 @@ function isLocalEndpoint(url: string): boolean {
 }
 const localProvider = isLocalEndpoint(llmBase);
 
+/**
+ * Migration 014's exposure and remedy, once, for both store paths. The
+ * PostgREST and SQL checks below used to each carry their own copy; the next
+ * edit to either — say, when search_thoughts gains a filter input — would have
+ * landed in one and left the two stores contradicting each other.
+ */
+const EXPOSURE =
+  "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
+const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
+const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
+
 // ── Configuration ────────────────────────────────────────────────────────────
 
 if (store !== "postgrest" && store !== "sql") {
@@ -240,7 +251,7 @@ if (configFailed) {
       if (rowCount === null) {
         add("filtered search", "skip", "not probed — the schema check above failed first");
       } else if (rowCount === 0) {
-        add("filtered search", "skip", "no rows to probe with; run once with OB1_STORE=sql to read the catalog");
+        add("filtered search", "skip", `no rows to probe with; ${CATALOG_HINT}`);
       } else {
         try {
           const probe = new Array(embDim).fill(0);
@@ -260,19 +271,19 @@ if (configFailed) {
               })
             : [];
           if (!anyEmbedded.length) {
-            add("filtered search", "skip", `${rowCount} row(s) but none with an embedding to probe with; run once with OB1_STORE=sql to read the catalog`);
+            add("filtered search", "skip", `${rowCount} row(s) but none with an embedding to probe with; ${CATALOG_HINT}`);
           } else if (rows.length >= 1) {
             add("filtered search", "ok",
-                "match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — run once with OB1_STORE=sql to see them)");
+                `match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — ${CATALOG_HINT})`);
           } else {
             add("filtered search", "warn",
-                "match_thoughts returned nothing for a NULL filter, which every body before 014 does — the migrations are not applied through 014, so a filtered match_thoughts call (direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter) silently returns fewer rows than match",
-                "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.");
+                `match_thoughts returned nothing for a NULL filter, which every body before 014 does — the migrations are not applied through 014, so ${EXPOSURE}`,
+                APPLY_014);
           }
         } catch (e) {
           // A failed probe is not evidence either way — a width mismatch or a
           // permission error says nothing about the body — so it is a skip.
-          add("filtered search", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); run once with OB1_STORE=sql to read the catalog`);
+          add("filtered search", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
       }
     }
@@ -412,17 +423,15 @@ if (configFailed) {
           const bounds = await sql`
             SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
           const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
-          const exposure =
-            "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
           const putBack =
             "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.";
-          const applyIt = "Apply db/migrations/014_filtered_match_thoughts.sql.";
+          const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
             add("filtered search", "warn", "match_thoughts is not defined, so nothing here can be checked", "Apply the migrations.");
           } else if (bodyIs014 && inForce) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
-            if (installedOld && libraryNew) {
+            if (staleRecord) {
               add("filtered search", "warn",
                   `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}; ${boundsText}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
                   "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
@@ -432,21 +441,27 @@ if (configFailed) {
             }
           } else if (bodyIs014) {
             add("filtered search", "warn",
-                `match_thoughts has 014's body but no iterative scan in force${ledgerHas014 ? " although migration 014 is recorded as applied" : ""} — a later redefinition dropped its SET clauses — so ${exposure}`,
+                `match_thoughts has 014's body but no iterative scan in force${ledgerHas014 ? " although migration 014 is recorded as applied" : ""} — a later redefinition dropped its SET clauses — so ${EXPOSURE}`,
                 putBack);
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
-                `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${exposure} — near zero for a filter matching under 1% of the corpus`,
+                `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
                 "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
           } else {
+            // The body predates 014. Say what IS on the function accurately: a
+            // SET clause an operator added by hand is present and useless here.
             const dropped = ledgerHas014 ? " although migration 014 is recorded as applied — a later redefinition replaced its body" : " — migration 014 is not applied";
-            const setNote = inForce ? `; the ${declared ? "SET clause" : "inherited hnsw.iterative_scan"} present cannot help this body, whose LIMIT sits before the filter` : "";
-            const stale = installedOld && libraryNew ? `; pg_extension records pgvector ${installed} while the server's library is ${available}, so run ALTER EXTENSION vector UPDATE first` : "";
+            const setting = declared
+              ? `carries hnsw.iterative_scan=${declared} as a SET clause, which cannot help this body, whose LIMIT sits before the filter`
+              : inForce
+                ? `inherits hnsw.iterative_scan=${inForce} from the database or role, which cannot help this body, whose LIMIT sits before the filter`
+                : "does not carry hnsw.iterative_scan";
+            const stale = staleRecord ? `; pg_extension records pgvector ${installed} while the server's library is ${available}, so run ALTER EXTENSION vector UPDATE first` : "";
             add("filtered search", "warn",
-                `match_thoughts does not carry hnsw.iterative_scan and its body predates 014${dropped}${setNote}${stale} — so ${exposure}`,
+                `match_thoughts ${setting}, and its body predates 014${dropped}${stale} — so ${EXPOSURE}`,
                 ledgerHas014
                   ? "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts."
-                  : applyIt);
+                  : APPLY_014);
           }
         } catch (e) {
           add("filtered search", "warn", `could not verify: ${(e as Error).message}`,

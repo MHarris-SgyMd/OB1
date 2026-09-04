@@ -1248,25 +1248,25 @@ rows with index scans disabled:
 
 | rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 50% | 10.0 | 8.0 | 0/50 | 10.0 | 9.4 | 0/50 |
-| 10,000 | 10% | 5.4 | 4.9 | 0/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 50% | 10.0 | 7.7 | 0/50 | 10.0 | 9.4 | 0/50 |
+| 10,000 | 10% | 5.4 | 5.0 | 0/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 1% | 0.8 | 0.8 | 25/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 0.1% (9 rows) | 0.1 | 0.1 | 46/50 | 9.0 | 9.0 | 0/50 |
-| 100,000 | 50% | 10.0 | 4.7 | 0/50 | 10.0 | 6.6 | 0/50 |
-| 100,000 | 10% | 5.7 | 3.6 | 0/50 | 10.0 | 8.7 | 0/50 |
-| 100,000 | 1% | 0.5 | 0.5 | 28/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 50% | 10.0 | 4.4 | 0/50 | 10.0 | 6.0 | 0/50 |
+| 100,000 | 10% | 5.9 | 3.9 | 0/50 | 10.0 | 9.0 | 0/50 |
+| 100,000 | 1% | 0.6 | 0.6 | 27/50 | 10.0 | 10.0 | 0/50 |
 | 100,000 | 0.1% | 0.0 | 0.0 | 49/50 | 10.0 | 10.0 | 0/50 |
 | 100,000 | 0.01% (6 rows) | 0.0 | 0.0 | 50/50 | 6.0 | 6.0 | 0/50 |
 
-Two things in the after column are not the fix. The 6.6 and 8.7 at 100,000
+Two things in the after column are not the fix. The 6.0 and 9.0 at 100,000
 rows for the broad filters are the HNSW approximation — random uniform vectors
-are the index's hardest case, and 007 scored 4.7 and 3.6 on the same rows; the
+are the index's hardest case, and 007 scored 4.4 and 3.9 on the same rows; the
 iterative scan improves it because it keeps going, but `ef_search` is unchanged
 and so is the index. And the two thinnest rows return fewer than ten because
 fewer than ten exist; they are there to show the scan reaching past its
 candidate budget for every matching row and finding them all.
 
-**These tables were measured twice.** The first bench's random generator was an
+**These tables were measured three times.** The first bench's random generator was an
 LCG multiplied in doubles; past 2^53 its low bits are rounding noise and the
 stream repeats every 10,466 draws, so at 100,000 rows the corpus held ~10,000
 distinct vectors stored up to ten times each and every "random" query was
@@ -1277,7 +1277,11 @@ if any query lies within cosine 0.99 of a stored row (it prints the nearest,
 0.56–0.59 here), and every number in this section is from the re-measurement.
 The shape of the finding did not change; the broad-filter approximation, the
 default path's cost and the scan bound's behaviour did, and are reported as
-re-measured.
+re-measured. The third measurement came after the sixth review pass found that
+the bench's session predated the migration that seeds the walk bounds at
+database level, and `RESET ALL` does not fetch those — so the bounds section D
+claimed to exercise were not in force. The bench now reconnects and asserts the
+session sees them before measuring; the tables are from that run.
 
 **Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
 real labels, stored the way the server stores them (whole-content vector plus
@@ -1393,25 +1397,25 @@ document lacks and scores against the exact answer within it.
 200` returns 40 rows on a 10,000-row table, because the scan returns at most
 `ef_search` and stops. So `v_fetch` above 40 was never honoured: with no chunk
 rows `match_count = 50` returned 40, and with chunks the two CTEs together capped
-near 80 — asked 100, got 69 to 77. 007's header calling the factor "a recall
+near 80 — asked 100, got 68 to 79. 007's header calling the factor "a recall
 budget, not a guess" was true only at `match_count <= 10`. The iterative scan
 fixes this too: asked 100, got 100.
 
 **Cost, and the plan it depends on.** The default path — unfiltered, ten rows,
-what every first-party caller sends — costs what it did: median 0.73 ms before
-and after at 10,000 rows, 1.62 → 1.45 ms at 100,000. That is the LEFT join
-doing its job; the first pass's inner join had added 0.1–0.2 ms here. Filtered
-medians at 10,000 rows run 0.3–3.1 ms depending on selectivity; at 100,000 rows
-0.3–7.8 ms, except the 1% tier at 41 ms, where the planner chose the HNSW walk
-over the GIN index even with the filter a known constant and paid for a complete
-answer. These are under the custom plan the function now forces. Section D
-strips that setting and forces the generic plan, where the filter is a parameter
-and the iterative HNSW walk does everything: at 100,000 rows a 0.1% filter took
-196 ms, a 0.01% one 272 ms and a filter matching nothing 268 ms — complete in
-every case, because both scan bounds are declared; slow, because the scan walks
-until a bound stops it and the chunk side pays a primary-key lookup per
-candidate. That is the cliff `plan_cache_mode = force_custom_plan` exists to
-keep the function off.
+what every first-party caller sends — costs what it did: median 0.86 → 0.75 ms
+at 10,000 rows, 1.38 → 1.35 ms at 100,000. That is the LEFT join doing its job;
+the first pass's inner join had added 0.1–0.2 ms here. Filtered medians at
+10,000 rows run 0.3–3.4 ms depending on selectivity; at 100,000 rows 0.3–8.1 ms
+in this run. The 1% tier there is the planner's to decide: one run sent it down
+the HNSW walk at 41 ms, the next to the GIN index at 2 ms, complete either way.
+These are under the custom plan the function forces. Section D strips that
+setting and forces the generic plan, where the filter is a parameter and the
+iterative HNSW walk does everything: at 100,000 rows a 0.1% filter took 211 ms,
+a 0.01% one 289 ms and a filter matching nothing 294 ms — complete in every
+case, because both scan bounds are in force (seeded at database level, and the
+session reconnected to read them); slow, because the scan walks until a bound
+stops it and the chunk side pays a primary-key lookup per candidate. That is the
+cliff `plan_cache_mode = force_custom_plan` exists to keep the function off.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
@@ -1437,12 +1441,17 @@ evidence. (The first version was an unconditional warning that could never be
 cleared; passes three, four and five each caught a case.) The migrator judges
 the pgvector library version up front and refuses 014 itself, in `--dry-run`
 too, while still applying earlier pending migrations and still seeding the
-ledger under `--baseline`. The destructive guard the evals carried — refuse to
-drop a schema on a host that is not local — lives in `dropSchema` now, and the
-one eval that drops tables itself calls it; "local" is the predicate preflight
-already used for model endpoints, so compose service names and container
-aliases pass, a Unix socket passes, and an EMPTY host does not, because the
-client resolves that through `PGHOST`. It honours the old
+ledger under `--baseline`, and after 014 it reads `pg_db_role_setting` and
+prints the two `ALTER DATABASE` statements when a non-owner role could not seed
+the bounds — the DO block's WARNING is real but this client surfaces none. The
+destructive guard the evals carried — refuse to drop a schema on a host that is
+not this machine — lives in `dropSchema` now, and the one eval that drops
+tables itself calls it. "This machine" means loopback, and nothing wider: the
+fifth pass suggested sharing preflight's local-endpoint
+predicate, which accepts RFC1918 and compose service names, and the sixth
+caught that a LAN-hosted stack holding a real database is the documented
+topology — so that widening is reverted. An EMPTY host is refused, because the
+client resolves it through `PGHOST`. It honours the old
 `OB1_EVAL_ALLOW_REMOTE_DB=1` alongside `OB1_ALLOW_REMOTE_DB=1`.
 `test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come

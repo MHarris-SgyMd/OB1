@@ -22,7 +22,7 @@
 --      match_count and larger above it, so each CTE could never contribute more
 --      than 40 candidates: with no chunk rows a caller asking for 50 got 40, and
 --      with chunk rows the two sources together capped near 80 — asked 100, got
---      69 to 77. 007's header calling the factor "a recall budget, not a guess"
+--      68 to 79. 007's header calling the factor "a recall budget, not a guess"
 --      was true only at match_count <= 10.
 --
 --   Who this reached. The server's own search_thoughts tool has no filter
@@ -38,16 +38,16 @@
 --   exact scan over the same rows:
 --
 --     filter matches   returned   in exact top-10   empty results
---     50%                 10.0        8.0               0/50
---     10%                  5.4        4.9               0/50
+--     50%                 10.0        7.7               0/50
+--     10%                  5.4        5.0               0/50
 --      1%                  0.8        0.8              25/50
 --      0.1% (9 rows)        0.1        0.1              46/50
 --
 --   After: 10.0 returned at every tier that has 10 rows, 10.0 in the exact
 --   top-10 at 10% and below, 9.4 at 50%, 0 empty. At 100,000 rows the before
---   column is the same shape (28 of 50 empty at 1%, 49 of 50 at 0.1%) and the
+--   column is the same shape (27 of 50 empty at 1%, 49 of 50 at 0.1%) and the
 --   after column is complete at 1% and thinner, while at 50% and 10% it holds
---   6.6 and 8.7 of the exact top-10 against 007's 4.7 and 3.6. That residue is
+--   6.0 and 9.0 of the exact top-10 against 007's 4.4 and 3.9. That residue is
 --   the HNSW approximation: random uniform vectors are the index's hardest
 --   case, the approximation was always there, and the iterative scan improves
 --   it because it keeps going. The full tables, and the real-corpus
@@ -100,7 +100,7 @@
 --     folds and the planner can route a thin filter to the GIN index on
 --     `metadata` and sort the few matches — exact, sub-millisecond; under a
 --     generic plan the OR against a parameter rules the GIN index out and the
---     iterative HNSW walk does everything: 200–270 ms for a thin or empty
+--     iterative HNSW walk does everything: 210–295 ms for a thin or empty
 --     filter at 100,000 rows (db/bench-hnsw.ts section D). plpgsql switches to
 --     the generic plan after five calls whenever its estimate is not costlier,
 --     per connection, and the pool has ten of them. Forcing the custom plan
@@ -108,8 +108,10 @@
 --     against 1.56 ms for the default unfiltered search, i.e. nothing
 --     distinguishable — and takes the cliff off the table rather than betting
 --     on the estimate. The planner still picks the HNSW walk for some filters
---     even with the constant known: at 100,000 rows the 1% tier went that way
---     and cost 41 ms, complete; the 0.1% tier went to the GIN index at 0.7 ms.
+--     even with the constant known, and not always the same way: at 100,000
+--     rows the 1% tier went to the walk in one run (41 ms) and to the GIN
+--     index in the next (2 ms), complete either way; the 0.1% tier went to the
+--     GIN index at 0.7 ms in both.
 --
 --   * The two bounds on the walk — hnsw.max_scan_tuples = 100000 and
 --     hnsw.scan_mem_multiplier = 8 — are seeded ONCE at database level by the
@@ -123,10 +125,12 @@
 --     generic plan forced, tuple cap 100,000: with the multiplier at its default
 --     a filter with 15 matching rows returned 6.3 of 10 asked and one with 110
 --     rows returned 42 of 50 — short, silently; with the multiplier at 8 both
---     returned everything, at ~300 ms for the full walk. With both bounds in
---     place, db/bench-hnsw.ts section D forces the walk at 100,000 rows and it
---     completes: 90 matching rows → 10 of 10 in 196 ms, 6 → 6 of 6 in 272 ms,
---     nothing → nothing in 268 ms. The bound needed is roughly
+--     returned everything, at ~300 ms for the full walk. With both bounds
+--     seeded at database level — and the bench's session reconnected to read
+--     them, which an earlier draft's RESET ALL had not done; the sixth review
+--     pass caught that — db/bench-hnsw.ts section D forces the walk at 100,000
+--     rows and it completes: 90 matching rows → 10 of 10 in 211 ms, 6 → 6 of 6
+--     in 289 ms, nothing → nothing in 294 ms. The bound needed is roughly
 --     v_fetch / selectivity, so pgvector's default covers a 0.1% filter only
 --     to match_count 5 on a million rows; 100,000 covers 25. With the custom
 --     plan forced, the walk is reached only when the planner still prefers the
@@ -179,12 +183,26 @@
 --     chunk-count-based on `chunked`) is a follow-up with its own measurement,
 --     which must include the unfiltered row-identity control the eval runs.
 --
---   * match_count is now load-bearing for cost. 007 capped each CTE at ~40
---     candidates whatever was asked; this function honours v_fetch, so a call
---     with match_count 5000 walks each CTE to 20,000 passing candidates and
---     groups 40,000 rows. Both servers' search_thoughts tools therefore bound
---     `limit` to 1–100, as search_thoughts_keyword already did. A direct SQL
---     or PostgREST caller owns its own match_count.
+--   * match_count is now load-bearing for cost, and is clamped to 1–100 INSIDE
+--     the function, as 012 clamps its p_limit. 007 capped each CTE at ~40
+--     candidates whatever was asked; this function honours v_fetch, so an
+--     unclamped call with match_count 5000 would walk each CTE to 20,000
+--     passing candidates and group 40,000 rows. Both servers' search_thoughts
+--     tools also bound `limit` to 1–100, but the callers who send a filter —
+--     direct SQL, PostgREST, the community integrations — are outside that
+--     bound, and one of them sends match_count 150 with a filter no row's
+--     metadata matches literally, which under an unclamped 014 is a full walk
+--     per call. Every shipped integration slices its result to 100 or fewer
+--     afterwards, so the clamp costs none of them a row.
+--
+--   * Memory. The walk's memory bound is work_mem * scan_mem_multiplier per
+--     scan node — two per filtered call, one per CTE — per backend: 32 MB each
+--     at the default 4 MB work_mem, though the 100,000-tuple cap binds first at
+--     roughly 21 MB. With the server's default pool of ten, ten concurrent thin
+--     filters can transiently take 430–640 MB across the pool on top of
+--     shared_buffers. Raising work_mem for other reasons raises this with it;
+--     raising the multiplier does too. Size the container for it, or lower the
+--     multiplier where memory is tighter than latency.
 --
 --   * A NULL filter is unfiltered. 007 evaluated `NULL = '{}'::jsonb OR
 --     t.metadata @> NULL`, which is NULL, which excluded every row: a caller
@@ -246,7 +264,13 @@ SET hnsw.iterative_scan = relaxed_order
 SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
-  v_fetch      int     := GREATEST(match_count * 4, 20);
+  -- Clamped here, as 012 clamps its p_limit: the cost of a call is now
+  -- proportional to match_count (the iterative scan honours v_fetch), and the
+  -- callers who send a filter are direct SQL and PostgREST — outside the zod
+  -- bound the two servers apply. Every shipped integration slices its result
+  -- to 100 or fewer afterwards, so nothing loses a row it used.
+  v_count      int     := LEAST(GREATEST(COALESCE(match_count, 10), 1), 100);
+  v_fetch      int     := GREATEST(v_count * 4, 20);
   v_unfiltered boolean := (filter IS NULL OR filter = '{}'::jsonb);
 BEGIN
   RETURN QUERY
@@ -273,8 +297,8 @@ BEGIN
     -- key, and join removal deletes it. With a real filter the predicate is
     -- strict and the planner reduces it back to an inner join. An inner join
     -- here paid the lookup on every default search for nothing; with the LEFT
-    -- join the default ten-row search costs what 007's did — 0.73 ms before
-    -- and after at 10,000 rows, 1.62 → 1.45 ms at 100,000 (db/bench-hnsw.ts, A).
+    -- join the default ten-row search costs what 007's did — 0.86 → 0.75 ms at
+    -- 10,000 rows, 1.38 → 1.35 ms at 100,000 (db/bench-hnsw.ts, A).
     SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
     FROM thought_chunks c
     LEFT JOIN thoughts p ON p.id = c.thought_id
@@ -297,7 +321,7 @@ BEGIN
   JOIN thoughts t ON t.id = b.tid
   WHERE b.sim > match_threshold
   ORDER BY b.sim DESC
-  LIMIT match_count;
+  LIMIT v_count;
 END;
 $$;
 

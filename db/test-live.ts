@@ -70,7 +70,7 @@ const unit = (i: number) => {
 // Start from an empty database so the run is repeatable.
 await dropSchema(URL_);
 
-const sql = new SQL({ url: URL_, max: 4 });
+let sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);
 
 // ── 1. The runner ────────────────────────────────────────────────────────────
@@ -187,6 +187,13 @@ console.log("\n[5] The planner uses the HNSW index");
 
 console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
 {
+  // 014 seeds the walk's bounds with ALTER DATABASE, which a session reads at
+  // connect. This pool predates the migration, so open a fresh one — and assert
+  // the bounds are in force, since the section claims to exercise them.
+  await sql.close();
+  sql = new SQL({ url: URL_, max: 1 });
+  const [{ t, mm }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS mm`;
+  assert(t === "100000" && mm === "8", `a fresh session sees 014's database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${mm})`);
   // 1,000 random rows through a real HNSW index, 1% of them tagged. Under 007
   // the tagged rows were almost never among the 40 nearest, so a filtered
   // search returned almost nothing — db/bench-hnsw.ts has the numbers. Here
@@ -220,6 +227,11 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
     if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
   }
   assert(agree === QUERIES, `a 1% filter returns the exact top-10 on ${agree}/${QUERIES} random queries`);
+
+  // match_count is clamped inside the function, as 012 clamps its p_limit: the
+  // cost of a call is now proportional to it, and direct callers are unbounded.
+  const many = await sql.unsafe(`SELECT count(*)::int AS c FROM match_thoughts('${random()}'::vector, -1.0, 500, '{}'::jsonb)`);
+  assert(Number(many[0].c) === 100, `match_count 500 over ${N} rows returns 100 — the function's own ceiling (got ${many[0].c})`);
 
   const [{ cfg }] = await sql`
     SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc

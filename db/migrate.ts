@@ -128,21 +128,28 @@ const applied = new Map<string, string>(
  * --dry-run reports the refusal the same way. Unknown means proceed: a server
  * whose control file is unreadable will still say so on 014.
  */
+const NEEDS_PGVECTOR_08 = (name: string) => name.startsWith("014_");
 let pgvectorTooOld: string | null = null;
-if (migrations.some((m) => m.name >= "014" && !applied.has(m.name))) {
-  const [ext] = await sql`SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`;
-  const library = ext?.default_version == null ? null : String(ext.default_version);
-  if (library !== null && !versionAtLeast(library, 0, 8)) pgvectorTooOld = library;
+if (migrations.some((m) => NEEDS_PGVECTOR_08(m.name) && !applied.has(m.name))) {
+  try {
+    const [ext] = await sql`SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`;
+    const library = ext?.default_version == null ? null : String(ext.default_version);
+    if (library !== null && !versionAtLeast(library, 0, 8)) pgvectorTooOld = library;
+  } catch {
+    // Not every role may read pg_available_extensions. Unknown means proceed;
+    // an old library still fails 014 itself, and the catch below explains it.
+  }
 }
+const PGVECTOR_REMEDY =
+  "  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n" +
+  "  Migrations before it are applied and recorded; nothing needs undoing.";
 const floorMessage = (name: string) =>
-  `\n  ${name} needs pgvector 0.8.0 or later; this server's pgvector library is ${pgvectorTooOld}.\n` +
-  `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n` +
-  `  Migrations before it are applied and recorded; nothing needs undoing.`;
+  `\n  ${name} needs pgvector 0.8.0 or later; this server's pgvector library is ${pgvectorTooOld ?? "older than 0.8.0"}.\n${PGVECTOR_REMEDY}`;
 
 let ran = 0;
 let skipped = 0;
 let drifted = 0;
-let floorBlocked = false;
+let floorBlocked: string | null = null;
 
 for (const m of migrations) {
   const prior = applied.get(m.name);
@@ -160,9 +167,9 @@ for (const m of migrations) {
     continue;
   }
   if (dryRun) {
-    if (pgvectorTooOld && m.name >= "014") {
+    if (pgvectorTooOld && NEEDS_PGVECTOR_08(m.name)) {
       console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorTooOld} < 0.8.0`);
-      floorBlocked = true;
+      floorBlocked = m.name;
       continue;
     }
     console.log(`  →  ${m.name}  would apply (${m.sha})`);
@@ -178,7 +185,7 @@ for (const m of migrations) {
 
   // The version floor, enforced only where it bites: earlier pending migrations
   // have already applied above, and --baseline never reaches here.
-  if (pgvectorTooOld && m.name >= "014") {
+  if (pgvectorTooOld && NEEDS_PGVECTOR_08(m.name)) {
     console.error(`  ✗  ${m.name}  refused` + floorMessage(m.name));
     await sql.close();
     process.exit(1);
@@ -193,6 +200,27 @@ for (const m of migrations) {
     });
     console.log(`  ✓  ${m.name}  applied`);
     ran++;
+    // 014 seeds two database-level settings from a DO block that can only
+    // RAISE WARNING when the role does not own the database — and this client
+    // surfaces no warnings. So look at the result rather than trust the
+    // protocol: if the bounds are not on the database now, say what to run.
+    if (NEEDS_PGVECTOR_08(m.name)) {
+      const [row] = await sql`
+        SELECT d.datname AS db, s.setconfig AS cfg FROM pg_database d
+        LEFT JOIN pg_db_role_setting s ON s.setdatabase = d.oid AND s.setrole = 0
+        WHERE d.datname = current_database()`;
+      const cfg: string[] = row?.cfg ?? [];
+      const missing = ["hnsw.max_scan_tuples", "hnsw.scan_mem_multiplier"].filter((k) => !cfg.some((c) => c.startsWith(k + "=")));
+      if (missing.length) {
+        console.error(
+          `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
+            `     the migrating role does not own the database. Run as the owner:\n` +
+            `       ALTER DATABASE ${row?.db ?? "<database>"} SET hnsw.max_scan_tuples = 100000;\n` +
+            `       ALTER DATABASE ${row?.db ?? "<database>"} SET hnsw.scan_mem_multiplier = 8;\n` +
+            `     Until then thin filters walk with pgvector's defaults and can return short.`
+        );
+      }
+    }
   } catch (err) {
     const message = (err as Error).message;
     console.error(`  ✗  ${m.name}  FAILED: ${message}`);
@@ -201,11 +229,7 @@ for (const m of migrations) {
     // error can only mean the LOADED library is older than 0.8.0, so the one
     // remedy is a server upgrade — an ALTER EXTENSION UPDATE cannot help.
     if (/hnsw\./.test(message) && /configuration parameter|Konfigurationsparameter|paramètre|parámetro/i.test(message)) {
-      console.error(
-        `\n  This migration needs pgvector 0.8.0 or later, and the loaded library rejected an hnsw.* setting.\n` +
-          `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run the migrator.\n` +
-          `  Migrations before this one are applied and recorded; nothing needs undoing.`
-      );
+      console.error(`\n  ${m.name} needs pgvector 0.8.0 or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
     }
     await sql.close();
     process.exit(1);
@@ -218,7 +242,7 @@ const verb = dryRun ? "would apply" : baseline ? "baselined" : "applied";
 console.log(`\n${verb} ${ran}, skipped ${skipped}${drifted ? `, DRIFTED ${drifted}` : ""}`);
 
 if (floorBlocked) {
-  console.error(floorMessage("Migration 014"));
+  console.error(floorMessage(floorBlocked));
   process.exit(1);
 }
 
