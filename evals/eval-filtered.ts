@@ -49,7 +49,8 @@
  * The corpus is internal engineering data. It is read from outside the
  * repository, goes only to a local Ollama and a throwaway local Postgres, and
  * the embedding cache written beside it is exactly as sensitive as it is —
- * the script refuses to put either inside the repo.
+ * the script refuses to put either inside the repo, and refuses a database
+ * host that is not loopback, because it drops the schema it is pointed at.
  *
  *   ../db/with-postgres.sh bun eval-filtered.ts
  *   OB1_EVAL_EMBED=embeddinggemma ../db/with-postgres.sh bun eval-filtered.ts
@@ -61,8 +62,8 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chunkContent, DEFAULT_MAX_TOKENS } from "../server-portable/chunk.ts";
 import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
-import { applyMigrations, resetSchema } from "../db/test-support.ts";
-import { embed, cosine, parseSpec } from "./lib.ts";
+import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "../db/test-support.ts";
+import { embed, cosine, parseSpec, requireLoopbackDatabase } from "./lib.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
@@ -78,45 +79,62 @@ for (const [what, p] of [["corpus", CORPUS], ["embedding cache", CACHE]] as cons
     process.exit(2);
   }
 }
-const DB_URL = process.env.DATABASE_URL;
-if (!DB_URL) {
-  console.error("DATABASE_URL is not set. Run through ../db/with-postgres.sh — this eval DROPS the schema it uses.");
-  process.exit(2);
+const DB_URL = requireDatabaseUrl("evals/eval-filtered.ts");
+requireLoopbackDatabase(DB_URL, CORPUS);
+
+/**
+ * Read and parse a JSON file, telling a missing file apart from a broken one.
+ * "Cannot read the corpus, build it" is the wrong advice for a corpus that
+ * exists and was truncated by a build that died mid-write; that needs the parse
+ * error, not a hint to run the builder again.
+ */
+async function readJson<T>(path: string): Promise<{ ok: true; value: T } | { ok: false; missing: boolean; error: string }> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return { ok: false, missing: true, error: "no such file" };
+  try {
+    return { ok: true, value: JSON.parse(await file.text()) as T };
+  } catch (e) {
+    return { ok: false, missing: false, error: (e as Error).message };
+  }
 }
 
 type Item = { id: string; title: string; text: string; labels: string[] };
-let ITEMS: Item[];
-try {
-  ITEMS = JSON.parse(await Bun.file(CORPUS).text());
-} catch {
-  console.error(`Cannot read the corpus at ${CORPUS}. Build it with \`bun build-linear-corpus.ts\`.`);
+const corpus = await readJson<Item[]>(CORPUS);
+if (!corpus.ok) {
+  if (corpus.missing) console.error(`No corpus at ${CORPUS}. Build it with \`bun build-linear-corpus.ts\` (output stays in /tmp).`);
+  else console.error(`The corpus at ${CORPUS} exists but does not parse: ${corpus.error}\nRebuild it rather than trusting a partial file.`);
   process.exit(2);
 }
+const ITEMS = corpus.value;
 
 // ── Embeddings, cached ──────────────────────────────────────────────────────
+//
+// One write, at the end. A periodic rewrite of the whole cache on the embedding
+// path costs O(n^2) bytes and, being non-atomic, can leave a truncated file
+// that the next run would mistake for an empty one.
 
 const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM ?? 1024);
-let cache: Record<string, number[]> = {};
-try {
-  cache = JSON.parse(await Bun.file(CACHE).text());
-} catch {
-  /* first run */
+const cached = await readJson<Record<string, number[]>>(CACHE);
+if (!cached.ok && !cached.missing) {
+  console.error(`The embedding cache at ${CACHE} exists but does not parse: ${cached.error}`);
+  console.error("Refusing to overwrite it. Move it aside (or delete it) and run again.");
+  process.exit(2);
 }
-let cacheDirty = 0;
+const cache: Record<string, number[]> = cached.ok ? cached.value : {};
+let cacheDirty = false;
 async function vec(text: string, isQuery = false): Promise<number[]> {
   const key = `${EMBED_MODEL}|${isQuery ? "q" : "d"}|${createHash("sha256").update(text).digest("hex")}`;
   if (cache[key]) return cache[key];
   const v = await embed(EMBED_MODEL, text, isQuery);
   cache[key] = v;
-  if (++cacheDirty % 50 === 0) await Bun.write(CACHE, JSON.stringify(cache));
+  cacheDirty = true;
   return v;
 }
 
-// ── Seeded synthetic tiers ──────────────────────────────────────────────────
+// ── Documents, with seeded synthetic tiers ──────────────────────────────────
 
-let seed = 968;
-const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+const { rnd } = seededRandom(968);
 type Doc = Item & { tiers: string[]; whole: number[]; windowText: string[]; windows: number[][]; query: number[] };
 
 process.stdout.write(`  embedding ${ITEMS.length} documents with ${EMBED_MODEL}`);
@@ -135,7 +153,7 @@ for (const it of ITEMS) {
   });
   if (DOCS.length % 50 === 0) process.stdout.write(".");
 }
-await Bun.write(CACHE, JSON.stringify(cache));
+if (cacheDirty) await Bun.write(CACHE, JSON.stringify(cache));
 console.log(` done (${DOCS.filter((d) => d.windows.length).length} chunk)`);
 
 /** The function's scoring rule, exactly: MAX over the whole vector and every window. */
@@ -172,16 +190,10 @@ for (const r of await sql`SELECT id, metadata->>'ref' AS ref FROM thoughts`) sto
 const EVAL = DOCS.filter((d) => stored.has(d.id));
 if (EVAL.length < DOCS.length) console.log(`  ${DOCS.length - EVAL.length} documents collapsed by the content fingerprint and are excluded`);
 
-// ── The arms ────────────────────────────────────────────────────────────────
-
-async function search(q: number[], filter: Record<string, unknown>): Promise<string[]> {
-  const rows = await sql`SELECT metadata->>'ref' AS ref FROM match_thoughts(${lit(q)}::vector, -1.0, ${K}, ${filter}::jsonb)`;
-  return rows.map((r: { ref: string }) => String(r.ref));
-}
-
-type Other = { filter: string; query: string; returned: number; overlap: number };
-type Own = { query: string; filter: string; rank: number; returned: number; overlap: number };
-type Run = { unfiltered: Map<string, string[]>; other: Other[]; own: Own[] };
+// ── The question set, built once ────────────────────────────────────────────
+//
+// Both arms answer the same questions against the same exact answers. The
+// answers depend only on the corpus, so they are computed here, not per arm.
 
 /** Pick a deterministic, evenly spaced sample of the eligible queries. */
 function sample<T>(xs: T[], n: number): T[] {
@@ -189,6 +201,38 @@ function sample<T>(xs: T[], n: number): T[] {
   const step = xs.length / n;
   return Array.from({ length: n }, (_, i) => xs[Math.floor(i * step)]);
 }
+const exactTop = (q: number[], members: Doc[]) =>
+  new Set(members.map((m) => ({ id: m.id, s: score(q, m) })).sort((a, b) => b.s - a.s).slice(0, K).map((x) => x.id));
+
+type OtherQ = { filter: Filter; doc: Doc; want: Set<string> };
+const OTHER: OtherQ[] = [];
+for (const f of FILTERS) {
+  const members = EVAL.filter(f.member);
+  for (const doc of sample(EVAL.filter((d) => !f.member(d)), PER_FILTER)) OTHER.push({ filter: f, doc, want: exactTop(doc.query, members) });
+}
+
+type OwnQ = { doc: Doc; label: string; want: Set<string> };
+const OWN: OwnQ[] = [];
+{
+  const freq = new Map<string, number>();
+  for (const d of EVAL) for (const l of d.labels) freq.set(l, (freq.get(l) ?? 0) + 1);
+  for (const doc of EVAL) {
+    if (!doc.labels.length) continue;
+    const label = [...doc.labels].sort((a, b) => (freq.get(a) ?? 0) - (freq.get(b) ?? 0))[0];
+    OWN.push({ doc, label, want: exactTop(doc.query, EVAL.filter((m) => m.labels.includes(label))) });
+  }
+}
+
+// ── The arms ────────────────────────────────────────────────────────────────
+
+async function search(q: number[], filter: Record<string, unknown>): Promise<string[]> {
+  const rows = await sql`SELECT metadata->>'ref' AS ref FROM match_thoughts(${lit(q)}::vector, -1.0, ${K}, ${filter}::jsonb)`;
+  return rows.map((r: { ref: string }) => String(r.ref));
+}
+
+type Other = { filter: string; returned: number; overlap: number };
+type Own = { rank: number; returned: number; overlap: number };
+type Run = { unfiltered: Map<string, string[]>; other: Other[]; own: Own[] };
 
 async function run(label: string): Promise<Run> {
   process.stdout.write(`  ${label.padEnd(18)}`);
@@ -197,32 +241,16 @@ async function run(label: string): Promise<Run> {
   process.stdout.write(".");
 
   const other: Other[] = [];
-  for (const f of FILTERS) {
-    const members = EVAL.filter(f.member);
-    const outsiders = sample(EVAL.filter((d) => !f.member(d)), PER_FILTER);
-    for (const d of outsiders) {
-      const want = new Set(
-        members.map((m) => ({ id: m.id, s: score(d.query, m) })).sort((a, b) => b.s - a.s).slice(0, K).map((x) => x.id)
-      );
-      const got = await search(d.query, f.json);
-      other.push({ filter: f.name, query: d.id, returned: got.length, overlap: got.filter((id) => want.has(id)).length });
-    }
-    process.stdout.write(".");
+  for (const { filter, doc, want } of OTHER) {
+    const got = await search(doc.query, filter.json);
+    other.push({ filter: filter.name, returned: got.length, overlap: got.filter((id) => want.has(id)).length });
   }
+  process.stdout.write(".");
 
   const own: Own[] = [];
-  const freq = new Map<string, number>();
-  for (const d of EVAL) for (const l of d.labels) freq.set(l, (freq.get(l) ?? 0) + 1);
-  for (const d of EVAL) {
-    if (!d.labels.length) continue;
-    const rarest = [...d.labels].sort((a, b) => (freq.get(a) ?? 0) - (freq.get(b) ?? 0))[0];
-    const members = EVAL.filter((m) => m.labels.includes(rarest));
-    const want = new Set(
-      members.map((m) => ({ id: m.id, s: score(d.query, m) })).sort((a, b) => b.s - a.s).slice(0, K).map((x) => x.id)
-    );
-    const got = await search(d.query, { labels: [rarest] });
-    const rank = got.indexOf(d.id) + 1;
-    own.push({ query: d.id, filter: rarest, rank, returned: got.length, overlap: got.filter((id) => want.has(id)).length });
+  for (const { doc, label, want } of OWN) {
+    const got = await search(doc.query, { labels: [label] });
+    own.push({ rank: got.indexOf(doc.id) + 1, returned: got.length, overlap: got.filter((id) => want.has(id)).length });
   }
   console.log(" done");
   return { unfiltered, other, own };

@@ -26,10 +26,10 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { EMBEDDING_DIM } from "./config.mjs";
+import { EMBEDDING_DIM, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, dropSchema } from "./test-support.ts";
+import { createAssert, dropSchema, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -188,10 +188,8 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   // search returned nothing; db/bench-hnsw.ts measured 0.6 of 10 asked. Here
   // the function must return exactly what a full scan returns.
   await sql`DELETE FROM thoughts`;
-  let seed = 968;
-  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-  const gauss = () => Math.sqrt(-2 * Math.log(rnd() || 1e-9)) * Math.cos(2 * Math.PI * rnd());
-  const random = () => `[${Array.from({ length: EMBEDDING_DIM }, gauss).join(",")}]`;
+  const { unitVector } = seededRandom(968);
+  const random = () => `[${unitVector(EMBEDDING_DIM).join(",")}]`;
   const N = 1000;
   for (let i = 0; i < N; i += 100) {
     const values = Array.from({ length: 100 }, (_, k) => {
@@ -224,7 +222,7 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
     WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`;
   assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg ?? "")), "match_thoughts carries hnsw.iterative_scan on a real server");
   const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
-  assert(String(extversion) >= "0.8.0", `pgvector ${extversion} supports the iterative scan 014 declares`);
+  assert(versionAtLeast(String(extversion), 0, 8), `pgvector ${extversion} supports the iterative scan 014 declares`);
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");

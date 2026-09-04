@@ -427,6 +427,12 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
     `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
   );
+  // The scan bound travels with the scan mode: without it a thin filter stops
+  // at pgvector's 20,000-tuple default and silently returns short again.
+  assert(
+    /(^|,)hnsw\.max_scan_tuples=\d+(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
+    "…and hnsw.max_scan_tuples, so the bound is declared beside the mode it bounds"
+  );
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");

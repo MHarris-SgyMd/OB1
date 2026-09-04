@@ -21,15 +21,24 @@
  * ── What is measured ─────────────────────────────────────────────────────────
  *
  *   A. Unfiltered row count at match_count 10 / 20 / 50 / 100 — requested
- *      against returned. The overfetch cap shows up here as "asked 50, got 40".
+ *      against returned — and the median latency at match_count 10, which is
+ *      every first-party caller's path. The overfetch cap shows up as "asked
+ *      50, got 40"; the latency column is what 014's extra join costs there.
  *
  *   B. Filtered overlap. For each selectivity (a `tier` key planted at 50%,
- *      10%, 1% and 0.1% of rows) and Q random query vectors: how many rows came
- *      back of the 10 asked for, how many of those the EXACT top-10 within the
- *      filter also contains, and how often the result was empty. The oracle is
- *      the same scoring (MAX over a thought's own vector and its chunks) with
- *      index scans disabled, so it is exact by construction and shares no code
- *      with the function under test.
+ *      10%, 1%, 0.1% and 0.01% of rows) and Q random query vectors: how many
+ *      rows came back of the 10 asked for, how many of those the EXACT top-10
+ *      within the filter also contains, and how often the result was empty.
+ *      The oracle is the same scoring (MAX over a thought's own vector and its
+ *      chunks) with index scans disabled, so it is exact by construction and
+ *      shares no code with the function under test. It is computed once per
+ *      query and tier; both arms are scored against the same answer.
+ *
+ *      The thinnest tier has fewer matching rows than the candidate budget, so
+ *      the iterative scan cannot stop early and must walk until it exhausts
+ *      the index or reaches `hnsw.max_scan_tuples`. A filter matching NOTHING
+ *      is measured too — a typo'd tag, an empty project — because that is the
+ *      case where the scan does the most work to return the least.
  *
  *      The queries are RANDOM vectors, not perturbed copies of a target. A
  *      perturbed copy makes the target the global nearest neighbour, which no
@@ -55,7 +64,7 @@
  */
 
 import { SQL } from "bun";
-import { applyMigrations, requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
@@ -75,32 +84,24 @@ const CHUNKED_SHARE = 0.2;
 const CHUNKS_PER = 2;
 
 /**
- * Planted selectivities. `tier` is one key so a filter is one containment
+ * Planted selectivities. `tiers` is one key so a filter is one containment
  * test, the same shape `search_thoughts` sends for `{"type": "decision"}`.
- * The tiers nest (a row in t01 is also in t1, t10, t50) so every selectivity
- * is a superset of the next and the comparison is between filter sizes only.
+ * The tiers nest (a row in t001 is also in t01, t1, t10, t50) so every
+ * selectivity is a superset of the next and the comparison is between filter
+ * sizes only. `none` matches no row at all.
  */
 const TIERS: { key: string; share: number }[] = [
   { key: "t50", share: 0.5 },
   { key: "t10", share: 0.1 },
   { key: "t1", share: 0.01 },
   { key: "t01", share: 0.001 },
+  { key: "t001", share: 0.0001 },
+  { key: "none", share: 0 },
 ];
 
 // ── Deterministic data ──────────────────────────────────────────────────────
 
-let seed = 20260904;
-const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-const gauss = () => {
-  const u = rnd() || 1e-9;
-  const v = rnd();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-};
-const unitVector = (): number[] => {
-  const v = Array.from({ length: DIM }, gauss);
-  const n = Math.hypot(...v);
-  return v.map((x) => x / n);
-};
+const { rnd, unitVector } = seededRandom(20260904);
 const lit = (v: number[]) => `[${v.join(",")}]`;
 
 type Row = { doc: number; v: number[]; tiers: string[] };
@@ -110,7 +111,7 @@ function generate(n: number): Row[] {
   for (let i = 0; i < n; i++) {
     const r = rnd();
     const tiers = TIERS.filter((t) => r < t.share).map((t) => t.key);
-    rows.push({ doc: i, v: unitVector(), tiers });
+    rows.push({ doc: i, v: unitVector(DIM), tiers });
   }
   return rows;
 }
@@ -127,8 +128,9 @@ async function load(sql: SQL, rows: Row[]): Promise<void> {
       .join(",");
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
   }
-  // Chunk rows for a share of thoughts: perturbed copies of the parent vector,
-  // so a chunk can out-score its parent and the merge has something to do.
+  // Chunk rows for a share of thoughts, carrying the parent's own vector: the
+  // point is that the chunk CTE has rows to scan and the merge has duplicates
+  // to collapse, not that a chunk out-scores its parent.
   await sql.unsafe(`
     INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
     SELECT t.id, g.i, 'chunk ' || g.i, t.embedding
@@ -143,8 +145,10 @@ async function load(sql: SQL, rows: Row[]): Promise<void> {
 /** A filter for a tier: `{"tiers": ["t1"]}` — array containment, one key. */
 const tierFilter = (key: string) => JSON.stringify({ tiers: [key] });
 
-async function unfilteredCounts(sql: SQL, queries: number[][]): Promise<Record<number, string>> {
-  const out: Record<number, string> = {};
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+
+async function unfiltered(sql: SQL, queries: number[][]): Promise<{ counts: Record<number, string>; ms10: number }> {
+  const counts: Record<number, string> = {};
   for (const count of [10, 20, 50, 100]) {
     let min = Infinity;
     let max = -Infinity;
@@ -155,17 +159,25 @@ async function unfilteredCounts(sql: SQL, queries: number[][]): Promise<Record<n
       min = Math.min(min, Number(c));
       max = Math.max(max, Number(c));
     }
-    out[count] = min === max ? String(min) : `${min}–${max}`;
+    counts[count] = min === max ? String(min) : `${min}–${max}`;
   }
-  return out;
+  // The default path's latency, over every query so the median means something.
+  const times: number[] = [];
+  for (const q of queries) {
+    const t0 = performance.now();
+    await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '{}'::jsonb)`);
+    times.push(performance.now() - t0);
+  }
+  return { counts, ms10: median(times) };
 }
 
 /**
  * Exact top-K within a filter, MAX over the thought's vector and its chunks.
  * Index scans off so this is a full scan and a sort, whatever the planner
- * would otherwise prefer. Correct by construction, slow on purpose.
+ * would otherwise prefer. Correct by construction, slow on purpose — which is
+ * why it runs once per (tier, query) and not once per arm.
  */
-async function oracle(sql: SQL, q: number[], filter: string): Promise<string[]> {
+async function oracle(sql: SQL, q: number[], filter: string): Promise<Set<string>> {
   const rows = await sql.begin(async (tx: SQL) => {
     await tx.unsafe(`SET LOCAL enable_indexscan = off`);
     await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
@@ -181,18 +193,19 @@ async function oracle(sql: SQL, q: number[], filter: string): Promise<string[]> 
       SELECT id FROM (SELECT id, MAX(sim) AS sim FROM scored GROUP BY id) s
       ORDER BY sim DESC LIMIT ${K}`);
   });
-  return rows.map((r: { id: string }) => r.id);
+  return new Set(rows.map((r: { id: string }) => r.id));
 }
 
-type FilteredResult = { returned: number; overlap: number; empty: number; ms: number };
+type FilteredResult = { returned: number; overlap: number; empty: number; ms: number; exact: number };
 
-async function filtered(sql: SQL, queries: number[][], filter: string): Promise<FilteredResult> {
+async function filtered(sql: SQL, queries: number[][], filter: string, wants: Set<string>[]): Promise<FilteredResult> {
   let returned = 0;
   let overlap = 0;
   let empty = 0;
+  let exact = 0;
   const times: number[] = [];
-  for (const q of queries) {
-    const want = new Set(await oracle(sql, q, filter));
+  for (const [i, q] of queries.entries()) {
+    const want = wants[i];
     const t0 = performance.now();
     const got = (
       await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`)
@@ -200,14 +213,15 @@ async function filtered(sql: SQL, queries: number[][], filter: string): Promise<
     times.push(performance.now() - t0);
     returned += got.length;
     overlap += got.filter((id) => want.has(id)).length;
+    exact += want.size;
     if (got.length === 0) empty++;
   }
-  times.sort((a, b) => a - b);
   return {
     returned: returned / queries.length,
     overlap: overlap / queries.length,
+    exact: exact / queries.length,
     empty,
-    ms: times[Math.floor(times.length / 2)],
+    ms: median(times),
   };
 }
 
@@ -241,7 +255,7 @@ async function extractBody(sql: SQL): Promise<string> {
   return body;
 }
 
-type PlanShape = { thoughts: string; chunks: string; iterative: boolean; ms: number; text: string };
+type PlanShape = { thoughts: string; chunks: string; ms: number; text: string };
 
 /**
  * How each candidate CTE reached its rows. The vector index names are
@@ -259,7 +273,6 @@ function shapeOf(plan: string, ms: number): PlanShape {
   return {
     thoughts: access("thoughts t", "thoughts_embedding_idx", "thoughts_metadata_idx"),
     chunks: access("thought_chunks c", "thought_chunks_embedding_idx"),
-    iterative: /Index Scan using thoughts_embedding_idx|Index Scan using thought_chunks_embedding_idx/.test(plan),
     ms,
     text: plan,
   };
@@ -270,8 +283,8 @@ async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: P
   const out: Record<string, PlanShape> = {};
   for (const mode of ["force_custom_plan", "force_generic_plan"]) {
     const rows = await sql.begin(async (tx: SQL) => {
-      // Function-level SET is not in effect outside the function; apply the
-      // same setting the function declares so the plan is the one it gets.
+      // Function-level SETs are not in effect outside the function; apply the
+      // same settings the function declares so the plan is the one it gets.
       const [{ cfg }] = await tx.unsafe(
         `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
       );
@@ -299,8 +312,17 @@ async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: P
 const sql = new SQL({ url: URL_, max: 1 });
 
 type Arm = "before (001–013)" | "after (014)";
-type Cell = FilteredResult & { key: string; share: number };
-const results: { scale: number; arm: Arm; counts: Record<number, string>; cells: Cell[]; plan?: { custom: PlanShape; generic: PlanShape } }[] = [];
+type Cell = FilteredResult & { key: string; share: number; matches: number };
+type Result = {
+  scale: number;
+  arm: Arm;
+  counts: Record<number, string>;
+  ms10: number;
+  cells: Cell[];
+  plan?: { custom: PlanShape; generic: PlanShape };
+};
+const results: Result[] = [];
+const generic: (FilteredResult & { scale: number; key: string; share: number; matches: number })[] = [];
 
 let banner = false;
 for (const n of SCALES) {
@@ -314,47 +336,80 @@ for (const n of SCALES) {
     console.log(`  ${DIM}-dimensional random unit vectors, ${Q} random queries per filter, K=${K}`);
     banner = true;
   }
-  await load(sql, generate(n));
-  const queries = Array.from({ length: Q }, unitVector);
+  const rows = generate(n);
+  await load(sql, rows);
+  const queries = Array.from({ length: Q }, () => unitVector(DIM));
+
+  // Tiers with at least one matching row, and the exact answer for each
+  // (tier, query) once — shared by both arms.
+  const tiers = TIERS.filter((t) => t.key === "none" || n * t.share >= 1).map((t) => ({
+    ...t,
+    matches: rows.filter((r) => r.tiers.includes(t.key)).length,
+  }));
+  process.stdout.write("  exact oracle      ");
+  const wants = new Map<string, Set<string>[]>();
+  for (const t of tiers) {
+    wants.set(t.key, await Promise.all(queries.map((q) => oracle(sql, q, tierFilter(t.key)))));
+    process.stdout.write(".");
+  }
+  console.log(" done");
 
   for (const arm of ["before (001–013)", "after (014)"] as Arm[]) {
     if (arm === "after (014)") await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
     process.stdout.write(`  ${arm.padEnd(18)}`);
-    const counts = await unfilteredCounts(sql, queries);
+    const { counts, ms10 } = await unfiltered(sql, queries);
     const cells: Cell[] = [];
-    for (const t of TIERS) {
-      // At 1,000 rows the 0.1% tier is one row; skip tiers thinner than K rows.
-      if (n * t.share < K) continue;
-      const r = await filtered(sql, queries, tierFilter(t.key));
-      cells.push({ ...r, key: t.key, share: t.share });
+    for (const t of tiers) {
+      const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+      cells.push({ ...r, key: t.key, share: t.share, matches: t.matches });
       process.stdout.write(".");
     }
     // Plans only for the function under test: see shapeOf.
     const plan = arm === "after (014)" ? await plans(sql, queries[0], tierFilter("t1")) : undefined;
-    results.push({ scale: n, arm, counts, cells, plan });
+    results.push({ scale: n, arm, counts, ms10, cells, plan });
     console.log(" done");
   }
+
+  // D. The generic plan, forced. plpgsql runs custom plans for its first five
+  // calls and may switch to the generic one after that when its estimate is
+  // not costlier. Under the generic plan the filter is a parameter, the GIN
+  // index is unavailable, and the iterative HNSW scan does all the work — so
+  // the thin and empty filters are measured under it explicitly rather than
+  // under whichever plan the cache happened to hold.
+  process.stdout.write("  generic plan      ");
+  await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
+  const thin = tiers.filter((t) => t.share <= 0.001);
+  for (const t of thin) {
+    const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+    generic.push({ scale: n, key: t.key, share: t.share, matches: t.matches, ...r });
+    process.stdout.write(".");
+  }
+  await sql.unsafe(`SET plan_cache_mode = auto`);
+  console.log(" done");
 }
 
 await sql.close();
 
 // ── Report ──────────────────────────────────────────────────────────────────
 
-console.log("\n### A. Unfiltered: rows returned for rows requested\n");
-console.log("| rows | arm | asked 10 | asked 20 | asked 50 | asked 100 |");
-console.log("| ---: | --- | ---: | ---: | ---: | ---: |");
+console.log("\n### A. Unfiltered: rows returned for rows requested, and the default path's latency\n");
+console.log("| rows | arm | asked 10 | asked 20 | asked 50 | asked 100 | median ms, asked 10 |");
+console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: |");
 for (const r of results) {
-  console.log(`| ${r.scale.toLocaleString()} | ${r.arm} | ${r.counts[10]} | ${r.counts[20]} | ${r.counts[50]} | ${r.counts[100]} |`);
+  console.log(
+    `| ${r.scale.toLocaleString()} | ${r.arm} | ${r.counts[10]} | ${r.counts[20]} | ${r.counts[50]} | ${r.counts[100]} | ${r.ms10.toFixed(2)} |`
+  );
 }
 
 console.log(`\n### B. Filtered: of ${K} asked, mean returned and mean overlap with the exact top-${K}\n`);
-console.log("| rows | filter matches | arm | returned | in exact top-10 | empty results | median ms |");
-console.log("| ---: | ---: | --- | ---: | ---: | ---: | ---: |");
+console.log("\"exact has\" is the oracle's own size: a tier thinner than K rows cannot fill the list.\n");
+console.log("| rows | filter matches | matching rows | arm | returned | in exact top-10 | exact has | empty results | median ms |");
+console.log("| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |");
 for (const r of results) {
   for (const c of r.cells) {
-    const share = c.share >= 0.01 ? `${c.share * 100}%` : `${c.share * 100}%`;
+    const share = c.key === "none" ? "nothing" : `${c.share * 100}%`;
     console.log(
-      `| ${r.scale.toLocaleString()} | ${share} | ${r.arm} | ${c.returned.toFixed(1)} | ${c.overlap.toFixed(1)} | ${c.empty}/${Q} | ${c.ms.toFixed(2)} |`
+      `| ${r.scale.toLocaleString()} | ${share} | ${c.matches} | ${r.arm} | ${c.returned.toFixed(1)} | ${c.overlap.toFixed(1)} | ${c.exact.toFixed(1)} | ${c.empty}/${Q} | ${c.ms.toFixed(2)} |`
     );
   }
 }
@@ -376,5 +431,15 @@ if (PRINT_PLANS) {
     console.log(`\n#### ${r.scale.toLocaleString()} rows, ${r.arm}, generic plan\n`);
     console.log(r.plan.generic.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
   }
+}
+
+console.log("\n### D. The generic plan, forced: thin and empty filters through the iterative scan (current function)\n");
+console.log("| rows | filter matches | matching rows | returned | in exact top-10 | exact has | median ms |");
+console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+for (const g of generic) {
+  const share = g.key === "none" ? "nothing" : `${g.share * 100}%`;
+  console.log(
+    `| ${g.scale.toLocaleString()} | ${share} | ${g.matches} | ${g.returned.toFixed(1)} | ${g.overlap.toFixed(1)} | ${g.exact.toFixed(1)} | ${g.ms.toFixed(2)} |`
+  );
 }
 console.log();

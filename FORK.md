@@ -1239,15 +1239,19 @@ rows with index scans disabled:
 | rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 10,000 | 50% | 10.0 | 9.3 | 0/50 | 10.0 | 9.8 | 0/50 |
-| 10,000 | 10% | 5.8 | 5.4 | 1/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 10% | 5.7 | 5.3 | 1/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 1% | 0.4 | 0.4 | 33/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 0.1% | 0.1 | 0.1 | 45/50 | 10.0 | 10.0 | 0/50 |
-| 100,000 | 10% | 5.0 | 4.6 | 11/50 | 10.0 | 9.1 | 0/50 |
-| 100,000 | 1% | 0.3 | 0.3 | 47/50 | 10.0 | 9.7 | 0/50 |
+| 100,000 | 10% | 4.9 | 4.5 | 12/50 | 10.0 | 9.2 | 0/50 |
+| 100,000 | 1% | 0.3 | 0.3 | 47/50 | 10.0 | 9.6 | 0/50 |
 | 100,000 | 0.1% | 0.2 | 0.2 | 49/50 | 10.0 | 9.8 | 0/50 |
+| 100,000 | 0.01% (30 rows) | 0.0 | 0.0 | 50/50 | 10.0 | 10.0 | 0/50 |
 
-The after column's 9.1–9.8 at 100,000 rows is the HNSW approximation, which was
+The after column's 9.2–9.8 at 100,000 rows is the HNSW approximation, which was
 always there and is now the only thing between the result and the exact answer.
+The last row has fewer matching rows than the candidate budget, so the scan
+cannot stop early; it is there to show the bound below being reached for, and
+not reached.
 
 **Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
 real labels, stored the way the server stores them (whole-content vector plus
@@ -1296,14 +1300,20 @@ document lacks and scores against the exact answer within it.
   scoped to the call and restored on exit — nothing leaks into the caller's
   transaction as `SET LOCAL` would, and nothing depends on a pool preserving
   session state. It is also validated at CREATE: on pgvector before 0.8.0 the
-  migration fails with `unrecognized configuration parameter`, which is the
-  intended failure. A version of this function that silently ran without the
-  setting would have exactly the recall 014 exists to fix.
+  migration fails with `invalid configuration parameter name
+  "hnsw.iterative_scan"` — pgvector reserves the prefix — which is the intended
+  failure, reproduced on 0.7.4. The validation depends on the `vector(N)`
+  typmod in the signature forcing the library to load first; a bare `vector`
+  parameter would store the SET as an unvalidated placeholder on an old server,
+  and the header says so. A version of this function that silently ran without
+  the setting would have exactly the recall 014 exists to fix.
 - `relaxed_order`, not `strict_order`: the final `ORDER BY b.sim DESC` re-sorts
   the merged candidates anyway.
 - `hnsw.ef_search` is left alone. At the default `match_count`, `v_fetch` is 40
-  and the first batch satisfies the LIMIT, so the default unfiltered path is
-  bit-identical — asserted in the bench, the eval and `test-schema.ts` [8b].
+  and the first batch satisfies the LIMIT, so the default unfiltered path returns
+  the same rows — asserted row for row on 441 real queries by the eval's
+  unfiltered control, which exits non-zero on any difference, and by row count
+  in the bench.
 - A NULL filter is unfiltered. 007 evaluated `NULL = '{}' OR metadata @> NULL`,
   which excluded every row.
 - One query text, `v_unfiltered OR …`, rather than two branches. The cost is
@@ -1315,22 +1325,41 @@ document lacks and scores against the exact answer within it.
 200` returns 40 rows on a 10,000-row table, because the scan returns at most
 `ef_search` and stops. So `v_fetch` above 40 was never honoured: with no chunk
 rows `match_count = 50` returned 40, and with chunks the two CTEs together capped
-near 80 — asked 100, got 71 to 79. 007's header calling the factor "a recall
+near 80 — asked 100, got 71 to 80. 007's header calling the factor "a recall
 budget, not a guess" was true only at `match_count <= 10`. The iterative scan
 fixes this too: asked 100, got 100.
 
-**Cost.** Median latency at 10,000 rows moved from ~0.9 ms to 0.4–3.2 ms
-depending on selectivity; at 100,000 rows from 1.5–2.1 ms to 1.2–2.9 ms. The
-bound to know about is `hnsw.max_scan_tuples` (default 20,000): a filter that
-passes fewer than `v_fetch` rows within 20,000 visited tuples returns what it
-found. Nothing in these measurements approached it.
+**Cost, and the plan it depends on.** The default path — unfiltered, ten rows,
+what every first-party caller sends — pays for the chunk CTE's new join: median
+0.59 → 0.70 ms at 10,000 rows and 0.76 → 0.92 ms at 100,000. Filtered medians
+at 10,000 rows moved from ~0.6 ms to 0.3–2.3 ms depending on selectivity; at
+100,000 rows from 0.8–1.3 ms to 0.5–2.5 ms. Those are under the plan plpgsql
+chose: a custom plan, where the filter is a known constant and the planner
+reaches for the GIN index on `metadata` and sorts the matches — exact, and cheap
+when the filter is thin. The bench also forces the generic plan (section D),
+because plpgsql may switch to it after five calls: there the filter is applied
+by the iterative HNSW scan, and at 100,000 rows a 0.1% filter cost 50 ms, a
+0.01% one 97 ms, and a filter matching nothing 95 ms — the scan walks until it
+gives up, and the chunk side pays a primary-key lookup per candidate it walks.
+Correct in every case measured; slow in the pathological one. The review of
+this change asked for the bound on that walk to be declared rather than
+inherited, so the function also carries `hnsw.max_scan_tuples = 100000`. The
+arithmetic is `v_fetch / selectivity`: pgvector's default of 20,000 covers a
+0.1% filter only to `match_count` 5 on a million rows, 100,000 covers 25. At the
+scale measured the cap did not bite at any value from 20,000 to 400,000, so this
+is headroom for corpora ten times larger than anything here, at no measured cost.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
-tag, since 014 has a version floor. `preflight.ts` reads `pg_proc.proconfig` and
-warns if `match_thoughts` lacks the SET clause — the defined-twice class this
-file keeps naming, in the form of a later `CREATE OR REPLACE` that forgets it —
-and says so differently when pgvector itself is too old. `test-schema.ts` [8b]
+tag, since 014 has a version floor. `preflight.ts` judges the version first,
+because below 0.8.0 nothing else can be said — and it tells apart a server whose
+binary is new but whose database never ran `ALTER EXTENSION vector UPDATE`
+(a new image over an old volume; the fix is that one statement) from a binary
+that is actually old. Only then does it read `pg_proc.proconfig`, accepting
+either iterative mode, and failing that the session's inherited setting, so a
+database-level GUC is not reported as a missing migration. It warns if none of
+those hold — the defined-twice class this file keeps naming, in the form of a
+later `CREATE OR REPLACE` that forgets the SET clause. `test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
 a 1% filter over 1,000 random rows agrees with an exact scan on a real server.

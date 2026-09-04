@@ -129,3 +129,6 @@ export function embeddingConfigWarnings(
   model?: string,
   truncate?: boolean
 ): string[];
+
+/** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
+export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

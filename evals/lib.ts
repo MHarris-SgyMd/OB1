@@ -115,3 +115,37 @@ export function cosine(a: number[], b: number[]): number {
   }
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
+
+/**
+ * Refuse a database that is not obviously a throwaway.
+ *
+ * The evals that call this do two things that are individually fine and
+ * together are not: they call `resetSchema`, which DROPS every table the schema
+ * owns, and then load the corpus — internal engineering data — into whatever
+ * they just cleared. Pointed at anything real by a stale `DATABASE_URL` in a
+ * shell, one command destroys that database and writes sensitive text into it,
+ * with no prompt. The benchmarks in db/ share the first hazard but load
+ * synthetic rows; these are the scripts that combine both.
+ *
+ * Same posture as `build-linear-corpus.ts` refusing to write inside the repo: a
+ * loopback host is allowed, everything else stops. `OB1_EVAL_ALLOW_REMOTE_DB=1`
+ * is the deliberate override, which is a thing you have to mean.
+ */
+export function requireLoopbackDatabase(url: string, loads: string): void {
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    /* an unparseable URL has no host to trust */
+  }
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0", ""]);
+  if (LOOPBACK.has(host) || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
+  console.error(
+    `  Refusing to run against ${host}.\n\n` +
+      `  This script DROPS every table in the schema and then loads ${loads}\n` +
+      `  into it. That is safe against a throwaway container and destructive\n` +
+      `  against anything else. Run it under db/with-postgres.sh, or set\n` +
+      `  OB1_EVAL_ALLOW_REMOTE_DB=1 if you are certain.`
+  );
+  process.exit(2);
+}

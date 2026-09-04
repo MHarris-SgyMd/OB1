@@ -605,3 +605,24 @@ export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_M
   }
   return warnings;
 }
+
+/**
+ * Version floor for "major.minor[.patch]" strings such as pg_extension's
+ * extversion. Compared numerically per component — as strings, "0.10.0" sorts
+ * before "0.8.0" — and defined once so preflight.ts and the live suite cannot
+ * disagree about the same value.
+ *
+ * @param {string} version
+ * @param {number} major
+ * @param {number} [minor]
+ * @param {number} [patch]
+ * @returns {boolean}
+ */
+export function versionAtLeast(version, major, minor = 0, patch = 0) {
+  const [a = 0, b = 0, c = 0] = String(version)
+    .split(".")
+    .map((n) => Number.parseInt(n, 10) || 0);
+  if (a !== major) return a > major;
+  if (b !== minor) return b > minor;
+  return c >= patch;
+}

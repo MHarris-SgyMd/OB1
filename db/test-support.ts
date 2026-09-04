@@ -188,3 +188,28 @@ export function requireDatabaseUrl(script: string): string {
   }
   return url;
 }
+
+/**
+ * A seeded PRNG for suites that need reproducible random vectors: an LCG, so the
+ * same seed produces the same rows on every machine and in CI. bench-hnsw.ts,
+ * test-live.ts and evals/eval-filtered.ts each carried a copy; this is the one.
+ */
+export function seededRandom(seed: number): {
+  rnd: () => number;
+  gauss: () => number;
+  unitVector: (dim: number) => number[];
+} {
+  let s = seed;
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const gauss = () => {
+    const u = rnd() || 1e-9;
+    const v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const unitVector = (dim: number) => {
+    const v = Array.from({ length: dim }, gauss);
+    const n = Math.hypot(...v);
+    return v.map((x) => x / n);
+  };
+  return { rnd, gauss, unitVector };
+}

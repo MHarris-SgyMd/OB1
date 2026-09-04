@@ -61,8 +61,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `118 assertions: 118 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports thirteen migrations applied, and
+`bun test-schema.ts` prints `128 assertions: 128 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fourteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -241,11 +241,17 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 Queries are random vectors, not perturbed copies of a target. A perturbed copy
 makes the target the global nearest neighbour, which no post-filter can lose;
 the first draft did that and reported perfect recall for a function that returns
-nothing at 1%. Section C reads the live function body from the catalog, rewrites
-its plpgsql variables as parameters and EXPLAINs the result under both custom and
-generic planning, because plpgsql may use either. The headline table is in the
-header of `migrations/014_filtered_match_thoughts.sql`; the real-corpus version
-is `evals/eval-filtered.ts`.
+nothing at 1%. The exact answer is computed once per query and tier and both
+arms are scored against it. Two tiers exist for the scan's failure shape rather
+than the filter's: one with fewer matching rows than the candidate budget, so
+the iterative scan cannot stop early, and one matching nothing. Section C reads
+the live function body from the catalog, rewrites its plpgsql variables as
+parameters and EXPLAINs the result under both custom and generic planning,
+because plpgsql may use either; section D then forces the generic plan and
+re-times the thin and empty filters through it, since that is where the scan
+does the most work to return the least. The headline table is in the header of
+`migrations/014_filtered_match_thoughts.sql`; the real-corpus version is
+`evals/eval-filtered.ts`.
 
 ### bench-keyword.ts
 
@@ -385,8 +391,9 @@ asserts 127 properties, including:
   nearer rows of one kind in front of them, both rows of the filtered kind come
   back — including one reachable only through its chunk — a NULL filter is
   unfiltered, `match_count = 50` returns 50, and `pg_proc.proconfig` carries
-  `hnsw.iterative_scan=relaxed_order`, so a later `CREATE OR REPLACE` that drops
-  the SET clause fails here rather than in search
+  `hnsw.iterative_scan=relaxed_order` and `hnsw.max_scan_tuples`, so a later
+  `CREATE OR REPLACE` that drops either SET clause fails here rather than in
+  search
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
 - a non-object `p_payload` raises rather than silently storing `{}`
 - `thought_chunks.context` exists and is nullable, and **both** functions that
