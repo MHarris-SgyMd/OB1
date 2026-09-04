@@ -250,8 +250,11 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
     SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
     WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`;
   assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg ?? "")), "match_thoughts carries hnsw.iterative_scan on a real server");
-  const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
-  assert(versionAtLeast(String(extversion), 0, 8), `pgvector ${extversion} supports the iterative scan 014 declares`);
+  // The LIBRARY's version, not the catalog record: a binary upgraded under an
+  // old volume runs 014 fine while pg_extension still says 0.7.x — the state
+  // the second review pass reproduced — and this section just proved it works.
+  const [{ library }] = await sql`SELECT default_version AS library FROM pg_available_extensions WHERE name = 'vector'`;
+  assert(versionAtLeast(String(library), 0, 8), `the server's pgvector library (${library}) supports the iterative scan 014 declares`);
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");

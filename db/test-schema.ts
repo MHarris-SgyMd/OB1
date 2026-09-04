@@ -458,12 +458,26 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
     `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
   );
-  // The plan mode is the other function-level SET; the two walk bounds are
-  // deliberately NOT on the function, because a function-level value would
-  // override the database-level one that is the operator's tuning knob.
+  // The scan mode is the ONLY function-level SET: the two walk bounds are
+  // deliberately not on the function, because a function-level value would
+  // override the database-level one that is the operator's tuning knob, and
+  // the plan mode an earlier draft forced is unnecessary once the filter is a
+  // plain predicate in its own branch.
   const proconfig = cfg.rows[0]?.cfg ?? "";
-  assert(/(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(proconfig), "…and plan_cache_mode=force_custom_plan, so a filter is a constant the planner can route to the GIN index");
-  assert(!/hnsw\.max_scan_tuples|hnsw\.scan_mem_multiplier/.test(proconfig), "…and neither walk bound, which would override the database-level setting");
+  assert(!/hnsw\.max_scan_tuples|hnsw\.scan_mem_multiplier|plan_cache_mode/.test(proconfig), "…and nothing else — neither walk bound nor a forced plan mode");
+
+  // The two branches must be the same function: the filtered branch's answer
+  // for kind "a" must be the unfiltered branch's answer with the non-"a" rows
+  // taken out — same rows, same order. By this point crowd 0 and crowd 1 carry
+  // NULL and array metadata, so they are excluded along with the two "b" rows.
+  const viaFilter = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
+  const viaNone = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 20, '{}'::jsonb)`, [unit(0)]);
+  const notA = new Set(["crowd 0", "crowd 1", "the one b", "b via chunk"]);
+  const expected = viaNone.rows.map((r) => r.content).filter((c) => !notA.has(c)).slice(0, 10);
+  assert(
+    viaFilter.rows.length === 10 && viaFilter.rows.every((r, i) => r.content === expected[i]),
+    "the filtered and unfiltered branches rank the same rows the same way when the filter admits them"
+  );
 
   // The bounds are seeded at database level, once. A value an operator set
   // first is left alone by re-applying 014; the seeded default is restored at

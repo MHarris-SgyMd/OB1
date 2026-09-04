@@ -161,13 +161,17 @@ export async function dropSchema(url: string): Promise<void> {
     // 014 seeds two database-level settings. They are not schema, so a fresh
     // start must clear them too, or every later run inherits whatever the
     // previous one left. Best effort: only the owner may, and a throwaway
-    // container's role is; anything else is left as found.
+    // container's role is. The RESET names hnsw.* settings, which a
+    // non-superuser may touch only once pgvector is loaded in the session —
+    // dropping the HNSW indexes above loads it incidentally, but not when the
+    // tables were already gone — so load it explicitly first.
     try {
+      await admin`SELECT '[1]'::vector`;
       const [{ db }] = await admin`SELECT current_database() AS db`;
       await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.max_scan_tuples`);
       await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.scan_mem_multiplier`);
     } catch {
-      /* not the owner, or the setting was never there */
+      /* not the owner of the database, or no pgvector to load — left as found */
     }
   } finally {
     await admin.close();

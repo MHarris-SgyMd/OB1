@@ -1248,25 +1248,25 @@ rows with index scans disabled:
 
 | rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 50% | 10.0 | 7.7 | 0/50 | 10.0 | 9.4 | 0/50 |
-| 10,000 | 10% | 5.4 | 5.0 | 0/50 | 10.0 | 10.0 | 0/50 |
-| 10,000 | 1% | 0.8 | 0.8 | 25/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 50% | 10.0 | 8.0 | 0/50 | 10.0 | 9.4 | 0/50 |
+| 10,000 | 10% | 5.3 | 4.9 | 1/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 1% | 0.8 | 0.8 | 24/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 0.1% (9 rows) | 0.1 | 0.1 | 46/50 | 9.0 | 9.0 | 0/50 |
-| 100,000 | 50% | 10.0 | 4.4 | 0/50 | 10.0 | 6.0 | 0/50 |
-| 100,000 | 10% | 5.9 | 3.9 | 0/50 | 10.0 | 9.0 | 0/50 |
-| 100,000 | 1% | 0.6 | 0.6 | 27/50 | 10.0 | 10.0 | 0/50 |
-| 100,000 | 0.1% | 0.0 | 0.0 | 49/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 50% | 10.0 | 4.6 | 0/50 | 10.0 | 6.4 | 0/50 |
+| 100,000 | 10% | 5.2 | 3.7 | 0/50 | 10.0 | 8.7 | 0/50 |
+| 100,000 | 1% | 0.5 | 0.5 | 30/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 0.1% | 0.0 | 0.0 | 48/50 | 10.0 | 10.0 | 0/50 |
 | 100,000 | 0.01% (6 rows) | 0.0 | 0.0 | 50/50 | 6.0 | 6.0 | 0/50 |
 
-Two things in the after column are not the fix. The 6.0 and 9.0 at 100,000
+Two things in the after column are not the fix. The 6.4 and 8.7 at 100,000
 rows for the broad filters are the HNSW approximation — random uniform vectors
-are the index's hardest case, and 007 scored 4.4 and 3.9 on the same rows; the
+are the index's hardest case, and 007 scored 4.6 and 3.7 on the same rows; the
 iterative scan improves it because it keeps going, but `ef_search` is unchanged
 and so is the index. And the two thinnest rows return fewer than ten because
 fewer than ten exist; they are there to show the scan reaching past its
 candidate budget for every matching row and finding them all.
 
-**These tables were measured three times.** The first bench's random generator was an
+**These tables were measured four times.** The first bench's random generator was an
 LCG multiplied in doubles; past 2^53 its low bits are rounding noise and the
 stream repeats every 10,466 draws, so at 100,000 rows the corpus held ~10,000
 distinct vectors stored up to ten times each and every "random" query was
@@ -1281,7 +1281,9 @@ re-measured. The third measurement came after the sixth review pass found that
 the bench's session predated the migration that seeds the walk bounds at
 database level, and `RESET ALL` does not fetch those — so the bounds section D
 claimed to exercise were not in force. The bench now reconnects and asserts the
-session sees them before measuring; the tables are from that run.
+session sees them before measuring. The fourth came after the ninth pass
+replaced the body's OR with two branches (below); the recall columns did not
+move and the latencies did, and the tables are from that run.
 
 **Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
 real labels, stored the way the server stores them (whole-content vector plus
@@ -1324,18 +1326,25 @@ document lacks and scores against the exact answer within it.
   EXISTS: inside an OR the planner cannot turn EXISTS into a semi-join and ran it
   as a hashed subplan — one full pass over `thoughts` per query, whatever the
   filter. Measured, that alone made the new function 3x the old one's latency at
-  10,000 rows. The join is one primary-key lookup per candidate, and it is a
-  LEFT join so that on the unfiltered path, where the predicate folds to true,
-  join removal drops the lookup altogether; every chunk has exactly one parent,
-  so the rows are identical either way.
-- `plan_cache_mode = force_custom_plan` on the function. The OR admits two plans
-  that are not close: with the filter a known constant the planner routes a thin
-  filter to the GIN index on `metadata` and sorts the few matches, exact and
-  sub-millisecond; with the filter a parameter the GIN index is out and the
-  iterative HNSW walk does everything — ~300 ms for a thin filter at 100,000
-  rows. plpgsql picks between them after five calls, per connection. Forcing the
-  custom plan was measured as free on the default path (1.49 against 1.56 ms)
-  and removes the cliff instead of betting against it.
+  10,000 rows. The join is one primary-key lookup per candidate, and it exists
+  only in the filtered branch; the unfiltered branch has no predicate and no
+  join.
+- **Two `RETURN QUERY` branches, one per path.** Drafts three through eight kept
+  a single query text with `v_unfiltered OR metadata @> filter` and paid for it
+  in layers: the OR against a parameter hid the GIN index from the generic plan,
+  so the function had to force custom plans (`plan_cache_mode`), so the chunk
+  join had to be LEFT for join removal to fire when the OR folded, so the next
+  author needed a paragraph about why a boolean local was load-bearing — and
+  the "forcing the custom plan is free" number was never re-measured with its
+  neighbours. The ninth review pass named the OR as the root. With the
+  predicate a plain `metadata @> filter` in its own branch, the planner has
+  the GIN index whichever plan mode plpgsql picks, picking is a latency choice
+  rather than a recall one (the plans are below), and the only function-level
+  SET is the scan mode. The two texts differ in the predicate and the
+  chunk-side join and nothing else; `test-schema.ts` holds them to the same
+  answer on the same rows. The earlier objection — a query
+  defined twice — is real and was judged smaller than what the single text
+  cost.
 - `hnsw.max_scan_tuples = 100000` **and** `hnsw.scan_mem_multiplier = 8`. The
   first pass of this change set only the tuple cap and reported that raising it
   from 20,000 to 400,000 changed nothing; the second review pass found why:
@@ -1380,14 +1389,19 @@ document lacks and scores against the exact answer within it.
   OID `pg_description` is keyed on, so a successor that forgot its own COMMENT
   inherited the claim — hence the body, which every replace rewrites, and the
   probe. A successor that keeps the in-scan filter carries the sentinel; one
-  that reintroduces a post-LIMIT filter must not. Preflight also requires
-  `plan_cache_mode` to still be on the function before reporting ok, since a
-  redefinition that dropped it would leave the generic-plan cliff live, and it
-  warns whenever the walk bounds were never SET on the database — a presence
-  check, so an operator who lowered one on purpose is tuning, not failing —
-  however 014 was recorded: `--baseline` never runs the DO block and a
-  non-owner cannot.
-- The function-level SETs are applied at CALL time too, so a non-superuser in
+  that reintroduces a post-LIMIT filter must not — and a successor that keeps
+  the sentinel but changes how a NULL filter is treated gets its own verdict
+  from the probe rather than the pre-014 remedy, which would have re-run 014
+  over it (ninth pass). Preflight also warns whenever the walk bounds are set
+  nowhere — judged by `pg_settings.source`, so a value from `ALTER SYSTEM`, a
+  parameter group or `ALTER ROLE` counts as set, and an operator who lowered one
+  on purpose is tuning, not failing — however 014 was recorded: `--baseline`
+  never runs the DO block and a non-owner cannot. The seed guard in 014 asks
+  the same question for the same reason: a database-level seed outranks server
+  configuration, so seeding over an operator's `ALTER SYSTEM` would silently
+  undo it (verified), and the eighth-pass version, which looked only for a
+  database-level row, would have.
+- The function-level SET is applied at CALL time too, so a non-superuser in
   a fresh session that has not yet loaded pgvector is refused on the first call
   as well as on the CREATE. First-party stores and PostgREST cast the query
   vector from text, which loads the library first; a direct SQL caller feeding
@@ -1426,10 +1440,14 @@ document lacks and scores against the exact answer within it.
   in the bench.
 - A NULL filter is unfiltered. 007 evaluated `NULL = '{}' OR metadata @> NULL`,
   which excluded every row.
-- One query text, `v_unfiltered OR …`, rather than two branches. The cost is
-  that the generic plan cannot use the GIN index on `metadata`; the bench shows
-  the planner choosing a GIN bitmap and sort under a custom plan and the HNSW
-  scan under a generic one. Both are exact for the filter.
+- The plans, read from the deployed body (bench section C). Under the custom
+  plan both sides come at the filter from the GIN index: a bitmap on `thoughts`
+  and a sort for the direct side, a bitmap on the parent and primary-key lookups
+  into `thought_chunks` for the chunk side. Under the generic plan, where the
+  filter is a parameter, the direct side still uses the GIN index; the chunk
+  side, whose filter lives on the parent row, walks its own HNSW index and looks
+  each candidate's parent up. Both are exact for the filter, because the walk is
+  iterative and bounded.
 
 **The second defect the mechanism predicted.** `ORDER BY embedding <=> q LIMIT
 200` returns 40 rows on a 10,000-row table, because the scan returns at most
@@ -1439,21 +1457,33 @@ near 80 — asked 100, got 68 to 79. 007's header calling the factor "a recall
 budget, not a guess" was true only at `match_count <= 10`. The iterative scan
 fixes this too: asked 100, got 100.
 
-**Cost, and the plan it depends on.** The default path — unfiltered, ten rows,
-what every first-party caller sends — costs what it did: median 0.86 → 0.75 ms
-at 10,000 rows, 1.38 → 1.35 ms at 100,000. That is the LEFT join doing its job;
-the first pass's inner join had added 0.1–0.2 ms here. Filtered medians at
-10,000 rows run 0.3–3.4 ms depending on selectivity; at 100,000 rows 0.3–8.1 ms
-in this run. The 1% tier there is the planner's to decide: one run sent it down
-the HNSW walk at 41 ms, the next to the GIN index at 2 ms, complete either way.
-These are under the custom plan the function forces. Section D strips that
-setting and forces the generic plan, where the filter is a parameter and the
-iterative HNSW walk does everything: at 100,000 rows a 0.1% filter took 211 ms,
-a 0.01% one 289 ms and a filter matching nothing 294 ms — complete in every
-case, because both scan bounds are in force (seeded at database level, and the
-session reconnected to read them); slow, because the scan walks until a bound
-stops it and the chunk side pays a primary-key lookup per candidate. That is the
-cliff `plan_cache_mode = force_custom_plan` exists to keep the function off.
+**Cost, and the plan it does not depend on.** The default path — unfiltered,
+ten rows, what every first-party caller sends — costs what it did: median
+0.62 → 0.68 ms at 10,000 rows, 1.32 → 1.40 ms at 100,000; its branch has no
+predicate and no join. Filtered medians at 10,000 rows run 1.1–3.3 ms. At
+100,000 rows they run 0.3–7.8 ms where the planner takes the GIN index — the
+broad tiers cost the most, a bitmap over 10,000 or 50,000 matching rows has to
+be sorted — and 44 and 190 ms on the 1% and 0.1% tiers in this run, where it
+sent both sides down the HNSW walk instead; the previous run of the same bench
+on the same seeded data took those two tiers to the GIN index at 2.2 and
+0.7 ms. That choice is the planner's estimate on a statistics sample, it was
+this way before the body had two branches (an earlier run recorded the 1% tier
+at 41 ms one time and 2 ms the next), and the answer is complete either way.
+The function declares no plan mode: plpgsql runs a statement's custom plan
+five times and then its generic plan if that does not estimate costlier, and
+section C explains both for a 1% filter — 0.65 ms custom against 3.87 generic
+at 10,000 rows, where both plans reach the GIN index for `thoughts` and the
+generic one walks the chunk index; 42.5 custom against 14.3 generic at 100,000,
+where the custom plan walked both sides and the generic one still had the GIN
+index for `thoughts`. Section D forces the generic plan for the whole session
+at 100,000 rows: a 0.1% filter, a 0.01% one and one matching nothing took
+62–64 ms each and returned every matching row, because both scan bounds are in
+force (seeded at database level, the session reconnected to read them) and the
+chunk side pays a primary-key lookup per candidate. The single-text body with
+`plan_cache_mode = force_custom_plan` measured 211–294 ms on the same section.
+Removing the OR turned the plan the function had to be kept off into one it
+may run and still answer, which is what let the forced plan mode go; the
+bounds are what make every plan here a latency and not a recall question.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`

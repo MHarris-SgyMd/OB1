@@ -48,9 +48,14 @@
  *   C. Plan shape. The live function body is read from the catalog
  *      (`pg_get_functiondef`), its plpgsql variables rewritten as parameters,
  *      and the result PREPAREd and EXPLAINed under both a custom and a generic
- *      plan — plpgsql may use either. That inspects the SQL actually deployed
- *      rather than a copy of it kept here, and it fails loudly if the function
- *      no longer has the shape the rewrite expects.
+ *      plan — plpgsql may use either, and 014 declares no plan mode. That
+ *      inspects the SQL actually deployed rather than a copy of it kept here,
+ *      and it fails loudly if the function no longer has the shape the rewrite
+ *      expects.
+ *
+ *   D. The generic plan, forced for the session, on the thin and empty
+ *      filters — the plan plpgsql may switch to after five calls, timed on the
+ *      filters where the chunk side's HNSW walk does the most work.
  *
  * ── Running ──────────────────────────────────────────────────────────────────
  *
@@ -274,9 +279,11 @@ async function extractBody(sql: SQL): Promise<string> {
   const [{ def }] = await sql.unsafe(
     `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
   );
-  const m = /RETURN QUERY\s+([\s\S]*?);\s*END;/.exec(def);
-  if (!m) throw new Error("match_thoughts has no single RETURN QUERY; the bench's rewrite does not apply");
-  let body = m[1];
+  // 014 has two RETURN QUERY branches; section C explains the FILTERED one.
+  const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|END IF;|END;)/g)].map((x) => x[1]);
+  const filteredBlock = blocks.find((b) => /@>\s*filter/.test(b));
+  if (!filteredBlock) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s) and none filters on metadata; the bench's rewrite does not apply`);
+  let body = filteredBlock;
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
   const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
@@ -311,15 +318,25 @@ type PlanShape = { thoughts: string; chunks: string; ms: number; text: string };
  * is explained (its outer join is a primary-key lookup and cannot match these).
  */
 function shapeOf(plan: string, ms: number): PlanShape {
-  const access = (table: string, vectorIdx: string, ginIdx?: string): string => {
-    if (new RegExp(`Index Scan using ${vectorIdx}`).test(plan)) return "HNSW index scan";
-    if (ginIdx && new RegExp(`Bitmap Index Scan on ${ginIdx}`).test(plan)) return "GIN bitmap + sort";
-    if (new RegExp(`Seq Scan on ${table}`).test(plan)) return "seq scan + sort";
+  // Each CTE is judged by the node that produced ITS rows, named by alias —
+  // `thoughts t` (direct), `thought_chunks c` and its parent `thoughts p`
+  // (chunked). The final SELECT also joins `thoughts t`, and when a CTE is
+  // inlined the planner renames the inner one `t_1`, so an alias may carry a
+  // numeric suffix; the outer `t` is a primary-key lookup and matches none of
+  // the access patterns below. A bare `Bitmap Index Scan on
+  // thoughts_metadata_idx` carries no alias, so it is attributed through the
+  // Bitmap Heap Scan above it.
+  const access = (alias: string, vectorIdx: string): string => {
+    const a = `${alias}(?:_\\d+)?\\b`;
+    if (new RegExp(`Index Scan using ${vectorIdx} on ${a}`).test(plan)) return "HNSW index scan";
+    if (new RegExp(`Bitmap Heap Scan on ${a}`).test(plan)) return "GIN bitmap + sort";
+    if (new RegExp(`Seq Scan on ${a}`).test(plan)) return "seq scan + sort";
     return "?";
   };
+  const chunkDriver = /Bitmap Heap Scan on thoughts p(?:_\d+)?\b/.test(plan) ? "GIN bitmap on parent + PK lookups" : access("thought_chunks c", "thought_chunks_embedding_idx");
   return {
-    thoughts: access("thoughts t", "thoughts_embedding_idx", "thoughts_metadata_idx"),
-    chunks: access("thought_chunks c", "thought_chunks_embedding_idx"),
+    thoughts: access("thoughts t", "thoughts_embedding_idx"),
+    chunks: chunkDriver,
     ms,
     text: plan,
   };
@@ -342,8 +359,9 @@ async function plans(sql: SQL, q: number[], filter: string): Promise<{ custom: P
       for (const { kv } of entries as { kv: string }[]) {
         const eq = kv.indexOf("=");
         if (eq < 0) throw new Error(`unexpected proconfig entry ${JSON.stringify(kv)}`);
-        // plan_cache_mode is the one setting the bench must NOT inherit here:
-        // this section exists to show both plans.
+        // 014 declares no plan mode; should a successor add one, it is the one
+        // setting this section must NOT inherit, since it exists to show both
+        // plans.
         if (kv.slice(0, eq) === "plan_cache_mode") continue;
         await tx.unsafe(`SELECT set_config($1, $2, true)`, [kv.slice(0, eq), kv.slice(eq + 1)]);
       }
@@ -389,6 +407,19 @@ type Result = {
 };
 const results: Result[] = [];
 const generic: (FilteredResult & { scale: number; key: string; share: number; matches: number })[] = [];
+
+// The after arm asserts the bounds 014 seeds are in force. A role that does not
+// own the database cannot seed them, and finding that out after a 100,000-row
+// load discards everything measured, so ask first.
+{
+  const [{ owner }] = await sql`
+    SELECT (pg_get_userbyid(d.datdba) = current_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)) AS owner
+    FROM pg_database d WHERE d.datname = current_database()`;
+  if (!owner) {
+    console.error("bench-hnsw.ts needs to run as the database's owner (or a superuser): migration 014 seeds two database-level settings the after arm depends on.");
+    process.exit(2);
+  }
+}
 
 let banner = false;
 for (const n of SCALES) {
@@ -450,17 +481,19 @@ for (const n of SCALES) {
     console.log(" done");
   }
 
-  // D. The generic plan, which 014 forbids the function from using. Under it
-  // the filter is a parameter, the GIN index is unavailable, and the iterative
-  // HNSW scan does all the work, bounded by hnsw.max_scan_tuples and by
-  // work_mem * hnsw.scan_mem_multiplier. This arm strips the function's own
-  // plan_cache_mode so the session can force the generic plan and measures the
-  // thin and empty filters through it. It runs last for its scale — the next
-  // scale resets the schema — so nothing needs restoring. It exists to show
-  // what the forced custom plan buys, and to show the bounds doing their job
-  // when the walk does happen.
+  // D. The generic plan, forced. plpgsql may switch a statement to its generic
+  // plan after five calls when that plan does not estimate costlier, and the
+  // function declares no plan mode, so this is a plan the function can run.
+  // Under it the filter is a parameter: the thoughts side still reaches the
+  // GIN index, but the chunk side, whose filter lives on the parent row,
+  // walks its own HNSW index and looks each candidate's parent up — bounded by
+  // hnsw.max_scan_tuples and by work_mem * hnsw.scan_mem_multiplier. This arm
+  // forces the generic plan for the session and measures the thin and empty
+  // filters through it. It runs last for its scale — the next scale resets the
+  // schema — so nothing needs restoring. It exists to show that the plan the
+  // planner may switch to is a complete one, and to show the bounds doing
+  // their job when the walk does happen.
   process.stdout.write("  generic plan      ");
-  await sql.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET plan_cache_mode`);
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   const thin = tiers.filter((t) => t.share <= 0.001);
   for (const t of thin) {
@@ -499,7 +532,7 @@ for (const r of results) {
 }
 
 console.log("\n### C. Plan shape of the current function for a 1% filter (custom plan / generic plan)\n");
-console.log("plpgsql may run either: custom for the first five calls, then generic if it is not costlier.\n");
+console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown.\n");
 console.log("| rows | thoughts candidates | chunk candidates | exec ms |");
 console.log("| ---: | --- | --- | ---: |");
 for (const r of results) {
@@ -517,8 +550,8 @@ if (PRINT_PLANS) {
   }
 }
 
-console.log("\n### D. The generic plan the function forbids, forced anyway: thin and empty filters through the iterative scan\n");
-console.log("What plan_cache_mode = force_custom_plan on the function avoids, and what the two scan bounds do when the walk happens.\n");
+console.log("\n### D. The generic plan, forced: thin and empty filters\n");
+console.log("What a cached generic plan does with these filters, and what the two scan bounds do if the planner walks the HNSW index.\n");
 console.log("| rows | filter matches | matching rows | returned | in exact top-10 | exact has | median ms |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 for (const g of generic) {

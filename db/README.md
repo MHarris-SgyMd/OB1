@@ -392,12 +392,14 @@ asserts 139 properties, including:
   nearer rows of one kind in front of them, both rows of the filtered kind come
   back — including one reachable only through its chunk — a NULL filter is
   unfiltered, `match_count = 50` returns 50, and `pg_proc.proconfig` carries
-  `hnsw.iterative_scan=relaxed_order` and `plan_cache_mode=force_custom_plan` —
-  and NOT the two walk bounds, which live on the database so `ALTER DATABASE`
-  tuning is never overridden. A later `CREATE OR REPLACE` that drops a SET
-  clause, or adds a bound to the function, fails here rather than in search.
-  The bounds' seeding is asserted too, and that re-applying 014 leaves an
-  operator's value alone
+  `hnsw.iterative_scan=relaxed_order` and nothing else — not the two walk
+  bounds, which live on the database so `ALTER DATABASE` tuning is never
+  overridden, and not a forced plan mode, which the two-branch body made
+  unnecessary. A later `CREATE OR REPLACE` that drops the SET clause, or adds a
+  bound or a plan mode to the function, fails here rather than in search. The
+  two branches are held to the same answer on the same rows; the bounds'
+  seeding is asserted, and that re-applying 014 leaves an operator's value
+  alone
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
 - a non-object `p_payload` raises rather than silently storing `{}`
 - `thought_chunks.context` exists and is nullable, and **both** functions that

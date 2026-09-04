@@ -235,16 +235,23 @@ for (const m of migrations) {
   // this role cannot read must not turn that into "FAILED".
   if (NEEDS_PGVECTOR_08(m.name)) {
     try {
-      const [row] = await sql`
-        SELECT d.datname AS db, s.setconfig AS cfg FROM pg_database d
-        LEFT JOIN pg_db_role_setting s ON s.setdatabase = d.oid AND s.setrole = 0
-        WHERE d.datname = current_database()`;
-      const cfg: string[] = row?.cfg ?? [];
-      const missing = ["hnsw.max_scan_tuples", "hnsw.scan_mem_multiplier"].filter((k) => !cfg.some((c) => c.startsWith(k + "=")));
+      // "Set" anywhere: a bound on the role or in server config counts (visible
+      // as a non-default source in THIS session, which 014 made pgvector-aware),
+      // and so does the database-level row 014 itself may just have written —
+      // which this session, opened before the ALTER DATABASE, does not yet see
+      // in pg_settings. Either is set; neither is unset.
+      const [row] = await sql`SELECT current_database() AS db`;
+      const unsetHere = (await sql`
+        SELECT name FROM pg_settings WHERE name IN ('hnsw.max_scan_tuples', 'hnsw.scan_mem_multiplier') AND source = 'default'`) as { name: string }[];
+      const [dbRow] = await sql`
+        SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+        WHERE d.datname = current_database() AND s.setrole = 0`;
+      const dbLevel: string[] = dbRow?.cfg ?? [];
+      const missing = unsetHere.map((r) => r.name).filter((name) => !dbLevel.some((c) => c.startsWith(name + "=")));
       if (missing.length) {
         console.error(
           `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
-            `     the migrating role does not own the database. Run as the owner, in one session:\n` +
+            `     the migrating role does not own the database, or the platform refused ALTER DATABASE. Run as the owner, in one session:\n` +
             `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
             `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES};\n` +
             `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};\n` +
@@ -252,7 +259,7 @@ for (const m of migrations) {
         );
       }
     } catch (e) {
-      console.error(`  ⚠  ${m.name}  applied; could not read pg_db_role_setting to confirm the walk bounds (${(e as Error).message}). Preflight checks them at startup.`);
+      console.error(`  ⚠  ${m.name}  applied; could not read pg_settings to confirm the walk bounds (${(e as Error).message}). Preflight checks them at startup.`);
     }
   }
 }

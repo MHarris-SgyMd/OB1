@@ -379,8 +379,8 @@ if (configFailed) {
          * body. 007's body applies the filter after its LIMIT, and no setting
          * repairs that. So the BODY is decided first — by the sentinel comment
          * `ob1:filter-inside-scan` in pg_proc.prosrc, which every CREATE OR
-         * REPLACE rewrites, confirmed by a behavioural probe when there is a row
-         * to probe with — then the setting, then the version — the
+         * REPLACE rewrites, with a NULL-filter probe beside it that gets its
+         * own verdict when it disagrees — then the setting, then the version — the
          * version only explains an absence or advises `ALTER EXTENSION vector
          * UPDATE` where the catalog record lags a working library.
          *
@@ -428,10 +428,16 @@ if (configFailed) {
               probed = null; // a call that fails proves nothing about the body
             }
           }
-          const bodyIs014 = sentinel && probed !== false;
+          // The sentinel and the probe answer different questions: the sentinel
+          // is the successor's declaration that the filter sits inside the
+          // scan; the probe checks one behaviour of 014's body (NULL is
+          // unfiltered) that a successor may legitimately change. A sentinel
+          // with a failed probe therefore gets its own verdict below, not the
+          // pre-014 remedy — which would re-run 014 over the successor.
+          const bodyIs014 = sentinel;
+          const probeDisagrees = sentinel && probed === false;
           const cfgText = String(mt[0]?.cfg ?? "");
           const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(cfgText)?.[2];
-          const planForced = /(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(cfgText);
           const inherited = String((await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`)[0]?.v ?? "off");
           const inForce = declared ?? (inherited === "relaxed_order" || inherited === "strict_order" ? inherited : undefined);
           const pgv = await sql`
@@ -452,34 +458,35 @@ if (configFailed) {
           const bounds = await sql`
             SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
           const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
-          // Whether the bounds were ever SET on the database, not whether they
-          // are large: an operator who lowered one on purpose (the header
-          // invites it where memory is tighter than latency) is tuning, not
-          // failing. Unset means 014's DO block could not seed them — a
-          // non-owner role, --baseline, a platform refusing ALTER DATABASE —
-          // and a thin filter routed to the HNSW walk then returns short.
-          const seededRows = await sql`
-            SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
-            WHERE d.datname = current_database() AND s.setrole = 0`;
-          const seededCfg: string[] = seededRows[0]?.cfg ?? [];
-          const boundsUnset = ["hnsw.max_scan_tuples=", "hnsw.scan_mem_multiplier="].some((k) => !seededCfg.some((c) => c.startsWith(k)));
+          // Whether the bounds were ever SET — anywhere this session resolves
+          // them from: ALTER DATABASE, ALTER ROLE, ALTER SYSTEM, a parameter
+          // group — not whether they are large, and not merely whether a
+          // database-level row exists. An operator who lowered one on purpose
+          // is tuning; one who set it on the role because the platform refuses
+          // ALTER DATABASE has set it. pg_settings.source is 'default' only
+          // when nothing has. The probe above loaded pgvector, so hnsw.* rows
+          // are present; if the probe did not run, load it here.
+          await sql`SELECT '[1]'::vector`;
+          const srcRows = await sql`
+            SELECT name, source FROM pg_settings WHERE name IN ('hnsw.max_scan_tuples', 'hnsw.scan_mem_multiplier')`;
+          const boundsUnset = srcRows.length < 2 || srcRows.some((r: { source: string }) => r.source === "default");
           const seedBounds =
             `Run as the database owner, in one session: SELECT '[1]'::vector; ALTER DATABASE <db> SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}; ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};  then restart the server so its pool reconnects.`;
           const putBack =
-            "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.";
+            "Put it back: SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order;  and carry it into the migration that redefined it.";
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
             add("filtered search", "warn", "match_thoughts is not defined, so nothing here can be checked", "Apply the migrations.");
-          } else if (bodyIs014 && inForce && !planForced) {
+          } else if (probeDisagrees) {
             add("filtered search", "warn",
-                `match_thoughts scans iteratively under a metadata filter (${inForce}) but no longer forces a custom plan — a later redefinition dropped plan_cache_mode — so after five calls a connection may switch to the generic plan, where a thin filter walks the index to a bound (210–295 ms at 100,000 rows) instead of using the GIN index`,
-                putBack);
+                `match_thoughts declares the in-scan filter (sentinel present) but returned nothing for a NULL filter, which 014's body treats as unfiltered — a later redefinition changed NULL handling. Not a recall defect by itself; verify the redefinition was intended${inForce ? "" : ", and note no iterative scan is in force for it"}`,
+                "If the redefinition is deliberate, no action; if not, compare the installed body with db/migrations/014_filtered_match_thoughts.sql.");
           } else if (bodyIs014 && inForce) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
             if (boundsUnset) {
               add("filtered search", "warn",
-                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds were never set on this database (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — a thin filter routed to the HNSW walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are at pgvector's defaults, set nowhere (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — a thin filter routed to the HNSW walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
                   seedBounds);
             } else if (staleRecord) {
               add("filtered search", "warn",
@@ -491,12 +498,12 @@ if (configFailed) {
             }
           } else if (bodyIs014) {
             add("filtered search", "warn",
-                `match_thoughts has 014's body but no iterative scan in force${ledgerHas014 ? " although migration 014 is recorded as applied" : ""} — a later redefinition dropped its SET clauses — so ${EXPOSURE}`,
+                `match_thoughts has 014's body but no iterative scan in force${ledgerHas014 ? " although migration 014 is recorded as applied" : ""} — a later redefinition dropped its SET clause — so ${EXPOSURE}`,
                 putBack);
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
                 `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
-                "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
+                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? "re-run the body of db/migrations/014_filtered_match_thoughts.sql — the migrator will skip it as already applied (--baseline recorded it)" : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.

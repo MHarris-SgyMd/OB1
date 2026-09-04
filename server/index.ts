@@ -264,10 +264,12 @@ function buildServer(): McpServer {
       },
       inputSchema: {
         query: z.string().describe("What to search for"),
-        // Any number is accepted, as before: match_thoughts itself clamps the
-        // count to 1–100 (migration 014), so a client that always sent 200, or
-        // 10.0, keeps working and gets at most 100 rather than a schema error.
-        limit: z.number().optional().default(10).describe("Results to return; the server returns at most 100."),
+        // Clamped, not rejected: any number a client sends lands in 1–100, so an
+        // existing connector that always asked for 200, or 7.5, keeps working.
+        // match_thoughts clamps identically (migration 014); this keeps a
+        // non-integer from ever reaching its int parameter.
+        limit: z.number().optional().default(10).describe("Results to return, clamped to 1-100.")
+          .transform((n) => Math.min(Math.max(Math.trunc(n), 1), 100)),
         threshold: z.number().optional().default(0.5),
       },
     },

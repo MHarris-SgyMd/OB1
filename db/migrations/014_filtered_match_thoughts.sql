@@ -38,16 +38,16 @@
 --   exact scan over the same rows:
 --
 --     filter matches   returned   in exact top-10   empty results
---     50%                 10.0        7.7               0/50
---     10%                  5.4        5.0               0/50
---      1%                  0.8        0.8              25/50
+--     50%                 10.0        8.0               0/50
+--     10%                  5.3        4.9               1/50
+--      1%                  0.8        0.8              24/50
 --      0.1% (9 rows)        0.1        0.1              46/50
 --
 --   After: 10.0 returned at every tier that has 10 rows, 10.0 in the exact
 --   top-10 at 10% and below, 9.4 at 50%, 0 empty. At 100,000 rows the before
---   column is the same shape (27 of 50 empty at 1%, 49 of 50 at 0.1%) and the
+--   column is the same shape (30 of 50 empty at 1%, 48 of 50 at 0.1%) and the
 --   after column is complete at 1% and thinner, while at 50% and 10% it holds
---   6.0 and 9.0 of the exact top-10 against 007's 4.4 and 3.9. That residue is
+--   6.4 and 8.7 of the exact top-10 against 007's 4.6 and 3.7. That residue is
 --   the HNSW approximation: random uniform vectors are the index's hardest
 --   case, the approximation was always there, and the iterative scan improves
 --   it because it keeps going. The full tables, and the real-corpus
@@ -56,12 +56,26 @@
 -- Design
 --   * The filter moves INSIDE both CTEs, so the HNSW scan applies it to each
 --     candidate as it is produced and keeps scanning until `v_fetch` rows pass.
---     For `thoughts` that is a plain Filter on the index scan. For
---     `thought_chunks` it is a LEFT JOIN to the parent row, because the chunk
---     carries no metadata of its own — which is what 007 said the filtered case
---     would need, and never did. LEFT so that the unfiltered path can drop the
---     lookup entirely (see the body); it is result-identical because every
---     chunk has exactly one parent.
+--     For `thoughts` that is a plain predicate on the scan. For `thought_chunks`
+--     it is a join to the parent row, because the chunk carries no metadata of
+--     its own — which is what 007 said the filtered case would need, and never
+--     did. The unfiltered path is its own branch with no predicate and no join.
+--
+--   * Two RETURN QUERY branches, one per path. Drafts three through eight kept
+--     one query text with `v_unfiltered OR metadata @> filter` and then paid
+--     for it in layers: the OR against a parameter hid the GIN index from the
+--     generic plan, so the function had to force custom plans
+--     (`plan_cache_mode`), so the chunk join had to be LEFT for join removal to
+--     fire when the OR folded, so the next author needed a paragraph about why
+--     a boolean local was load-bearing. The ninth review pass named the OR as
+--     the root. With `metadata @> filter` plain, the planner has the GIN index
+--     whichever plan mode plpgsql picks — the custom plan uses it on both
+--     sides; the generic plan, where the filter is a parameter, uses it for
+--     the direct side and walks the chunk index for the other, complete either
+--     way (db/bench-hnsw.ts section C) — so the choice is latency, not recall,
+--     and the function declares none. The two branches differ only in the
+--     predicate and the chunk-side join. db/test-schema.ts [8b] holds both to
+--     the same answer on the same rows.
 --
 --   * `hnsw.iterative_scan = relaxed_order`, set on the FUNCTION. This is what
 --     turns the post-filter into a correct one: without it the scan hands over
@@ -85,7 +99,7 @@
 --     The seventh review pass reproduced it on the upgrade path; the explicit
 --     load is the fix, and every printed ALTER DATABASE remedy carries it too.
 --
---     The same rule applies at CALL time. Function-level SETs are applied from
+--     The same rule applies at CALL time. The function-level SET is applied from
 --     proconfig when the function is entered, before its body runs, so a
 --     non-superuser in a session that has not yet loaded pgvector is refused
 --     on the first call, not just on the CREATE. Both first-party stores and
@@ -114,25 +128,6 @@
 --     the default the iterative scan continues to the LIMIT instead of stopping
 --     at 40.
 --
---   * `plan_cache_mode = force_custom_plan`, so the filter is always a constant
---     when this body is planned. That matters because the two plans the OR
---     admits are not close: under a custom plan `false OR metadata @> {...}`
---     folds and the planner can route a thin filter to the GIN index on
---     `metadata` and sort the few matches — exact, sub-millisecond; under a
---     generic plan the OR against a parameter rules the GIN index out and the
---     iterative HNSW walk does everything: 210–295 ms for a thin or empty
---     filter at 100,000 rows (db/bench-hnsw.ts section D). plpgsql switches to
---     the generic plan after five calls whenever its estimate is not costlier,
---     per connection, and the pool has ten of them. Forcing the custom plan
---     costs replanning on every call — measured at 100,000 rows as 1.49 ms
---     against 1.56 ms for the default unfiltered search, i.e. nothing
---     distinguishable — and takes the cliff off the table rather than betting
---     on the estimate. The planner still picks the HNSW walk for some filters
---     even with the constant known, and not always the same way: at 100,000
---     rows the 1% tier went to the walk in one run (41 ms) and to the GIN
---     index in the next (2 ms), complete either way; the 0.1% tier went to the
---     GIN index at 0.7 ms in both.
---
 --   * The two bounds on the walk — hnsw.max_scan_tuples = 100000 and
 --     hnsw.scan_mem_multiplier = 8 — are seeded ONCE at database level by the
 --     DO block after the function, not declared on the function. pgvector stops
@@ -145,18 +140,23 @@
 --     generic plan forced, tuple cap 100,000: with the multiplier at its default
 --     a filter with 15 matching rows returned 6.3 of 10 asked and one with 110
 --     rows returned 42 of 50 — short, silently; with the multiplier at 8 both
---     returned everything, at ~300 ms for the full walk. With both bounds
+--     returned everything. With both bounds
 --     seeded at database level — and the bench's session reconnected to read
 --     them, which an earlier draft's RESET ALL had not done; the sixth review
---     pass caught that — db/bench-hnsw.ts section D forces the walk at 100,000
---     rows and it completes: 90 matching rows → 10 of 10 in 211 ms, 6 → 6 of 6
---     in 289 ms, nothing → nothing in 294 ms. The bound needed is roughly
+--     pass caught that — db/bench-hnsw.ts section D forces the generic plan at
+--     100,000 rows and the walk completes: 90 matching rows → 10 of 10, 6 → 6
+--     of 6, nothing → nothing, 62–64 ms each. The bound needed is roughly
 --     v_fetch / selectivity, so pgvector's default covers a 0.1% filter only
---     to match_count 5 on a million rows; 100,000 covers 25. With the custom
---     plan forced, the walk is reached only when the planner still prefers the
---     HNSW index under a filter, so these are a floor under a path that is now
---     rarely taken — but they are the reason that path returns everything when
---     it is.
+--     to match_count 5 on a million rows; 100,000 covers 25. Which plan a
+--     filtered call gets is the planner's estimate to make: the function
+--     declares no plan mode, so plpgsql may run the generic plan after five
+--     calls when it does not estimate costlier (at 10,000 rows it did, 3.2 ms
+--     against 0.6), and under the custom plan the planner may still prefer
+--     the walk to the GIN index for a thin filter on a large table — at
+--     100,000 rows one run took the 1% and 0.1% tiers to the GIN index at 2.2
+--     and 0.7 ms and the next walked both sides at 44 and 190 ms, same seeded
+--     data, different statistics sample. These bounds are what make every one
+--     of those a latency choice rather than a recall one.
 --
 --     Why database level. The third and fourth drafts declared them as
 --     function-level SETs and then built machinery to compensate: a SET on the
@@ -166,29 +166,15 @@
 --     and preflight. The fifth review pass named that for what it was. One
 --     `ALTER DATABASE ... SET` by the owner is the whole tuning surface: every
 --     session honours it, no redefinition of the function touches it, and this
---     migration only seeds a value where none exists. The cost is that the
+--     migration only seeds a value where NOTHING has set one — judged by
+--     pg_settings.source, so a value from ALTER SYSTEM, a parameter group or
+--     ALTER ROLE is respected too (a database-level seed would outrank server
+--     config, and would have silently undone it). The cost is that the
 --     migrating role must own the database to seed the defaults; where it does
 --     not, the DO block warns with the two statements and the migration still
 --     applies — the fix does not depend on the bounds, only the depth of a rare
 --     walk does. Sessions read database-level settings at connect, so a running
 --     server picks up a change when its pool reconnects.
---
---   * Two invariants the body leans on, stated because SMD-945 and SMD-958 will
---     rewrite it. First, `v_unfiltered` is a BOOLEAN LOCAL, not a rewrite of
---     the filter: under the forced custom plan it is a known constant, so on
---     the default path `true OR …` folds away and the chunk-side join can be
---     removed, and on the filtered path `false OR …` leaves a strict predicate
---     the planner can route to the GIN index. A tempting simplification —
---     `WHERE t.metadata @> COALESCE(filter, '{}')` — is wrong twice: it drops
---     every row whose metadata is NULL or not an object from UNFILTERED search
---     (`NULL @> '{}'` is NULL, `'[1]' @> '{}'` is false), and with no
---     containment statistics the planner would route the default path to the
---     GIN bitmap and lose the join removal. Second, therefore: `thoughts.metadata`
---     is nullable and unconstrained (001 declares `jsonb DEFAULT '{}'` with no
---     NOT NULL and no jsonb_typeof CHECK; 004 stores `p_payload->'metadata'`
---     unchecked; the `||` merges in 005 and 013 can turn an object into an
---     array). The unfiltered path must not care. db/test-schema.ts [8b] plants a
---     NULL row and an array row and asserts both come back unfiltered.
 --
 --   * `v_fetch := GREATEST(match_count * 4, 20)` is 007's factor, kept on
 --     purpose. 007 justified it as a recall budget against the ef_search cap,
@@ -233,20 +219,6 @@
 --     passing NULL got zero results and no error. Neither store passes NULL
 --     (both send `{}`); a hand-written PostgREST call can.
 --
---   * The single query text is kept, with `v_unfiltered OR ...` rather than an
---     IF branching into two near-identical statements. Two copies of this
---     query is the defined-twice defect FORK.md keeps finding. The planner then
---     has two ways to run it, and db/bench-hnsw.ts shows both: under a CUSTOM
---     plan (plpgsql's first five calls, and after that whenever the generic
---     estimate is costlier) the parameter is a known constant, `false OR …`
---     folds away, and the planner may pick the GIN index on `metadata` and sort
---     the matches — exact, and cheap when the filter is selective. Under a
---     GENERIC plan the OR against a parameter rules the GIN index out and the
---     filter is applied by the iterative HNSW scan. Either is exact for the
---     filter; only the vector side is approximate, as it always was. The
---     `plan_cache_mode` SET above keeps this function on the first shape; the
---     two scan bounds are about the second.
---
 --   * Signature, return shape and the strict `> match_threshold` are unchanged.
 --     store-sql.ts and store-postgrest.ts call it exactly as before.
 --
@@ -258,9 +230,8 @@
 --   `match_thoughts` returns `match_count` rows whenever that many pass the
 --   threshold and filter, for any filter selectivity the scan can reach within
 --   `hnsw.max_scan_tuples`; `pg_proc.proconfig` for it records the iterative-scan
---   setting and the forced plan mode so preflight and the schema test can see
---   them, and `pg_db_role_setting` for the database records the two bounds
---   unless an operator had already set them.
+--   setting so preflight and the schema test can see it, and the database
+--   records the two bounds unless something had already set them anywhere.
 -- ============================================================================
 
 -- Load pgvector's library into THIS session before the CREATE below. The SET
@@ -287,21 +258,18 @@ RETURNS TABLE (
   created_at  timestamptz
 )
 LANGUAGE plpgsql
--- Both are scoped to this call and restored on exit. The first requires
--- pgvector >= 0.8.0, and the CREATE fails on anything older rather than
--- producing a function that quietly stops at the first ef_search candidates.
--- The second is what keeps the filtered path off the iterative walk in the
--- first place. The walk's two BOUNDS are deliberately not here: a function-level
--- SET would override the database-level values seeded below, which are the
--- operator's tuning knob. The header has the measurements behind each.
+-- Scoped to this call and restored on exit. Requires pgvector >= 0.8.0, and the
+-- CREATE fails on anything older rather than producing a function that quietly
+-- stops at the first ef_search candidates. The walk's two BOUNDS are
+-- deliberately not here: a function-level SET would override the database-level
+-- values seeded below, which are the operator's tuning knob.
 SET hnsw.iterative_scan = relaxed_order
-SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
   -- Clamped here, as 012 clamps its p_limit: the cost of a call is now
   -- proportional to match_count (the iterative scan honours v_fetch), and the
   -- callers who send a filter are direct SQL and PostgREST — outside the zod
-  -- bound the two servers apply. Three edges change from 007, deliberately:
+  -- clamp the two servers apply. Three edges change from 007, deliberately:
   -- 0 returns 1 row (was 0), a negative count returns 1 row (was an error),
   -- NULL returns 10 (was LIMIT NULL, the whole candidate set). Counts above
   -- 100 are cut to 100: some integrations ask for up to 200 or 500 as headroom
@@ -310,7 +278,6 @@ DECLARE
   -- cap near 80, and a later migration can raise the ceiling if one needs it.
   v_count      int     := LEAST(GREATEST(COALESCE(match_count, 10), 1), 100);
   v_fetch      int     := GREATEST(v_count * 4, 20);
-  v_unfiltered boolean := (filter IS NULL OR filter = '{}'::jsonb);
 BEGIN
   -- ob1:filter-inside-scan — a CONTRACT SENTINEL, not prose. It lives in the
   -- BODY (pg_proc.prosrc), which every CREATE OR REPLACE rewrites, so it says
@@ -320,56 +287,85 @@ BEGIN
   -- the claim.) A later migration that redefines match_thoughts and keeps the
   -- filter inside the candidate scan carries this line; one that reintroduces
   -- a post-LIMIT filter must not. preflight reads it, and on the SQL store
-  -- also probes the behaviour it stands for; db/test-schema.ts [8b] asserts it.
-  RETURN QUERY
-  WITH direct AS (
-    SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
-    FROM thoughts t
-    WHERE t.embedding IS NOT NULL
-      AND (v_unfiltered OR t.metadata @> filter)
-    ORDER BY t.embedding <=> query_embedding
-    LIMIT v_fetch
-  ),
-  chunked AS (
-    -- A join, not an EXISTS. Inside an OR the planner cannot turn EXISTS into a
-    -- semi-join, so it ran it as a hashed subplan: one full pass over `thoughts`
-    -- per query to build the hash, whatever the filter. The join is one
-    -- primary-key lookup per candidate the scan produces — measured, a full
-    -- pass at 10,000 rows was 3x the whole query's former cost.
-    --
-    -- A LEFT join, because it is result-identical (007 declares thought_id
-    -- NOT NULL REFERENCES thoughts, so every chunk has exactly one parent) and
-    -- it lets the planner drop the lookup on the unfiltered path: under the
-    -- custom plan this function forces, `true OR p.metadata @> filter` folds
-    -- to true, `p` is then referenced only in the ON clause against its primary
-    -- key, and join removal deletes it. With a real filter the predicate is
-    -- strict and the planner reduces it back to an inner join. An inner join
-    -- here paid the lookup on every default search for nothing; with the LEFT
-    -- join the default ten-row search costs what 007's did — 0.86 → 0.75 ms at
-    -- 10,000 rows, 1.38 → 1.35 ms at 100,000 (db/bench-hnsw.ts, A).
-    SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
-    FROM thought_chunks c
-    LEFT JOIN thoughts p ON p.id = c.thought_id
-    WHERE (v_unfiltered OR p.metadata @> filter)
-    ORDER BY c.embedding <=> query_embedding
-    LIMIT v_fetch
-  ),
-  best AS (
-    SELECT u.tid, MAX(u.sim) AS sim
-    FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
-    GROUP BY u.tid
-  )
-  SELECT
-    t.id,
-    t.content,
-    t.metadata,
-    b.sim,
-    t.created_at
-  FROM best b
-  JOIN thoughts t ON t.id = b.tid
-  WHERE b.sim > match_threshold
-  ORDER BY b.sim DESC
-  LIMIT v_count;
+  -- also probes the NULL-filter behaviour beside it; db/test-schema.ts [8b]
+  -- asserts it.
+  --
+  -- Two branches, not one query with `v_unfiltered OR metadata @> filter`.
+  -- Earlier drafts kept a single text and paid for it: the OR against a
+  -- parameter hid the GIN index from the generic plan, which then needed
+  -- `plan_cache_mode = force_custom_plan` on the function, which needed a
+  -- LEFT JOIN whose removal depended on the OR folding to true, which needed
+  -- a paragraph of invariants for the next author. With the predicate a plain
+  -- `metadata @> filter` the planner has the GIN index whichever plan mode
+  -- plpgsql picks, the walk is complete under either, and none of that is
+  -- load-bearing. The two texts differ only in the
+  -- predicate and the chunk-side join, and db/test-schema.ts [8b] holds them
+  -- to the same answer on the same rows.
+  IF filter IS NULL OR filter = '{}'::jsonb THEN
+    -- Unfiltered. A NULL filter is unfiltered: 007 evaluated
+    -- `NULL = '{}' OR metadata @> NULL`, which excluded every row.
+    RETURN QUERY
+    WITH direct AS (
+      SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
+      FROM thoughts t
+      WHERE t.embedding IS NOT NULL
+      ORDER BY t.embedding <=> query_embedding
+      LIMIT v_fetch
+    ),
+    chunked AS (
+      SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
+      FROM thought_chunks c
+      ORDER BY c.embedding <=> query_embedding
+      LIMIT v_fetch
+    ),
+    best AS (
+      SELECT u.tid, MAX(u.sim) AS sim
+      FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
+      GROUP BY u.tid
+    )
+    SELECT t.id, t.content, t.metadata, b.sim, t.created_at
+    FROM best b
+    JOIN thoughts t ON t.id = b.tid
+    WHERE b.sim > match_threshold
+    ORDER BY b.sim DESC
+    LIMIT v_count;
+  ELSE
+    -- Filtered. The predicate sits INSIDE each candidate CTE, so the scan
+    -- applies it to every candidate it produces and keeps going until v_fetch
+    -- pass — the iterative scan declared above is what lets it keep going.
+    -- The chunk side joins its parent row for the metadata; a join rather than
+    -- EXISTS because inside an OR (the previous shape) EXISTS became a hashed
+    -- subplan — one full pass over thoughts per call — and a join is one
+    -- primary-key lookup per candidate.
+    RETURN QUERY
+    WITH direct AS (
+      SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
+      FROM thoughts t
+      WHERE t.embedding IS NOT NULL
+        AND t.metadata @> filter
+      ORDER BY t.embedding <=> query_embedding
+      LIMIT v_fetch
+    ),
+    chunked AS (
+      SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
+      FROM thought_chunks c
+      JOIN thoughts p ON p.id = c.thought_id
+      WHERE p.metadata @> filter
+      ORDER BY c.embedding <=> query_embedding
+      LIMIT v_fetch
+    ),
+    best AS (
+      SELECT u.tid, MAX(u.sim) AS sim
+      FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
+      GROUP BY u.tid
+    )
+    SELECT t.id, t.content, t.metadata, b.sim, t.created_at
+    FROM best b
+    JOIN thoughts t ON t.id = b.tid
+    WHERE b.sim > match_threshold
+    ORDER BY b.sim DESC
+    LIMIT v_count;
+  END IF;
 END;
 $$;
 
@@ -399,17 +395,29 @@ $$;
 DO $$
 DECLARE
   v_db       text := current_database();
-  v_existing text[];
+  v_dblevel  text[];
 BEGIN
-  SELECT s.setconfig INTO v_existing
-  FROM pg_db_role_setting s
-  JOIN pg_database d ON d.oid = s.setdatabase
+  -- "Set" means set ANYWHERE the session resolves it from — ALTER SYSTEM, the
+  -- config file, a managed parameter group, ALTER ROLE, ALTER DATABASE — not
+  -- merely a database-level row. A database-level seed outranks server config,
+  -- so seeding over an operator's ALTER SYSTEM would silently undo it (ninth
+  -- review pass). Two signals, because each misses a case the other catches:
+  -- pg_settings.source is 'default' only when nothing had set the value when
+  -- THIS session connected (the SELECT '[1]'::vector at the top of this file
+  -- made hnsw.* visible there); pg_db_role_setting shows a database-level
+  -- value set since — by an operator earlier in this session, or by this
+  -- block on a previous run — which pg_settings will not report until the
+  -- next connection. Unset means both say so.
+  SELECT s.setconfig INTO v_dblevel
+  FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
   WHERE d.datname = v_db AND s.setrole = 0;
 
-  IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.max_scan_tuples=%') THEN
+  IF EXISTS (SELECT 1 FROM pg_settings WHERE name = 'hnsw.max_scan_tuples' AND source = 'default')
+     AND NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_dblevel, '{}')) c WHERE c LIKE 'hnsw.max_scan_tuples=%') THEN
     EXECUTE format('ALTER DATABASE %I SET hnsw.max_scan_tuples = {{HNSW_SEED_MAX_SCAN_TUPLES}}', v_db);
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.scan_mem_multiplier=%') THEN
+  IF EXISTS (SELECT 1 FROM pg_settings WHERE name = 'hnsw.scan_mem_multiplier' AND source = 'default')
+     AND NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_dblevel, '{}')) c WHERE c LIKE 'hnsw.scan_mem_multiplier=%') THEN
     EXECUTE format('ALTER DATABASE %I SET hnsw.scan_mem_multiplier = {{HNSW_SEED_SCAN_MEM_MULTIPLIER}}', v_db);
   END IF;
 EXCEPTION WHEN OTHERS THEN
