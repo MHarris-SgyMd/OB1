@@ -199,12 +199,26 @@
 -- 100,000 rows, and part of that is returning content instead of ids.
 --
 -- ── The ceiling, which is selectivity and not scale ──────────────────────────
--- A needle in ~10% of rows, through the function: 0.90 ms at 1,000 rows, 7.3 ms
--- at 10,000, 75 ms at 100,000. That is the honest limit of this feature. A needle
--- in a tenth of the corpus has to touch a tenth of the heap however it is found,
--- and the occurrence count and total_count are then paid on all of it. Keyword
--- search is fast for the queries it exists for — exact, rare strings — and
--- unremarkable for everything else.
+-- Through the function, by how much of the corpus the needle matches:
+--
+--   rows       ~10% of rows   every row
+--   -------    ------------   ---------
+--     1,000    0.95 ms        7.5 ms
+--    10,000    7.8 ms         75 ms
+--   100,000    79 ms          731 ms
+--
+-- The right-hand column is the number an operator needs: it is the worst case
+-- any authenticated caller can ask for, including by accident — a one-character
+-- needle reaches it. No index helps there. A needle matching everything has to
+-- touch the whole heap however it is found, and the occurrence count and
+-- total_count are then paid on all of it.
+--
+-- It is bounded rather than dangerous — 731 ms at 100,000 rows, and the caller's
+-- own statement_timeout applies — but it is 9x the 10% figure, which an earlier
+-- version of this header called "the honest limit of this feature". It was not.
+--
+-- Keyword search is fast for the queries it exists for — exact, rare strings, in
+-- single-digit milliseconds — and unremarkable for everything else.
 --
 -- ── Without the index at all ─────────────────────────────────────────────────
 -- A sequential scan, with the correct rows. Migration 011's measurements say

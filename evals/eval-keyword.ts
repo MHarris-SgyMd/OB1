@@ -62,6 +62,37 @@ if (!DB_URL) {
   process.exit(2);
 }
 
+/**
+ * Refuse a database that is not obviously a throwaway.
+ *
+ * This script does two things that are individually fine and together are not:
+ * it calls `resetSchema`, which DROPS every table the schema owns, and it then
+ * loads the corpus — internal engineering data — into whatever it just cleared.
+ * Pointed at anything real by a stale `DATABASE_URL` in a shell, it destroys
+ * that database and writes sensitive text into it, in one command, with no
+ * prompt. The benchmarks in db/ share the first hazard but load synthetic rows;
+ * this is the only script in the repo that combines both.
+ *
+ * `evals/build-linear-corpus.ts` already refuses rather than warns when asked to
+ * write the corpus inside the repository. Same posture here: a loopback host is
+ * allowed, everything else stops. `OB1_EVAL_ALLOW_REMOTE_DB=1` is the deliberate
+ * override, which is a thing you have to mean.
+ */
+const dbHost = (() => {
+  try { return new URL(DB_URL).hostname; } catch { return ""; }
+})();
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0", ""]);
+if (!LOOPBACK.has(dbHost) && process.env.OB1_EVAL_ALLOW_REMOTE_DB !== "1") {
+  console.error(
+    `  Refusing to run against ${dbHost}.\n\n` +
+      `  This script DROPS every table in the schema and then loads ${CORPUS}\n` +
+      `  into it. That is safe against a throwaway container and destructive\n` +
+      `  against anything else. Run it under db/with-postgres.sh, or set\n` +
+      `  OB1_EVAL_ALLOW_REMOTE_DB=1 if you are certain.`
+  );
+  process.exit(2);
+}
+
 type Item = { id: string; title: string; text: string };
 const ITEMS: Item[] = JSON.parse(await Bun.file(CORPUS).text());
 if (ITEMS.length === 0) {

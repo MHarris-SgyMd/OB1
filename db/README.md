@@ -205,8 +205,13 @@ migration header argues: the ordering already materialises the whole match set, 
 the window adds no scan. The whole function is ~0.1 ms over the bare pattern at
 100,000 rows.
 
-**The ceiling.** A needle in ~10% of rows costs 75 ms at 100,000. Keyword search
-is fast for what it is for — exact, rare strings — and unremarkable otherwise.
+**The ceiling.** A needle in ~10% of rows costs 79 ms at 100,000; one matching
+*every* row costs 731 ms, and no index helps there. The second number is the one
+an operator needs — it is the worst case any caller can reach, including by
+accident with a one-character needle — and an earlier version of this script
+printed only the first and called it the ceiling. Keyword search is fast for what
+it is for, exact rare strings in single-digit milliseconds, and unremarkable
+otherwise.
 
 A decoy is planted that only an *unescaped* pattern can match, so a regression in
 the escaping doubles the row count and the script refuses to print rather than

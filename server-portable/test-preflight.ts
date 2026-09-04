@@ -135,6 +135,25 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
   /**
+   * Migration 012, and the reason it is checked at all: the tool is registered
+   * unconditionally, so a database without the function serves a tool that
+   * errors on every call while everything else looks healthy.
+   */
+  const noKeyword = new SQL({ url: LIVE, max: 1 });
+  await noKeyword.unsafe("DROP FUNCTION IF EXISTS search_thoughts_keyword(text, int, int, jsonb)");
+  await noKeyword.close();
+
+  const missingKw = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(missingKw.code === 1, "a database missing migration 012 does not start");
+  assert(/search_thoughts_keyword is missing/.test(missingKw.out),
+         "…and names the function rather than the symptom");
+  assert(/012_search_thoughts_keyword\.sql/.test(missingKw.out), "…with the migration to apply");
+
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("012") });
+  const withKw = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/keyword search.*present/s.test(withKw.out), "…and reports it present once applied");
+
+  /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a
    * deployment that flips it afterwards and re-runs the migrator gets a clean
    * "already applied" and no change to the index — a silent no-op on an explicit

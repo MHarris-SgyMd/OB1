@@ -264,6 +264,33 @@ if (configFailed) {
                  "Apply db/migrations/010_agent_identity.sql.");
 
         /**
+         * Migration 012's function, checked because the tool that calls it is
+         * registered unconditionally.
+         *
+         * A server built after SMD-944 running against a database still at 011
+         * advertises `search_thoughts_keyword` in tools/list and answers every
+         * call to it with `function search_thoughts_keyword(unknown) does not
+         * exist`. Nothing else notices: the handshake succeeds, the liveness
+         * probe passes, the other eight tools work. That is precisely the
+         * failure this file exists to convert into a startup message, and every
+         * other migration that backs a registered feature is already checked
+         * here — 004, 008, 010, 011. This one was missed.
+         *
+         * A failure rather than a warning, matching `atomic capture` and `audit
+         * trail`: the absence does not degrade the tool, it breaks it. The
+         * compose stack runs the migrator to completion before the server
+         * starts, so the ordinary upgrade path never reaches this.
+         */
+        const keyword = await sql`
+          SELECT count(*)::int AS c FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'search_thoughts_keyword' AND n.nspname = 'public'`;
+        if (Number(keyword[0].c) >= 1) add("keyword search", "ok", "search_thoughts_keyword present");
+        else add("keyword search", "fail",
+                 "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it would fail",
+                 "Apply db/migrations/012_search_thoughts_keyword.sql.");
+
+        /**
          * The trigram flag is read only when migration 011 applies. Migrations
          * run once, so someone who changes OB1_TRGM_INDEX against a database
          * that already has 011 in its ledger and re-runs the migrator gets a

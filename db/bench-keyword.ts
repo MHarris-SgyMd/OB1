@@ -78,6 +78,17 @@ const MARKED_ROWS = 5;
 /** A term in ~10% of rows, where the index helps much less. From bench-trgm. */
 const MID = "mesotrope";
 
+/**
+ * A term in EVERY row — the actual worst case, and the reason this exists.
+ *
+ * The first version of this benchmark called the 10% figure "the honest ceiling
+ * on the feature". It is not: a needle matching everything costs about nine
+ * times more, because the occurrence count and the window are then paid on the
+ * whole table. Any authenticated caller can issue that query, so it is the
+ * number an operator actually needs.
+ */
+const ALL = "omnitrope";
+
 /** Escape exactly as migration 012 does, so the two cannot drift apart. */
 function escapeNeedle(needle: string): string {
   return needle.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -109,6 +120,7 @@ function generate(n: number, seed = 42): string[] {
   for (let i = 0; i < n; i++) {
     const words: string[] = [];
     for (let w = 0; w < 70; w++) words.push(WORDS[Math.floor(r() * WORDS.length)]);
+    words.push(ALL);
     if (i < MARKED_ROWS) words.splice(10, 0, IDENT);
     else if (i < MARKED_ROWS * 2) words.splice(10, 0, DECOY);
     else if (i % 10 === 0) words.splice(10, 0, MID);
@@ -196,6 +208,8 @@ type Row = {
   noWindowMs: number;
   noOccMs: number;
   midMs: number;
+  allMs: number;
+  allTotal: number;
   usedIndex: boolean;
   usedInLoop: number;
   escapedPlan: string;
@@ -308,6 +322,20 @@ for (const scale of SCALES) {
     sql`SELECT id, occurrences, total_count FROM search_thoughts_keyword(${MID}, 25, 0, '{}'::jsonb)`
   );
 
+  // Every row. The real ceiling.
+  const all = await time(() =>
+    sql`SELECT id, occurrences, total_count FROM search_thoughts_keyword(${ALL}, 25, 0, '{}'::jsonb)`
+  );
+  const allTotal = Number(
+    (await sql`SELECT total_count FROM search_thoughts_keyword(${ALL}, 1, 0, '{}'::jsonb)`)[0].total_count
+  );
+  if (allTotal !== scale) {
+    throw new Error(
+      `the all-rows probe matched ${allTotal} of ${scale} rows. It is supposed to be in every ` +
+        `row, so this is not the worst case it is labelled as — refusing to publish it as one.`
+    );
+  }
+
   results.push({
     scale,
     fnMs: fn.ms,
@@ -315,6 +343,8 @@ for (const scale of SCALES) {
     noWindowMs: noWindow.ms,
     noOccMs: noOcc.ms,
     midMs: mid.ms,
+    allMs: all.ms,
+    allTotal,
     usedIndex,
     usedInLoop,
     escapedPlan: await planOf(sql, escaped),
@@ -370,16 +400,21 @@ console.log(
     "     than ids — so a few of its microseconds are bytes on the wire."
 );
 
-console.log("\n  3. A term in ~10% of rows, where the index helps least\n");
-console.log("     rows        full fn      plan");
-console.log("     ─────────   ──────────   ────");
+console.log("\n  3. Where the index helps least, and the actual ceiling\n");
+console.log("     rows        ~10% of rows   plan               every row");
+console.log("     ─────────   ────────────   ────────────────   ─────────");
 for (const r of results) {
   console.log(
-    `     ${String(r.scale.toLocaleString()).padEnd(9)}   ${fmt(r.midMs).padEnd(10)}   ${r.midPlan}`
+    `     ${String(r.scale.toLocaleString()).padEnd(9)}   ${fmt(r.midMs).padEnd(12)}   ` +
+      `${r.midPlan.padEnd(16)}   ${fmt(r.allMs)}`
   );
 }
 console.log(
-  "\n     This is the honest ceiling on the feature. A needle in a tenth of the\n" +
-    "     corpus has to touch a tenth of the heap however it is found, and the\n" +
-    "     occurrence count and total_count are then paid on all of it.\n"
+  "\n     The last column is the worst case any caller can ask for, and it is the\n" +
+    "     number an operator needs. A needle matching everything has to touch the\n" +
+    "     whole heap however it is found, and the occurrence count and total_count\n" +
+    "     are then paid on all of it — no index can help.\n\n" +
+    "     An earlier version of this script printed only the 10% column and called\n" +
+    "     it 'the honest ceiling on the feature'. It is about nine times short of\n" +
+    "     one.\n"
 );
