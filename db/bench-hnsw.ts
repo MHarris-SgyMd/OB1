@@ -54,8 +54,8 @@
  *
  * ── Running ──────────────────────────────────────────────────────────────────
  *
- *   ./with-postgres.sh bun bench-hnsw.ts
- *   OB1_BENCH_SCALES=1000,10000,100000 ./with-postgres.sh bun bench-hnsw.ts
+ *   ./with-postgres.sh bun bench-hnsw.ts             # 10,000 and 100,000 rows, 50 queries
+ *   OB1_BENCH_SCALES=1000 OB1_BENCH_QUERIES=20 ./with-postgres.sh bun bench-hnsw.ts
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
  *
  * Vectors are 64-wide random unit vectors: wide enough that HNSW behaves like
@@ -71,12 +71,14 @@ const PRINT_PLANS = process.argv.includes("--plans");
 
 const DIM = 64;
 const OPTS = { dim: DIM, model: "stub-embed" };
-const SCALES = (process.env.OB1_BENCH_SCALES ?? "1000,10000")
+// The defaults are the run every published table came from, so the documented
+// command reproduces the documented numbers.
+const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
   .split(",")
   .map((s) => Number(s.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
 /** Random queries per selectivity. */
-const Q = Number(process.env.OB1_BENCH_QUERIES ?? 100);
+const Q = Number(process.env.OB1_BENCH_QUERIES ?? 50);
 /** Result size for the filtered arm. The server's default is 10. */
 const K = 10;
 /** Share of thoughts that also get chunk rows, so the chunk CTE is exercised. */
@@ -100,20 +102,47 @@ const TIERS: { key: string; share: number }[] = [
 ];
 
 // ── Deterministic data ──────────────────────────────────────────────────────
+//
+// Re-seeded per scale, so the 100,000-row corpus is the same corpus whether or
+// not 10,000 ran first. The generator is test-support's; the copy this file had
+// cycled after ~10,000 draws and made most queries exact copies of stored rows,
+// which is why `checkConfound` exists below.
 
-const { rnd, unitVector } = seededRandom(20260904);
 const lit = (v: number[]) => `[${v.join(",")}]`;
 
 type Row = { doc: number; v: number[]; tiers: string[] };
 
-function generate(n: number): Row[] {
+function generate(n: number): { rows: Row[]; queries: number[][] } {
+  const { rnd, unitVector } = seededRandom(20260904 + n);
   const rows: Row[] = [];
   for (let i = 0; i < n; i++) {
     const r = rnd();
     const tiers = TIERS.filter((t) => r < t.share).map((t) => t.key);
     rows.push({ doc: i, v: unitVector(DIM), tiers });
   }
-  return rows;
+  const queries = Array.from({ length: Q }, () => unitVector(DIM));
+  return { rows, queries };
+}
+
+/**
+ * A query that IS a stored row is its own global nearest neighbour, which no
+ * post-filter can lose — the confound this bench exists to avoid. Random unit
+ * vectors in 64 dimensions sit near cosine 0 of each other; anything close to
+ * 1 means the generator repeated itself. Refuse to publish numbers on that.
+ */
+function checkConfound(rows: Row[], queries: number[][]): number {
+  let max = -1;
+  for (const q of queries) {
+    for (const r of rows) {
+      let dot = 0;
+      for (let i = 0; i < DIM; i++) dot += q[i] * r.v[i];
+      if (dot > max) max = dot;
+    }
+  }
+  if (max > 0.99) {
+    throw new Error(`a query vector coincides with a stored row (cosine ${max.toFixed(4)}); the generator is not random enough to measure with`);
+  }
+  return max;
 }
 
 async function load(sql: SQL, rows: Row[]): Promise<void> {
@@ -336,9 +365,9 @@ for (const n of SCALES) {
     console.log(`  ${DIM}-dimensional random unit vectors, ${Q} random queries per filter, K=${K}`);
     banner = true;
   }
-  const rows = generate(n);
+  const { rows, queries } = generate(n);
+  console.log(`  nearest query-to-row cosine ${checkConfound(rows, queries).toFixed(3)} (a repeat would read 1.000)`);
   await load(sql, rows);
-  const queries = Array.from({ length: Q }, () => unitVector(DIM));
 
   // Tiers with at least one matching row, and the exact answer for each
   // (tier, query) once — shared by both arms.
@@ -370,13 +399,16 @@ for (const n of SCALES) {
     console.log(" done");
   }
 
-  // D. The generic plan, forced. plpgsql runs custom plans for its first five
-  // calls and may switch to the generic one after that when its estimate is
-  // not costlier. Under the generic plan the filter is a parameter, the GIN
-  // index is unavailable, and the iterative HNSW scan does all the work — so
-  // the thin and empty filters are measured under it explicitly rather than
-  // under whichever plan the cache happened to hold.
+  // D. The generic plan, which 014 forbids the function from using. Under it
+  // the filter is a parameter, the GIN index is unavailable, and the iterative
+  // HNSW scan does all the work, bounded by hnsw.max_scan_tuples and by
+  // work_mem * hnsw.scan_mem_multiplier. This arm strips the function's own
+  // plan_cache_mode so the session can force the generic plan, measures the
+  // thin and empty filters through it, and then re-applies 014 to restore the
+  // shipped function. It exists to show what the forced custom plan buys, and
+  // to show the bounds doing their job when the walk does happen.
   process.stdout.write("  generic plan      ");
+  await sql.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET plan_cache_mode`);
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   const thin = tiers.filter((t) => t.share <= 0.001);
   for (const t of thin) {
@@ -385,6 +417,7 @@ for (const n of SCALES) {
     process.stdout.write(".");
   }
   await sql.unsafe(`SET plan_cache_mode = auto`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
   console.log(" done");
 }
 
@@ -433,7 +466,8 @@ if (PRINT_PLANS) {
   }
 }
 
-console.log("\n### D. The generic plan, forced: thin and empty filters through the iterative scan (current function)\n");
+console.log("\n### D. The generic plan the function forbids, forced anyway: thin and empty filters through the iterative scan\n");
+console.log("What plan_cache_mode = force_custom_plan on the function avoids, and what the two scan bounds do when the walk happens.\n");
 console.log("| rows | filter matches | matching rows | returned | in exact top-10 | exact has | median ms |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 for (const g of generic) {

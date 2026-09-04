@@ -190,17 +190,32 @@ export function requireDatabaseUrl(script: string): string {
 }
 
 /**
- * A seeded PRNG for suites that need reproducible random vectors: an LCG, so the
- * same seed produces the same rows on every machine and in CI. bench-hnsw.ts,
+ * A seeded PRNG for suites that need reproducible random vectors, so the same
+ * seed produces the same rows on every machine and in CI. bench-hnsw.ts,
  * test-live.ts and evals/eval-filtered.ts each carried a copy; this is the one.
+ *
+ * mulberry32, in 32-bit integer arithmetic via Math.imul. The copy this
+ * replaced was an LCG written as `s * 1103515245` in doubles: the product
+ * passes 2^53, the low bits become rounding artefacts, and the stream collapsed
+ * into a 10,466-draw cycle. At 100,000 bench rows that meant ~10,000 distinct
+ * vectors, each stored up to ten times, and every "random" query bit-identical
+ * to a stored row — exactly the query-is-its-own-nearest-neighbour confound the
+ * bench's header says its design avoids. Found by the second review pass; the
+ * numbers published before it were re-measured.
  */
 export function seededRandom(seed: number): {
   rnd: () => number;
   gauss: () => number;
   unitVector: (dim: number) => number[];
 } {
-  let s = seed;
-  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  let a = seed >>> 0;
+  const rnd = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   const gauss = () => {
     const u = rnd() || 1e-9;
     const v = rnd();

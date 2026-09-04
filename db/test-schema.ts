@@ -427,12 +427,13 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
     `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
   );
-  // The scan bound travels with the scan mode: without it a thin filter stops
-  // at pgvector's 20,000-tuple default and silently returns short again.
-  assert(
-    /(^|,)hnsw\.max_scan_tuples=\d+(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
-    "…and hnsw.max_scan_tuples, so the bound is declared beside the mode it bounds"
-  );
+  // The bounds travel with the scan mode, and the shipped VALUES are pinned:
+  // CREATE OR REPLACE rewrites proconfig wholesale, so a later redefinition
+  // that changes or drops one of these must do so on purpose, here.
+  const proconfig = cfg.rows[0]?.cfg ?? "";
+  assert(/(^|,)hnsw\.max_scan_tuples=100000(,|$)/.test(proconfig), "…and hnsw.max_scan_tuples=100000, the tuple bound on the walk");
+  assert(/(^|,)hnsw\.scan_mem_multiplier=8(,|$)/.test(proconfig), "…and hnsw.scan_mem_multiplier=8, without which the memory bound stops the walk near 19,000 tuples");
+  assert(/(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(proconfig), "…and plan_cache_mode=force_custom_plan, so a filter is a constant the planner can route to the GIN index");
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");

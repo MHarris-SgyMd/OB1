@@ -138,7 +138,8 @@ export function requireLoopbackDatabase(url: string, loads: string): void {
   } catch {
     /* an unparseable URL has no host to trust */
   }
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0", ""]);
+  // WHATWG URL keeps the brackets on an IPv6 host: `[::1]`, not `::1`.
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0", ""]);
   if (LOOPBACK.has(host) || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
   console.error(
     `  Refusing to run against ${host}.\n\n` +

@@ -212,6 +212,13 @@ if (configFailed) {
           "OB1_CHUNK_CONTEXT is on, but the PostgREST store cannot be checked against the schema from here — if migration 013 is not applied, every blurb is embedded and none is recorded",
           "Confirm db/migrations/013_chunk_context.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
     }
+    // Migration 014 is the other silent one: without it a filtered search
+    // returns fewer rows than match, with no error anywhere. Same rule as above.
+    if (built.kind !== "sql") {
+      add("filtered search", "warn",
+          "the PostgREST store cannot be checked against the schema from here — if migration 014 is not applied, a filtered search_thoughts silently returns fewer rows than match, near zero for a filter matching under 1% of the corpus",
+          "Confirm db/migrations/014_filtered_match_thoughts.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
+    }
 
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
@@ -321,59 +328,63 @@ if (configFailed) {
          * (db/bench-hnsw.ts). So the check reads the catalog, not the
          * migration ledger.
          *
-         * Order matters. The version is judged FIRST, because on pgvector before
-         * 0.8.0 the setting does not exist, `bun migrate.ts` fails on 014, and
-         * no reading of proconfig can say anything useful. Two sub-cases: the
-         * server binary is new but the extension was never updated in this
-         * database (a new image over an old volume — nothing in the repo runs
-         * ALTER EXTENSION), which is a one-line fix and named as one; or the
-         * binary itself is old. Only then is the function's own SET read, and
-         * failing that the session's inherited value, since a database- or
-         * role-level GUC satisfies the same invariant.
+         * The function's own SET is read FIRST, because it is the fact: the
+         * `hnsw.*` settings come from pgvector's loaded shared library, not from
+         * `pg_extension.extversion`, so a new binary over an old volume applies
+         * 014 and runs it correctly while extversion still reads 0.7.x. The
+         * version is consulted only to explain an ABSENT setting — a binary too
+         * old to accept it, or a stale extension record worth updating — and to
+         * advise `ALTER EXTENSION vector UPDATE` when the record lags a working
+         * function. Failing both, the session's inherited value is checked,
+         * since a database- or role-level GUC satisfies the same invariant.
+         *
+         * The lookup matches its siblings — proname, namespace, argument count —
+         * rather than casting a signature through search_path, which would
+         * return NULL (or raise, on PG15) when the vector type lives outside the
+         * connecting role's search_path.
          *
          * A WARNING throughout: without the setting the tool still answers,
          * with the recall it had before 014.
          */
         const { versionAtLeast } = await import("../db/config.mjs");
+        const mt = await sql`
+          SELECT array_to_string(p.proconfig, ',') AS cfg FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
+        const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
         const pgv = await sql`
           SELECT e.extversion, a.default_version
           FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
           WHERE e.extname = 'vector'`;
-        if (pgv.length === 0) {
+        const installed = pgv.length ? String(pgv[0].extversion) : null;
+        const available = pgv.length ? String(pgv[0].default_version ?? pgv[0].extversion) : null;
+        if (declared && installed && !versionAtLeast(installed, 0, 8)) {
+          add("filtered search", "warn",
+              `match_thoughts scans iteratively under a metadata filter (${declared}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
+              "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
+        } else if (declared) {
+          add("filtered search", "ok", `match_thoughts scans iteratively under a metadata filter (${declared}, pgvector ${installed ?? "unknown"})`);
+        } else if (installed === null) {
           add("filtered search", "warn", "the vector extension is not installed, so match_thoughts cannot be checked",
               "Apply the migrations; 001 creates the extension.");
+        } else if (!versionAtLeast(installed, 0, 8) && !versionAtLeast(available ?? installed, 0, 8)) {
+          add("filtered search", "warn",
+              `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and a filtered search_thoughts silently returns fewer rows than match — near zero for a filter matching under 1% of the corpus`,
+              "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
+        } else if (!versionAtLeast(installed, 0, 8)) {
+          add("filtered search", "warn",
+              `match_thoughts does not carry hnsw.iterative_scan, and pg_extension records pgvector ${installed} while the server's library is ${available} — migration 014 is not applied, and the extension record lags the binary`,
+              "ALTER EXTENSION vector UPDATE;  then apply db/migrations/014_filtered_match_thoughts.sql.");
         } else {
-          const installed = String(pgv[0].extversion);
-          const available = String(pgv[0].default_version ?? installed);
-          if (!versionAtLeast(installed, 0, 8)) {
-            if (versionAtLeast(available, 0, 8)) {
-              add("filtered search", "warn",
-                  `pgvector ${installed} is installed in this database but ${available} is available on the server — the extension was never updated, so migration 014 cannot apply and a filtered search_thoughts silently returns fewer rows than match`,
-                  "ALTER EXTENSION vector UPDATE;  then apply db/migrations/014_filtered_match_thoughts.sql.");
-            } else {
-              add("filtered search", "warn",
-                  `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and a filtered search_thoughts silently returns fewer rows than match — near zero for a filter matching under 1% of the corpus`,
-                  "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
-            }
+          const inherited = await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`;
+          const v = String(inherited[0]?.v ?? "off");
+          if (v === "relaxed_order" || v === "strict_order") {
+            add("filtered search", "ok",
+                `match_thoughts scans iteratively under a metadata filter, inheriting hnsw.iterative_scan=${v} from the database or role rather than its own SET clause (pgvector ${installed})`);
           } else {
-            const mt = await sql`
-              SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
-              WHERE oid = to_regprocedure('public.match_thoughts(vector, float, int, jsonb)')`;
-            const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
-            if (declared) {
-              add("filtered search", "ok", `match_thoughts scans iteratively under a metadata filter (${declared}, pgvector ${installed})`);
-            } else {
-              const inherited = await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`;
-              const v = String(inherited[0]?.v ?? "off");
-              if (v === "relaxed_order" || v === "strict_order") {
-                add("filtered search", "ok",
-                    `match_thoughts scans iteratively under a metadata filter, inheriting hnsw.iterative_scan=${v} from the database or role rather than its own SET clause (pgvector ${installed})`);
-              } else {
-                add("filtered search", "warn",
-                    "match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied, or a later redefinition dropped its SET clause — so a filtered search_thoughts silently returns fewer rows than match",
-                    "Apply db/migrations/014_filtered_match_thoughts.sql.");
-              }
-            }
+            add("filtered search", "warn",
+                "match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied, or a later redefinition dropped its SET clause — so a filtered search_thoughts silently returns fewer rows than match",
+                "Apply db/migrations/014_filtered_match_thoughts.sql.");
           }
         }
 

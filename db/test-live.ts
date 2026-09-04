@@ -185,7 +185,7 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
 {
   // 1,000 random rows through a real HNSW index, 1% of them tagged. Under 007
   // the tagged rows were almost never among the 40 nearest, so a filtered
-  // search returned nothing; db/bench-hnsw.ts measured 0.6 of 10 asked. Here
+  // search returned almost nothing — db/bench-hnsw.ts has the numbers. Here
   // the function must return exactly what a full scan returns.
   await sql`DELETE FROM thoughts`;
   const { unitVector } = seededRandom(968);

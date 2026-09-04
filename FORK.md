@@ -74,7 +74,7 @@ audit of the pinned tree; the rest are migration work — a runtime-neutral buil
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–27 are the numbered `###` sections** further down, which is
+sections. Changes **18–28 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -1238,20 +1238,36 @@ rows with index scans disabled:
 
 | rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 50% | 10.0 | 9.3 | 0/50 | 10.0 | 9.8 | 0/50 |
-| 10,000 | 10% | 5.7 | 5.3 | 1/50 | 10.0 | 10.0 | 0/50 |
-| 10,000 | 1% | 0.4 | 0.4 | 33/50 | 10.0 | 10.0 | 0/50 |
-| 10,000 | 0.1% | 0.1 | 0.1 | 45/50 | 10.0 | 10.0 | 0/50 |
-| 100,000 | 10% | 4.9 | 4.5 | 12/50 | 10.0 | 9.2 | 0/50 |
-| 100,000 | 1% | 0.3 | 0.3 | 47/50 | 10.0 | 9.6 | 0/50 |
-| 100,000 | 0.1% | 0.2 | 0.2 | 49/50 | 10.0 | 9.8 | 0/50 |
-| 100,000 | 0.01% (30 rows) | 0.0 | 0.0 | 50/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 50% | 10.0 | 8.0 | 0/50 | 10.0 | 9.4 | 0/50 |
+| 10,000 | 10% | 5.4 | 4.9 | 0/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 1% | 0.8 | 0.8 | 25/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 0.1% (9 rows) | 0.1 | 0.1 | 46/50 | 9.0 | 9.0 | 0/50 |
+| 100,000 | 50% | 10.0 | 4.7 | 0/50 | 10.0 | 6.6 | 0/50 |
+| 100,000 | 10% | 5.7 | 3.6 | 0/50 | 10.0 | 8.7 | 0/50 |
+| 100,000 | 1% | 0.5 | 0.5 | 28/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 0.1% | 0.0 | 0.0 | 49/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 0.01% (6 rows) | 0.0 | 0.0 | 50/50 | 6.0 | 6.0 | 0/50 |
 
-The after column's 9.2–9.8 at 100,000 rows is the HNSW approximation, which was
-always there and is now the only thing between the result and the exact answer.
-The last row has fewer matching rows than the candidate budget, so the scan
-cannot stop early; it is there to show the bound below being reached for, and
-not reached.
+Two things in the after column are not the fix. The 6.6 and 8.7 at 100,000
+rows for the broad filters are the HNSW approximation — random uniform vectors
+are the index's hardest case, and 007 scored 4.7 and 3.6 on the same rows; the
+iterative scan improves it because it keeps going, but `ef_search` is unchanged
+and so is the index. And the two thinnest rows return fewer than ten because
+fewer than ten exist; they are there to show the scan reaching past its
+candidate budget for every matching row and finding them all.
+
+**These tables were measured twice.** The first bench's random generator was an
+LCG multiplied in doubles; past 2^53 its low bits are rounding noise and the
+stream repeats every 10,466 draws, so at 100,000 rows the corpus held ~10,000
+distinct vectors stored up to ten times each and every "random" query was
+bit-identical to a stored row — the query-is-its-own-nearest-neighbour confound
+this bench's header says its design avoids. The second review pass found it.
+The generator is now mulberry32 in 32-bit arithmetic, the bench refuses to run
+if any query lies within cosine 0.99 of a stored row (it prints the nearest,
+0.56–0.59 here), and every number in this section is from the re-measurement.
+The shape of the finding did not change; the broad-filter approximation, the
+default path's cost and the scan bound's behaviour did, and are reported as
+re-measured.
 
 **Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
 real labels, stored the way the server stores them (whole-content vector plus
@@ -1265,11 +1281,12 @@ carry; the right answer is the exact top-10 within the label:
 | `web` | 14% | 6.4 | 5.8 | 0/60 | 10.0 | 10.0 | 0/60 |
 | `portal` | 4.5% | 1.6 | 1.6 | 31/60 | 10.0 | 10.0 | 0/60 |
 | `design` | 2.7% | 2.0 | 1.9 | 0/60 | 10.0 | 10.0 | 0/60 |
-| seeded 10% | 10% | 4.5 | 3.8 | 0/60 | 10.0 | 10.0 | 0/60 |
-| seeded 2% | 1.8% | 0.5 | 0.5 | 39/60 | 8.0 | 8.0 | 0/60 |
+| seeded 10% | 8.4% | 4.3 | 3.7 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 2% | 0.7% | 0.2 | 0.2 | 48/60 | 3.0 | 3.0 | 0/60 |
 
-Paired: 306 of 360 filtered queries improved, none worsened. (The 2% tier has
-eight documents, so eight is the whole answer.) Filtered to a label the document
+Paired: 306 of 360 filtered queries improved, none worsened. (The seeded 2% tier
+landed on three documents, so three is the whole answer; 007 found none of them
+on 48 of 60 queries.) Filtered to a label the document
 **does** carry, the target's rank is unchanged on all 316 queries — MRR 0.938
 both ways — and the other nine rows go from 7.9 to 9.9 in the exact top-10.
 Unfiltered, all 441 queries return identical rows before and after; the run
@@ -1293,7 +1310,32 @@ document lacks and scores against the exact answer within it.
   EXISTS: inside an OR the planner cannot turn EXISTS into a semi-join and ran it
   as a hashed subplan — one full pass over `thoughts` per query, whatever the
   filter. Measured, that alone made the new function 3x the old one's latency at
-  10,000 rows. The join is one primary-key lookup per candidate.
+  10,000 rows. The join is one primary-key lookup per candidate, and it is a
+  LEFT join so that on the unfiltered path, where the predicate folds to true,
+  join removal drops the lookup altogether; every chunk has exactly one parent,
+  so the rows are identical either way.
+- `plan_cache_mode = force_custom_plan` on the function. The OR admits two plans
+  that are not close: with the filter a known constant the planner routes a thin
+  filter to the GIN index on `metadata` and sorts the few matches, exact and
+  sub-millisecond; with the filter a parameter the GIN index is out and the
+  iterative HNSW walk does everything — ~300 ms for a thin filter at 100,000
+  rows. plpgsql picks between them after five calls, per connection. Forcing the
+  custom plan was measured as free on the default path (1.49 against 1.56 ms)
+  and removes the cliff instead of betting against it.
+- `hnsw.max_scan_tuples = 100000` **and** `hnsw.scan_mem_multiplier = 8`. The
+  first pass of this change set only the tuple cap and reported that raising it
+  from 20,000 to 400,000 changed nothing; the second review pass found why:
+  pgvector also stops the iterative scan when its memory passes
+  `work_mem * scan_mem_multiplier`, 4 MB by default, about 19,000 visited
+  tuples — so the tuple cap was never the operative bound. Re-measured with
+  valid data (below), the memory bound left a 15-row filter at 6.3 of 10 and a
+  110-row filter at 42 of 50 under the generic plan; with the multiplier at 8
+  both complete. Arithmetic for the cap: `v_fetch / selectivity`; pgvector's
+  default covers a 0.1% filter to `match_count` 5 on a million rows, 100,000
+  covers 25. Both are function-level SETs, which a later `CREATE OR REPLACE`
+  rewrites wholesale and which override database-level values, so an operator
+  who tunes them must re-apply after any migration touching this function;
+  `test-schema.ts` pins the shipped values so changing them is deliberate.
 - `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
   This is what makes an in-scan filter correct: without it the scan stops at its
   first `ef_search` candidates, filter or no filter. A function-level SET is
@@ -1325,41 +1367,42 @@ document lacks and scores against the exact answer within it.
 200` returns 40 rows on a 10,000-row table, because the scan returns at most
 `ef_search` and stops. So `v_fetch` above 40 was never honoured: with no chunk
 rows `match_count = 50` returned 40, and with chunks the two CTEs together capped
-near 80 — asked 100, got 71 to 80. 007's header calling the factor "a recall
+near 80 — asked 100, got 69 to 77. 007's header calling the factor "a recall
 budget, not a guess" was true only at `match_count <= 10`. The iterative scan
 fixes this too: asked 100, got 100.
 
 **Cost, and the plan it depends on.** The default path — unfiltered, ten rows,
-what every first-party caller sends — pays for the chunk CTE's new join: median
-0.59 → 0.70 ms at 10,000 rows and 0.76 → 0.92 ms at 100,000. Filtered medians
-at 10,000 rows moved from ~0.6 ms to 0.3–2.3 ms depending on selectivity; at
-100,000 rows from 0.8–1.3 ms to 0.5–2.5 ms. Those are under the plan plpgsql
-chose: a custom plan, where the filter is a known constant and the planner
-reaches for the GIN index on `metadata` and sorts the matches — exact, and cheap
-when the filter is thin. The bench also forces the generic plan (section D),
-because plpgsql may switch to it after five calls: there the filter is applied
-by the iterative HNSW scan, and at 100,000 rows a 0.1% filter cost 50 ms, a
-0.01% one 97 ms, and a filter matching nothing 95 ms — the scan walks until it
-gives up, and the chunk side pays a primary-key lookup per candidate it walks.
-Correct in every case measured; slow in the pathological one. The review of
-this change asked for the bound on that walk to be declared rather than
-inherited, so the function also carries `hnsw.max_scan_tuples = 100000`. The
-arithmetic is `v_fetch / selectivity`: pgvector's default of 20,000 covers a
-0.1% filter only to `match_count` 5 on a million rows, 100,000 covers 25. At the
-scale measured the cap did not bite at any value from 20,000 to 400,000, so this
-is headroom for corpora ten times larger than anything here, at no measured cost.
+what every first-party caller sends — costs what it did: median 0.73 ms before
+and after at 10,000 rows, 1.62 → 1.45 ms at 100,000. That is the LEFT join
+doing its job; the first pass's inner join had added 0.1–0.2 ms here. Filtered
+medians at 10,000 rows run 0.3–3.1 ms depending on selectivity; at 100,000 rows
+0.3–7.8 ms, except the 1% tier at 41 ms, where the planner chose the HNSW walk
+over the GIN index even with the filter a known constant and paid for a complete
+answer. These are under the custom plan the function now forces. Section D
+strips that setting and forces the generic plan, where the filter is a parameter
+and the iterative HNSW walk does everything: at 100,000 rows a 0.1% filter took
+196 ms, a 0.01% one 272 ms and a filter matching nothing 268 ms — complete in
+every case, because both scan bounds are declared; slow, because the scan walks
+until a bound stops it and the chunk side pays a primary-key lookup per
+candidate. That is the cliff `plan_cache_mode = force_custom_plan` exists to
+keep the function off.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
-tag, since 014 has a version floor. `preflight.ts` judges the version first,
-because below 0.8.0 nothing else can be said — and it tells apart a server whose
-binary is new but whose database never ran `ALTER EXTENSION vector UPDATE`
-(a new image over an old volume; the fix is that one statement) from a binary
-that is actually old. Only then does it read `pg_proc.proconfig`, accepting
-either iterative mode, and failing that the session's inherited setting, so a
-database-level GUC is not reported as a missing migration. It warns if none of
+tag, since 014 has a version floor. `preflight.ts` reads `pg_proc.proconfig`
+first, because that is the fact: the `hnsw.*` settings come from pgvector's
+loaded library, not from `pg_extension.extversion`, so a new binary over an old
+volume applies 014 and runs it correctly while the catalog still says 0.7.x
+(reproduced, by the second review pass, with the record edited by hand). The
+version is consulted only to explain an absent setting — a binary too old to
+accept it, or a record that lags the binary, where `ALTER EXTENSION vector
+UPDATE` is the fix — and it accepts either iterative mode and the session's
+inherited setting, so a database-level GUC is not reported as a missing
+migration. The lookup matches its siblings (name, namespace, argument count)
+rather than casting a signature through `search_path`. It warns if none of
 those hold — the defined-twice class this file keeps naming, in the form of a
-later `CREATE OR REPLACE` that forgets the SET clause. `test-schema.ts` [8b]
+later `CREATE OR REPLACE` that forgets the SET clause — and, on the PostgREST
+store where nothing can be read, says that it cannot check. `test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
 a 1% filter over 1,000 random rows agrees with an exact scan on a real server.

@@ -1344,11 +1344,11 @@ whole vector and the windows):
 | `web` | 14% | 6.4 | 5.8 | 0/60 | 10.0 | 10.0 | 0/60 |
 | `portal` | 4.5% | 1.6 | 1.6 | 31/60 | 10.0 | 10.0 | 0/60 |
 | `design` | 2.7% | 2.0 | 1.9 | 0/60 | 10.0 | 10.0 | 0/60 |
-| seeded 10% | 10% | 4.5 | 3.8 | 0/60 | 10.0 | 10.0 | 0/60 |
-| seeded 2% | 1.8% | 0.5 | 0.5 | 39/60 | 8.0 | 8.0 | 0/60 |
+| seeded 10% | 8.4% | 4.3 | 3.7 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 2% | 0.7% | 0.2 | 0.2 | 48/60 | 3.0 | 3.0 | 0/60 |
 
 Paired, 014 improved 306 of 360 queries and worsened none. The seeded 2% tier
-holds eight documents, so eight is the whole answer.
+landed on three documents, so three is the whole answer.
 
 Two controls run alongside. **Own-label**: the same queries filtered to the
 rarest label the document does carry — the flattering case. The target's rank
