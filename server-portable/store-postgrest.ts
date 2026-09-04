@@ -19,6 +19,7 @@ import type {
   ListFilters,
   MutationError,
   MutationResult,
+  ThoughtKeywordMatch,
   ThoughtListItem,
   ThoughtMatch,
   ThoughtMeta,
@@ -56,6 +57,40 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return (data ?? []) as ThoughtMatch[];
+  }
+
+  async keywordThoughts(opts: {
+    query: string;
+    limit: number;
+    offset: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtKeywordMatch[]> {
+    const { data, error } = await this.client.rpc("search_thoughts_keyword", {
+      p_query: opts.query,
+      p_limit: opts.limit,
+      p_offset: opts.offset,
+      p_filter: opts.filter,
+    });
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Record<string, unknown>[];
+    // Mapped rather than cast. PostgREST returns the function's column names —
+    // `total_count`, snake_case — and the store's contract is `totalCount`; a
+    // cast type-checks and delivers `undefined` to every caller.
+    //
+    // `created_at` goes through Date deliberately, and it is the one line here
+    // that a review caught. `String()` on what the driver hands back produced
+    // "Thu Sep 03 2026 15:51:39 GMT-0500 (Central Daylight Time)" — locale- and
+    // timezone-dependent, and not the ISO string the SQL store returns for the
+    // same row. Two stores disagreeing about a field's FORMAT is the class of
+    // difference that survives every test asserting only presence.
+    return rows.map((r) => ({
+      id: String(r.id),
+      content: String(r.content),
+      metadata: (r.metadata ?? {}) as Record<string, unknown>,
+      created_at: new Date(r.created_at as string).toISOString(),
+      occurrences: Number(r.occurrences),
+      totalCount: Number(r.total_count ?? 0),
+    }));
   }
 
   async getThought(id: string): Promise<ThoughtRecord | null> {

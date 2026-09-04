@@ -130,6 +130,39 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
          `scored by the matching chunk (${hits[0]?.similarity?.toFixed(4)})`);
 }
 
+console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
+{
+  // The reason this store has a suite at all: an RPC argument shape that is
+  // wrong here type-checks, runs, and silently returns nothing. `total_count`
+  // is the specific hazard — PostgREST hands back the function's snake_case
+  // column names, and a cast rather than a mapping would deliver
+  // `totalCount: undefined` to every caller with no error anywhere.
+  await store.captureThought({
+    content: "postgrest keyword needle PGRST202 mentioned once",
+    payload: { metadata: { kind: "kw" } },
+    embedding: vec(9),
+  });
+
+  const hits = await store.keywordThoughts({ query: "PGRST202", limit: 10, offset: 0, filter: {} });
+  assert(hits.length === 1, `the RPC reaches the function (${hits.length})`);
+  assert(hits[0].totalCount === 1, `total_count is mapped to totalCount, not undefined (${hits[0].totalCount})`);
+  assert(hits[0].occurrences === 1, `occurrences arrives as a number (${hits[0].occurrences})`);
+  assert(typeof hits[0].id === "string" && hits[0].id.length === 36, "…with a uuid id");
+
+  // The two stores must agree on the SHAPE of a field, not merely have one. This
+  // path returned a locale- and timezone-formatted date where the SQL store
+  // returns ISO, and every assertion that only checked presence passed.
+  assert(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(hits[0].created_at),
+         `created_at is an ISO string, as the SQL store returns (got ${hits[0].created_at})`);
+
+  // The p_filter argument, which is the jsonb one and therefore the one that
+  // binds wrongly if it is pre-stringified.
+  const kept = await store.keywordThoughts({ query: "PGRST202", limit: 10, offset: 0, filter: { kind: "kw" } });
+  assert(kept.length === 1, "a matching jsonb filter is passed through as an object, not a scalar string");
+  const dropped = await store.keywordThoughts({ query: "PGRST202", limit: 10, offset: 0, filter: { kind: "nope" } });
+  assert(dropped.length === 0, "…and a non-matching one actually filters");
+}
+
 console.log("\n[4] A thought is deduplicated across its own chunks");
 {
   await store.captureThought({

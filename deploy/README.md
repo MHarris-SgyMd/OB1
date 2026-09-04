@@ -58,12 +58,12 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 
 `migrate` exits 0 having applied five migrations (it needs no `bun install` —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` prints `5 checks: 5 passed, 0 failed`.
+followed by `Started server`. `smoke.sh` prints `6 checks: 6 passed, 0 failed`.
 
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong
-`DATABASE_URL` starts cleanly, answers `initialize`, returns all six tools from
+`DATABASE_URL` starts cleanly, answers `initialize`, returns every tool from
 `tools/list`, and passes any HTTP liveness probe — then fails when a user captures
 their first thought, with the real error buried inside a tool response.
 

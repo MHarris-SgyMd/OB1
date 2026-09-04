@@ -135,39 +135,66 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
   /**
-   * The trigram index is opt-in, and its flag is only read when 011 applies. So
-   * the state that actually needs catching is the one a migrator run cannot fix:
-   * the setting says on, the ledger says 011 is done, and nothing built an index.
-   * Left undetected that is a silent no-op on an explicit instruction.
-   *
-   * The schema above was built with the default (off), so simply asking for it
-   * reproduces the mismatch exactly — no sabotage needed.
+   * Migration 012, and the reason it is checked at all: the tool is registered
+   * unconditionally, so a database without the function serves a tool that
+   * errors on every call while everything else looks healthy.
    */
-  const offOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/trigram index.*disabled/s.test(offOff.out), "with the flag unset, preflight reports the index disabled");
+  const noKeyword = new SQL({ url: LIVE, max: 1 });
+  await noKeyword.unsafe("DROP FUNCTION IF EXISTS search_thoughts_keyword(text, int, int, jsonb)");
+  await noKeyword.close();
 
-  const wantOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "on" });
-  assert(wantOn.code === 0, "a trigram mismatch is a warning, not a refusal to serve");
+  const missingKw = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(missingKw.code === 1, "a database missing migration 012 does not start");
+  assert(/search_thoughts_keyword is missing/.test(missingKw.out),
+         "…and names the function rather than the symptom");
+  assert(/012_search_thoughts_keyword\.sql/.test(missingKw.out), "…with the migration to apply");
+
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("012") });
+  const withKw = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/keyword search.*present/s.test(withKw.out), "…and reports it present once applied");
+
+  /**
+   * The trigram flag is read only when 011 APPLIES. Migrations run once, so a
+   * deployment that flips it afterwards and re-runs the migrator gets a clean
+   * "already applied" and no change to the index — a silent no-op on an explicit
+   * instruction, in both directions. Preflight is the only thing that notices,
+   * so all four combinations are covered here.
+   *
+   * SMD-944 flipped the default from off to on, which inverts which of these
+   * states the schema starts in: applyMigrations above now builds the index.
+   */
+  const agreeOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/trigram index.*enabled and present/s.test(agreeOn.out),
+         "with the flag unset, the default builds the index and preflight agrees");
+
+  // Present, but this deployment says it does not want it. A small brain that
+  // turned it off is paying the write cost for nothing, and only preflight can
+  // say so — the migrator will not drop it.
+  const unwanted = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "off" });
+  assert(unwanted.code === 0, "a trigram mismatch is a warning, not a refusal to serve");
+  assert(/exists but OB1_TRGM_INDEX is off/.test(unwanted.out),
+         "an index nobody asked for is reported — it costs every capture");
+  assert(/DROP INDEX CONCURRENTLY/.test(unwanted.out), "…with the statement that fixes it");
+
+  // The mirror, and the one that matters most after the default flip: every
+  // deployment that applied 011 before SMD-944 is in exactly this state — the
+  // default now wants the index, the ledger says 011 is done, and no index
+  // exists. Their keyword search works and sequentially scans.
+  const idx = new SQL({ url: LIVE, max: 1 });
+  await idx.unsafe("DROP INDEX IF EXISTS idx_thoughts_content_trgm");
+  await idx.close();
+
+  const wantOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(wantOn.code === 0, "a database upgraded from before the flip still starts");
   assert(/OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist/.test(wantOn.out),
          "…and names the disagreement between the setting and the database");
   assert(/CREATE INDEX CONCURRENTLY/.test(wantOn.out), "…with the statement that fixes it");
 
-  // The mirror: build it, leave the flag off, and the warning must invert rather
-  // than the check simply going quiet whenever the two differ.
-  const idx = new SQL({ url: LIVE, max: 1 });
-  await idx.unsafe("CREATE INDEX IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops)");
-  await idx.close();
-
-  const nowOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "on" });
-  assert(/trigram index.*enabled and present/s.test(nowOn.out), "once built, the setting and the database agree");
-
-  const unwanted = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/exists but OB1_TRGM_INDEX is off/.test(unwanted.out),
-         "an index nobody asked for is reported too — it costs every capture");
-
-  const drop = new SQL({ url: LIVE, max: 1 });
-  await drop.unsafe("DROP INDEX IF EXISTS idx_thoughts_content_trgm");
-  await drop.close();
+  // And the fourth state: both off, which is a supported configuration rather
+  // than a problem, so it must not warn.
+  const agreeOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_TRGM_INDEX: "off" });
+  assert(/trigram index.*disabled/s.test(agreeOff.out),
+         "asking for it off, with it absent, is reported as agreement and not a warning");
 
   const j = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json");
   const parsed = JSON.parse(j.out);

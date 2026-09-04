@@ -312,25 +312,40 @@ export const EMBEDDING_DIMENSIONS = resolveEmbeddingDimensions(
 /**
  * Whether migration 011 builds the trigram index on `thoughts.content`.
  *
- * Off by default, and the default is the interesting part. Measured on this
- * fork's own corpus (db/bench-trgm.ts), the index does nothing below ~10,000
- * rows — the planner correctly declines it — and nothing at any scale for a
- * common word or a pattern under three characters. What it always does is cost:
- * roughly +70 to +95 microseconds on every capture, and about as much storage as
- * the table itself.
+ * ON by default as of SMD-944, and it was off before that. The reason for off
+ * was narrow and specific: no query in core issued an ILIKE against
+ * `thoughts.content`, so the index was unreachable and every capture paid for
+ * it anyway. Migration 012 adds `search_thoughts_keyword`, which is exactly that
+ * query, so the one argument for off no longer holds and the default flips with
+ * it.
  *
- * And no query in this fork's core issues an ILIKE against `thoughts.content` at
- * all. Search is vector, list filters on metadata, fetch is a lookup by id. The
- * function the index was written for, `search_thoughts_text`, lives in
- * schemas/enhanced-thoughts, which is not promoted.
+ * The costs did not change, and they are still real. Measured on this fork's own
+ * corpus (db/bench-trgm.ts): the index does nothing below ~10,000 rows — the
+ * planner correctly declines it — nothing at any scale for a common word, and
+ * nothing for a pattern under three characters. It costs roughly +70 to +95
+ * microseconds on every capture, and about as much storage as the table itself.
  *
- * So the honest default for a stock deployment is off. Turn it on if you have
- * installed schemas/enhanced-thoughts, if you query the table with ILIKE
- * yourself, or when core grows a keyword-search path.
+ * So a stock deployment below ~10,000 thoughts now pays that write cost for no
+ * read benefit. That is the unflattering half, and it is the reason this stayed
+ * a flag rather than becoming unconditional: `OB1_TRGM_INDEX=off` before the
+ * first migration run restores the previous behaviour exactly, and keyword
+ * search still returns the right rows without it — by sequential scan, which at
+ * that size is what the planner would have chosen regardless.
+ *
+ * Above the crossover the trade is not close: 267 ms versus 0.20 ms for a rare
+ * term at 100,000 rows.
  */
-export const DEFAULT_TRGM_INDEX = false;
+export const DEFAULT_TRGM_INDEX = true;
 
-/** Parse OB1_TRGM_INDEX. Same accepted spellings as OB1_EMBEDDING_DIMENSIONS. */
+/**
+ * Parse OB1_TRGM_INDEX. Same accepted spellings as OB1_EMBEDDING_DIMENSIONS.
+ *
+ * Note what flipping the default did to a typo: anything unrecognised is false,
+ * so `OB1_TRGM_INDEX=onn` now turns the index OFF, where before it landed on the
+ * default and was invisible. That is not silent — preflight compares the setting
+ * against pg_indexes on every boot and warns — but it is worth knowing that an
+ * unrecognised value is a decision here, not a fallback to the default.
+ */
 export function resolveTrgmIndex(raw) {
   if (raw === undefined || raw === "") return DEFAULT_TRGM_INDEX;
   return /^(1|on|true|yes)$/i.test(raw);

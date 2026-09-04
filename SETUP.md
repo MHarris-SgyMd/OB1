@@ -307,16 +307,16 @@ http://localhost:8000/?key=<your-raw-key>
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
 URL. For anything reachable from outside your machine, put it behind TLS first.
 
-A write key sees eight tools; a read key sees five. `update_thought` and
+A write key sees nine tools; a read key sees six. `update_thought` and
 `delete_thought` are never registered for a read key, so they do not appear in
 `tools/list` at all rather than failing when called. `capture_thought` returns the
 new thought's id, which is what the other two take.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied eleven migrations. `server` logs `preflight OK` and
-`Started server`. `smoke.sh` prints `5 checks: 5 passed, 0 failed`. A client shows
-eight tools for a write key, five for a read key.
+`migrate` exits 0 having applied twelve migrations. `server` logs `preflight OK` and
+`Started server`. `smoke.sh` prints `6 checks: 6 passed, 0 failed`. A client shows
+nine tools for a write key, six for a read key.
 
 ## Where to run it for real
 

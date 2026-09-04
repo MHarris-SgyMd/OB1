@@ -585,6 +585,116 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  /**
+   * Tool 1b: Exact keyword search. Migration 012, SMD-944.
+   *
+   * A separate tool rather than a `mode` on search_thoughts. The two have
+   * different cost models, different result shapes and different failure modes,
+   * and an LLM choosing between two clearly-described tools does better than one
+   * choosing between two meanings of one tool. The description leads with WHEN to
+   * reach for it, because that is the only part the model reads before deciding.
+   */
+  server.registerTool(
+    "search_thoughts_keyword",
+    {
+      title: "Search Thoughts by Exact Text",
+      description:
+        "Find thoughts containing an exact string — an error code, a ticket key, a commit SHA, a function name, a rare proper noun. " +
+        "Case-insensitive substring match, not semantic: it will not find paraphrases, and it has no boolean operators. " +
+        "Use search_thoughts when you know the meaning; use this when you know the literal text.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        query: z.string().describe("The literal text to find. Matched as a substring; % and _ are literal, not wildcards."),
+        // Bounded in the schema, not merely clamped in SQL. The function clamps
+        // too, because the store is callable directly — but a bound here is
+        // enforced where the caller can see it, and it keeps `offset` sane for
+        // the result numbering below, which is plain arithmetic on it. Without
+        // it, offset: -5 renders "Result -4".
+        limit: z.number().int().min(1).max(100).optional().default(10).describe("Results per page, 1-100."),
+        offset: z.number().int().min(0).optional().default(0).describe("Skip this many results, for paging."),
+      },
+    },
+    async ({ query, limit, offset }) => {
+      try {
+        const data = await (await db()).keywordThoughts({
+          query,
+          limit,
+          offset,
+          filter: {},
+        });
+
+        if (data.length === 0) {
+          // Two different nothings, and the difference is actionable: an empty
+          // needle is a caller bug, no matches is an answer. Saying "no thoughts
+          // found" for the first sends the model looking for different words.
+          if (query.trim() === "") {
+            return {
+              content: [{ type: "text" as const, text: "Empty query — pass the literal text to search for." }],
+            };
+          }
+          // The needle is matched exactly as given, whitespace included, because
+          // trimming it would silently widen "SMD-944 " into "SMD-944". That is
+          // the right trade, but it makes a pasted string with a stray space
+          // fail for a reason the caller cannot see — so say it.
+          const padded = query !== query.trim();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `No thoughts contain "${query}". This is an exact substring match — ` +
+                  (padded
+                    ? `note the leading or trailing whitespace in your query, which is matched literally. Try "${query.trim()}", or `
+                    : `try `) +
+                  `search_thoughts for a match by meaning, or a shorter fragment of the same string.`,
+              },
+            ],
+          };
+        }
+
+        const total = data[0].totalCount;
+        const results = data.map((t, i) => {
+          const m = t.metadata || {};
+          const parts = [
+            `--- Result ${offset + i + 1} (${t.occurrences} occurrence${t.occurrences === 1 ? "" : "s"}) ---`,
+            `ID: ${t.id}`,
+            `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            `Type: ${m.type || "unknown"}`,
+          ];
+          if (Array.isArray(m.topics) && m.topics.length)
+            parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+          parts.push(`\n${t.content}`);
+          return parts.join("\n");
+        });
+
+        // The header states the whole match set, not the page. Without it a
+        // model that gets ten results cannot tell "these are all of them" from
+        // "there are four hundred more", and will not page.
+        const shown = `${offset + 1}-${offset + data.length} of ${total}`;
+        const more =
+          offset + data.length < total
+            ? ` Call again with offset=${offset + data.length} for the next page.`
+            : "";
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Showing ${shown} thought(s) containing "${query}".${more}\n\n${results.join("\n\n")}`,
+            },
+          ],
+        };
+      } catch (err: unknown) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // Tool 2: List Recent
   server.registerTool(
     "list_thoughts",
