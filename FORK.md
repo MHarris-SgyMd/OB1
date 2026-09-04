@@ -1371,17 +1371,31 @@ document lacks and scores against the exact answer within it.
   client-side post-filter now get 100 — more than 007 ever returned, less than
   they asked for. The fourth pass asked for the tool bound, the sixth for the
   clamp, the seventh for the edges to be stated and tested.
-- The function's COMMENT carries a contract marker, `[filter-inside-scan]`,
+- The function body carries a contract sentinel, `-- ob1:filter-inside-scan`,
   and preflight decides whether the deployed body has 014's semantics by that
-  marker rather than by grepping the body for a local variable's name — a
-  rename in SMD-945 or SMD-958 would otherwise have produced a false "body
-  predates 014" warning whose remedy regressed the newer function. A successor
-  that keeps the in-scan filter carries the marker; one that reintroduces a
-  post-LIMIT filter must not. Preflight also requires `plan_cache_mode` to still
-  be on the function before reporting ok, since a redefinition that dropped it
-  would leave the generic-plan cliff live, and it warns whenever the session's
-  effective walk bounds are below what 014 seeds, however 014 was recorded —
-  `--baseline` never runs the DO block and a non-owner cannot.
+  sentinel plus a behavioural probe (a NULL filter returns a row under 014 and
+  nothing under any earlier body) rather than by grepping for a local
+  variable's name. The seventh pass moved the marker off the local's name and
+  into `COMMENT ON FUNCTION`; the eighth caught that a replace preserves the
+  OID `pg_description` is keyed on, so a successor that forgot its own COMMENT
+  inherited the claim — hence the body, which every replace rewrites, and the
+  probe. A successor that keeps the in-scan filter carries the sentinel; one
+  that reintroduces a post-LIMIT filter must not. Preflight also requires
+  `plan_cache_mode` to still be on the function before reporting ok, since a
+  redefinition that dropped it would leave the generic-plan cliff live, and it
+  warns whenever the walk bounds were never SET on the database — a presence
+  check, so an operator who lowered one on purpose is tuning, not failing —
+  however 014 was recorded: `--baseline` never runs the DO block and a
+  non-owner cannot.
+- The function-level SETs are applied at CALL time too, so a non-superuser in
+  a fresh session that has not yet loaded pgvector is refused on the first call
+  as well as on the CREATE. First-party stores and PostgREST cast the query
+  vector from text, which loads the library first; a direct SQL caller feeding
+  an existing column value in uncast, on a cold pooled connection, does not.
+  Documented in the header rather than engineered away: moving the settings
+  into the body as `SET LOCAL` would reopen the transaction-scoped leak this
+  design rejected, for a path only cold, uncast, non-superuser direct SQL
+  reaches. Cast the argument or `SELECT '[1]'::vector` on connect.
 - `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
   This is what makes an in-scan filter correct: without it the scan stops at its
   first `ef_search` candidates, filter or no filter. A function-level SET is
@@ -1444,8 +1458,10 @@ cliff `plan_cache_mode = force_custom_plan` exists to keep the function off.
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
 tag, since 014 has a version floor. `preflight.ts` decides on the function's
-BODY first — 014's has a boolean local 007's does not — because no setting can
-repair 007's LIMIT-before-filter, and only then on whether an iterative scan is
+BODY first — by the `ob1:filter-inside-scan` sentinel in the function source,
+confirmed by a NULL-filter probe when there is a row to probe with — because no
+setting can repair 007's LIMIT-before-filter, and only then on whether an
+iterative scan is
 in force, from the function's own SET clause or inherited from the database or
 role. The version is consulted last, to explain an absence or to advise
 `ALTER EXTENSION vector UPDATE` where the catalog record lags a working library

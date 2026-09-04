@@ -26,6 +26,8 @@ import {
   DEFAULT_TRGM_INDEX,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
+  HNSW_SEED_MAX_SCAN_TUPLES,
+  HNSW_SEED_SCAN_MEM_MULTIPLIER,
   migrationValues,
   substituteMigration,
   DEFAULT_CHUNK_CONTEXT,
@@ -438,11 +440,12 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
   }
 
-  // The contract marker preflight reads instead of grepping the body.
-  const marker = await db.query<{ c: string | null }>(
-    `SELECT obj_description('match_thoughts(vector, float, int, jsonb)'::regprocedure, 'pg_proc') AS c`
+  // The contract sentinel preflight reads — in the BODY, which a replace
+  // rewrites, not in the COMMENT, which a replace leaves on the preserved OID.
+  const src = await db.query<{ s: string | null }>(
+    `SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
   );
-  assert(/\[filter-inside-scan\]/.test(marker.rows[0]?.c ?? ""), "the function's COMMENT carries the [filter-inside-scan] marker a successor must keep");
+  assert(/ob1:filter-inside-scan/.test(src.rows[0]?.s ?? ""), "the function body carries the ob1:filter-inside-scan sentinel a successor must keep");
 
   // The setting that makes the in-scan filter correct lives on the function.
   // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
@@ -471,14 +474,14 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
        WHERE d.datname = current_database() AND s.setrole = 0`
     )).rows[0]?.c ?? [];
   const seeded = await dbSettings();
-  assert(seeded.includes("hnsw.max_scan_tuples=100000"), `hnsw.max_scan_tuples=100000 is seeded on the database (${seeded.join(", ") || "nothing set"})`);
-  assert(seeded.includes("hnsw.scan_mem_multiplier=8"), "hnsw.scan_mem_multiplier=8 is seeded on the database");
+  assert(seeded.includes(`hnsw.max_scan_tuples=${HNSW_SEED_MAX_SCAN_TUPLES}`), `hnsw.max_scan_tuples=${HNSW_SEED_MAX_SCAN_TUPLES} is seeded on the database (${seeded.join(", ") || "nothing set"})`);
+  assert(seeded.includes(`hnsw.scan_mem_multiplier=${HNSW_SEED_SCAN_MEM_MULTIPLIER}`), `hnsw.scan_mem_multiplier=${HNSW_SEED_SCAN_MEM_MULTIPLIER} is seeded on the database`);
   await db.exec(`ALTER DATABASE ${(await db.query<{ d: string }>(`SELECT current_database() AS d`)).rows[0].d} SET hnsw.max_scan_tuples = 250000`);
   const f014 = files.find((f) => f.startsWith("014"))!;
   await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
   const tuned = await dbSettings();
   assert(tuned.includes("hnsw.max_scan_tuples=250000"), "re-applying 014 leaves an operator's database-level bound alone");
-  await db.exec(`ALTER DATABASE ${(await db.query<{ d: string }>(`SELECT current_database() AS d`)).rows[0].d} SET hnsw.max_scan_tuples = 100000`);
+  await db.exec(`ALTER DATABASE ${(await db.query<{ d: string }>(`SELECT current_database() AS d`)).rows[0].d} SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}`);
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");

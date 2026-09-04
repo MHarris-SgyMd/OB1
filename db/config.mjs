@@ -530,6 +530,11 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
+    // Not operator configuration — ALTER DATABASE owns that — but the one
+    // definition of what 014 seeds, so the SQL, the migrator's remedy,
+    // preflight's report and the schema test cannot disagree about it.
+    HNSW_SEED_MAX_SCAN_TUPLES: String(HNSW_SEED_MAX_SCAN_TUPLES),
+    HNSW_SEED_SCAN_MEM_MULTIPLIER: String(HNSW_SEED_SCAN_MEM_MULTIPLIER),
   };
 }
 
@@ -650,3 +655,14 @@ export function isLocalHostname(host, serviceNames = []) {
     /^172\.(1[6-9]|2\d|3[01])\./.test(h)
   );
 }
+
+/**
+ * What migration 014 seeds as the HNSW walk's bounds at database level, and
+ * what preflight and the migrator quote when they are missing. These are the
+ * measured defaults (014's header); they are NOT an operator setting — an
+ * operator tunes with `ALTER DATABASE … SET`, which 014 never overwrites — so
+ * there is no environment variable behind them. One definition, because the
+ * eighth review pass found the pair written as literals in seven places.
+ */
+export const HNSW_SEED_MAX_SCAN_TUPLES = 100000;
+export const HNSW_SEED_SCAN_MEM_MULTIPLIER = 8;

@@ -280,19 +280,23 @@ async function extractBody(sql: SQL): Promise<string> {
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
   const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
-    const d = /^\s*(\w+)\s+\w+\s*:=\s*(.+);\s*$/.exec(line);
+    // `name  type words  := expr;` — the type may be several words
+    // (`double precision`, `timestamp with time zone`).
+    const d = /^\s*(\w+)\s+[\w ]+?\s*:=\s*(.+);\s*$/.exec(line);
     if (d) locals.push([d[1], d[2]]);
   }
-  // Locals may reference earlier locals (v_fetch is built from v_count), so
-  // substitute until none remain rather than in one pass over the list.
+  // Replacer FUNCTIONS throughout: a replacement string would interpret `$1`,
+  // `$&` or `$$` inside an expression as a pattern, and 014's SQL is one `$$`
+  // away from that. Locals may reference earlier locals (v_fetch is built from
+  // v_count), so substitute until none remain rather than in one pass.
   for (let pass = 0; pass < locals.length + 1; pass++) {
-    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), `(${expr})`);
+    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${expr})`);
   }
   body = body
-    .replace(/\bquery_embedding\b/g, `$1::vector(${DIM})`)
-    .replace(/\bmatch_threshold\b/g, "$2::float")
-    .replace(/\bmatch_count\b/g, "$3::int")
-    .replace(/\bfilter\b/g, "$4::jsonb");
+    .replace(/\bquery_embedding\b/g, () => `$1::vector(${DIM})`)
+    .replace(/\bmatch_threshold\b/g, () => "$2::float")
+    .replace(/\bmatch_count\b/g, () => "$3::int")
+    .replace(/\bfilter\b/g, () => "$4::jsonb");
   const leftover = /\b(v_\w+)\b/.exec(body);
   if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
   return body;

@@ -377,8 +377,10 @@ if (configFailed) {
          * in force for the call, normally as the function's own SET clause,
          * possibly inherited from the database or role — AND only for 014's
          * body. 007's body applies the filter after its LIMIT, and no setting
-         * repairs that. So the BODY is decided first (its boolean local
-         * `v_unfiltered` is the tell), then the setting, then the version — the
+         * repairs that. So the BODY is decided first — by the sentinel comment
+         * `ob1:filter-inside-scan` in pg_proc.prosrc, which every CREATE OR
+         * REPLACE rewrites, confirmed by a behavioural probe when there is a row
+         * to probe with — then the setting, then the version — the
          * version only explains an absence or advises `ALTER EXTENSION vector
          * UPDATE` where the catalog record lags a working library.
          *
@@ -396,18 +398,37 @@ if (configFailed) {
          * with the recall it had before 014.
          */
         try {
-          const { versionAtLeast } = await import("../db/config.mjs");
+          const { versionAtLeast, HNSW_SEED_MAX_SCAN_TUPLES, HNSW_SEED_SCAN_MEM_MULTIPLIER } = await import("../db/config.mjs");
           const mt = await sql`
-            SELECT array_to_string(p.proconfig, ',') AS cfg, obj_description(p.oid, 'pg_proc') AS comment FROM pg_proc p
+            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
-          // The body's semantics are declared by a contract marker in the
-          // function's COMMENT, `[filter-inside-scan]`, which 014 sets and any
-          // successor that keeps the in-scan filter must carry forward. An
-          // earlier draft grepped the body for a local variable's name, which
-          // a rename would have broken in the direction of a false warning
-          // whose remedy regressed the newer function.
-          const bodyIs014 = /\[filter-inside-scan\]/.test(String(mt[0]?.comment ?? ""));
+          // The body's semantics are declared by a sentinel comment in the body
+          // itself, `ob1:filter-inside-scan`, which 014 carries and any successor
+          // that keeps the in-scan filter must carry forward. In prosrc, not in
+          // COMMENT ON FUNCTION: a replace rewrites the source but preserves
+          // the OID that pg_description is keyed on, so a marker there survived
+          // a successor that forgot its own COMMENT (eighth review pass). And
+          // because a sentinel is still a claim, the behaviour it stands for is
+          // probed too when there is a row to probe with: 014 treats a NULL
+          // filter as unfiltered; every earlier body returned nothing for it.
+          const sentinel = /ob1:filter-inside-scan/.test(String(mt[0]?.src ?? ""));
+          let probed: boolean | null = null;
+          if (mt.length) {
+            try {
+              const probe = new Array(embDim).fill(0);
+              probe[0] = 1;
+              const vec = `[${probe.join(",")}]`;
+              const any = await sql`SELECT count(*)::int AS c FROM match_thoughts(${vec}::vector, -1.0, 1, ${{}}::jsonb)`;
+              if (Number(any[0]?.c ?? 0) > 0) {
+                const nul = await sql`SELECT count(*)::int AS c FROM match_thoughts(${vec}::vector, -1.0, 1, NULL::jsonb)`;
+                probed = Number(nul[0]?.c ?? 0) > 0;
+              }
+            } catch {
+              probed = null; // a call that fails proves nothing about the body
+            }
+          }
+          const bodyIs014 = sentinel && probed !== false;
           const cfgText = String(mt[0]?.cfg ?? "");
           const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(cfgText)?.[2];
           const planForced = /(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(cfgText);
@@ -430,16 +451,20 @@ if (configFailed) {
           }
           const bounds = await sql`
             SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
-          const tuples = Number(bounds[0]?.t ?? NaN);
-          const mult = Number(bounds[0]?.m ?? NaN);
           const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
-          // Below the values 014 seeds, a thin filter routed to the HNSW walk
-          // returns short (6.3 of 10 measured at pgvector's defaults). Judged
-          // from the session's effective settings, however 014 was recorded —
-          // --baseline never runs the DO block, and a non-owner cannot.
-          const boundsLow = !(tuples >= 100000) || !(mult >= 8);
+          // Whether the bounds were ever SET on the database, not whether they
+          // are large: an operator who lowered one on purpose (the header
+          // invites it where memory is tighter than latency) is tuning, not
+          // failing. Unset means 014's DO block could not seed them — a
+          // non-owner role, --baseline, a platform refusing ALTER DATABASE —
+          // and a thin filter routed to the HNSW walk then returns short.
+          const seededRows = await sql`
+            SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+            WHERE d.datname = current_database() AND s.setrole = 0`;
+          const seededCfg: string[] = seededRows[0]?.cfg ?? [];
+          const boundsUnset = ["hnsw.max_scan_tuples=", "hnsw.scan_mem_multiplier="].some((k) => !seededCfg.some((c) => c.startsWith(k)));
           const seedBounds =
-            "Run as the database owner, in one session: SELECT '[1]'::vector; ALTER DATABASE <db> SET hnsw.max_scan_tuples = 100000; ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = 8;  then restart the server so its pool reconnects.";
+            `Run as the database owner, in one session: SELECT '[1]'::vector; ALTER DATABASE <db> SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}; ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};  then restart the server so its pool reconnects.`;
           const putBack =
             "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.";
           const staleRecord = installedOld && libraryNew;
@@ -452,9 +477,9 @@ if (configFailed) {
                 putBack);
           } else if (bodyIs014 && inForce) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
-            if (boundsLow) {
+            if (boundsUnset) {
               add("filtered search", "warn",
-                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are below what 014 seeds (${boundsText}; wanted 100000 tuples, memory x8) — a thin filter routed to the HNSW walk returns short. 014's DO block could not set them (non-owner role, or --baseline)`,
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds were never set on this database (${boundsText}; 014 seeds ${HNSW_SEED_MAX_SCAN_TUPLES} tuples, memory x${HNSW_SEED_SCAN_MEM_MULTIPLIER}) — a thin filter routed to the HNSW walk returns short. 014's DO block could not seed them: a non-owner role, --baseline, or a platform refusing ALTER DATABASE`,
                   seedBounds);
             } else if (staleRecord) {
               add("filtered search", "warn",

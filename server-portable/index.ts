@@ -686,10 +686,10 @@ function buildServer(principal: Principal): McpServer {
       },
       inputSchema: {
         query: z.string().describe("What to search for"),
-        // Bounded since migration 014: match_thoughts now honours its overfetch
-        // (4x the count per candidate source), so an unbounded count is
-        // unbounded scan work. 100 matches search_thoughts_keyword.
-        limit: z.number().int().min(1).max(100).optional().default(10).describe("Results to return, 1-100."),
+        // Any number is accepted, as before: match_thoughts itself clamps the
+        // count to 1–100 (migration 014), so a client that always sent 200, or
+        // 10.0, keeps working and gets at most 100 rather than a schema error.
+        limit: z.number().optional().default(10).describe("Results to return; the server returns at most 100."),
         threshold: z.number().optional().default(0.5),
       },
     },

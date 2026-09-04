@@ -85,6 +85,22 @@
 --     The seventh review pass reproduced it on the upgrade path; the explicit
 --     load is the fix, and every printed ALTER DATABASE remedy carries it too.
 --
+--     The same rule applies at CALL time. Function-level SETs are applied from
+--     proconfig when the function is entered, before its body runs, so a
+--     non-superuser in a session that has not yet loaded pgvector is refused
+--     on the first call, not just on the CREATE. Both first-party stores and
+--     PostgREST pass the query vector as a cast from text, which loads the
+--     library before the call; a direct SQL caller whose first statement in a
+--     fresh connection feeds an existing `embedding` column value straight in
+--     (a subquery, no cast) does not, and gets "permission denied to set
+--     parameter" where 007 answered. Casting the argument (`$1::vector`) or a
+--     `SELECT '[1]'::vector` on connect is the remedy; `shared_preload_libraries
+--     = 'vector'` removes the question where the operator controls the server.
+--     Documented rather than engineered away: moving the settings into the
+--     body as SET LOCAL would reopen the transaction-scoped leak this design
+--     rejected, for a path that only cold, uncast, non-superuser direct SQL
+--     reaches.
+--
 --   * `relaxed_order`, not `strict_order`. The iterative scan may yield a
 --     candidate slightly out of distance order; the final `ORDER BY b.sim DESC`
 --     re-sorts the merged set anyway, so strict ordering inside the scan would
@@ -296,6 +312,15 @@ DECLARE
   v_fetch      int     := GREATEST(v_count * 4, 20);
   v_unfiltered boolean := (filter IS NULL OR filter = '{}'::jsonb);
 BEGIN
+  -- ob1:filter-inside-scan — a CONTRACT SENTINEL, not prose. It lives in the
+  -- BODY (pg_proc.prosrc), which every CREATE OR REPLACE rewrites, so it says
+  -- something about the function actually installed. (An earlier draft put a
+  -- marker in COMMENT ON FUNCTION; pg_description is keyed on the OID that a
+  -- replace preserves, so a successor that omitted its own COMMENT inherited
+  -- the claim.) A later migration that redefines match_thoughts and keeps the
+  -- filter inside the candidate scan carries this line; one that reintroduces
+  -- a post-LIMIT filter must not. preflight reads it, and on the SQL store
+  -- also probes the behaviour it stands for; db/test-schema.ts [8b] asserts it.
   RETURN QUERY
   WITH direct AS (
     SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
@@ -382,22 +407,22 @@ BEGIN
   WHERE d.datname = v_db AND s.setrole = 0;
 
   IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.max_scan_tuples=%') THEN
-    EXECUTE format('ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000', v_db);
+    EXECUTE format('ALTER DATABASE %I SET hnsw.max_scan_tuples = {{HNSW_SEED_MAX_SCAN_TUPLES}}', v_db);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.scan_mem_multiplier=%') THEN
-    EXECUTE format('ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8', v_db);
+    EXECUTE format('ALTER DATABASE %I SET hnsw.scan_mem_multiplier = {{HNSW_SEED_SCAN_MEM_MULTIPLIER}}', v_db);
   END IF;
-EXCEPTION WHEN insufficient_privilege THEN
+EXCEPTION WHEN OTHERS THEN
+  -- Any failure here — insufficient_privilege from a non-owner role, a hosted
+  -- platform's policy refusing ALTER DATABASE, an event trigger — leaves the
+  -- bounds at pgvector's defaults and the FIX intact. The header calls the
+  -- seeding optional, so the block must not abort the transaction that also
+  -- carries the function. The migrator reads pg_db_role_setting afterwards and
+  -- prints these statements; preflight warns while they are unset.
   RAISE WARNING USING
-    MESSAGE = format('match_thoughts: could not seed the database-level HNSW scan bounds (%s).', SQLERRM),
-    HINT = format('Run as the database owner, in one session: SELECT ''[1]''::vector; ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000; ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8;  (the SELECT loads pgvector so a non-superuser may set hnsw.* settings)', v_db, v_db);
+    MESSAGE = format('match_thoughts: could not seed the database-level HNSW scan bounds (%s: %s).', SQLSTATE, SQLERRM),
+    HINT = format('Run as the database owner, in one session: SELECT ''[1]''::vector; ALTER DATABASE %I SET hnsw.max_scan_tuples = {{HNSW_SEED_MAX_SCAN_TUPLES}}; ALTER DATABASE %I SET hnsw.scan_mem_multiplier = {{HNSW_SEED_SCAN_MEM_MULTIPLIER}};  (the SELECT loads pgvector so a non-superuser may set hnsw.* settings)', v_db, v_db);
 END $$;
 
--- `[filter-inside-scan]` is a CONTRACT MARKER, not prose: preflight decides
--- whether this function has 014's semantics — the metadata filter applied inside
--- the candidate scan — by looking for it here, not by grepping the body for a
--- local variable's name. A later migration that redefines match_thoughts and
--- keeps that property must carry the marker into its own COMMENT; one that
--- reintroduces a post-LIMIT filter must not. db/test-schema.ts [8b] asserts it.
 COMMENT ON FUNCTION match_thoughts(vector, float, int, jsonb) IS
-  '[filter-inside-scan] Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence. The metadata filter is applied inside the index scan (iterative HNSW scan, pgvector >= 0.8), so a selective filter does not silently empty the result.';
+  'Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence. The metadata filter is applied inside the index scan (iterative HNSW scan, pgvector >= 0.8), so a selective filter does not silently empty the result.';

@@ -24,6 +24,8 @@ import { createHash } from "node:crypto";
 import {
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
+  HNSW_SEED_MAX_SCAN_TUPLES,
+  HNSW_SEED_SCAN_MEM_MULTIPLIER,
   TRGM_INDEX,
   migrationValues,
   substituteMigration,
@@ -129,6 +131,8 @@ const applied = new Map<string, string>(
  * whose control file is unreadable will still say so on 014.
  */
 const NEEDS_PGVECTOR_08 = (name: string) => name.startsWith("014_");
+/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
+const quoteIdent = (name: unknown) => (name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`);
 let pgvectorTooOld: string | null = null;
 if (migrations.some((m) => NEEDS_PGVECTOR_08(m.name) && !applied.has(m.name))) {
   try {
@@ -141,8 +145,10 @@ if (migrations.some((m) => NEEDS_PGVECTOR_08(m.name) && !applied.has(m.name))) {
   }
 }
 const PGVECTOR_REMEDY =
-  "  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n" +
-  "  Migrations before it are applied and recorded; nothing needs undoing.";
+  "  Upgrade pgvector on the server to 0.8.0 or later — the compose stack pins pgvector/pgvector:0.8.6-pg16;\n" +
+  "  on RDS, Aurora, Neon, Cloud SQL or Timescale, take the platform's newer pgvector — then, in this database,\n" +
+  "    ALTER EXTENSION vector UPDATE;\n" +
+  "  and re-run. Migrations before it are applied and recorded; nothing needs undoing.";
 const floorMessage = (name: string) =>
   `\n  ${name} needs pgvector 0.8.0 or later; this server's pgvector library is ${pgvectorTooOld ?? "older than 0.8.0"}.\n${PGVECTOR_REMEDY}`;
 
@@ -240,8 +246,8 @@ for (const m of migrations) {
           `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
             `     the migrating role does not own the database. Run as the owner, in one session:\n` +
             `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
-            `       ALTER DATABASE ${row?.db ?? "<database>"} SET hnsw.max_scan_tuples = 100000;\n` +
-            `       ALTER DATABASE ${row?.db ?? "<database>"} SET hnsw.scan_mem_multiplier = 8;\n` +
+            `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES};\n` +
+            `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};\n` +
             `     Until then thin filters walk with pgvector's defaults and can return short; preflight warns about it.`
         );
       }

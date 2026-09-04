@@ -135,3 +135,7 @@ export function versionAtLeast(version: string, major: number, minor?: number, p
 
 /** Is this hostname the local machine or its private network? Empty is not local. */
 export function isLocalHostname(host: string, serviceNames?: string[]): boolean;
+
+/** What migration 014 seeds as the HNSW walk's bounds; tuned with ALTER DATABASE, not here. */
+export const HNSW_SEED_MAX_SCAN_TUPLES: number;
+export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
