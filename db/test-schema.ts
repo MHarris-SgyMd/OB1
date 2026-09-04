@@ -28,6 +28,7 @@ import {
   EMBEDDING_MODEL,
   migrationValues,
   substituteMigration,
+  DEFAULT_CHUNK_CONTEXT,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -647,6 +648,71 @@ console.log("\n[13] Migration 012 left upsert_thought and match_thoughts alone")
      WHERE p.proname = 'search_thoughts_text' AND n.nspname = 'public'`
   );
   assert(upstreamName.rows[0].c === 0, "012 defines no search_thoughts_text, so it cannot clash with upstream's");
+}
+
+// ── 14. Migration 013 — chunk context ────────────────────────────────────────
+
+console.log("\n[14] Migration 013 declares chunk context without disturbing anything");
+{
+  /**
+   * Static assertions only. The behavioural half — that a context survives a
+   * capture, an edit and a bare payload — lives in `db/test-live.ts` [7],
+   * against real Postgres, because PGlite cannot run it: writing chunk rows
+   * through the 4-argument `upsert_thought` crashes the WASM build in this
+   * process, with "received invalid response: 0" when the payload is bound as
+   * a parameter and "Out of bounds memory access" when it is inlined or built
+   * server-side with array_fill.
+   *
+   * It reproduces with migrations 001-012 applied and no 013, at any position
+   * in this file, on the shared instance and on a second one — so it is the
+   * harness rather than the migration, and moving the assertions to the suite
+   * that runs against a real server is the fix rather than a workaround. The
+   * split is not a loss of coverage: the same functions are exercised through
+   * a container in test-live.ts [7] and in server-portable/test-chunking.ts.
+   */
+  const col = await db.query<{ data_type: string; is_nullable: string }>(
+    `SELECT data_type, is_nullable FROM information_schema.columns
+     WHERE table_name = 'thought_chunks' AND column_name = 'context'`
+  );
+  assert(col.rows.length === 1, "thought_chunks.context exists");
+  assert(col.rows[0]?.data_type === "text", `…as text (got ${col.rows[0]?.data_type})`);
+  assert(col.rows[0]?.is_nullable === "YES",
+         "…and nullable, so a window embedded bare is representable");
+
+  /**
+   * Both writers, read out of pg_proc rather than out of the file. A migration
+   * that added the column and updated only `upsert_thought` would pass every
+   * capture test and silently strip context on the first edit — so the source
+   * of each function is checked for the column by name.
+   */
+  const src = await db.query<{ proname: string; prosrc: string }>(
+    `SELECT p.proname, p.prosrc FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+     WHERE ns.nspname = 'public' AND p.proname IN ('upsert_thought', 'update_thought')`
+  );
+  const writes = src.rows.filter((r) => /INSERT INTO thought_chunks/i.test(r.prosrc));
+  assert(writes.length === 2, `two functions write chunk rows (got ${writes.length})`);
+  assert(writes.every((r) => /elem->>'context'/.test(r.prosrc)),
+         "…and both carry context through, so an edit cannot strip it");
+
+  // 013 REPLACES those functions rather than adding overloads. A signature that
+  // drifted by one default or one type would leave a fourth upsert_thought or a
+  // second update_thought behind, and every existing caller would start failing
+  // with "function is not unique".
+  const counts = await db.query<{ n: number; u: number }>(
+    `SELECT
+       count(*) FILTER (WHERE p.proname = 'upsert_thought')::int AS n,
+       count(*) FILTER (WHERE p.proname = 'update_thought')::int AS u
+     FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+     WHERE ns.nspname = 'public'`
+  );
+  assert(counts.rows[0].n === 3, `still exactly three upsert_thought overloads (got ${counts.rows[0].n})`);
+  assert(counts.rows[0].u === 1, `still exactly one update_thought (got ${counts.rows[0].u})`);
+
+  const cfg = await db.query<{ value: string }>(
+    `SELECT value FROM ob1_config WHERE key = 'chunk_context'`
+  );
+  assert(cfg.rows[0]?.value === String(DEFAULT_CHUNK_CONTEXT),
+         `ob1_config records the configured setting (got ${cfg.rows[0]?.value})`);
 }
 
 report();

@@ -116,7 +116,22 @@ console.log("[1] A capture longer than the batch is stored without truncation er
   await call("capture_thought", { content: LONG_HEAD });
   await call("capture_thought", { content: LONG_MID });
   await call("capture_thought", { content: "A short thought about a quicksilver idea." });
-  assert(overBatch === 0, `no provider call exceeded the batch (${overBatch} did)`);
+  /**
+   * ONE over-batch call is expected, and only one, across all four captures.
+   *
+   * A chunked capture also asks the provider for a whole-content vector, because
+   * on a provider that truncates (Ollama, the default) that vector is measurably
+   * better than the head window — see embedCapture. This stub is the other kind:
+   * it REFUSES over-batch input with a 400. The first refusal latches, so the
+   * attempt is not repeated, and the capture falls back to the head window
+   * exactly as it behaved before.
+   *
+   * Asserting `=== 1` rather than `<= 1` is the point. At `<= 1` this passes
+   * whether the latch works or is never reached at all; at `=== 1` it fails if
+   * the probe stops happening AND fails if it happens four times.
+   */
+  assert(overBatch === 1,
+    `exactly one over-batch probe, latched after the first refusal (${overBatch} calls exceeded the batch)`);
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [t] = await sql`SELECT count(*)::int AS c FROM thoughts`;

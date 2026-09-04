@@ -12,6 +12,7 @@
     "cf:dev": "wrangler dev",
     "preflight": "bun preflight.ts",
     "test:preflight": "../db/with-postgres.sh bun test-preflight.ts",
+    "test:chunk-context": "../db/with-postgres.sh bun test-chunk-context.ts",
     "test:auth": "bun test-auth.ts",
     "keygen": "bun keygen.ts",
     "test:local": "../db/with-postgres.sh bun test-local-provider.ts"

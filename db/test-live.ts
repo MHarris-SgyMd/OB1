@@ -26,7 +26,7 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
+import { EMBEDDING_DIM } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, dropSchema } from "./test-support.ts";
@@ -43,12 +43,6 @@ if (!URL_) {
   process.exit(2);
 }
 
-/** Migrations are templates; migrate.ts substitutes these at apply time. */
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
-}
 
 const { assert, report } = createAssert();
 
@@ -203,6 +197,75 @@ console.log("\n[6] The unique partial index is enforced by the server");
   await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES ('c', NULL)`;
   await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES ('d', NULL)`;
   assert(true, "multiple NULL fingerprints coexist");
+}
+
+console.log("\n[7] Chunk context survives capture, edit and a payload without it");
+{
+  await sql`DELETE FROM thoughts`;
+
+  /**
+   * The behavioural half of migration 013, here rather than in test-schema.ts
+   * because PGlite cannot run it: writing chunk rows through the 4-argument
+   * upsert_thought crashes the WASM build in-process, with migrations 001-012
+   * applied and no 013, so it is the harness rather than the migration. This is
+   * the suite that talks to a real server, which is where the round trip
+   * belongs anyway.
+   */
+  const chunkPayload = (specs: { content: string; at: number; context?: string }[]) =>
+    specs.map((c) => ({
+      content: c.content,
+      embedding: unit(c.at),
+      ...(c.context !== undefined ? { context: c.context } : {}),
+    }));
+
+  const [cap] = await sql`
+    SELECT upsert_thought(
+      ${"a long capture"}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector,
+      ${chunkPayload([
+        { content: "first window", at: 1, context: "Notes on the payments rollout." },
+        { content: "second window", at: 2 },
+      ])}::jsonb
+    ) AS r`;
+  assert(cap.r?.chunks === 2, `both chunks written (got ${cap.r?.chunks})`);
+
+  const stored = await sql`SELECT chunk_index, context FROM thought_chunks ORDER BY chunk_index`;
+  assert(stored[0].context === "Notes on the payments rollout.", "the context sent with a chunk is stored");
+  assert(stored[1].context === null, "…and a chunk sent without the key is NULL, not an empty string");
+
+  /**
+   * The half that would otherwise rot silently. An edit replaces every chunk, so
+   * an update_thought that did not select `context` would strip it from a
+   * contextualized thought through ordinary use — embeddings intact, the record
+   * of what produced them gone, and nothing reporting it.
+   */
+  const [upd] = await sql`
+    SELECT update_thought(
+      ${cap.r.id}::uuid, ${"a longer capture, edited"}, NULL::jsonb, ${unit(3)}::vector,
+      ${chunkPayload([{ content: "rewritten window", at: 3, context: "Revised notes on the payments rollout." }])}::jsonb
+    ) AS r`;
+  assert(upd.r?.ok === true, `the edit succeeds (${JSON.stringify(upd.r)})`);
+  const after = await sql`SELECT context FROM thought_chunks ORDER BY chunk_index`;
+  assert(after.length === 1, `chunks replaced wholesale (got ${after.length})`);
+  assert(after[0].context === "Revised notes on the payments rollout.",
+         "…and update_thought carries context through rather than dropping it");
+
+  // A caller that has never heard of context — every client older than 013, and
+  // every capture with OB1_CHUNK_CONTEXT off — keeps working unchanged.
+  await sql`
+    SELECT upsert_thought(
+      ${"a second long capture"}, ${{ metadata: {} }}::jsonb, ${unit(4)}::vector,
+      ${chunkPayload([{ content: "old-style window", at: 4 }])}::jsonb
+    )`;
+  const [legacy] = await sql`
+    SELECT c.context FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id
+    WHERE t.content = ${"a second long capture"}`;
+  assert(legacy.context === null, "a chunk payload with no context key is accepted and stored bare");
+
+  // Deleting still takes the chunks with it — the CASCADE from 007 is unaffected
+  // by the new column, and an orphaned vector would keep answering searches.
+  await sql`DELETE FROM thoughts`;
+  const [orphans] = await sql`SELECT count(*)::int AS c FROM thought_chunks`;
+  assert(orphans.c === 0, `no chunk rows survive their thought (got ${orphans.c})`);
 }
 
 await sql.close();

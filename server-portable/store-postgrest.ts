@@ -146,7 +146,7 @@ export class PostgrestStore implements ThoughtStore {
     content: string;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
-    chunks?: { content: string; embedding: number[] }[];
+    chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
@@ -167,7 +167,7 @@ export class PostgrestStore implements ThoughtStore {
       p_payload: envelope,
       p_embedding: opts.embedding,
       ...(chunks.length
-        ? { p_chunks: chunks.map((c) => ({ content: c.content, embedding: `[${c.embedding.join(",")}]` })) }
+        ? { p_chunks: chunks.map((c) => ({ content: c.content, embedding: `[${c.embedding.join(",")}]`, context: c.context ?? null })) }
         : {}),
     });
 
@@ -216,13 +216,14 @@ export class PostgrestStore implements ThoughtStore {
     content?: string;
     metadataPatch?: Record<string, unknown>;
     embedding?: number[];
-    chunks?: { content: string; embedding: number[] }[];
+    chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: `[${c.embedding.join(",")}]`,
+      context: c.context ?? null,
     }));
     const { data, error } = await this.client.rpc("update_thought", {
       p_id: opts.id,

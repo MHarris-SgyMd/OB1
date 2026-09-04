@@ -1187,6 +1187,134 @@ one. Anything else means the tokenizer and the SQL function disagree about what 
 token is, and the script exits without printing a comparison rather than
 publishing one against a query set that does not mean what its label says.
 
+## Contextual retrieval: measured, and it makes things worse here
+
+`eval-contextual.ts`, run as `bun run contextual`. It needs a running Ollama and
+the rebuilt corpus at `/tmp/linear-corpus-full.json` (`bun build-linear-corpus.ts`
+— the output stays in `/tmp`, out of git, and `OB1_EVAL_CORPUS` points elsewhere).
+No database: it does the ranking arithmetic itself, so nothing here needs a
+container. The generated blurbs are cached beside the corpus in `/tmp`, keyed by
+a digest of the prompt so editing a template in `db/config.mjs` regenerates them
+rather than quietly reusing answers to a question no longer being asked.
+
+Anthropic's Contextual Retrieval (September 2024) prepends a short generated
+blurb to each chunk before embedding it, and reports roughly a 35% reduction in
+top-20 retrieval failure. Those are their numbers on their corpora. Here:
+
+| arm | chunked-doc MRR | detail-query MRR | helped | hurt |
+| --- | ---: | ---: | ---: | ---: |
+| one vector, whole text (pre-007) | 0.910 | 0.823 | 3 | 7 |
+| MAX over bare windows (before change 27) | 0.917 | 0.904 | — | — |
+| **whole text AND bare windows — the server today** | **0.917** | **0.935** | **3** | **0** |
+| one blurb per document | 0.850 | 0.759 | 1 | 13 |
+| a blurb per window (Anthropic) | 0.922 | 0.826 | 1 | 8 |
+| a 20-word blurb per window | 0.956 | 0.847 | 0 | 5 |
+| whole text AND contextual windows | 0.950 | 0.867 | 3 | 5 |
+
+`qwen3-embedding:4b@1024`, 441 documents, the 15 that reach the 1200-token
+chunking threshold, 37 detail queries. Helped/hurt are paired counts against the
+baseline row, which is the statistic that matters at this size — a mean MRR
+across 37 queries can move on one of them. The baseline is what the server stored
+before change 27, because that is what every arm here was measured against; the
+bold row is what it stores now, and it is the row to compare a contextual arm to
+if the question is "would turning the flag on help today".
+
+### Why there are two columns, and which one to read
+
+The left column is the task `eval-real.ts` poses: the issue title is the query.
+**It cannot discriminate between these arms**, and reading it alone would have
+shipped the wrong conclusion — a title describes a whole document, so a
+whole-document vector answers it best, and every arm scores within a document or
+two of every other. It is kept as the control that nothing regresses on ordinary
+queries, not as the measurement.
+
+The right column is the query contextual retrieval exists for: it names the
+document's SUBJECT and asks for a DETAIL that lives in one window — "how long is
+the rollback window we agreed for the payments service?", where the window says
+"thirty minutes, anything longer needs sign-off" and never says "payments". A
+bare window cannot match the subject half. A contextualized one can.
+
+Those queries are generated from the title and one window, never the whole
+document, so the detail half comes from the window itself — which hands the BARE
+arm the strongest advantage available. The harness is biased against the change
+it is testing on purpose.
+
+### The mechanism, measured rather than guessed
+
+Prepending a blurb moves a window **away from its own query**. The harness
+compares each detail query against the exact window it was written for:
+
+| blurb | mean cosine change | lower on |
+| --- | ---: | ---: |
+| full (median 388 chars) | −0.0338 | 32 of 37 |
+| 20 words | −0.0144 | 27 of 37 |
+
+The loss tracks blurb length, which is the whole story: a fixed-size vector has
+less room for the sentence that actually answers. The first run's blurbs were
+also formulaic — every one opened "This chunk outlines…", identical text in front
+of every window in the corpus — which is why the 20-word prompt with a banned
+opener exists and why it is *less bad* rather than good.
+
+### It is a flag because the sign belongs to the model
+
+The same harness, same corpus, same blurbs, on `embeddinggemma`:
+
+| arm | detail-query MRR | helped | hurt |
+| --- | ---: | ---: | ---: |
+| MAX over bare windows | 0.814 | — | — |
+| whole text AND bare windows | 0.834 | 4 | 0 |
+| a blurb per window | **0.855** | 5 | 4 |
+| whole text AND contextual windows | **0.865** | 8 | 2 |
+
+768 dimensions against 1024, and a real ceiling — the harness bisects for the
+shortest prefix that embeds identically and finds `embeddinggemma` stops reading
+at ~8,150 characters where `qwen3-embedding:4b` read all 15,812. A weaker window
+vector has more to gain from the extra subject signal than it loses to dilution.
+So `OB1_CHUNK_CONTEXT` ships, off, with this table next to it.
+
+### The finding that did pay
+
+**Keep the whole-content vector.** `whole text AND bare windows` is +0.032 on
+`qwen3-embedding:4b` and +0.020 on `embeddinggemma`, hurting nothing on either,
+for one extra embedding call on the 3.4% of captures long enough to chunk. That
+is now what the server does.
+
+It had been the first window's vector since migration 007, to avoid sending an
+over-batch request that Ollama answers by silently truncating. Sound when
+written, and no longer true of the configured default — which is the argument for
+the ceiling probe being part of this harness rather than a fact anyone remembers.
+
+### One confound, checked rather than assumed
+
+Every contextualization prompt embeds the whole document, so a blurb model whose
+context is smaller than the documents would be writing from a fragment — the
+exact failure chunking exists to fix, reintroduced in the call that produces the
+fix, and invisible in the output. `qwen2.5:7b` on Ollama reads back sentinels at
+both ends of a 31,669-character prompt, twice the longest real document, so the
+tables above are unaffected.
+
+The harness no longer takes that on trust: it runs the probe before generating
+anything and **exits without printing a comparison** if either end is lost.
+Forced to fail, it reports `start LOST, end seen` — the front of the prompt goes
+first, which is precisely the half carrying the document.
+
+### Reproducibility
+
+Every number above was re-derived from an empty cache after the prompt-keyed
+caching landed — 126 fresh generations, and all eight arms came back identical to
+three decimal places on both tables. Blurb generation runs at temperature 0 with
+reasoning off, matching what the server sends, so the tables are a property of
+the corpus and the models rather than of one sampling run.
+
+### What this harness deliberately does not claim
+
+15 chunked documents is 3.4% of the corpus, so nothing here moves a whole-corpus
+average, and the unchunked 426 are reported separately as a control: they shift
+by 0.003 MRR across every arm, which is chunked documents changing rank around
+them and not a finding. Anyone capturing transcripts or imported documents rather
+than issue threads has a different corpus and should re-run this before trusting
+any row of it.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

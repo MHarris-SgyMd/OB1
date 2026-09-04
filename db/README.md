@@ -61,10 +61,11 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `108 assertions: 108 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports twelve migrations applied, and
+`bun test-schema.ts` prints `118 assertions: 118 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports thirteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
-primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`.
+primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
+thought_chunks` shows five columns since 013 added `context`.
 
 ## The migrations
 
@@ -82,6 +83,7 @@ primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`.
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
+| `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
 
 ## What changed relative to the guide
 
@@ -106,6 +108,65 @@ introduce multi-tenancy; do not port this one.
 
 **No `GRANT … TO service_role`.** Grant to whichever role your application
 connects as.
+
+## Chunk context, and why it is off
+
+Migration 013 adds `thought_chunks.context`: a short generated blurb naming what
+a window is about, prepended to it before embedding. It is Anthropic's Contextual
+Retrieval, and `OB1_CHUNK_CONTEXT` defaults to **off** because it was measured
+rather than adopted.
+
+`evals/eval-contextual.ts` scores it over the 15 documents in the 441-issue
+corpus that reach the chunking threshold, using 37 queries that name a document's
+subject and ask for a detail living in exactly one window — the query the
+technique exists for, and one a title-as-query benchmark cannot pose. Against the
+bare windows the server stores today, on the default `qwen3-embedding:4b`:
+
+| arm | MRR | helped | hurt |
+| --- | ---: | ---: | ---: |
+| bare windows (before change 27) | 0.904 | — | — |
+| whole content + windows (**today**) | 0.935 | 3 | 0 |
+| a blurb per window (Anthropic) | 0.826 | 1 | 8 |
+| a 20-word blurb per window | 0.847 | 0 | 5 |
+| one blurb per document | 0.759 | 1 | 13 |
+
+Helped/hurt are paired counts against the baseline row. Against what the server
+actually stores today the gap is wider still — 0.935 against 0.867 for the best
+contextual arm — because keeping the whole-content vector already helped the
+queries a blurb was meant to.
+
+**The mechanism is measured, not inferred.** The same harness compares each query
+against the exact window it was written for: prepending a blurb moves that window
+*away* from its own query, by 0.034 with a full blurb (lower on 32 of 37) and
+0.014 with a 20-word one (27 of 37). The loss tracks blurb length. A fixed-size
+vector has less room for the sentence that actually answers.
+
+**It ships as a flag because the sign belongs to the model, not the technique.**
+The same harness on `embeddinggemma` — 768 dimensions against 1024, and a real
+2048-token ceiling — reports a blurb per window at **+0.041**, helping 5 and
+hurting 4. A weaker window vector has more to gain from the extra subject signal
+than it loses to dilution. Measure before turning it on.
+
+The column exists whether or not the flag does, because it is the only way to
+tell the two kinds of chunk apart: a window is not a substring of its parent
+(`chunkContent` joins paragraph segments with a space), so nothing is recoverable
+by comparing text. `preflight.ts` counts both and reports a corpus captured under
+both settings. Turning the flag on without applying 013 is a **failure** at
+startup, not a warning: the functions from 007 and 009 would not select the key.
+The blurb still reaches the vector — the server composes the embedded text before
+the database sees it — so what is dropped is the record, and with it any way to
+tell a contextualized chunk from a bare one afterwards.
+
+There is no backfill. Re-contextualizing an existing corpus is a bulk pass over
+every chunked thought, which wants the claim/lease table from SMD-946.
+
+The same applies to the whole-content vector that change 27 restored: a long
+thought captured before it still has its head window in `thoughts.embedding`,
+and re-capturing is the only way to upgrade it. Preflight does **not** report
+that split, unlike the chunk-context one, because it cannot be told apart from a
+legitimate state — a provider that refuses over-length input falls back to the
+head window for every long capture, forever, and a check that nags a correct
+deployment is worse than no check.
 
 ## Extensions
 
@@ -239,8 +300,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 108 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 30 assertions, real server, throwaway container
+bun test-schema.ts                    # 118 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 38 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:pg16`, exports `DATABASE_URL`, runs
@@ -262,7 +323,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 108 properties, including:
+asserts 118 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -296,6 +357,18 @@ asserts 108 properties, including:
   strict `>` or result counts change silently.
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
 - a non-object `p_payload` raises rather than silently storing `{}`
+- `thought_chunks.context` exists and is nullable, and **both** functions that
+  write chunk rows carry it through. Checking only `upsert_thought` would pass
+  against a migration that strips context on the first edit
+
+One thing this suite deliberately does NOT assert: that a context survives a
+capture, an edit and a payload that omits it. Writing chunk rows through the
+4-argument `upsert_thought` crashes PGlite's WASM build in this process —
+`received invalid response: 0` when the payload is bound as a parameter, `Out of
+bounds memory access` when it is inlined — and it reproduces with migrations
+001-012 applied and no 013, at any position in the file, on a second instance as
+well as the shared one. So it is the harness rather than the migration, and the
+round trip is asserted in `test-live.ts` [7] against a real server instead.
 
 ### The double-encoding trap
 

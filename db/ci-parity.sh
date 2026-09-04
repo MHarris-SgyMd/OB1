@@ -47,6 +47,7 @@ main() {
   run server-portable    test-agents.ts
   run server-portable    test-store-postgrest.ts
   run server-portable    test-chunking.ts
+  run server-portable    test-chunk-context.ts
   run server-portable    test-embedding-dimensions.ts
   run server-portable    test-preflight.ts
   run compat/supabase-sql test-compat.ts

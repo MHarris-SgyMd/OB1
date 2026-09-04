@@ -314,7 +314,7 @@ new thought's id, which is what the other two take.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied twelve migrations. `server` logs `preflight OK` and
+`migrate` exits 0 having applied thirteen migrations. `server` logs `preflight OK` and
 `Started server`. `smoke.sh` prints `6 checks: 6 passed, 0 failed`. A client shows
 nine tools for a write key, six for a read key.
 
