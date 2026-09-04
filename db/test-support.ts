@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, migrationValues, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, isLocalHostname, migrationValues, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,18 +98,20 @@ export function substitute(sql: string, opts: SchemaOptions): string {
 /**
  * Refuse to drop a database that is not obviously a throwaway.
  *
- * Every suite and bench in this repo resets the schema — eighteen callers — and
- * two of them then load internal engineering data into what they cleared.
- * Pointed at anything real by a stale `DATABASE_URL` in a shell, one command
- * destroys that database with no prompt. The check lived beside two of the
- * callers before the third review pass; it lives in `dropSchema` now so every
- * destructive caller inherits it.
+ * Every suite and bench in this repo resets the schema, and two of them then
+ * load internal engineering data into what they cleared. Pointed at anything
+ * real by a stale `DATABASE_URL` in a shell, one command destroys that database
+ * with no prompt. The check lives in `dropSchema` so every caller that goes
+ * through it inherits it; the one eval that drops tables on its own calls it
+ * directly.
  *
- * Three details the first version got wrong. The host is lowercased, so
- * `LocalHost` is not refused. IPv6 loopback is `[::1]` as WHATWG URL reports
- * it, brackets kept. And an EMPTY host is refused rather than trusted: Bun's SQL
- * client resolves `postgres:///db` through PGHOST, exactly as libpq does, so an
- * empty hostname is whatever the shell says it is — not loopback.
+ * "Local" is `isLocalHostname` from config.mjs — the predicate preflight uses to
+ * decide whether a model endpoint needs a credential — so the two cannot
+ * disagree: loopback, the container-to-host aliases, RFC1918, and the compose
+ * service name `postgres`. A Unix-socket URL (`?host=/var/run/...`) is local.
+ * An EMPTY host is refused rather than trusted: Bun's SQL client resolves
+ * `postgres:///db` through PGHOST, exactly as libpq does, so an empty hostname
+ * is whatever the shell says it is.
  *
  * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
  * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
@@ -118,14 +120,15 @@ export function substitute(sql: string, opts: SchemaOptions): string {
 export function assertThrowawayDatabase(url: string): void {
   if (process.env.OB1_ALLOW_REMOTE_DB === "1" || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
   let host: string | null = null;
+  let socket = false;
   try {
-    host = new URL(url).hostname.toLowerCase();
+    const u = new URL(url);
+    host = u.hostname;
+    socket = (u.searchParams.get("host") ?? "").startsWith("/");
   } catch {
     /* unparseable: refuse below */
   }
-  // 0.0.0.0 as a CLIENT target is the local machine; it was accepted before.
-  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
-  if (host && LOOPBACK.has(host)) return;
+  if (socket || (host !== null && isLocalHostname(host, ["postgres"]))) return;
   const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
   console.error(
     `  Refusing to drop the schema at ${shown}.\n\n` +

@@ -111,27 +111,43 @@
 --     even with the constant known: at 100,000 rows the 1% tier went that way
 --     and cost 41 ms, complete; the 0.1% tier went to the GIN index at 0.7 ms.
 --
---   * `hnsw.max_scan_tuples = 100000` and `hnsw.scan_mem_multiplier = 8`, the
---     two bounds on the walk when it does happen. pgvector stops an iterative
---     scan at EITHER: the tuple cap, or when the scan's memory exceeds
---     work_mem * scan_mem_multiplier (4 MB * 1 by default, about 19,000 visited
---     tuples at ~215 bytes each). The first draft of this migration set only
---     the tuple cap, and the second review pass caught that the memory bound
---     was the one actually stopping the scan — which is why raising the cap
---     from 20,000 to 400,000 had changed nothing. Measured at 100,000 rows with
---     the generic plan forced, tuple cap 100,000: with the multiplier at its
---     default a filter with 15 matching rows returned 6.3 of 10 asked and one
---     with 110 rows returned 42 of 50 — short, silently; with the multiplier at
---     8 both returned everything, at ~300 ms for the full walk. With both
---     bounds in place, db/bench-hnsw.ts section D forces the walk at 100,000
---     rows and it completes: 90 matching rows → 10 of 10 in 196 ms, 6 → 6 of 6
---     in 272 ms, nothing → nothing in 268 ms. The bound needed is roughly
+--   * The two bounds on the walk — hnsw.max_scan_tuples = 100000 and
+--     hnsw.scan_mem_multiplier = 8 — are seeded ONCE at database level by the
+--     DO block after the function, not declared on the function. pgvector stops
+--     an iterative scan at EITHER the tuple cap or when the scan's memory
+--     exceeds work_mem * scan_mem_multiplier (4 MB * 1 by default, about 19,000
+--     visited tuples at ~215 bytes each). The first draft of this migration set
+--     only the tuple cap; the second review pass caught that the memory bound
+--     was the one actually stopping the scan, which is why raising the cap from
+--     20,000 to 400,000 had changed nothing. Measured at 100,000 rows with the
+--     generic plan forced, tuple cap 100,000: with the multiplier at its default
+--     a filter with 15 matching rows returned 6.3 of 10 asked and one with 110
+--     rows returned 42 of 50 — short, silently; with the multiplier at 8 both
+--     returned everything, at ~300 ms for the full walk. With both bounds in
+--     place, db/bench-hnsw.ts section D forces the walk at 100,000 rows and it
+--     completes: 90 matching rows → 10 of 10 in 196 ms, 6 → 6 of 6 in 272 ms,
+--     nothing → nothing in 268 ms. The bound needed is roughly
 --     v_fetch / selectivity, so pgvector's default covers a 0.1% filter only
---     to match_count 5 on a million rows; 100,000 covers 25.
---     With the custom plan forced above, the walk is reached only when the
---     planner still prefers the HNSW index under a filter, so these are a floor
---     under a path that is now rarely taken — but they are the reason that path
---     returns everything when it is.
+--     to match_count 5 on a million rows; 100,000 covers 25. With the custom
+--     plan forced, the walk is reached only when the planner still prefers the
+--     HNSW index under a filter, so these are a floor under a path that is now
+--     rarely taken — but they are the reason that path returns everything when
+--     it is.
+--
+--     Why database level. The third and fourth drafts declared them as
+--     function-level SETs and then built machinery to compensate: a SET on the
+--     function overrides any database- or role-level value, and CREATE OR
+--     REPLACE rewrites proconfig, so an operator's tuning had nowhere durable to
+--     live except a template variable threaded through config, compose, tests
+--     and preflight. The fifth review pass named that for what it was. One
+--     `ALTER DATABASE ... SET` by the owner is the whole tuning surface: every
+--     session honours it, no redefinition of the function touches it, and this
+--     migration only seeds a value where none exists. The cost is that the
+--     migrating role must own the database to seed the defaults; where it does
+--     not, the DO block warns with the two statements and the migration still
+--     applies — the fix does not depend on the bounds, only the depth of a rare
+--     walk does. Sessions read database-level settings at connect, so a running
+--     server picks up a change when its pool reconnects.
 --
 --   * Two invariants the body leans on, stated because SMD-945 and SMD-958 will
 --     rewrite it. First, `v_unfiltered` is a BOOLEAN LOCAL, not a rewrite of
@@ -162,22 +178,6 @@
 --     above inherits the factor. Sizing it differently (smaller on `direct`,
 --     chunk-count-based on `chunked`) is a follow-up with its own measurement,
 --     which must include the unfiltered row-identity control the eval runs.
---
---   * The two bounds are TEMPLATE VALUES, not literals: `{{HNSW_MAX_SCAN_TUPLES}}`
---     and `{{HNSW_SCAN_MEM_MULTIPLIER}}` come from OB1_HNSW_MAX_SCAN_TUPLES and
---     OB1_HNSW_SCAN_MEM_MULTIPLIER in the environment the migrator runs under,
---     defaulting to 100000 and 8 (db/config.mjs), the same way 011 takes
---     OB1_TRGM_INDEX. This is the durable home for a tuned bound. The function's
---     SETs override any database- or role-level value, and CREATE OR REPLACE
---     rewrites proconfig wholesale, so a bound set by hand with ALTER FUNCTION
---     is discarded by the next redefinition without any error — but a bound set
---     in the environment is substituted into every future migration that
---     redefines this function through the migrator. The migrator hashes the
---     template, not the substituted text, so the ledger does not drift when the
---     value changes; re-applying an already-applied 014 with a new value is,
---     however, a no-op — change the value in a later migration, or ALTER FUNCTION
---     for the interim. db/test-schema.ts [8b] pins the substituted values and
---     proves the placeholder is live by applying 014 with a different one.
 --
 --   * match_count is now load-bearing for cost. 007 capped each CTE at ~40
 --     candidates whatever was asked; this function honours v_fetch, so a call
@@ -215,8 +215,10 @@
 -- Expected outcome
 --   `match_thoughts` returns `match_count` rows whenever that many pass the
 --   threshold and filter, for any filter selectivity the scan can reach within
---   `hnsw.max_scan_tuples`, and `pg_proc.proconfig` for it records the
---   iterative-scan setting so preflight and the schema test can see it.
+--   `hnsw.max_scan_tuples`; `pg_proc.proconfig` for it records the iterative-scan
+--   setting and the forced plan mode so preflight and the schema test can see
+--   them, and `pg_db_role_setting` for the database records the two bounds
+--   unless an operator had already set them.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION match_thoughts(
@@ -233,16 +235,14 @@ RETURNS TABLE (
   created_at  timestamptz
 )
 LANGUAGE plpgsql
--- All four are scoped to this call and restored on exit. The first requires
+-- Both are scoped to this call and restored on exit. The first requires
 -- pgvector >= 0.8.0, and the CREATE fails on anything older rather than
 -- producing a function that quietly stops at the first ef_search candidates.
--- The two bounds travel with the mode — the tuple cap is only the operative
--- bound if the memory bound is above it — and the plan mode is what keeps the
--- filtered path off the iterative walk in the first place. The header has the
--- measurements behind each value and says when to change them.
+-- The second is what keeps the filtered path off the iterative walk in the
+-- first place. The walk's two BOUNDS are deliberately not here: a function-level
+-- SET would override the database-level values seeded below, which are the
+-- operator's tuning knob. The header has the measurements behind each.
 SET hnsw.iterative_scan = relaxed_order
-SET hnsw.max_scan_tuples = {{HNSW_MAX_SCAN_TUPLES}}
-SET hnsw.scan_mem_multiplier = {{HNSW_SCAN_MEM_MULTIPLIER}}
 SET plan_cache_mode = force_custom_plan
 AS $$
 DECLARE
@@ -300,6 +300,51 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- The walk's two bounds, seeded ONCE at database level
+--
+-- pgvector stops an iterative scan at whichever comes first: hnsw.max_scan_tuples
+-- (default 20,000) or a memory bound of work_mem * hnsw.scan_mem_multiplier
+-- (default 4 MB * 1, about 19,000 visited tuples). Both defaults leave a thin
+-- filter returning short; the header has the measurements behind 100000 and 8.
+--
+-- They are set on the DATABASE, not on the function, and only when nothing has
+-- set them yet. A function-level SET would win over any database- or role-level
+-- value and would be rewritten by every CREATE OR REPLACE of match_thoughts, so
+-- an operator's tuning could live nowhere durable. Here it lives in
+-- pg_db_role_setting: one `ALTER DATABASE ... SET hnsw.max_scan_tuples = N` by
+-- the owner is honoured by every session, survives every redefinition of the
+-- function, and is never overwritten by re-running this migration. Sessions
+-- pick database-level settings up at connect, so a running server sees a new
+-- value after its pool reconnects (a restart does it).
+--
+-- ALTER DATABASE needs the database's owner (or a superuser). Where the
+-- migrating role is neither — some hosted platforms — this raises a WARNING
+-- with the two statements to run, and the migration still applies: the fix
+-- above does not depend on the bounds, only the depth of a rare walk does.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  v_db       text := current_database();
+  v_existing text[];
+BEGIN
+  SELECT s.setconfig INTO v_existing
+  FROM pg_db_role_setting s
+  JOIN pg_database d ON d.oid = s.setdatabase
+  WHERE d.datname = v_db AND s.setrole = 0;
+
+  IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.max_scan_tuples=%') THEN
+    EXECUTE format('ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000', v_db);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM unnest(COALESCE(v_existing, '{}')) c WHERE c LIKE 'hnsw.scan_mem_multiplier=%') THEN
+    EXECUTE format('ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8', v_db);
+  END IF;
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE WARNING USING
+    MESSAGE = format('match_thoughts: could not seed the database-level HNSW scan bounds (%s).', SQLERRM),
+    HINT = format('Run as the database owner: ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000; ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8;', v_db, v_db);
+END $$;
 
 COMMENT ON FUNCTION match_thoughts(vector, float, int, jsonb) IS
   'Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence. The metadata filter is applied inside the index scan (iterative HNSW scan, pgvector >= 0.8), so a selective filter does not silently empty the result.';

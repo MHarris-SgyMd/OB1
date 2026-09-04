@@ -181,7 +181,10 @@ else {
   await ledger.close();
   const dropped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(dropped.code === 0, "a recorded 014 whose function lost its clauses still starts");
-  assert(/recorded as applied — a later redefinition dropped its SET clauses/.test(dropped.out), "…and is described as a dropped redefinition, not a missing migration");
+  // Re-applying 007 replaces the BODY as well as the clauses, and the check
+  // says which: a 014 body that merely lost its SETs gets the ALTER FUNCTION
+  // remedy, a pre-014 body gets the body re-run.
+  assert(/recorded as applied — a later redefinition (replaced its body|dropped its SET clauses)/.test(dropped.out), "…and is described as a later redefinition, not a missing migration");
   assert(/Re-run the body of db\/migrations\/014|ALTER FUNCTION match_thoughts/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
   const unledger = new SQL({ url: LIVE, max: 1 });
   await unledger.unsafe(`DROP TABLE schema_migrations`);

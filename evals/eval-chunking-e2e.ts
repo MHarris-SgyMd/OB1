@@ -23,6 +23,8 @@ import { SQL } from "bun";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { estimateTokens } from "../server-portable/chunk.ts";
+import { migrationValues, substituteMigration } from "../db/config.mjs";
+import { assertThrowawayDatabase } from "../db/test-support.ts";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -70,16 +72,19 @@ const LEAD = "Notes from the session, written up afterwards so the detail is not
 const build = (repeats: number, tail: string): string => `${LEAD} ${FILLER.repeat(repeats)} ${tail}`;
 
 async function freshSchema(): Promise<void> {
+  // The same refusal every other schema-resetting script gets from dropSchema.
+  // This one drops on its own because it also clears the ledger and ob1_config.
+  assertThrowawayDatabase(URL_);
   const admin = new SQL({ url: URL_, max: 1 });
   await admin`DROP TABLE IF EXISTS thought_chunks CASCADE`;
   await admin`DROP TABLE IF EXISTS thoughts CASCADE`;
   await admin`DROP TABLE IF EXISTS schema_migrations CASCADE`;
   await admin`DROP TABLE IF EXISTS ob1_config CASCADE`;
   for (const f of readdirSync(join(HERE, "..", "db", "migrations")).filter((x) => x.endsWith(".sql")).sort()) {
+    // The shared substitution, not a private .replace() chain: 011 added a
+    // {{TRGM_INDEX}} the chain here never knew about, and Postgres met it raw.
     await admin.unsafe(
-      readFileSync(join(HERE, "..", "db", "migrations", f), "utf8")
-        .replace(/\{\{EMBEDDING_DIM\}\}/g, String(DIM))
-        .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBED)
+      substituteMigration(readFileSync(join(HERE, "..", "db", "migrations", f), "utf8"), migrationValues({ dim: DIM, model: EMBED }), f)
     );
   }
   await admin.close();

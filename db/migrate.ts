@@ -24,10 +24,7 @@ import { createHash } from "node:crypto";
 import {
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
-  HNSW_MAX_SCAN_TUPLES,
-  HNSW_SCAN_MEM_MULTIPLIER,
   TRGM_INDEX,
-  hnswBoundIssues,
   migrationValues,
   substituteMigration,
   validateEmbeddingConfig,
@@ -120,38 +117,32 @@ const applied = new Map<string, string>(
 
 /**
  * Migration 014 declares HNSW settings that exist from pgvector 0.8.0. On an
- * older library the CREATE fails — by design, see its header — but "invalid
+ * older library its CREATE fails — by design, see its header — but "invalid
  * configuration parameter name" says nothing about versions, is localised, and
- * only appears once 001–013 have applied. So the floor is checked here, before
- * anything runs and in --dry-run too, against the version the server's library
- * REPORTS (pg_available_extensions.default_version), which is the loaded code
- * regardless of what pg_extension records for this database. Unknown means
- * proceed: a server whose control file is unreadable will still say so on 014.
+ * only appears once 001–013 have applied. So the floor is judged here, against
+ * the version the server's library REPORTS (pg_available_extensions.
+ * default_version — the loaded code, whatever pg_extension records for this
+ * database), and enforced in the loop: pending migrations before 014 still
+ * apply and are recorded, --baseline still seeds the ledger (it executes no
+ * SQL), and 014 itself is refused with a message that names the version.
+ * --dry-run reports the refusal the same way. Unknown means proceed: a server
+ * whose control file is unreadable will still say so on 014.
  */
+let pgvectorTooOld: string | null = null;
 if (migrations.some((m) => m.name >= "014" && !applied.has(m.name))) {
-  const [ext] = await sql`SELECT default_version, installed_version FROM pg_available_extensions WHERE name = 'vector'`;
+  const [ext] = await sql`SELECT default_version FROM pg_available_extensions WHERE name = 'vector'`;
   const library = ext?.default_version == null ? null : String(ext.default_version);
-  if (library !== null && !versionAtLeast(library, 0, 8)) {
-    console.error(
-      `\n  Migration 014 needs pgvector 0.8.0 or later; this server's pgvector library is ${library}` +
-        (ext?.installed_version ? ` (installed in this database: ${ext.installed_version})` : "") +
-        `.\n  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n` +
-        `  Nothing has been applied by this run.`
-    );
-    await sql.close();
-    process.exit(1);
-  }
+  if (library !== null && !versionAtLeast(library, 0, 8)) pgvectorTooOld = library;
 }
-for (const issue of hnswBoundIssues()) {
-  console.error(`  ✗  ${issue}`);
-  await sql.close();
-  process.exit(1);
-}
-console.log(`  HNSW scan bounds: max_scan_tuples ${HNSW_MAX_SCAN_TUPLES}, scan_mem_multiplier ${HNSW_SCAN_MEM_MULTIPLIER} (OB1_HNSW_*)`);
+const floorMessage = (name: string) =>
+  `\n  ${name} needs pgvector 0.8.0 or later; this server's pgvector library is ${pgvectorTooOld}.\n` +
+  `  Upgrade pgvector on the server (deploy/compose.yaml pins pgvector/pgvector:0.8.6-pg16), then re-run.\n` +
+  `  Migrations before it are applied and recorded; nothing needs undoing.`;
 
 let ran = 0;
 let skipped = 0;
 let drifted = 0;
+let floorBlocked = false;
 
 for (const m of migrations) {
   const prior = applied.get(m.name);
@@ -169,6 +160,11 @@ for (const m of migrations) {
     continue;
   }
   if (dryRun) {
+    if (pgvectorTooOld && m.name >= "014") {
+      console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorTooOld} < 0.8.0`);
+      floorBlocked = true;
+      continue;
+    }
     console.log(`  →  ${m.name}  would apply (${m.sha})`);
     ran++;
     continue;
@@ -178,6 +174,14 @@ for (const m of migrations) {
     console.log(`  ✓  ${m.name}  marked applied without running (--baseline)`);
     ran++;
     continue;
+  }
+
+  // The version floor, enforced only where it bites: earlier pending migrations
+  // have already applied above, and --baseline never reaches here.
+  if (pgvectorTooOld && m.name >= "014") {
+    console.error(`  ✗  ${m.name}  refused` + floorMessage(m.name));
+    await sql.close();
+    process.exit(1);
   }
 
   // Each migration runs in its own transaction: a failure leaves earlier ones
@@ -212,6 +216,11 @@ await sql.close();
 
 const verb = dryRun ? "would apply" : baseline ? "baselined" : "applied";
 console.log(`\n${verb} ${ran}, skipped ${skipped}${drifted ? `, DRIFTED ${drifted}` : ""}`);
+
+if (floorBlocked) {
+  console.error(floorMessage("Migration 014"));
+  process.exit(1);
+}
 
 if (drifted > 0) {
   console.error(

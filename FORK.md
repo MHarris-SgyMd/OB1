@@ -1342,14 +1342,20 @@ document lacks and scores against the exact answer within it.
   110-row filter at 42 of 50 under the generic plan; with the multiplier at 8
   both complete. Arithmetic for the cap: `v_fetch / selectivity`; pgvector's
   default covers a 0.1% filter to `match_count` 5 on a million rows, 100,000
-  covers 25. Both are function-level SETs, which a later `CREATE OR REPLACE`
-  rewrites wholesale and which override database-level values — so the durable
-  home for a tuned bound is not `ALTER FUNCTION` but the environment: the values
-  are template placeholders filled from `OB1_HNSW_MAX_SCAN_TUPLES` and
-  `OB1_HNSW_SCAN_MEM_MULTIPLIER` when the migrator runs, the way 011 takes
-  `OB1_TRGM_INDEX`, and every later redefinition through the migrator carries
-  them. `test-schema.ts` pins the substituted values and proves the placeholder
-  is live by applying 014 with a different one.
+  covers 25. They are seeded ONCE at **database** level by a DO block in the
+  migration, and only where nothing has set them — not declared on the function.
+  The third and fourth drafts put them on the function and then built a
+  compensating layer: a function-level SET overrides any database or role value
+  and is rewritten by every `CREATE OR REPLACE`, so an operator's tuning had
+  nowhere durable to live except a template variable threaded through config,
+  compose, tests and preflight, each of which then needed its own validation.
+  The fifth review pass named that for what it was. One `ALTER DATABASE … SET`
+  by the owner is now the whole tuning surface: every session honours it, no
+  redefinition of the function touches it, and re-running 014 leaves it alone —
+  `test-schema.ts` asserts both the seeding and the leaving-alone. Where the
+  migrating role does not own the database the DO block warns with the two
+  statements and the migration still applies; the fix does not depend on the
+  bounds, only the depth of a rare walk does.
 - `search_thoughts` now bounds `limit` to 1–100 in both servers, as the keyword
   tool already did. 007 capped each CTE near 40 candidates whatever was asked;
   this function honours `v_fetch`, so an unbounded count became unbounded scan
@@ -1409,36 +1415,35 @@ keep the function off.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
-tag, since 014 has a version floor. `preflight.ts` reads `pg_proc.proconfig`
-first, because that is the fact: the `hnsw.*` settings come from pgvector's
-loaded library, not from `pg_extension.extversion`, so a new binary over an old
-volume applies 014 and runs it correctly while the catalog still says 0.7.x
-(reproduced, by the second review pass, with the record edited by hand). The
-version is consulted only to explain an absent setting — a binary too old to
-accept it, or a record that lags the binary, where `ALTER EXTENSION vector
-UPDATE` is the fix — and it accepts either iterative mode and the session's
-inherited setting, so a database-level GUC is not reported as a missing
-migration. The lookup matches its siblings (name, namespace, argument count)
-rather than casting a signature through `search_path`. It warns if none of
-those hold — the defined-twice class this file keeps naming, in the form of a
-later `CREATE OR REPLACE` that forgets the SET clause — and words the remedy by
-the ledger, since "apply 014" is a no-op when 014 is recorded and the clause was
-dropped afterwards. On the PostgREST store, where the catalog cannot be read, it
-probes instead: one RPC with a NULL filter returns a row under 014's body and
-nothing under 007's, so the body is verified and the message says the SET
-clauses are not — and it first confirms that some row has an embedding at all,
-since a table of embedding-less rows returns nothing under either body. (The
-first version of that check was an unconditional warning that could never be
-cleared; the third review pass caught it, and the fourth caught the
-embedding-less case.) An inherited database-level GUC is accepted only when the
-function body is 014's; it cannot repair 007's LIMIT-before-filter. The
-migrator, for its part, checks the server's pgvector library version before
-applying anything — in `--dry-run` too — rather than matching the English text
-of the error 014 produces on an old library. The destructive guard the evals
-carried — refuse to drop a schema on a non-loopback host — now lives in
-`dropSchema` itself, so all eighteen resetting callers inherit it; it refuses
-an EMPTY host too, because the client resolves that through `PGHOST`, and it
-honours the old `OB1_EVAL_ALLOW_REMOTE_DB=1` alongside `OB1_ALLOW_REMOTE_DB=1`.
+tag, since 014 has a version floor. `preflight.ts` decides on the function's
+BODY first — 014's has a boolean local 007's does not — because no setting can
+repair 007's LIMIT-before-filter, and only then on whether an iterative scan is
+in force, from the function's own SET clause or inherited from the database or
+role. The version is consulted last, to explain an absence or to advise
+`ALTER EXTENSION vector UPDATE` where the catalog record lags a working library
+(the `hnsw.*` settings come from the loaded library, not from
+`pg_extension.extversion`; a new binary over an old volume runs 014 correctly
+while the catalog says 0.7.x, reproduced by the second review pass). The lookup
+matches its siblings (name, namespace, argument count) rather than casting a
+signature through `search_path`, the remedy is worded by the ledger since
+"apply 014" is a no-op when 014 is recorded and a redefinition dropped the
+clauses, the effective walk bounds are printed, and the whole check has its own
+error boundary so a hardened server that hides `pg_available_extensions` costs
+one warning rather than every check after it. On the PostgREST store, where the
+catalog cannot be read, it probes: one RPC with a NULL filter returns a row
+under 014's body and nothing under any earlier one — after confirming some row
+has an embedding at all, and treating a failed probe as a skip rather than
+evidence. (The first version was an unconditional warning that could never be
+cleared; passes three, four and five each caught a case.) The migrator judges
+the pgvector library version up front and refuses 014 itself, in `--dry-run`
+too, while still applying earlier pending migrations and still seeding the
+ledger under `--baseline`. The destructive guard the evals carried — refuse to
+drop a schema on a host that is not local — lives in `dropSchema` now, and the
+one eval that drops tables itself calls it; "local" is the predicate preflight
+already used for model endpoints, so compose service names and container
+aliases pass, a Unix socket passes, and an EMPTY host does not, because the
+client resolves that through `PGHOST`. It honours the old
+`OB1_EVAL_ALLOW_REMOTE_DB=1` alongside `OB1_ALLOW_REMOTE_DB=1`.
 `test-schema.ts` [8b]
 arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts

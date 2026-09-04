@@ -375,6 +375,9 @@ let banner = false;
 for (const n of SCALES) {
   console.log(`▸ ${n.toLocaleString()} rows — loading`);
   await resetSchema(URL_, { ...OPTS, only: (f) => f < "014" });
+  // 014 seeds the walk's bounds at DATABASE level, which sessions read at
+  // connect; this session may predate them, so re-read its defaults.
+  await sql.unsafe(`RESET ALL`);
   if (!banner) {
     // The extension exists only once the schema does, so the banner waits.
     const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
@@ -402,7 +405,10 @@ for (const n of SCALES) {
   console.log(" done");
 
   for (const arm of ["before (001–013)", "after (014)"] as Arm[]) {
-    if (arm === "after (014)") await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
+    if (arm === "after (014)") {
+      await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
+      await sql.unsafe(`RESET ALL`); // pick up the database-level bounds 014 just seeded
+    }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10 } = await unfiltered(sql, queries);
     const cells: Cell[] = [];

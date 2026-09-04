@@ -104,8 +104,6 @@ export function migrationValues(overrides?: {
   model?: string;
   trgm?: boolean;
   chunkContext?: boolean;
-  hnswMaxScanTuples?: number;
-  hnswScanMemMultiplier?: number;
 }): Record<string, string>;
 
 /** Substitute a migration template; throws on an unknown `{{VARIABLE}}`. */
@@ -135,10 +133,5 @@ export function embeddingConfigWarnings(
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;
 
-/** Bounds on match_thoughts' iterative HNSW walk (migration 014), from OB1_HNSW_*. */
-export const DEFAULT_HNSW_MAX_SCAN_TUPLES: number;
-export const DEFAULT_HNSW_SCAN_MEM_MULTIPLIER: number;
-export const HNSW_MAX_SCAN_TUPLES: number;
-export const HNSW_SCAN_MEM_MULTIPLIER: number;
-/** Problems with the OB1_HNSW_* variables, as messages; empty when none. */
-export function hnswBoundIssues(env?: Record<string, string | undefined>): string[];
+/** Is this hostname the local machine or its private network? Empty is not local. */
+export function isLocalHostname(host: string, serviceNames?: string[]): boolean;

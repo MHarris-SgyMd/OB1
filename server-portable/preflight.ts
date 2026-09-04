@@ -50,6 +50,7 @@ const {
   DEFAULT_EMBEDDING_DIM: DEF_DIM,
   DEFAULT_METADATA_MODEL: DEF_META,
   DEFAULT_LLM_BASE_URL: DEF_BASE,
+  isLocalHostname,
 } = await import("../db/config.mjs");
 
 const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
@@ -65,14 +66,7 @@ const llmKey = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
  */
 function isLocalEndpoint(url: string): boolean {
   try {
-    const h = new URL(url).hostname;
-    return (
-      h === "localhost" || h === "127.0.0.1" || h === "::1" ||
-      h === "host.docker.internal" || h === "host.containers.internal" ||
-      h === "ollama" ||                       // the compose service name
-      /^10\./.test(h) || /^192\.168\./.test(h) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(h)
-    );
+    return isLocalHostname(new URL(url).hostname, ["ollama"]); // "ollama" is the compose service name
   } catch {
     return false;
   }
@@ -272,12 +266,13 @@ if (configFailed) {
                 "match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — run once with OB1_STORE=sql to see them)");
           } else {
             add("filtered search", "warn",
-                "match_thoughts returned nothing for a NULL filter, which is 007's behaviour — migration 014 is not applied, so a filtered match_thoughts call (direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter) silently returns fewer rows than match",
-                "Apply db/migrations/014_filtered_match_thoughts.sql.");
+                "match_thoughts returned nothing for a NULL filter, which every body before 014 does — the migrations are not applied through 014, so a filtered match_thoughts call (direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter) silently returns fewer rows than match",
+                "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.");
           }
         } catch (e) {
-          add("filtered search", "warn", `could not probe match_thoughts: ${(e as Error).message}`,
-              "Run preflight once with OB1_STORE=sql against the same database.");
+          // A failed probe is not evidence either way — a width mismatch or a
+          // permission error says nothing about the body — so it is a skip.
+          add("filtered search", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); run once with OB1_STORE=sql to read the catalog`);
         }
       }
     }
@@ -367,105 +362,95 @@ if (configFailed) {
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,
-         * which is only correct because the scan is iterative —
-         * `hnsw.iterative_scan` set to `relaxed_order` or `strict_order`,
-         * normally as a function-level SET on match_thoughts. That setting is
-         * the whole fix, and it is the kind of thing a later CREATE OR REPLACE
-         * of match_thoughts silently drops — the redefinition succeeds, the
-         * signature is unchanged, every unfiltered search still works, and a
-         * filtered call returns 0.8 rows of 10 asked at 1% selectivity on
-         * 10,000 rows (db/bench-hnsw.ts). So the check reads the catalog, not
-         * the migration ledger — though the ledger is consulted at the end to
-         * word the remedy: "apply 014" is useless advice when 014 is recorded
-         * as applied and a later redefinition dropped the clause.
-         *
-         * The function's own SET is read FIRST, because it is the fact: the
-         * `hnsw.*` settings come from pgvector's loaded shared library, not from
-         * `pg_extension.extversion`, so a new binary over an old volume applies
-         * 014 and runs it correctly while extversion still reads 0.7.x. The
-         * version is consulted only to explain an ABSENT setting — a binary too
-         * old to accept it, or a stale extension record worth updating — and to
-         * advise `ALTER EXTENSION vector UPDATE` when the record lags a working
-         * function. Failing both, the session's inherited value is checked,
-         * since a database- or role-level GUC satisfies the same invariant.
+         * which is correct only when the scan is iterative — hnsw.iterative_scan
+         * in force for the call, normally as the function's own SET clause,
+         * possibly inherited from the database or role — AND only for 014's
+         * body. 007's body applies the filter after its LIMIT, and no setting
+         * repairs that. So the BODY is decided first (its boolean local
+         * `v_unfiltered` is the tell), then the setting, then the version — the
+         * version only explains an absence or advises `ALTER EXTENSION vector
+         * UPDATE` where the catalog record lags a working library.
          *
          * The lookup matches its siblings — proname, namespace, argument count —
-         * rather than casting a signature through search_path, which would
-         * return NULL (or raise, on PG15) when the vector type lives outside the
-         * connecting role's search_path.
+         * rather than casting a signature through search_path. The migration
+         * ledger is consulted to word the remedy: "apply 014" is a no-op when
+         * 014 is recorded and a later redefinition dropped the clause.
+         *
+         * Everything here has its own error boundary. These catalog reads can
+         * fail on a hardened server (pg_available_extensions is not always
+         * readable), and a throw must not be reported as "atomic capture" or
+         * take the checks after this one down with it.
          *
          * A WARNING throughout: without the setting the tool still answers,
          * with the recall it had before 014.
          */
-        const { versionAtLeast, HNSW_MAX_SCAN_TUPLES, HNSW_SCAN_MEM_MULTIPLIER } = await import("../db/config.mjs");
-        const mt = await sql`
-          SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
-        const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
-        // 014's body is recognisable by its boolean local; 007's has none. A
-        // GUC inherited from the database can make 014's body correct, and
-        // cannot do anything for 007's, whose LIMIT sits before the filter.
-        const bodyIs014 = /\bv_unfiltered\b/.test(String(mt[0]?.src ?? ""));
-        // Whether the ledger records 014 decides the remedy's wording: when it
-        // does, "apply 014" is a no-op — the migrator skips it — and the SET
-        // clauses have to be put back by hand or by the migration that dropped
-        // them. No ledger means the schema was applied outside the runner.
-        let ledgerHas014 = false;
         try {
-          const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
-          ledgerHas014 = Number(led[0]?.c ?? 0) > 0;
-        } catch {
-          /* no ledger */
-        }
-        const putBack =
-          `Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET hnsw.max_scan_tuples = ${HNSW_MAX_SCAN_TUPLES} SET hnsw.scan_mem_multiplier = ${HNSW_SCAN_MEM_MULTIPLIER} SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.`;
-        const applyIt = "Apply db/migrations/014_filtered_match_thoughts.sql.";
-        const pgv = await sql`
-          SELECT e.extversion, a.default_version
-          FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
-          WHERE e.extname = 'vector'`;
-        const installed = pgv.length ? String(pgv[0].extversion) : null;
-        // default_version is NULL when the server's control file is unreadable;
-        // then nothing is known about the library and no "update" can be advised.
-        const available = pgv.length && pgv[0].default_version != null ? String(pgv[0].default_version) : null;
-        const installedOld = installed !== null && !versionAtLeast(installed, 0, 8);
-        const libraryNew = available !== null && versionAtLeast(available, 0, 8);
-        const exposure =
-          "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
-        if (declared && installedOld && libraryNew) {
-          add("filtered search", "warn",
-              `match_thoughts scans iteratively under a metadata filter (${declared}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
-              "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
-        } else if (declared) {
-          add("filtered search", "ok",
-              `match_thoughts scans iteratively under a metadata filter (${declared}, pgvector ${installed ?? "unknown"}${installedOld ? " per a catalog record the loaded library has outgrown" : ""})`);
-        } else if (installed === null) {
-          add("filtered search", "warn", "the vector extension is not installed, so match_thoughts cannot be checked",
-              "Apply the migrations; 001 creates the extension.");
-        } else if (installedOld && libraryNew) {
-          add("filtered search", "warn",
-              `match_thoughts does not carry hnsw.iterative_scan${ledgerHas014 ? " although migration 014 is recorded as applied — a later redefinition dropped its SET clauses" : " — migration 014 is not applied"}, and pg_extension records pgvector ${installed} while the server's library is ${available}, so the extension record lags the binary`,
-              `ALTER EXTENSION vector UPDATE;  then ${ledgerHas014 ? putBack : applyIt}`);
-        } else if (installedOld) {
-          add("filtered search", "warn",
-              `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${exposure} — near zero for a filter matching under 1% of the corpus`,
-              "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
-        } else {
-          const inherited = await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`;
-          const v = String(inherited[0]?.v ?? "off");
-          if ((v === "relaxed_order" || v === "strict_order") && bodyIs014) {
-            add("filtered search", "ok",
-                `match_thoughts scans iteratively under a metadata filter, inheriting hnsw.iterative_scan=${v} from the database or role rather than its own SET clause (pgvector ${installed})`);
-          } else if (ledgerHas014) {
-            add("filtered search", "warn",
-                `match_thoughts does not carry hnsw.iterative_scan although migration 014 is recorded as applied — a later redefinition dropped its SET clauses${!bodyIs014 ? " and its body" : ""} — so ${exposure}`,
-                bodyIs014 ? putBack : "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts.");
-          } else {
-            add("filtered search", "warn",
-                `match_thoughts does not carry hnsw.iterative_scan — migration 014 is not applied${v !== "off" ? `, and the inherited hnsw.iterative_scan=${v} cannot help 007's body, whose LIMIT sits before the filter` : ""} — so ${exposure}`,
-                applyIt);
+          const { versionAtLeast } = await import("../db/config.mjs");
+          const mt = await sql`
+            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
+          const bodyIs014 = /\bv_unfiltered\b/.test(String(mt[0]?.src ?? ""));
+          const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
+          const inherited = String((await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`)[0]?.v ?? "off");
+          const inForce = declared ?? (inherited === "relaxed_order" || inherited === "strict_order" ? inherited : undefined);
+          const pgv = await sql`
+            SELECT e.extversion, a.default_version
+            FROM pg_extension e LEFT JOIN pg_available_extensions a ON a.name = e.extname
+            WHERE e.extname = 'vector'`;
+          const installed = pgv.length ? String(pgv[0].extversion) : null;
+          const available = pgv.length && pgv[0].default_version != null ? String(pgv[0].default_version) : null;
+          const installedOld = installed !== null && !versionAtLeast(installed, 0, 8);
+          const libraryNew = available !== null && versionAtLeast(available, 0, 8);
+          let ledgerHas014 = false;
+          try {
+            const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
+            ledgerHas014 = Number(led[0]?.c ?? 0) > 0;
+          } catch {
+            /* no ledger */
           }
+          const bounds = await sql`
+            SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
+          const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
+          const exposure =
+            "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
+          const putBack =
+            "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.";
+          const applyIt = "Apply db/migrations/014_filtered_match_thoughts.sql.";
+
+          if (mt.length === 0) {
+            add("filtered search", "warn", "match_thoughts is not defined, so nothing here can be checked", "Apply the migrations.");
+          } else if (bodyIs014 && inForce) {
+            const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
+            if (installedOld && libraryNew) {
+              add("filtered search", "warn",
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}; ${boundsText}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
+                  "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
+            } else {
+              add("filtered search", "ok",
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}; ${boundsText}; pgvector ${installed ?? "unknown"})`);
+            }
+          } else if (bodyIs014) {
+            add("filtered search", "warn",
+                `match_thoughts has 014's body but no iterative scan in force${ledgerHas014 ? " although migration 014 is recorded as applied" : ""} — a later redefinition dropped its SET clauses — so ${exposure}`,
+                putBack);
+          } else if (installedOld && !libraryNew) {
+            add("filtered search", "warn",
+                `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${exposure} — near zero for a filter matching under 1% of the corpus`,
+                "Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then apply db/migrations/014_filtered_match_thoughts.sql.");
+          } else {
+            const dropped = ledgerHas014 ? " although migration 014 is recorded as applied — a later redefinition replaced its body" : " — migration 014 is not applied";
+            const setNote = inForce ? `; the ${declared ? "SET clause" : "inherited hnsw.iterative_scan"} present cannot help this body, whose LIMIT sits before the filter` : "";
+            const stale = installedOld && libraryNew ? `; pg_extension records pgvector ${installed} while the server's library is ${available}, so run ALTER EXTENSION vector UPDATE first` : "";
+            add("filtered search", "warn",
+                `match_thoughts does not carry hnsw.iterative_scan and its body predates 014${dropped}${setNote}${stale} — so ${exposure}`,
+                ledgerHas014
+                  ? "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts."
+                  : applyIt);
+          }
+        } catch (e) {
+          add("filtered search", "warn", `could not verify: ${(e as Error).message}`,
+              "The catalog reads behind this check need SELECT on pg_proc, pg_extension and pg_available_extensions.");
         }
 
         /**

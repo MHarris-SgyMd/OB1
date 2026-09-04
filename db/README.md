@@ -85,7 +85,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
-| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, and honours `match_count` above the default. The walk's two bounds are template values from `OB1_HNSW_MAX_SCAN_TUPLES` / `OB1_HNSW_SCAN_MEM_MULTIPLIER` (defaults 100000 / 8), so a tuned value survives later redefinitions. Requires pgvector 0.8.0; the migrator checks before applying anything | This fork; upstream #417 |
+| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, and honours `match_count` above the default. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
 
 ## What changed relative to the guide
 

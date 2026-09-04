@@ -63,12 +63,6 @@ services:
       # Migration 013 records this in ob1_config, so preflight can tell what the
       # schema was migrated under. Same no-fallback rule as above.
       OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
-      # Migration 014 substitutes these into match_thoughts' SET clauses. Set
-      # them here, not with ALTER FUNCTION: a later redefinition through the
-      # migrator carries them, a hand-made ALTER is discarded by it. No fallback,
-      # same rule as above — db/config.mjs owns the defaults (100000 and 8).
-      OB1_HNSW_MAX_SCAN_TUPLES: ${OB1_HNSW_MAX_SCAN_TUPLES:-}
-      OB1_HNSW_SCAN_MEM_MULTIPLIER: ${OB1_HNSW_SCAN_MEM_MULTIPLIER:-}
       # migrate.ts calls validateEmbeddingConfig, which reads this. Without it the
       # runner and the server could disagree about whether a width is legal.
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
@@ -113,10 +107,6 @@ services:
       OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
       OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
       OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
-      # Preflight quotes these in its remedy text when match_thoughts has lost
-      # its SET clauses; the server never sets them itself.
-      OB1_HNSW_MAX_SCAN_TUPLES: ${OB1_HNSW_MAX_SCAN_TUPLES:-}
-      OB1_HNSW_SCAN_MEM_MULTIPLIER: ${OB1_HNSW_SCAN_MEM_MULTIPLIER:-}
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
       OB1_LLM_API_KEY: ${OB1_LLM_API_KEY:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}

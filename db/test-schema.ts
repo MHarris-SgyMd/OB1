@@ -26,8 +26,6 @@ import {
   DEFAULT_TRGM_INDEX,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
-  HNSW_MAX_SCAN_TUPLES,
-  HNSW_SCAN_MEM_MULTIPLIER,
   migrationValues,
   substituteMigration,
   DEFAULT_CHUNK_CONTEXT,
@@ -444,34 +442,30 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
     `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
   );
-  // The bounds travel with the scan mode. Their values come from config.mjs
-  // (OB1_HNSW_*), so the assertion reads the same constants the migrator
-  // substitutes rather than a literal that could drift from them.
+  // The plan mode is the other function-level SET; the two walk bounds are
+  // deliberately NOT on the function, because a function-level value would
+  // override the database-level one that is the operator's tuning knob.
   const proconfig = cfg.rows[0]?.cfg ?? "";
-  assert(
-    new RegExp(`(^|,)hnsw\\.max_scan_tuples=${HNSW_MAX_SCAN_TUPLES}(,|$)`).test(proconfig),
-    `…and hnsw.max_scan_tuples=${HNSW_MAX_SCAN_TUPLES}, the tuple bound on the walk`
-  );
-  assert(
-    new RegExp(`(^|,)hnsw\\.scan_mem_multiplier=${HNSW_SCAN_MEM_MULTIPLIER}(,|$)`).test(proconfig),
-    `…and hnsw.scan_mem_multiplier=${HNSW_SCAN_MEM_MULTIPLIER}, without which the memory bound stops the walk near 19,000 tuples`
-  );
   assert(/(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(proconfig), "…and plan_cache_mode=force_custom_plan, so a filter is a constant the planner can route to the GIN index");
+  assert(!/hnsw\.max_scan_tuples|hnsw\.scan_mem_multiplier/.test(proconfig), "…and neither walk bound, which would override the database-level setting");
 
-  // The placeholder is live: 014 applied with a different bound carries it into
-  // proconfig, which is how an operator's OB1_HNSW_MAX_SCAN_TUPLES survives a
-  // later redefinition through the migrator. Then the default is restored.
+  // The bounds are seeded at database level, once. A value an operator set
+  // first is left alone by re-applying 014; the seeded default is restored at
+  // the end so later sections see the shipped state.
+  const dbSettings = async () =>
+    (await db.query<{ c: string[] | null }>(
+      `SELECT s.setconfig AS c FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+       WHERE d.datname = current_database() AND s.setrole = 0`
+    )).rows[0]?.c ?? [];
+  const seeded = await dbSettings();
+  assert(seeded.includes("hnsw.max_scan_tuples=100000"), `hnsw.max_scan_tuples=100000 is seeded on the database (${seeded.join(", ") || "nothing set"})`);
+  assert(seeded.includes("hnsw.scan_mem_multiplier=8"), "hnsw.scan_mem_multiplier=8 is seeded on the database");
+  await db.exec(`ALTER DATABASE ${(await db.query<{ d: string }>(`SELECT current_database() AS d`)).rows[0].d} SET hnsw.max_scan_tuples = 250000`);
   const f014 = files.find((f) => f.startsWith("014"))!;
-  const tuned = substituteMigration(
-    readFileSync(join(MIGRATIONS, f014), "utf8"),
-    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, hnswMaxScanTuples: 250000 })
-  );
-  await db.exec(tuned);
-  const tunedCfg = await db.query<{ cfg: string | null }>(
-    `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
-  );
-  assert(/(^|,)hnsw\.max_scan_tuples=250000(,|$)/.test(tunedCfg.rows[0]?.cfg ?? ""), "OB1_HNSW_MAX_SCAN_TUPLES reaches the function through the template");
   await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
+  const tuned = await dbSettings();
+  assert(tuned.includes("hnsw.max_scan_tuples=250000"), "re-applying 014 leaves an operator's database-level bound alone");
+  await db.exec(`ALTER DATABASE ${(await db.query<{ d: string }>(`SELECT current_database() AS d`)).rows[0].d} SET hnsw.max_scan_tuples = 100000`);
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
