@@ -181,6 +181,52 @@ console.log("\n[5] The planner uses the HNSW index");
   await sql`SET enable_seqscan = on`;
 }
 
+console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
+{
+  // 1,000 random rows through a real HNSW index, 1% of them tagged. Under 007
+  // the tagged rows were almost never among the 40 nearest, so a filtered
+  // search returned nothing; db/bench-hnsw.ts measured 0.6 of 10 asked. Here
+  // the function must return exactly what a full scan returns.
+  await sql`DELETE FROM thoughts`;
+  let seed = 968;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() || 1e-9)) * Math.cos(2 * Math.PI * rnd());
+  const random = () => `[${Array.from({ length: EMBEDDING_DIM }, gauss).join(",")}]`;
+  const N = 1000;
+  for (let i = 0; i < N; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => {
+      const tagged = (i + k) % 100 === 7; // exactly 1%
+      return `('row ${i + k}', '{"tagged": ${tagged}}'::jsonb, '${random()}'::vector)`;
+    }).join(",");
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  await sql.unsafe(`VACUUM ANALYZE thoughts`);
+
+  let agree = 0;
+  const QUERIES = 10;
+  for (let q = 0; q < QUERIES; q++) {
+    const qv = random();
+    const exact = await sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+      await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+      return tx.unsafe(
+        `SELECT id FROM thoughts WHERE metadata @> '{"tagged": true}' ORDER BY embedding <=> '${qv}'::vector LIMIT 10`
+      );
+    });
+    const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '{"tagged": true}'::jsonb)`);
+    const want = new Set(exact.map((r: { id: string }) => r.id));
+    if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
+  }
+  assert(agree === QUERIES, `a 1% filter returns the exact top-10 on ${agree}/${QUERIES} random queries`);
+
+  const [{ cfg }] = await sql`
+    SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
+    WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`;
+  assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg ?? "")), "match_thoughts carries hnsw.iterative_scan on a real server");
+  const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+  assert(String(extversion) >= "0.8.0", `pgvector ${extversion} supports the iterative scan 014 declares`);
+}
+
 console.log("\n[6] The unique partial index is enforced by the server");
 {
   await sql`DELETE FROM thoughts`;

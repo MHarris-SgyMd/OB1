@@ -1315,6 +1315,49 @@ them and not a finding. Anyone capturing transcripts or imported documents rathe
 than issue threads has a different corpus and should re-run this before trusting
 any row of it.
 
+## Filtered search: what a metadata filter used to cost
+
+`eval-filtered.ts`, run as `bun run filtered`. Needs Ollama, the rebuilt corpus
+at `/tmp/linear-corpus-full.json`, and a throwaway Postgres — it searches
+through the deployed `match_thoughts`, as shipped by migrations 001–013 and then
+with 014 applied onto the same rows. Embeddings are cached beside the corpus in
+`/tmp`, so the second run is mostly database time.
+
+Under 007, `match_thoughts` chose its candidates first and applied
+`metadata @> filter` afterwards, so a filter matching a small share of the
+corpus saw a small share of 40 candidates. `db/bench-hnsw.ts` shows the mechanism
+on random vectors; this asks whether it mattered on real data.
+
+**The task is not "title finds its document".** Under a filter that question is
+nearly meaningless: the target is the global nearest neighbour of its own title
+(MRR 0.90 here), and the first 40 candidates always contain the global nearest
+neighbour, so no post-filter can lose it. The query a filter exists for is
+"things about X among my `portal` issues", where the best `portal` match is not
+the global best match. So the eval filters to a label the query's document does
+**not** carry and scores against the exact top-10 within that label, computed in
+JavaScript from the same vectors with the function's own rule (MAX over the
+whole vector and the windows):
+
+| filter | share | before: returned of 10 | in exact top-10 | empty | after: returned | in exact top-10 | empty |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `api` | 36% | 9.9 | 8.5 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `web` | 14% | 6.4 | 5.8 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `portal` | 4.5% | 1.6 | 1.6 | 31/60 | 10.0 | 10.0 | 0/60 |
+| `design` | 2.7% | 2.0 | 1.9 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 10% | 10% | 4.5 | 3.8 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 2% | 1.8% | 0.5 | 0.5 | 39/60 | 8.0 | 8.0 | 0/60 |
+
+Paired, 014 improved 306 of 360 queries and worsened none. The seeded 2% tier
+holds eight documents, so eight is the whole answer.
+
+Two controls run alongside. **Own-label**: the same queries filtered to the
+rarest label the document does carry — the flattering case. The target's rank
+is unchanged on all 316 queries (MRR 0.938 both ways) and the *other* nine rows
+go from 7.9 to 9.9 in the exact top-10. **Unfiltered**: every query with `{}`
+must return identical rows before and after, row for row, and the script exits
+non-zero if it does not, because "the default path did not change" is the claim
+014 makes about itself. It held on 441 of 441.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

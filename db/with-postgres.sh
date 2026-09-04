@@ -12,7 +12,7 @@
 # container and sets DATABASE_URL directly.
 set -euo pipefail
 
-IMAGE="${OB1_PG_IMAGE:-pgvector/pgvector:pg16}"
+IMAGE="${OB1_PG_IMAGE:-pgvector/pgvector:0.8.6-pg16}"
 NAME="ob1-test-pg-$$"
 # Pick a free port rather than a fixed one: a leftover container from an
 # interrupted run would otherwise fail every later run with "address already in

@@ -68,7 +68,7 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-seven numbered changes on top of the pin. Seven fix defects found in an
+Twenty-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
@@ -148,6 +148,9 @@ db/bench-keyword.ts              # fix 26  (new file — index reach and plan-ca
 evals/eval-keyword.ts            # fix 26  (new file — where vector search misses)
 db/migrations/013_*.sql          # fix 27  (new file — thought_chunks.context)
 evals/eval-contextual.ts         # fix 27  (new file — contextual retrieval, measured)
+db/migrations/014_*.sql          # fix 28  (new file — the filter inside the scan)
+db/bench-hnsw.ts                 # fix 28  (new file — filtered recall against an exact scan)
+evals/eval-filtered.ts           # fix 28  (new file — the same, on the real corpus)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
@@ -1213,6 +1216,129 @@ bounds memory access` inlined — and it reproduces with migrations 001-012 appl
 and no 013, at any position in the file, on a second instance as well as the
 shared one. It is the harness, not the migration, and the round trip belongs
 against a real server anyway.
+
+### 28. A filtered search reaches the index — and the overfetch that never did
+
+Migration 014 (Linear SMD-968; upstream
+[#417](https://github.com/NateBJones-Projects/OB1/issues/417)). The issue
+reports that `match_thoughts` loses recall under a metadata filter: pgvector's
+HNSW scan hands over its first `hnsw.ef_search` candidates — 40 by default — and
+a filter applied after that sees only those 40. Upstream's fix is one line,
+`SET LOCAL hnsw.ef_search = 200`.
+
+**That line could not have fixed this fork.** 007's function took each
+candidate CTE's top `v_fetch` rows by distance — `LIMIT GREATEST(match_count *
+4, 20)` — and applied `t.metadata @> filter` to the merged result afterwards. The
+explicit LIMIT capped the candidate set before the filter ran, whatever
+`ef_search` said. A filter matching 1% of the corpus saw 1% of 40 candidates.
+
+**Measured first, on random vectors.** `db/bench-hnsw.ts`, 64-dimensional unit
+vectors, planted filter tiers, 10 rows asked, against an exact scan of the same
+rows with index scans disabled:
+
+| rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 50% | 10.0 | 9.3 | 0/50 | 10.0 | 9.8 | 0/50 |
+| 10,000 | 10% | 5.8 | 5.4 | 1/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 1% | 0.4 | 0.4 | 33/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 0.1% | 0.1 | 0.1 | 45/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 10% | 5.0 | 4.6 | 11/50 | 10.0 | 9.1 | 0/50 |
+| 100,000 | 1% | 0.3 | 0.3 | 47/50 | 10.0 | 9.7 | 0/50 |
+| 100,000 | 0.1% | 0.2 | 0.2 | 49/50 | 10.0 | 9.8 | 0/50 |
+
+The after column's 9.1–9.8 at 100,000 rows is the HNSW approximation, which was
+always there and is now the only thing between the result and the exact answer.
+
+**Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
+real labels, stored the way the server stores them (whole-content vector plus
+bare windows), searched through the deployed function in a real Postgres. The
+query is a document's title; the filter is a label that document does **not**
+carry; the right answer is the exact top-10 within the label:
+
+| filter | share of corpus | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `api` | 36% | 9.9 | 8.5 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `web` | 14% | 6.4 | 5.8 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `portal` | 4.5% | 1.6 | 1.6 | 31/60 | 10.0 | 10.0 | 0/60 |
+| `design` | 2.7% | 2.0 | 1.9 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 10% | 10% | 4.5 | 3.8 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 2% | 1.8% | 0.5 | 0.5 | 39/60 | 8.0 | 8.0 | 0/60 |
+
+Paired: 306 of 360 filtered queries improved, none worsened. (The 2% tier has
+eight documents, so eight is the whole answer.) Filtered to a label the document
+**does** carry, the target's rank is unchanged on all 316 queries — MRR 0.938
+both ways — and the other nine rows go from 7.9 to 9.9 in the exact top-10.
+Unfiltered, all 441 queries return identical rows before and after; the run
+exits non-zero if they do not.
+
+**Why the query design matters, and the draft that got it wrong.** A query
+formed by perturbing the target's own vector makes the target the global nearest
+neighbour, which no post-filter can lose. The first draft of the bench did that
+and reported 50/50 recall for a function that returns nothing at 1%. Title
+queries have the same property on this corpus: the target is the global nearest
+neighbour of its title (MRR 0.90), so "does the title still find its document
+under a filter" would have called the defect harmless. The task a filter exists
+for is "things about X among my `portal` issues", where the best `portal` match
+is not the global best match — so the eval filters to a label the query's
+document lacks and scores against the exact answer within it.
+
+**What changed.**
+
+- The filter moves inside both CTEs. For `thoughts` it is a plain Filter on the
+  index scan. For `thought_chunks` it is a **join** to the parent row, not an
+  EXISTS: inside an OR the planner cannot turn EXISTS into a semi-join and ran it
+  as a hashed subplan — one full pass over `thoughts` per query, whatever the
+  filter. Measured, that alone made the new function 3x the old one's latency at
+  10,000 rows. The join is one primary-key lookup per candidate.
+- `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
+  This is what makes an in-scan filter correct: without it the scan stops at its
+  first `ef_search` candidates, filter or no filter. A function-level SET is
+  scoped to the call and restored on exit — nothing leaks into the caller's
+  transaction as `SET LOCAL` would, and nothing depends on a pool preserving
+  session state. It is also validated at CREATE: on pgvector before 0.8.0 the
+  migration fails with `unrecognized configuration parameter`, which is the
+  intended failure. A version of this function that silently ran without the
+  setting would have exactly the recall 014 exists to fix.
+- `relaxed_order`, not `strict_order`: the final `ORDER BY b.sim DESC` re-sorts
+  the merged candidates anyway.
+- `hnsw.ef_search` is left alone. At the default `match_count`, `v_fetch` is 40
+  and the first batch satisfies the LIMIT, so the default unfiltered path is
+  bit-identical — asserted in the bench, the eval and `test-schema.ts` [8b].
+- A NULL filter is unfiltered. 007 evaluated `NULL = '{}' OR metadata @> NULL`,
+  which excluded every row.
+- One query text, `v_unfiltered OR …`, rather than two branches. The cost is
+  that the generic plan cannot use the GIN index on `metadata`; the bench shows
+  the planner choosing a GIN bitmap and sort under a custom plan and the HNSW
+  scan under a generic one. Both are exact for the filter.
+
+**The second defect the mechanism predicted.** `ORDER BY embedding <=> q LIMIT
+200` returns 40 rows on a 10,000-row table, because the scan returns at most
+`ef_search` and stops. So `v_fetch` above 40 was never honoured: with no chunk
+rows `match_count = 50` returned 40, and with chunks the two CTEs together capped
+near 80 — asked 100, got 71 to 79. 007's header calling the factor "a recall
+budget, not a guess" was true only at `match_count <= 10`. The iterative scan
+fixes this too: asked 100, got 100.
+
+**Cost.** Median latency at 10,000 rows moved from ~0.9 ms to 0.4–3.2 ms
+depending on selectivity; at 100,000 rows from 1.5–2.1 ms to 1.2–2.9 ms. The
+bound to know about is `hnsw.max_scan_tuples` (default 20,000): a filter that
+passes fewer than `v_fetch` rows within 20,000 visited tuples returns what it
+found. Nothing in these measurements approached it.
+
+**Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
+containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
+tag, since 014 has a version floor. `preflight.ts` reads `pg_proc.proconfig` and
+warns if `match_thoughts` lacks the SET clause — the defined-twice class this
+file keeps naming, in the form of a later `CREATE OR REPLACE` that forgets it —
+and says so differently when pgvector itself is too old. `test-schema.ts` [8b]
+arranges sixty nearer rows in front of the filtered ones and asserts both come
+back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
+a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
+
+**Not done here.** SMD-969 asks whether the *unfiltered* candidate scan reaches
+the HNSW index at scale; this bench explains only the filtered case, and only at
+1%. SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
+body so they do not reintroduce the post-filter.
 
 ## Detached from the fork network
 

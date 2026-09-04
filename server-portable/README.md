@@ -138,7 +138,7 @@ bun run cf:build          # ~256 KiB gzipped
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
-to start and remove a throwaway `pgvector/pgvector:pg16`.
+to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing
 

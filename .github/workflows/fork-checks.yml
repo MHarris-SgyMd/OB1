@@ -176,7 +176,7 @@ jobs:
     # mostly run podman.
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg16
         env:
           POSTGRES_PASSWORD: ob1test
           POSTGRES_DB: ob1test
@@ -214,7 +214,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg16
         env:
           POSTGRES_PASSWORD: ob1test
           POSTGRES_DB: ob1test
@@ -395,7 +395,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg16
         env:
           POSTGRES_PASSWORD: ob1test
           POSTGRES_DB: ob1test

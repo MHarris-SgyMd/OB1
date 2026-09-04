@@ -84,6 +84,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
+| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, and honours `match_count` above the default. Requires pgvector 0.8.0 | This fork; upstream #417 |
 
 ## What changed relative to the guide
 
@@ -224,6 +225,28 @@ gets only 8-9x at either size, and a common word and any sub-trigram pattern are
 unaffected at every scale. The full table, with the write cost beside it, is in
 the header of `migrations/011_text_search_trgm.sql`.
 
+### bench-hnsw.ts
+
+What a filtered `match_thoughts` returns against an exact scan of the same rows,
+and whether the candidate LIMIT above the default count is honoured. Random
+64-dimensional vectors with filter tiers planted at 50%, 10%, 1% and 0.1%; the
+function as shipped by 001–013, then 014 applied onto the same rows.
+
+```bash
+./with-postgres.sh bun bench-hnsw.ts
+OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
+./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
+```
+
+Queries are random vectors, not perturbed copies of a target. A perturbed copy
+makes the target the global nearest neighbour, which no post-filter can lose;
+the first draft did that and reported perfect recall for a function that returns
+nothing at 1%. Section C reads the live function body from the catalog, rewrites
+its plpgsql variables as parameters and EXPLAINs the result under both custom and
+generic planning, because plpgsql may use either. The headline table is in the
+header of `migrations/014_filtered_match_thoughts.sql`; the real-corpus version
+is `evals/eval-filtered.ts`.
+
 ### bench-keyword.ts
 
 `bench-trgm.ts` measures a bare `content ILIKE '%needle%'`. `bench-keyword.ts`
@@ -300,11 +323,11 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 118 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 38 assertions, real server, throwaway container
+bun test-schema.ts                    # 127 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 41 assertions, real server, throwaway container
 ```
 
-`with-postgres.sh` starts `pgvector/pgvector:pg16`, exports `DATABASE_URL`, runs
+`with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the
 macOS `/opt/podman/bin` location that is often off `PATH`) and falls back to
 docker. CI does not use it — GitHub Actions supplies the database as a service
@@ -319,11 +342,14 @@ container.
   a test that writes SQL literals. It only appears when a client binds a JS value
   to a `jsonb` parameter.
 - **The planner.** Whether HNSW is actually chosen, rather than merely present.
+- **Filtered recall at scale.** [5b] loads 1,000 random rows through a real HNSW
+  index, tags 1% of them, and asserts a filtered `match_thoughts` returns exactly
+  what a full scan returns. Under 007 that filter returned almost nothing.
 
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 118 properties, including:
+asserts 127 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -355,6 +381,12 @@ asserts 118 properties, including:
 - the threshold comparison is **strict** — a row whose similarity exactly equals
   the threshold is excluded. Anyone reimplementing this in raw SQL must keep the
   strict `>` or result counts change silently.
+- **the filter is applied inside the candidate scan** (migration 014): with sixty
+  nearer rows of one kind in front of them, both rows of the filtered kind come
+  back — including one reachable only through its chunk — a NULL filter is
+  unfiltered, `match_count = 50` returns 50, and `pg_proc.proconfig` carries
+  `hnsw.iterative_scan=relaxed_order`, so a later `CREATE OR REPLACE` that drops
+  the SET clause fails here rather than in search
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives
 - a non-object `p_payload` raises rather than silently storing `{}`
 - `thought_chunks.context` exists and is nullable, and **both** functions that
@@ -388,7 +420,7 @@ default — are unaffected.
 ## Caveats
 
 - **Not yet run against a managed Postgres.** Verified against PGlite (PostgreSQL 17
-  in WASM) *and* a real `pgvector/pgvector:pg16` container, but neither is RDS or
+  in WASM) *and* a real `pgvector/pgvector:0.8.6-pg16` container, but neither is RDS or
   Neon. Run `--dry-run` first against the real target.
 - **HNSW index build time is not represented.** On an empty table it is instant; on
   a populated one it is not. Build it after a bulk load, not before.

@@ -17,8 +17,14 @@ name: open-brain
 
 services:
   # Replaces: the Supabase-hosted Postgres.
+  #
+  # Pinned to a pgvector release, not the floating `pg16` tag. Migration 014
+  # declares `hnsw.iterative_scan` on match_thoughts, which exists from pgvector
+  # 0.8.0; on an older image the migrator fails on 014 and the stack does not
+  # start. A floating tag could also move under a working deployment. Change
+  # the pin deliberately and re-run the schema tests against it.
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.6-pg16
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       POSTGRES_DB: openbrain

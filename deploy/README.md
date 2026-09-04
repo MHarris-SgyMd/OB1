@@ -38,7 +38,7 @@ Three services, in order:
 
 | Service | Replaces |
 | --- | --- |
-| `postgres` | The Supabase-hosted database (`pgvector/pgvector:pg16`) |
+| `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — runs `db/migrate.ts`, then exits |
 | `server` | The Edge Function and `supabase functions deploy` |
 

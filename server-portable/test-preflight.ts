@@ -154,6 +154,21 @@ else {
   assert(/keyword search.*present/s.test(withKw.out), "…and reports it present once applied");
 
   /**
+   * Migration 014 lives in a SET clause on match_thoughts, which a later
+   * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
+   * event: same signature, no iterative scan. A warning, because every search
+   * still answers — with the filtered recall it had before 014.
+   */
+  assert(/filtered search.*scans iteratively/s.test(withKw.out), "a fully migrated match_thoughts is reported as scanning iteratively");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("007") });
+  const pre014 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(pre014.code === 0, "a match_thoughts without 014's SET clause still starts");
+  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…while saying the filtered scan is not iterative");
+  assert(/014_filtered_match_thoughts\.sql/.test(pre014.out), "…with the migration to apply");
+  // 007 also re-created the chunk writers without the context column; restore 013 and 014.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
+
+  /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a
    * deployment that flips it afterwards and re-runs the migrator gets a clean
    * "already applied" and no change to the index — a silent no-op on an explicit

@@ -357,6 +357,78 @@ console.log("\n[8] match_thoughts ranks by cosine similarity");
   assert(l.rows.length === 1, "match_count caps the result set");
 }
 
+// ── 8b. The filter reaches the candidate scan (migration 014) ────────────────
+//
+// 007 took each CTE's top-40 by distance and applied the metadata filter to
+// those 40. So a filtered search whose matches were not among the 40 globally
+// nearest rows returned nothing, silently. These rows are arranged so that the
+// crowd fills the candidate budget before the filtered row can appear: sixty
+// near-copies of the query in kind "a", and one orthogonal row in kind "b".
+// Plan-independent — the LIMIT sat before the filter whatever the planner did.
+
+console.log("\n[8b] match_thoughts applies the metadata filter inside the candidate scan");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  for (let i = 0; i < 60; i++) {
+    await db.query(`SELECT upsert_thought($1, '{"metadata":{"kind":"a"}}'::jsonb, $2::vector)`, [
+      `crowd ${i}`,
+      blend(0, 1, 1, 0.001 * (i + 1)),
+    ]);
+  }
+  await db.query(`SELECT upsert_thought('the one b', '{"metadata":{"kind":"b"}}'::jsonb, $1::vector)`, [unit(1)]);
+  // A second kind "b" row whose ONLY evidence is a chunk: no whole-content
+  // vector, so the direct CTE cannot see it and the chunk CTE must.
+  //
+  // The chunk is inserted directly rather than through upsert_thought's jsonb
+  // path. Observed, not explained: under PGlite a chunk stored through that
+  // path prints its vector correctly but returns NULL from every distance
+  // operator (`vector_norm`, `<=>`, `<->`), so the row is silently unrankable
+  // and the HNSW scan never yields it. Real Postgres does not do this — the
+  // live suite, test-chunking.ts and evals/eval-filtered.ts all store chunks
+  // through upsert_thought there and search them. This section is about
+  // match_thoughts, so it takes the path PGlite gets right.
+  const b2 = await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('b via chunk', '{"metadata":{"kind":"b"}}'::jsonb, NULL::vector) AS r`
+  );
+  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, 'window', $2::vector)`, [
+    b2.rows[0].r.id,
+    unit(1),
+  ]);
+
+  const f = await db.query<{ content: string }>(
+    `SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"b"}'::jsonb)`,
+    [unit(0)]
+  );
+  const got = f.rows.map((r) => r.content).sort();
+  assert(got.length === 2, `both kind "b" rows come back past sixty nearer kind "a" rows (got ${got.length})`);
+  assert(got[0] === "b via chunk", "…including the one reachable only through its chunk");
+  assert(got[1] === "the one b", "…and the one reachable through its own vector");
+
+  const none = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"z"}'::jsonb)`, [unit(0)]);
+  assert(none.rows[0].c === 0, "a filter nothing matches still returns nothing");
+
+  // 007 evaluated `NULL = '{}' OR metadata @> NULL` → NULL → every row excluded.
+  const nul = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, NULL::jsonb)`, [unit(0)]);
+  assert(nul.rows[0].c === 10, `a NULL filter is unfiltered (got ${nul.rows[0].c} rows, 007 gave 0)`);
+
+  // The overfetch is honoured above the default: 62 rows stored, 50 asked, 50 back.
+  // Under 007 each CTE stopped at hnsw.ef_search (40) candidates.
+  const big = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 50, '{}'::jsonb)`, [unit(0)]);
+  assert(big.rows[0].c === 50, `match_count 50 returns 50 of 62 rows (got ${big.rows[0].c})`);
+
+  // The setting that makes the in-scan filter correct lives on the function.
+  // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
+  // the defined-twice class FORK.md keeps finding — fails here, not in search.
+  const cfg = await db.query<{ cfg: string | null }>(
+    `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
+     WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
+  );
+  assert(
+    /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
+    `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
+  );
+}
+
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
 {
   await db.exec(`DELETE FROM thoughts`);
