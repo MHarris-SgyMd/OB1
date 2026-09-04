@@ -1360,12 +1360,28 @@ document lacks and scores against the exact answer within it.
   migrating role does not own the database the DO block warns with the two
   statements and the migration still applies; the fix does not depend on the
   bounds, only the depth of a rare walk does.
-- `search_thoughts` now bounds `limit` to 1–100 in both servers, as the keyword
-  tool already did. 007 capped each CTE near 40 candidates whatever was asked;
-  this function honours `v_fetch`, so an unbounded count became unbounded scan
-  work — `limit: 5000` would walk each CTE to 20,000 passing candidates. The
-  fourth review pass caught it. Direct SQL and PostgREST callers own their own
-  `match_count`.
+- `match_count` is clamped to 1–100 inside the function, as 012 clamps its
+  `p_limit`, and `search_thoughts` bounds `limit` to 1–100 in both servers, as
+  the keyword tool already did. 007 capped each CTE near 40 candidates whatever
+  was asked; this function honours `v_fetch`, so an unbounded count became
+  unbounded scan work — `limit: 5000` would walk each CTE to 20,000 passing
+  candidates — and the callers who send a filter are outside the servers' bound.
+  What the clamp changes, named: 0 and negative counts return one row, NULL
+  returns ten, and integrations that asked for 200–500 rows as headroom for a
+  client-side post-filter now get 100 — more than 007 ever returned, less than
+  they asked for. The fourth pass asked for the tool bound, the sixth for the
+  clamp, the seventh for the edges to be stated and tested.
+- The function's COMMENT carries a contract marker, `[filter-inside-scan]`,
+  and preflight decides whether the deployed body has 014's semantics by that
+  marker rather than by grepping the body for a local variable's name — a
+  rename in SMD-945 or SMD-958 would otherwise have produced a false "body
+  predates 014" warning whose remedy regressed the newer function. A successor
+  that keeps the in-scan filter carries the marker; one that reintroduces a
+  post-LIMIT filter must not. Preflight also requires `plan_cache_mode` to still
+  be on the function before reporting ok, since a redefinition that dropped it
+  would leave the generic-plan cliff live, and it warns whenever the session's
+  effective walk bounds are below what 014 seeds, however 014 was recorded —
+  `--baseline` never runs the DO block and a non-owner cannot.
 - `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
   This is what makes an in-scan filter correct: without it the scan stops at its
   first `ef_search` candidates, filter or no filter. A function-level SET is
@@ -1374,11 +1390,19 @@ document lacks and scores against the exact answer within it.
   session state. It is also validated at CREATE: on pgvector before 0.8.0 the
   migration fails with `invalid configuration parameter name
   "hnsw.iterative_scan"` — pgvector reserves the prefix — which is the intended
-  failure, reproduced on 0.7.4. The validation depends on the `vector(N)`
-  typmod in the signature forcing the library to load first; a bare `vector`
-  parameter would store the SET as an unvalidated placeholder on an old server,
-  and the header says so. A version of this function that silently ran without
-  the setting would have exactly the recall 014 exists to fix.
+  failure, reproduced on 0.7.4. That validation needs pgvector's library loaded
+  in the session, and the migration now loads it explicitly with a
+  `SELECT '[1]'::vector` on its first line. Earlier drafts credited the
+  `vector(N)` typmod in the signature with forcing the load; that was true only
+  for a superuser. Postgres checks a function's SET clauses before it resolves
+  its parameter types, and a non-superuser owner — Supabase's `postgres` role,
+  Neon, an RDS master user — in a session that had not yet touched pgvector was
+  refused with `permission denied to set parameter "hnsw.iterative_scan"` on
+  the upgrade path. Fresh installs passed because 001 had loaded the library in
+  the same session; every verification here ran as a superuser and never saw
+  it. The seventh review pass reproduced it. Every printed `ALTER DATABASE`
+  remedy now carries the same load. A version of this function that silently
+  ran without the setting would have exactly the recall 014 exists to fix.
 - `relaxed_order`, not `strict_order`: the final `ORDER BY b.sim DESC` re-sorts
   the merged candidates anyway.
 - `hnsw.ef_search` is left alone. At the default `match_count`, `v_fetch` is 40

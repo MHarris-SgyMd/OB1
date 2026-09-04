@@ -48,7 +48,7 @@ if (!URL_) {
 }
 
 
-const { assert, report } = createAssert();
+const { assert, skip, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 async function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
@@ -192,8 +192,21 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   // the bounds are in force, since the section claims to exercise them.
   await sql.close();
   sql = new SQL({ url: URL_, max: 1 });
+  // What the DATABASE has, not the shipped literals: 014 leaves an operator's
+  // earlier value alone, and a non-owner role cannot seed at all. Assert that
+  // whatever pg_db_role_setting holds is what a fresh session sees.
+  const [seeded] = await sql`
+    SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+    WHERE d.datname = current_database() AND s.setrole = 0`;
+  const dbSettings: string[] = seeded?.cfg ?? [];
+  const want = Object.fromEntries(dbSettings.filter((c) => c.startsWith("hnsw.")).map((c) => c.split("=") as [string, string]));
   const [{ t, mm }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS mm`;
-  assert(t === "100000" && mm === "8", `a fresh session sees 014's database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${mm})`);
+  if (want["hnsw.max_scan_tuples"] && want["hnsw.scan_mem_multiplier"]) {
+    assert(t === want["hnsw.max_scan_tuples"] && mm === want["hnsw.scan_mem_multiplier"],
+      `a fresh session sees the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${mm})`);
+  } else {
+    skip("a fresh session sees the database-level bounds", "not seeded on this database — the migrating role does not own it");
+  }
   // 1,000 random rows through a real HNSW index, 1% of them tagged. Under 007
   // the tagged rows were almost never among the 40 nearest, so a filtered
   // search returned almost nothing — db/bench-hnsw.ts has the numbers. Here

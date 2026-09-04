@@ -422,7 +422,15 @@ for (const n of SCALES) {
       await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
       await reconnect(); // the database-level bounds 014 just seeded are read at connect
       const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
-      if (t !== "100000" || m !== "8") throw new Error(`session did not pick up 014's bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m})`);
+      const [row] = await sql`
+        SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase
+        WHERE d.datname = current_database() AND s.setrole = 0`;
+      const cfg: string[] = row?.cfg ?? [];
+      const has = (k: string, v: string) => cfg.includes(`${k}=${v}`);
+      if (!has("hnsw.max_scan_tuples", t) || !has("hnsw.scan_mem_multiplier", m)) {
+        throw new Error(`session did not pick up the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m}; database has ${cfg.join(", ") || "none"})`);
+      }
+      console.log(`  bounds in force: max_scan_tuples=${t}, scan_mem_multiplier=${m}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10 } = await unfiltered(sql, queries);

@@ -158,6 +158,17 @@ export async function dropSchema(url: string): Promise<void> {
   try {
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
+    // 014 seeds two database-level settings. They are not schema, so a fresh
+    // start must clear them too, or every later run inherits whatever the
+    // previous one left. Best effort: only the owner may, and a throwaway
+    // container's role is; anything else is left as found.
+    try {
+      const [{ db }] = await admin`SELECT current_database() AS db`;
+      await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.max_scan_tuples`);
+      await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.scan_mem_multiplier`);
+    } catch {
+      /* not the owner, or the setting was never there */
+    }
   } finally {
     await admin.close();
   }

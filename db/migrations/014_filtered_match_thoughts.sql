@@ -75,11 +75,15 @@
 --       DETAIL: "hnsw" is a reserved prefix.
 --     which is the intended failure (reproduced on 0.7.4). A version of this
 --     function that silently ran without the setting would have exactly the
---     recall this migration exists to fix. The validation happens because the
---     `vector({{EMBEDDING_DIM}})` parameter forces pgvector's library to load
---     before the SET is checked; a bare `vector` argument would not, and on an
---     old server the SET would then be stored as an unvalidated placeholder.
---     Keep the typmod in the signature.
+--     recall this migration exists to fix. That validation needs pgvector's
+--     library LOADED in the session, which is why the file opens with
+--     `SELECT '[1]'::vector` — earlier drafts credited the `vector(N)` typmod
+--     in the signature with forcing the load, and that was true only for a
+--     superuser: Postgres checks a function's SET clauses before it resolves its
+--     parameter types, and a non-superuser owner in a session that had not yet
+--     touched pgvector was refused with "permission denied to set parameter".
+--     The seventh review pass reproduced it on the upgrade path; the explicit
+--     load is the fix, and every printed ALTER DATABASE remedy carries it too.
 --
 --   * `relaxed_order`, not `strict_order`. The iterative scan may yield a
 --     candidate slightly out of distance order; the final `ORDER BY b.sim DESC`
@@ -192,8 +196,12 @@
 --     direct SQL, PostgREST, the community integrations — are outside that
 --     bound, and one of them sends match_count 150 with a filter no row's
 --     metadata matches literally, which under an unclamped 014 is a full walk
---     per call. Every shipped integration slices its result to 100 or fewer
---     afterwards, so the clamp costs none of them a row.
+--     per call. What the clamp costs: integrations that requested 200–500 rows
+--     as headroom for their own client-side post-filter (rest-api by date,
+--     agent-memory-api by scope) now get 100 — more than 007 ever returned,
+--     but less than they asked for, and without a signal. 0 and negative
+--     counts return 1 row, NULL returns 10. db/test-schema.ts [8b] asserts the
+--     edges; db/test-live.ts [5b] asserts the ceiling.
 --
 --   * Memory. The walk's memory bound is work_mem * scan_mem_multiplier per
 --     scan node — two per filtered call, one per CTE — per backend: 32 MB each
@@ -239,6 +247,16 @@
 --   unless an operator had already set them.
 -- ============================================================================
 
+-- Load pgvector's library into THIS session before the CREATE below. The SET
+-- clauses name hnsw.* settings, and Postgres validates them before it resolves
+-- the vector(N) parameter types — so in a session that has not yet touched
+-- pgvector, a role that is not a superuser is refused with "permission denied
+-- to set parameter" (the hnsw prefix is reserved and, unloaded, unknown). A
+-- superuser may set unknown placeholders and never sees it; every earlier
+-- verification of this migration ran as one. Fresh installs passed only because
+-- 001 had loaded the library in the same session. One cast is enough.
+SELECT '[1]'::vector;
+
 CREATE OR REPLACE FUNCTION match_thoughts(
   query_embedding  vector({{EMBEDDING_DIM}}),
   match_threshold  float   DEFAULT 0.7,
@@ -267,8 +285,13 @@ DECLARE
   -- Clamped here, as 012 clamps its p_limit: the cost of a call is now
   -- proportional to match_count (the iterative scan honours v_fetch), and the
   -- callers who send a filter are direct SQL and PostgREST — outside the zod
-  -- bound the two servers apply. Every shipped integration slices its result
-  -- to 100 or fewer afterwards, so nothing loses a row it used.
+  -- bound the two servers apply. Three edges change from 007, deliberately:
+  -- 0 returns 1 row (was 0), a negative count returns 1 row (was an error),
+  -- NULL returns 10 (was LIMIT NULL, the whole candidate set). Counts above
+  -- 100 are cut to 100: some integrations ask for up to 200 or 500 as headroom
+  -- for a client-side post-filter (rest-api by date, agent-memory-api by
+  -- scope) and lose that headroom here — still far more than 007's effective
+  -- cap near 80, and a later migration can raise the ceiling if one needs it.
   v_count      int     := LEAST(GREATEST(COALESCE(match_count, 10), 1), 100);
   v_fetch      int     := GREATEST(v_count * 4, 20);
   v_unfiltered boolean := (filter IS NULL OR filter = '{}'::jsonb);
@@ -367,8 +390,14 @@ BEGIN
 EXCEPTION WHEN insufficient_privilege THEN
   RAISE WARNING USING
     MESSAGE = format('match_thoughts: could not seed the database-level HNSW scan bounds (%s).', SQLERRM),
-    HINT = format('Run as the database owner: ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000; ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8;', v_db, v_db);
+    HINT = format('Run as the database owner, in one session: SELECT ''[1]''::vector; ALTER DATABASE %I SET hnsw.max_scan_tuples = 100000; ALTER DATABASE %I SET hnsw.scan_mem_multiplier = 8;  (the SELECT loads pgvector so a non-superuser may set hnsw.* settings)', v_db, v_db);
 END $$;
 
+-- `[filter-inside-scan]` is a CONTRACT MARKER, not prose: preflight decides
+-- whether this function has 014's semantics — the metadata filter applied inside
+-- the candidate scan — by looking for it here, not by grepping the body for a
+-- local variable's name. A later migration that redefines match_thoughts and
+-- keeps that property must carry the marker into its own COMMENT; one that
+-- reintroduces a post-LIMIT filter must not. db/test-schema.ts [8b] asserts it.
 COMMENT ON FUNCTION match_thoughts(vector, float, int, jsonb) IS
-  'Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence. The metadata filter is applied inside the index scan (iterative HNSW scan, pgvector >= 0.8), so a selective filter does not silently empty the result.';
+  '[filter-inside-scan] Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence. The metadata filter is applied inside the index scan (iterative HNSW scan, pgvector >= 0.8), so a selective filter does not silently empty the result.';

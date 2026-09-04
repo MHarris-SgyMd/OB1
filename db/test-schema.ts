@@ -431,6 +431,19 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   const big = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 50, '{}'::jsonb)`, [unit(0)]);
   assert(big.rows[0].c === 50, `match_count 50 returns 50 of 62 rows (got ${big.rows[0].c})`);
 
+  // The clamp's edges, named in the header: 0 and negative give 1 row, NULL
+  // gives the default 10. 007 gave 0, an error, and the whole candidate set.
+  for (const [arg, want, label] of [["0", 1, "match_count 0 returns 1 row"], ["-5", 1, "a negative match_count returns 1 row, not an error"], ["NULL", 10, "a NULL match_count returns the default 10"]] as const) {
+    const r = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, ${arg}, '{}'::jsonb)`, [unit(0)]);
+    assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
+  }
+
+  // The contract marker preflight reads instead of grepping the body.
+  const marker = await db.query<{ c: string | null }>(
+    `SELECT obj_description('match_thoughts(vector, float, int, jsonb)'::regprocedure, 'pg_proc') AS c`
+  );
+  assert(/\[filter-inside-scan\]/.test(marker.rows[0]?.c ?? ""), "the function's COMMENT carries the [filter-inside-scan] marker a successor must keep");
+
   // The setting that makes the in-scan filter correct lives on the function.
   // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
   // the defined-twice class FORK.md keeps finding — fails here, not in search.

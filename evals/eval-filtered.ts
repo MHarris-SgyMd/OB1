@@ -178,7 +178,7 @@ const FILTERS: Filter[] = ["api", "web", "portal", "design"].map(labelFilter).co
 const lit = (v: number[]) => `[${v.join(",")}]`;
 console.log(`  loading Postgres via upsert_thought (whole vector + ${DOCS.reduce((n, d) => n + d.windows.length, 0)} windows)`);
 await resetSchema(DB_URL, { dim: DIM, model: spec.name, only: (f) => f < "014" });
-const sql = new SQL({ url: DB_URL, max: 1 });
+let sql = new SQL({ url: DB_URL, max: 1 });
 for (const d of DOCS) {
   const payload = { metadata: { ref: d.id, labels: d.labels, tiers: d.tiers } };
   const chunks = d.windows.map((w, i) => ({ content: d.windowText[i], embedding: lit(w) }));
@@ -265,6 +265,15 @@ async function run(label: string): Promise<Run> {
 
 const before = await run("before (001–013)");
 await applyMigrations(DB_URL, { dim: DIM, model: spec.name, only: (f) => f.startsWith("014") });
+// 014 seeds the walk's bounds at DATABASE level, read at session start: a
+// session opened before it keeps pgvector's defaults. Reconnect, and say what
+// the after arm actually ran under.
+await sql.close();
+sql = new SQL({ url: DB_URL, max: 1 });
+{
+  const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
+  console.log(`  after arm runs with hnsw.max_scan_tuples=${t}, hnsw.scan_mem_multiplier=${m}`);
+}
 const after = await run("after (014)");
 await sql.close();
 

@@ -398,11 +398,19 @@ if (configFailed) {
         try {
           const { versionAtLeast } = await import("../db/config.mjs");
           const mt = await sql`
-            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
+            SELECT array_to_string(p.proconfig, ',') AS cfg, obj_description(p.oid, 'pg_proc') AS comment FROM pg_proc p
             JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'match_thoughts' AND n.nspname = 'public' AND p.pronargs = 4`;
-          const bodyIs014 = /\bv_unfiltered\b/.test(String(mt[0]?.src ?? ""));
-          const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(String(mt[0]?.cfg ?? ""))?.[2];
+          // The body's semantics are declared by a contract marker in the
+          // function's COMMENT, `[filter-inside-scan]`, which 014 sets and any
+          // successor that keeps the in-scan filter must carry forward. An
+          // earlier draft grepped the body for a local variable's name, which
+          // a rename would have broken in the direction of a false warning
+          // whose remedy regressed the newer function.
+          const bodyIs014 = /\[filter-inside-scan\]/.test(String(mt[0]?.comment ?? ""));
+          const cfgText = String(mt[0]?.cfg ?? "");
+          const declared = /(^|,)hnsw\.iterative_scan=(relaxed_order|strict_order)(,|$)/.exec(cfgText)?.[2];
+          const planForced = /(^|,)plan_cache_mode=force_custom_plan(,|$)/.test(cfgText);
           const inherited = String((await sql`SELECT current_setting('hnsw.iterative_scan', true) AS v`)[0]?.v ?? "off");
           const inForce = declared ?? (inherited === "relaxed_order" || inherited === "strict_order" ? inherited : undefined);
           const pgv = await sql`
@@ -422,16 +430,33 @@ if (configFailed) {
           }
           const bounds = await sql`
             SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
+          const tuples = Number(bounds[0]?.t ?? NaN);
+          const mult = Number(bounds[0]?.m ?? NaN);
           const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
+          // Below the values 014 seeds, a thin filter routed to the HNSW walk
+          // returns short (6.3 of 10 measured at pgvector's defaults). Judged
+          // from the session's effective settings, however 014 was recorded —
+          // --baseline never runs the DO block, and a non-owner cannot.
+          const boundsLow = !(tuples >= 100000) || !(mult >= 8);
+          const seedBounds =
+            "Run as the database owner, in one session: SELECT '[1]'::vector; ALTER DATABASE <db> SET hnsw.max_scan_tuples = 100000; ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = 8;  then restart the server so its pool reconnects.";
           const putBack =
             "Put them back: ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order SET plan_cache_mode = force_custom_plan;  and carry them into the migration that redefined it.";
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
             add("filtered search", "warn", "match_thoughts is not defined, so nothing here can be checked", "Apply the migrations.");
+          } else if (bodyIs014 && inForce && !planForced) {
+            add("filtered search", "warn",
+                `match_thoughts scans iteratively under a metadata filter (${inForce}) but no longer forces a custom plan — a later redefinition dropped plan_cache_mode — so after five calls a connection may switch to the generic plan, where a thin filter walks the index to a bound (210–295 ms at 100,000 rows) instead of using the GIN index`,
+                putBack);
           } else if (bodyIs014 && inForce) {
             const source = declared ? "its own SET clause" : "hnsw.iterative_scan inherited from the database or role";
-            if (staleRecord) {
+            if (boundsLow) {
+              add("filtered search", "warn",
+                  `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}) but the walk's bounds are below what 014 seeds (${boundsText}; wanted 100000 tuples, memory x8) — a thin filter routed to the HNSW walk returns short. 014's DO block could not set them (non-owner role, or --baseline)`,
+                  seedBounds);
+            } else if (staleRecord) {
               add("filtered search", "warn",
                   `match_thoughts scans iteratively under a metadata filter (${inForce}, via ${source}; ${boundsText}) and works, but pg_extension records pgvector ${installed} while the server's library is ${available} — the extension was never updated after a binary upgrade`,
                   "ALTER EXTENSION vector UPDATE;  (advisable, not required for 014 — it keeps the catalog honest for the next migration that checks it)");
