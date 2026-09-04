@@ -196,6 +196,65 @@ else {
   assert(/trigram index.*disabled/s.test(agreeOff.out),
          "asking for it off, with it absent, is reported as agreement and not a warning");
 
+  /**
+   * Chunk context, in the four states it can be in.
+   *
+   * The one that has to FAIL is the flag on against a database without
+   * migration 013: the column the blurbs go into does not exist, the
+   * chunk-writing functions from 007 and 009 simply do not select the key, and
+   * every capture succeeds while the context is generated, embedded and
+   * dropped. Nothing else in the system would ever mention it.
+   */
+  const ctx = new SQL({ url: LIVE, max: 1 });
+  await ctx.unsafe("ALTER TABLE thought_chunks DROP COLUMN IF EXISTS context");
+
+  const noColumnOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/chunk context.*off \(migration 013 not applied\)/s.test(noColumnOff.out),
+         "off against a database without 013 is agreement, not a warning");
+
+  const noColumnOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noColumnOn.code !== 0, "the flag on without 013 refuses to start");
+  assert(/every blurb would be embedded and then discarded/.test(noColumnOn.out),
+         "…and says what would silently happen, not just which migration is missing");
+  assert(/013_chunk_context\.sql/.test(noColumnOn.out), "…with the migration that fixes it");
+
+  await ctx.unsafe("ALTER TABLE thought_chunks ADD COLUMN IF NOT EXISTS context text");
+  await ctx.unsafe("DELETE FROM thoughts");
+
+  const empty = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(/chunk context.*on, no chunks stored yet/s.test(empty.out),
+         "on with 013 applied and nothing captured is reported as ok");
+
+  /**
+   * The mixed corpus — the state SMD-951 exists to make visible. Written
+   * directly rather than captured, because producing it through the server
+   * would mean running two servers with different settings; what preflight
+   * reads is the rows, and this is the rows.
+   */
+  const [row] = await ctx.unsafe(
+    "SELECT upsert_thought('a chunked thought', '{\"metadata\":{}}'::jsonb, NULL::vector) AS r"
+  );
+  const tid = (row.r as { id: string }).id;
+  const vec = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
+  await ctx.unsafe(
+    `INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding, context)
+     VALUES ('${tid}'::uuid, 0, 'first window',  ${vec}, 'Situating blurb.'),
+            ('${tid}'::uuid, 1, 'second window', ${vec}, NULL)`
+  );
+
+  const mixed = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(mixed.code === 0, "a mixed corpus is a warning, not a refusal — every query still works");
+  assert(/1 of 2 chunks carry a situating context and 1 do not/.test(mixed.out),
+         "…and it is counted from the rows rather than trusted from ob1_config");
+
+  await ctx.unsafe(`UPDATE thought_chunks SET context = 'Situating blurb.' WHERE context IS NULL`);
+  const allCtxOff = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/all 2 chunks carry a context but OB1_CHUNK_CONTEXT is off/.test(allCtxOff.out),
+         "turning it back off with a contextualized corpus warns about the next capture");
+
+  await ctx.unsafe("DELETE FROM thoughts");
+  await ctx.close();
+
   const j = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json");
   const parsed = JSON.parse(j.out);
   assert(parsed.ok === true, "--json reports ok:true");

@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-six numbered changes on top of the pin. Seven fix defects found in an
+Twenty-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–26 are the numbered `###` sections** further down, which is
+sections. Changes **18–27 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -143,6 +143,12 @@ server-portable/chunk.ts         # fix 18  (new file)
 server-portable/thoughts.ts      # fix 20  (new file — pure rules, lifted for testing)
 server-portable/test-support.ts  # fix 20  (new file — the MCP client)
 server-portable/test-thoughts.ts # fix 20  (new file)
+db/migrations/012_*.sql          # fix 26  (new file — search_thoughts_keyword)
+db/bench-keyword.ts              # fix 26  (new file — index reach and plan-cache probe)
+evals/eval-keyword.ts            # fix 26  (new file — where vector search misses)
+db/migrations/013_*.sql          # fix 27  (new file — thought_chunks.context)
+evals/eval-contextual.ts         # fix 27  (new file — contextual retrieval, measured)
+server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
@@ -199,10 +205,12 @@ above `OB1_CHUNK_TOKENS` (1200) into overlapping windows and embeds each. Notes:
   a replacement.
 - **Short thoughts write no chunk rows at all.** Both corpora measured in `evals/`
   average under 500 tokens, so the common case pays nothing.
-- For chunked content `thoughts.embedding` becomes the *first chunk's* vector, not
-  the whole content's. Embedding the whole thing would be an over-batch request,
-  which Ollama answers by silently truncating — reintroducing the bug in the one
-  column pre-existing rows and the PostgREST path still depend on.
+- For chunked content `thoughts.embedding` became the *first chunk's* vector, not
+  the whole content's, because embedding the whole thing would be an over-batch
+  request that Ollama answers by silently truncating. **Superseded by change 27**,
+  which measured the ceiling instead of assuming it and found the configured
+  default reads a 15,812-character document whole. It is the whole-content vector
+  again, best-effort, with the head window as the fallback.
 - `match_thoughts` searches both tables and deduplicates to one row per thought,
   scored by its best evidence. Each side takes its own indexed top-K rather than
   scoring every row, because the obvious formulation cannot use an HNSW index.
@@ -1084,6 +1092,112 @@ while its own timing column said 0.59 ms for a query a sequential scan does in
 267 ms. Statistics flush at most once a second. The two columns contradicting each
 other is what caught it; a script that printed only the counter would have been
 believed.
+
+### 27. Contextual retrieval, measured — and the whole-content vector it found
+
+Migration 013 (Linear SMD-951). The issue asked for Anthropic's Contextual
+Retrieval: generate a short blurb naming what each window of a long capture is
+about, prepend it before embedding, so a window reading "we settled on thirty
+minutes, anything longer needs sign-off" carries which system it concerns. Their
+published result is roughly a 35% reduction in top-20 retrieval failure.
+
+**It is worse here, and the flag ships off.** `evals/eval-contextual.ts`, 441
+real issues, the 15 that reach the 1200-token chunking threshold, 37 queries that
+name a document's subject and ask for a detail living in exactly one window:
+
+| arm | MRR | helped | hurt |
+| --- | ---: | ---: | ---: |
+| bare windows (the server before this change) | 0.904 | — | — |
+| a blurb per window (Anthropic) | 0.826 | 1 | 8 |
+| a 20-word blurb per window | 0.847 | 0 | 5 |
+| one blurb per document | 0.759 | 1 | 13 |
+
+Helped/hurt are paired counts, because at 37 queries a mean can move on one of
+them and an average alone would not say which.
+
+**The task in the existing harness could not have found this.** `eval-real.ts`
+uses the issue title as the query, and a title describes a whole document, so a
+whole-document vector answers it best and every arm lands within a document or
+two of every other — 0.917 against 0.922 against 0.956, in the direction that
+flatters the change. Building the eval on that would have shipped contextual
+retrieval as a small win. The detail query is the one the technique exists for,
+and it is generated from the title plus ONE window, never the whole document, so
+the detail half comes from the window itself and the bare arm gets the strongest
+advantage available. Biased against the change on purpose.
+
+**The mechanism is measured, not inferred.** The same harness compares each query
+against the exact window it was written for. A blurb moves that window *away*
+from its own query: −0.0338 with a full blurb (lower on 32 of 37), −0.0144 with a
+20-word one (27 of 37). The loss tracks blurb length. A fixed-size vector has
+less room for the sentence that actually answers. That also explains the 20-word
+prompt in `db/config.mjs` — the first run's blurbs ran to a median of 388
+characters and every one opened "This chunk outlines…", identical text in front
+of every window in the corpus. Tightening it made the technique *less bad*, not
+good.
+
+**It ships as a flag anyway, because the sign belongs to the model.** Same
+harness, same corpus, same blurbs, on `embeddinggemma`: a blurb per window scores
+**+0.041**, helping 5 and hurting 4. 768 dimensions against 1024, and a real
+ceiling. A weaker window vector has more to gain from the extra subject signal
+than it loses to dilution. So `thought_chunks.context` and `OB1_CHUNK_CONTEXT`
+exist, default off, with the table beside them.
+
+**Two premises in the issue turned out to be false, and checking them is what
+produced the change that pays.** The issue says the harness is already truncating
+those 15 documents at Ollama's 2048-token batch. It is not — not for the
+configured model. `eval-contextual.ts` finds the ceiling by bisecting for the
+shortest prefix that embeds to a bit-identical vector, no tokeniser involved, and
+`qwen3-embedding:4b` read all 15,812 characters of the longest document in the
+corpus. `embeddinggemma` stops at ~8,150 and `bge-m3` at ~7,530, so the premise
+was true of the model migration 007 was written against and not of the default
+that replaced it.
+
+Which exposed the real defect. `embedCapture` set `thoughts.embedding` to the
+**first window's** vector for a chunked capture, deliberately, to avoid an
+over-batch request. On a provider that reads the whole document that threw away a
+better vector for free:
+
+| arm | detail-query MRR | helped | hurt |
+| --- | ---: | ---: | ---: |
+| MAX over bare windows (before) | 0.904 | — | — |
+| whole content AND bare windows (now) | **0.935** | **3** | **0** |
+
+Worth noting that migration 007's own header has said `thoughts.embedding` is
+"the whole-content embedding, truncated by the provider exactly as before" since
+the day it landed, while `index.ts` stored the head window. The schema's
+documentation and the server's behaviour had disagreed for the whole life of the
+feature, and neither was wrong enough to fail anything. This change makes the
+code match what the migration always claimed.
+
++0.020 with none worse on `embeddinggemma` too, where the whole-content vector
+*is* truncated — a head-truncated vector is a longer head than the first window,
+not a worse one. The cost is one extra provider call on the 3.4% of captures long
+enough to chunk, and it is best-effort: a provider that REFUSES over-length input
+rather than truncating it (hosted APIs do; Ollama does not) falls back to the old
+head-window behaviour, and latches so it is not asked again for the life of the
+process. `test-chunking.ts` asserts **exactly one** such probe across four long
+captures — `<= 1` would pass whether the latch works or the probe never happens.
+
+**Failure policy, and why the column exists.** A blurb that cannot be generated
+degrades to a bare window rather than failing the capture: one flaky local model
+call must not lose a thought, which is the whole point of migration 008's atomic
+capture. The usual objection is that this silently produces an inconsistent
+corpus, and the answer is the column rather than the policy —
+`thought_chunks.context` is NULL for a bare window, the capture response says how
+many went in bare, and `preflight.ts` counts both across the corpus and reports a
+brain captured under both settings. Turning the flag on without migration 013 is
+a startup **failure**, not a warning: 007 and 009's functions would not select
+the key, so every blurb would be generated, embedded, and dropped with nothing
+recording it.
+
+**One harness limit worth recording.** The behavioural half of the migration test
+lives in `db/test-live.ts` rather than `test-schema.ts` because PGlite cannot run
+it: writing chunk rows through the 4-argument `upsert_thought` crashes the WASM
+build in-process — `received invalid response: 0` bound as a parameter, `Out of
+bounds memory access` inlined — and it reproduces with migrations 001-012 applied
+and no 013, at any position in the file, on a second instance as well as the
+shared one. It is the harness, not the migration, and the round trip belongs
+against a real server anyway.
 
 ## Detached from the fork network
 

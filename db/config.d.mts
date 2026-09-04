@@ -53,6 +53,16 @@ export const EMBEDDING_PROMPTS: Record<string, { query: string; document: string
 export function applyEmbeddingPrompt(model: string, text: string, isQuery: boolean): string;
 
 /**
+ * Prompts that generate the blurb prepended to a chunk before embedding, with
+ * `{document}` and `{chunk}` placeholders. `document` situates a whole document
+ * in one call; `chunk` situates one window and costs a call per window.
+ */
+export const CHUNK_CONTEXT_PROMPTS: { document: string; chunk: string };
+
+/** Join a blurb to its window. An empty context returns the window unchanged. */
+export function composeChunkForEmbedding(context: string | null | undefined, chunk: string): string;
+
+/**
  * Resolve whether to request truncation, given the raw env value (or undefined),
  * the configured width and the model. Explicit env wins; otherwise on only for a
  * known-MRL model configured below its known native width.
@@ -66,17 +76,27 @@ export function resolveEmbeddingDimensions(
 /** Whether to send the OpenAI `dimensions` parameter. OB1_EMBEDDING_DIMENSIONS. */
 export const EMBEDDING_DIMENSIONS: boolean;
 
-/** Whether migration 011 builds the trigram index. Off by default. */
+/** Whether migration 011 builds the trigram index. On by default since SMD-944. */
 export const DEFAULT_TRGM_INDEX: boolean;
 export const TRGM_INDEX: boolean;
 /** Parse OB1_TRGM_INDEX; returns DEFAULT_TRGM_INDEX when unset or empty. */
 export function resolveTrgmIndex(raw: string | undefined): boolean;
+
+/**
+ * Whether a capture generates a situating blurb per chunk before embedding it.
+ * Off by default, and measured off — see the source, and evals/eval-contextual.ts.
+ */
+export const DEFAULT_CHUNK_CONTEXT: boolean;
+export const CHUNK_CONTEXT: boolean;
+/** Parse OB1_CHUNK_CONTEXT; returns DEFAULT_CHUNK_CONTEXT when unset or empty. */
+export function resolveChunkContext(raw: string | undefined): boolean;
 
 /** Values substituted into `{{...}}` in db/migrations/*.sql. */
 export function migrationValues(overrides?: {
   dim?: number;
   model?: string;
   trgm?: boolean;
+  chunkContext?: boolean;
 }): Record<string, string>;
 
 /** Substitute a migration template; throws on an unknown `{{VARIABLE}}`. */

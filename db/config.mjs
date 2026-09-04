@@ -277,6 +277,81 @@ export function applyEmbeddingPrompt(model, text, isQuery) {
 }
 
 /**
+ * Contextual retrieval — the blurb prepended to a chunk before it is embedded.
+ *
+ * A window of a long capture is embedded on its own, so it carries none of the
+ * document's framing: "we went with the second option" embeds into roughly the
+ * wrong neighbourhood because nothing in those words says which decision. The
+ * technique (Anthropic, September 2024) is to generate a short situating
+ * sentence and put it in front of the window before embedding.
+ *
+ * `{document}` and `{chunk}` are substituted. Both templates are here rather
+ * than in the server because `evals/eval-contextual.ts` measures the same text
+ * the server would embed, and a benchmark that prompts differently from
+ * production measures nothing about production — the exact defect lib.ts was
+ * written to end for the embedding templates.
+ *
+ * The instruction to answer with the context and nothing else is load-bearing.
+ * Without it a 7B model returns "Certainly! Here is the context:" and that
+ * preamble is embedded along with everything else, in every chunk, pulling every
+ * window in the corpus very slightly toward each other.
+ */
+export const CHUNK_CONTEXT_PROMPTS = {
+  /** One call per document; the same blurb goes in front of every window. */
+  document:
+    "<document>\n{document}\n</document>\n\n" +
+    "Write one short sentence describing what this document is about, so that an " +
+    "excerpt from it can be understood without the rest. Answer with the sentence " +
+    "and nothing else.",
+  /** One call per window — more expensive, and what Anthropic actually measured. */
+  chunk:
+    "<document>\n{document}\n</document>\n\n" +
+    "Here is a chunk we want to situate within the whole document:\n\n" +
+    "<chunk>\n{chunk}\n</chunk>\n\n" +
+    "Give a short succinct context to situate this chunk within the overall document " +
+    "for the purposes of improving search retrieval of the chunk. Answer with the " +
+    "succinct context and nothing else.",
+  /**
+   * The same request with the two failure modes of the one above closed off.
+   *
+   * "Short succinct" is not a length, and a 7B model reads it as a paragraph:
+   * qwen2.5:7b returned a median of 388 characters, every one of them opening
+   * with "This chunk outlines" or "This chunk discusses". Both halves of that
+   * hurt. The length dilutes the window it is supposed to situate, and the
+   * shared opening is identical text prepended to every chunk in the corpus,
+   * which pulls all of them toward each other and costs exactly the
+   * discrimination the blurb was added to buy.
+   *
+   * A word budget and a banned opener are the whole difference.
+   */
+  chunkTight:
+    "<document>\n{document}\n</document>\n\n" +
+    "Here is an excerpt from that document:\n\n" +
+    "<chunk>\n{chunk}\n</chunk>\n\n" +
+    "In at most 20 words, name what this excerpt is about: the system, feature or " +
+    "decision it concerns. Do not begin with \"This\". Do not describe the excerpt " +
+    "or the document. Answer with the phrase and nothing else.",
+};
+
+/**
+ * How a blurb and a window become the text that gets embedded.
+ *
+ * One line, and it still belongs here. The server composes it at capture, the
+ * benchmark composes it to measure, and a backfill would compose it again; if
+ * any of the three used a different separator the vectors would not be
+ * comparable and nothing would say so. This fork's recurring defect is a value
+ * defined twice.
+ *
+ * An empty or missing context returns the window unchanged, which is what makes
+ * a failed blurb degrade to today's behaviour rather than embedding a stray
+ * separator.
+ */
+export function composeChunkForEmbedding(context, chunk) {
+  const ctx = (context ?? "").trim();
+  return ctx ? `${ctx}\n\n${chunk}` : chunk;
+}
+
+/**
  * Whether to ask the provider to shorten the vector, via the OpenAI `dimensions`
  * parameter. Off by default: a silently shortened vector from a model that was not
  * trained for it is precisely the kind of quiet quality loss this fork tries to
@@ -354,6 +429,62 @@ export function resolveTrgmIndex(raw) {
 export const TRGM_INDEX = resolveTrgmIndex(ENV.OB1_TRGM_INDEX);
 
 /**
+ * Whether a capture generates a situating blurb for each of its chunks.
+ *
+ * OFF, and measured off rather than assumed off. `evals/eval-contextual.ts`
+ * scores it over 37 queries that name a document's subject and ask for a detail
+ * that lives in exactly one window — the query the technique exists for, and one
+ * that title-as-query benchmarks cannot pose. Against the bare windows the
+ * server stores today, on the configured default model:
+ *
+ *   arm                                    MRR      helped   hurt
+ *   bare windows (before change 27)        0.904         —      —
+ *   whole content + windows (TODAY)        0.935         3      0
+ *   a blurb per window                     0.826         1      8
+ *   a 20-word blurb per window             0.847         0      5
+ *   one blurb per document                 0.759         1     13
+ *
+ * Helped/hurt are against the baseline row. Against what the server actually
+ * stores today the gap is wider still: 0.935 to 0.867 for the best contextual
+ * arm, because keeping the whole-content vector helped the same queries a blurb
+ * was supposed to.
+ *
+ * The mechanism is dilution, not a bad blurb: the same harness measures the
+ * cosine between each query and the exact window it was written against, and
+ * prepending context moves that window AWAY from its own query — by 0.034 with
+ * a full blurb (lower on 32 of 37) and 0.014 with a 20-word one (27 of 37). The
+ * loss tracks blurb length, which is why `chunkTight` exists and why it is less
+ * bad rather than good.
+ *
+ * It is a flag rather than deleted code because the sign is a property of the
+ * MODEL, not of the technique. The same harness on `embeddinggemma` — 768
+ * dimensions against 1024, and a real 2048-token ceiling — reverses it: a blurb
+ * per window scores +0.041 there, helping 5 queries and hurting 4. A weaker
+ * window vector has more to gain from the extra subject signal than it loses to
+ * dilution. Anyone running a smaller embedding model, or capturing transcripts
+ * rather than issue threads, should measure before accepting this default.
+ *
+ * Turning it on costs one LLM call per chunk at capture — 1.6s each at
+ * `qwen2.5:7b` locally, on the 3.4% of captures long enough to chunk.
+ */
+export const DEFAULT_CHUNK_CONTEXT = false;
+
+/**
+ * Parse OB1_CHUNK_CONTEXT. Same accepted spellings as the other flags.
+ *
+ * Unlike OB1_TRGM_INDEX this is read per capture rather than once at migration
+ * time, so flipping it mid-life leaves a corpus where some chunks carry context
+ * and some do not. That state is legal, silent in every query, and detectable:
+ * `thought_chunks.context` is NULL for a bare chunk, and preflight counts both.
+ */
+export function resolveChunkContext(raw) {
+  if (raw === undefined || raw === "") return DEFAULT_CHUNK_CONTEXT;
+  return /^(1|on|true|yes)$/i.test(raw);
+}
+
+export const CHUNK_CONTEXT = resolveChunkContext(ENV.OB1_CHUNK_CONTEXT);
+
+/**
  * The values substituted into `{{...}}` in db/migrations/*.sql.
  *
  * Here rather than in the runner because there are three callers — migrate.ts,
@@ -369,6 +500,7 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_DIM: String(overrides.dim ?? EMBEDDING_DIM),
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
+    CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
   };
 }
 

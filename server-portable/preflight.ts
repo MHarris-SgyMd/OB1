@@ -291,6 +291,68 @@ if (configFailed) {
                  "Apply db/migrations/012_search_thoughts_keyword.sql.");
 
         /**
+         * Chunk context, checked in two directions because the flag and the
+         * corpus can disagree in both.
+         *
+         * `OB1_CHUNK_CONTEXT` is read per capture, not at migration time, so a
+         * server restarted with it on starts writing contextualized chunks
+         * immediately. If migration 013 has not been applied, the column those
+         * blurbs go into does not exist — and the chunk-writing functions from
+         * 007 and 009 simply do not select the key, so every capture succeeds
+         * while the context is dropped on the floor. The embedding includes the
+         * blurb, the stored row does not record it, and nothing anywhere says
+         * so. That is the one combination worth failing on.
+         *
+         * The other direction is a corpus holding both kinds of chunk, which is
+         * legal, has no effect on any query, and is reported rather than
+         * refused: it is what flipping the flag mid-life looks like, and the
+         * only way to resolve it is a re-embed of the affected thoughts.
+         */
+        const { CHUNK_CONTEXT: wantContext } = await import("../db/config.mjs");
+        const ctxCol = await sql`
+          SELECT count(*)::int AS c FROM information_schema.columns
+          WHERE table_name = 'thought_chunks' AND column_name = 'context'`;
+        const haveCtxCol = Number(ctxCol[0].c) >= 1;
+        if (wantContext && !haveCtxCol) {
+          add("chunk context", "fail",
+              "OB1_CHUNK_CONTEXT is on but thought_chunks.context does not exist — every blurb would be embedded and then discarded, with no record that it happened",
+              "Apply db/migrations/013_chunk_context.sql.");
+        } else if (!haveCtxCol) {
+          add("chunk context", "ok", "off (migration 013 not applied)");
+        } else {
+          /**
+           * Counted from the rows rather than read from ob1_config, because the
+           * config row records what was INTENDED at the last migration and the
+           * rows record what actually happened. Only the second one can be wrong
+           * in a way anybody cares about.
+           */
+          const split = await sql`
+            SELECT count(*) FILTER (WHERE context IS NOT NULL)::int AS with_ctx,
+                   count(*)::int AS total
+            FROM thought_chunks`;
+          const withCtx = Number(split[0].with_ctx);
+          const total = Number(split[0].total);
+          const bare = total - withCtx;
+          if (total === 0) {
+            add("chunk context", "ok", `${wantContext ? "on" : "off"}, no chunks stored yet`);
+          } else if (withCtx > 0 && bare > 0) {
+            add("chunk context", "warn",
+                `${withCtx} of ${total} chunks carry a situating context and ${bare} do not — the corpus was captured under both settings, so those thoughts are not ranked on comparable vectors`,
+                "Re-capture the affected thoughts under one setting, or leave it: the effect is a ranking inconsistency, not an error.");
+          } else if (withCtx === total && !wantContext) {
+            add("chunk context", "warn",
+                `all ${total} chunks carry a context but OB1_CHUNK_CONTEXT is off — the next long capture will be inconsistent with everything already stored`,
+                "Set OB1_CHUNK_CONTEXT=on, or re-capture the existing thoughts.");
+          } else if (bare === total && wantContext) {
+            add("chunk context", "warn",
+                `OB1_CHUNK_CONTEXT is on but none of the ${total} stored chunks has one — everything captured so far predates the setting`,
+                "Expected right after turning it on; new captures will differ from old ones until they are re-embedded.");
+          } else {
+            add("chunk context", "ok", wantContext ? `on, ${withCtx}/${total} chunks` : `off, ${total} bare chunks`);
+          }
+        }
+
+        /**
          * The trigram flag is read only when migration 011 applies. Migrations
          * run once, so someone who changes OB1_TRGM_INDEX against a database
          * that already has 011 in its ledger and re-runs the migrator gets a

@@ -315,6 +315,17 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # OB1_CHUNK_CONTEXT, which is off by default and measured off. Its own
+      # suite because the server snapshots its environment, so the flag cannot
+      # be flipped inside the process test-chunking.ts already owns. The stub's
+      # blurb carries a word found in no document, so the test can prove the
+      # blurb reached the VECTOR rather than only the column.
+      - name: Chunk context reaches the embedding, or degrades visibly
+        working-directory: server-portable
+        run: bun test-chunk-context.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
       - name: Embedding truncation via the dimensions parameter
         working-directory: server-portable
         run: bun test-embedding-dimensions.ts

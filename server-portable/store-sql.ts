@@ -178,7 +178,7 @@ export class SqlStore implements ThoughtStore {
     content: string;
     payload: { metadata: Record<string, unknown> };
     embedding: number[];
-    chunks?: { content: string; embedding: number[] }[];
+    chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
@@ -211,7 +211,7 @@ export class SqlStore implements ThoughtStore {
             ${opts.content}::text,
             ${envelope}::jsonb,
             ${toVector(opts.embedding)}::vector,
-            ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding) }))}::jsonb
+            ${chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }))}::jsonb
           ) AS r`
       : await this.sql`
           SELECT upsert_thought(
@@ -230,13 +230,14 @@ export class SqlStore implements ThoughtStore {
     content?: string;
     metadataPatch?: Record<string, unknown>;
     embedding?: number[];
-    chunks?: { content: string; embedding: number[] }[];
+    chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: toVector(c.embedding),
+      context: c.context ?? null,
     }));
     const rows = await this.sql`
       SELECT update_thought(
