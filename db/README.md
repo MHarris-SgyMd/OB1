@@ -152,8 +152,10 @@ tell the two kinds of chunk apart: a window is not a substring of its parent
 (`chunkContent` joins paragraph segments with a space), so nothing is recoverable
 by comparing text. `preflight.ts` counts both and reports a corpus captured under
 both settings. Turning the flag on without applying 013 is a **failure** at
-startup, not a warning: the functions from 007 and 009 would not select the key,
-so every blurb would be generated, embedded, and then dropped with no record.
+startup, not a warning: the functions from 007 and 009 would not select the key.
+The blurb still reaches the vector — the server composes the embedded text before
+the database sees it — so what is dropped is the record, and with it any way to
+tell a contextualized chunk from a bare one afterwards.
 
 There is no backfill. Re-contextualizing an existing corpus is a bulk pass over
 every chunked thought, which wants the claim/lease table from SMD-946.

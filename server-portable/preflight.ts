@@ -194,6 +194,25 @@ if (configFailed) {
   }
 
   if (built) {
+    /**
+     * Every schema check below is gated on the SQL store, because they read
+     * pg_proc and information_schema over a direct connection that the PostgREST
+     * path does not have. That has been true since migration 004's check and is
+     * a limitation of the deployment shape rather than of any one migration.
+     *
+     * It is called out here only for chunk context, because that is the setting
+     * whose unchecked state is silent in a way the others are not: with the flag
+     * on against a database still at 012, the RPC accepts the extra key and
+     * ignores it, so blurbs reach the vector and nothing records that they did.
+     * Every other gated check fails loudly at first use instead.
+     */
+    const { CHUNK_CONTEXT: wantCtxAnywhere } = await import("../db/config.mjs");
+    if (built.kind !== "sql" && wantCtxAnywhere) {
+      add("chunk context", "warn",
+          "OB1_CHUNK_CONTEXT is on, but the PostgREST store cannot be checked against the schema from here — if migration 013 is not applied, every blurb is embedded and none is recorded",
+          "Confirm db/migrations/013_chunk_context.sql is applied, or run preflight once with OB1_STORE=sql against the same database.");
+    }
+
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
     try {
@@ -315,7 +334,7 @@ if (configFailed) {
         const haveCtxCol = Number(ctxCol[0].c) >= 1;
         if (wantContext && !haveCtxCol) {
           add("chunk context", "fail",
-              "OB1_CHUNK_CONTEXT is on but thought_chunks.context does not exist — every blurb would be embedded and then discarded, with no record that it happened",
+              "OB1_CHUNK_CONTEXT is on but thought_chunks.context does not exist — the chunk writers from 007 and 009 do not select the key, so every blurb would reach the VECTOR and none would be recorded: captures would silently become contextualized with nothing able to tell them apart from bare ones afterwards",
               "Apply db/migrations/013_chunk_context.sql.");
         } else if (!haveCtxCol) {
           add("chunk context", "ok", "off (migration 013 not applied)");

@@ -214,8 +214,8 @@ else {
 
   const noColumnOn = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(noColumnOn.code !== 0, "the flag on without 013 refuses to start");
-  assert(/every blurb would be embedded and then discarded/.test(noColumnOn.out),
-         "…and says what would silently happen, not just which migration is missing");
+  assert(/every blurb would reach the VECTOR and none would be recorded/.test(noColumnOn.out),
+         "…and says what would silently happen — the blurb lands in the embedding, only the record is lost");
   assert(/013_chunk_context\.sql/.test(noColumnOn.out), "…with the migration that fixes it");
 
   await ctx.unsafe("ALTER TABLE thought_chunks ADD COLUMN IF NOT EXISTS context text");

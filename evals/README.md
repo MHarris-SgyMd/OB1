@@ -1189,10 +1189,17 @@ publishing one against a query set that does not mean what its label says.
 
 ## Contextual retrieval: measured, and it makes things worse here
 
-`eval-contextual.ts`, run as `bun run contextual`. Anthropic's Contextual
-Retrieval (September 2024) prepends a short generated blurb to each chunk before
-embedding it, and reports roughly a 35% reduction in top-20 retrieval failure.
-Those are their numbers on their corpora. Here:
+`eval-contextual.ts`, run as `bun run contextual`. It needs a running Ollama and
+the rebuilt corpus at `/tmp/linear-corpus-full.json` (`bun build-linear-corpus.ts`
+— the output stays in `/tmp`, out of git, and `OB1_EVAL_CORPUS` points elsewhere).
+No database: it does the ranking arithmetic itself, so nothing here needs a
+container. The generated blurbs are cached beside the corpus in `/tmp`, keyed by
+a digest of the prompt so editing a template in `db/config.mjs` regenerates them
+rather than quietly reusing answers to a question no longer being asked.
+
+Anthropic's Contextual Retrieval (September 2024) prepends a short generated
+blurb to each chunk before embedding it, and reports roughly a 35% reduction in
+top-20 retrieval failure. Those are their numbers on their corpora. Here:
 
 | arm | chunked-doc MRR | detail-query MRR | helped | hurt |
 | --- | ---: | ---: | ---: | ---: |
@@ -1276,6 +1283,14 @@ It had been the first window's vector since migration 007, to avoid sending an
 over-batch request that Ollama answers by silently truncating. Sound when
 written, and no longer true of the configured default — which is the argument for
 the ceiling probe being part of this harness rather than a fact anyone remembers.
+
+### Reproducibility
+
+Every number above was re-derived from an empty cache after the prompt-keyed
+caching landed — 126 fresh generations, and all eight arms came back identical to
+three decimal places on both tables. Blurb generation runs at temperature 0 with
+reasoning off, matching what the server sends, so the tables are a property of
+the corpus and the models rather than of one sampling run.
 
 ### What this harness deliberately does not claim
 

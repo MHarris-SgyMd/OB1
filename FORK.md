@@ -1187,8 +1187,9 @@ corpus, and the answer is the column rather than the policy —
 many went in bare, and `preflight.ts` counts both across the corpus and reports a
 brain captured under both settings. Turning the flag on without migration 013 is
 a startup **failure**, not a warning: 007 and 009's functions would not select
-the key, so every blurb would be generated, embedded, and dropped with nothing
-recording it.
+the key. The blurb still reaches the vector — the server composes the embedded
+text before the database sees anything — so what is lost is the record, and with
+it any way to tell a contextualized chunk from a bare one ever again.
 
 **A defect the review found next door.** `deploy/compose.yaml` forwards an
 explicit whitelist of environment variables, not the whole environment, so a
@@ -1273,7 +1274,7 @@ bun run test:sql && bun run test:e2e            # needs podman or docker
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker
-cd .. && node scripts/check-fork-consistency.mjs
+cd .. && bun scripts/check-fork-consistency.mjs   # CI runs it under node; bun runs it too
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
   -m "Upstream main @ $(git rev-parse upstream/main)"
