@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, migrationValues, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,6 +96,55 @@ export function substitute(sql: string, opts: SchemaOptions): string {
 }
 
 /**
+ * Refuse to drop a database that is not obviously a throwaway.
+ *
+ * Every suite and bench in this repo resets the schema, and two of them then
+ * load internal engineering data into what they cleared. Pointed at anything
+ * real by a stale `DATABASE_URL` in a shell, one command destroys that database
+ * with no prompt. The check lives in `dropSchema` so every caller that goes
+ * through it inherits it; the one eval that drops tables on its own calls it
+ * directly.
+ *
+ * "Throwaway" means LOOPBACK. Not "local enough to skip a credential": the
+ * fifth review pass suggested sharing
+ * preflight's `isLocalHostname`, which accepts RFC1918 addresses, the container
+ * aliases and compose service names, and the sixth caught what that widened —
+ * a LAN-hosted stack at 192.168.x.x holding a real database is the documented
+ * deployment topology, and a stale DATABASE_URL to it would have been dropped
+ * without a prompt. The two questions have different answers. An EMPTY host is
+ * refused rather than trusted: Bun's SQL client resolves `postgres:///db`
+ * through PGHOST, exactly as libpq does, so an empty hostname is whatever the
+ * shell says it is. IPv6 loopback is `[::1]` as WHATWG URL reports it. A
+ * libpq-style socket URL (`postgres://u@/db?host=/var/run/...`) does not parse
+ * and is refused; the client does not honour that form either, so the override
+ * is the way through for it.
+ *
+ * `OB1_ALLOW_REMOTE_DB=1` is the deliberate override, which is a thing you have
+ * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
+ * honoured too so a shell profile that set it keeps working.
+ */
+export function assertThrowawayDatabase(url: string): void {
+  if (process.env.OB1_ALLOW_REMOTE_DB === "1" || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
+  let host: string | null = null;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    /* unparseable: refuse below */
+  }
+  const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+  if (host !== null && LOOPBACK.has(host)) return;
+  const shown = host === null ? "an unparseable URL" : host === "" ? "a URL with no host (the client would resolve PGHOST)" : host;
+  console.error(
+    `  Refusing to drop the schema at ${shown}.\n\n` +
+      `  This command DROPS every table Open Brain owns in that database. That is\n` +
+      `  safe against a throwaway container and destructive against anything else.\n` +
+      `  Run it under db/with-postgres.sh, name a loopback host explicitly, or set\n` +
+      `  OB1_ALLOW_REMOTE_DB=1 if you are certain.`
+  );
+  process.exit(2);
+}
+
+/**
  * Drop every table and function the schema owns.
  *
  * Separate from applying, because one suite legitimately needs to observe the
@@ -104,10 +153,25 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * exists for a single caller.
  */
 export async function dropSchema(url: string): Promise<void> {
+  assertThrowawayDatabase(url);
   const admin = new SQL({ url, max: 1 });
   try {
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
+    // 014 seeds two database-level settings. They are not schema, so a fresh
+    // start must clear them too, or every later run inherits whatever the
+    // previous one left. Best effort: only the owner may, and a throwaway
+    // container's role is. The RESET names hnsw.* settings, which a
+    // non-superuser may touch only once pgvector is loaded in the session —
+    // dropping the HNSW indexes above loads it incidentally, but not when the
+    // tables were already gone — so load it explicitly first.
+    try {
+      await admin`SELECT '[1]'::vector`;
+      const [{ db }] = await admin`SELECT current_database() AS db`;
+      for (const bound of HNSW_BOUNDS) await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET ${bound}`);
+    } catch {
+      /* not the owner of the database, or no pgvector to load — left as found */
+    }
   } finally {
     await admin.close();
   }
@@ -187,4 +251,44 @@ export function requireDatabaseUrl(script: string): string {
     process.exit(2);
   }
   return url;
+}
+
+/**
+ * A seeded PRNG for suites that need reproducible random vectors, so the same
+ * seed produces the same rows on every machine and in CI. bench-hnsw.ts,
+ * test-live.ts and evals/eval-filtered.ts each carried a copy; this is the one.
+ *
+ * mulberry32, in 32-bit integer arithmetic via Math.imul. The copy this
+ * replaced was an LCG written as `s * 1103515245` in doubles: the product
+ * passes 2^53, the low bits become rounding artefacts, and the stream collapsed
+ * into a 10,466-draw cycle. At 100,000 bench rows that meant ~10,000 distinct
+ * vectors, each stored up to ten times, and every "random" query bit-identical
+ * to a stored row — exactly the query-is-its-own-nearest-neighbour confound the
+ * bench's header says its design avoids. Found by the second review pass; the
+ * numbers published before it were re-measured.
+ */
+export function seededRandom(seed: number): {
+  rnd: () => number;
+  gauss: () => number;
+  unitVector: (dim: number) => number[];
+} {
+  let a = seed >>> 0;
+  const rnd = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const gauss = () => {
+    const u = rnd() || 1e-9;
+    const v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const unitVector = (dim: number) => {
+    const v = Array.from({ length: dim }, gauss);
+    const n = Math.hypot(...v);
+    return v.map((x) => x / n);
+  };
+  return { rnd, gauss, unitVector };
 }

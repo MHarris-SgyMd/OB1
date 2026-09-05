@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-seven numbered changes on top of the pin. Seven fix defects found in an
+Twenty-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–27 are the numbered `###` sections** further down, which is
+sections. Changes **18–28 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -148,6 +148,9 @@ db/bench-keyword.ts              # fix 26  (new file — index reach and plan-ca
 evals/eval-keyword.ts            # fix 26  (new file — where vector search misses)
 db/migrations/013_*.sql          # fix 27  (new file — thought_chunks.context)
 evals/eval-contextual.ts         # fix 27  (new file — contextual retrieval, measured)
+db/migrations/014_*.sql          # fix 28  (new file — the filter inside the scan)
+db/bench-hnsw.ts                 # fix 28  (new file — filtered recall against an exact scan)
+evals/eval-filtered.ts           # fix 28  (new file — the same, on the real corpus)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
@@ -1213,6 +1216,387 @@ bounds memory access` inlined — and it reproduces with migrations 001-012 appl
 and no 013, at any position in the file, on a second instance as well as the
 shared one. It is the harness, not the migration, and the round trip belongs
 against a real server anyway.
+
+### 28. A filtered search reaches the index — and the overfetch that never did
+
+Migration 014 (Linear SMD-968; upstream
+[#417](https://github.com/NateBJones-Projects/OB1/issues/417)). The issue
+reports that `match_thoughts` loses recall under a metadata filter: pgvector's
+HNSW scan hands over its first `hnsw.ef_search` candidates — 40 by default — and
+a filter applied after that sees only those 40. Upstream's fix is one line,
+`SET LOCAL hnsw.ef_search = 200`.
+
+**That line could not have fixed this fork.** 007's function took each
+candidate CTE's top `v_fetch` rows by distance — `LIMIT GREATEST(match_count *
+4, 20)` — and applied `t.metadata @> filter` to the merged result afterwards. The
+explicit LIMIT capped the candidate set before the filter ran, whatever
+`ef_search` said. A filter matching 1% of the corpus saw 1% of 40 candidates.
+
+**Who it reached, stated plainly because the first two drafts of this section
+overstated it.** The server's own `search_thoughts` has no filter input and
+passes `{}` on every call, in both `server/index.ts` and `server-portable/`.
+So the filtered-recall defect never touched first-party search; it reached
+direct SQL callers, PostgREST RPC callers, and community code that sends its own
+filter — the enhanced-mcp integration's `metadata_filter`, the local-brain
+recipe's search function. The overfetch defect below did reach first-party
+callers, above ten results. The third review pass caught the framing; the
+Linear ticket carries the same correction.
+
+**Measured first, on random vectors.** `db/bench-hnsw.ts`, 64-dimensional unit
+vectors, planted filter tiers, 10 rows asked, against an exact scan of the same
+rows with index scans disabled:
+
+| rows | filter matches | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 50% | 10.0 | 7.9 | 0/50 | 10.0 | 9.3 | 0/50 |
+| 10,000 | 10% | 5.4 | 4.9 | 1/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 1% | 0.8 | 0.8 | 23/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 0.1% (9 rows) | 0.1 | 0.1 | 46/50 | 9.0 | 9.0 | 0/50 |
+| 100,000 | 50% | 10.0 | 4.5 | 0/50 | 10.0 | 6.3 | 0/50 |
+| 100,000 | 10% | 6.0 | 3.9 | 0/50 | 10.0 | 8.9 | 0/50 |
+| 100,000 | 1% | 0.5 | 0.5 | 28/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 0.1% | 0.1 | 0.1 | 47/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 0.01% (6 rows) | 0.0 | 0.0 | 50/50 | 6.0 | 6.0 | 0/50 |
+
+Two things in the after column are not the fix. The 6.3 and 8.9 at 100,000
+rows for the broad filters are the HNSW approximation — random uniform vectors
+are the index's hardest case, and 007 scored 4.5 and 3.9 on the same rows; the
+iterative scan improves it because it keeps going, but `ef_search` is unchanged
+and so is the index. And the two thinnest rows return fewer than ten because
+fewer than ten exist; they are there to show the scan reaching past its
+candidate budget for every matching row and finding them all.
+
+**These tables were measured seven times.** The first bench's random generator was an
+LCG multiplied in doubles; past 2^53 its low bits are rounding noise and the
+stream repeats every 10,466 draws, so at 100,000 rows the corpus held ~10,000
+distinct vectors stored up to ten times each and every "random" query was
+bit-identical to a stored row — the query-is-its-own-nearest-neighbour confound
+this bench's header says its design avoids. The second review pass found it.
+The generator is now mulberry32 in 32-bit arithmetic, the bench refuses to run
+if any query lies within cosine 0.99 of a stored row (it prints the nearest,
+0.56–0.59 here), and every number in this section is from the re-measurement.
+The shape of the finding did not change; the broad-filter approximation, the
+default path's cost and the scan bound's behaviour did, and are reported as
+re-measured. The third measurement came after the sixth review pass found that
+the bench's session predated the migration that seeds the walk bounds at
+database level, and `RESET ALL` does not fetch those — so the bounds section D
+claimed to exercise were not in force. The bench now reconnects and asserts the
+session sees them before measuring. The fourth came after the ninth pass
+replaced the body's OR with two branches; the fifth after the tenth added the
+exact branch and raised the ceiling (below); the sixth after the eleventh
+folded the routing count into that branch; the seventh after the twelfth made
+that count ignore rows nothing can score. The recall columns have moved by at
+most 0.2 since the second; the latencies have moved a great deal, and the
+tables are from the seventh run.
+
+**Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
+real labels, stored the way the server stores them (whole-content vector plus
+bare windows), searched through the deployed function in a real Postgres. The
+query is a document's title; the filter is a label that document does **not**
+carry; the right answer is the exact top-10 within the label:
+
+| filter | share of corpus | before: returned | in exact top-10 | empty | after: returned | in exact top-10 | empty |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `api` | 36% | 9.9 | 8.5 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `web` | 14% | 6.4 | 5.8 | 0/60 | 10.0 | 10.0 | 0/60 |
+| `portal` | 4.5% | 1.6 | 1.6 | 31/60 | 10.0 | 10.0 | 0/60 |
+| `design` | 2.7% | 2.0 | 1.9 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 10% | 8.4% | 4.3 | 3.7 | 0/60 | 10.0 | 10.0 | 0/60 |
+| seeded 2% | 0.7% | 0.2 | 0.2 | 48/60 | 3.0 | 3.0 | 0/60 |
+
+Paired: 306 of 360 filtered queries improved, none worsened. (The seeded 2% tier
+landed on three documents, so three is the whole answer; 007 found none of them
+on 48 of 60 queries.) Filtered to a label the document
+**does** carry, the target's rank is unchanged on all 316 queries — MRR 0.938
+both ways — and the other nine rows go from 7.9 to 9.9 in the exact top-10.
+Unfiltered, all 441 queries return identical rows before and after; the run
+exits non-zero if they do not.
+
+**Why the query design matters, and the draft that got it wrong.** A query
+formed by perturbing the target's own vector makes the target the global nearest
+neighbour, which no post-filter can lose. The first draft of the bench did that
+and reported 50/50 recall for a function that returns nothing at 1%. Title
+queries have the same property on this corpus: the target is the global nearest
+neighbour of its title (MRR 0.90), so "does the title still find its document
+under a filter" would have called the defect harmless. The task a filter exists
+for is "things about X among my `portal` issues", where the best `portal` match
+is not the global best match — so the eval filters to a label the query's
+document lacks and scores against the exact answer within it.
+
+**What changed.**
+
+- The filter moves inside both CTEs. For `thoughts` it is a plain Filter on the
+  index scan. For `thought_chunks` it is a **join** to the parent row, not an
+  EXISTS: inside an OR the planner cannot turn EXISTS into a semi-join and ran it
+  as a hashed subplan — one full pass over `thoughts` per query, whatever the
+  filter. Measured, that alone made the new function 3x the old one's latency at
+  10,000 rows. The join is one primary-key lookup per candidate, and it exists
+  only in the walk branch; the unfiltered branch has no predicate and no join.
+- **A thin filter is answered exactly, with no index walk.** The function
+  collects the matching thoughts' ids through the GIN index, at most the
+  threshold plus one of them, and when at most `GREATEST(v_fetch * 4, 1000)`
+  match it scores those rows and their chunks directly by id — primary-key
+  probes and chunk-index probes with that array, one pass over the filter (the
+  tenth-pass draft counted first and re-evaluated the predicate to build the
+  matched set; the eleventh folded the two into one). Only rows a branch can
+  score count towards the threshold: a thought captured through the 2-arg
+  fallback has no vector and no chunks, and the twelfth pass found that
+  counting those could send a filter with 1,200 matches and 30 scoreable rows
+  to the walk, which needs 40 passing rows that do not exist and returns short
+  at the bound; `test-schema.ts` [8d] pins the exclusion with a walk clamped to
+  one tuple. The tenth review pass forced the branch: the
+  enhanced-mcp integration sends `exclude_restricted: true` on every semantic
+  call and nothing writes that key, so every one of its calls matched nothing,
+  and the walk-only body ran each CTE to the scan bound to return the same
+  empty answer 007 gave in 40 candidates — 60+ ms and up to 32 MB per scan,
+  per call. It now costs one GIN probe. The same branch takes the planner's
+  knife-edge away for every thin filter on a large table (the 2 ms / 190 ms
+  variance below was that edge). Above the threshold the walk has at least
+  that many rows to find its candidates among, so it visits about `N / 25`
+  tuples at the default count and the seeded bounds are its ceiling on tables
+  past ~2.5 million rows; bench section D runs the walk's own statement on the
+  thin filters to show the bounds working when it is reached.
+- **A `RETURN QUERY` branch per path, not an OR.** Drafts three through eight kept
+  a single query text with `v_unfiltered OR metadata @> filter` and paid for it
+  in layers: the OR against a parameter hid the GIN index from the generic plan,
+  so the function had to force custom plans (`plan_cache_mode`), so the chunk
+  join had to be LEFT for join removal to fire when the OR folded, so the next
+  author needed a paragraph about why a boolean local was load-bearing — and
+  the "forcing the custom plan is free" number was never re-measured with its
+  neighbours. The ninth review pass named the OR as the root. With the
+  predicate a plain `metadata @> filter` in its own branch, the planner has
+  the GIN index whichever plan mode plpgsql picks, picking is a latency choice
+  rather than a recall one (the plans are below), and the only function-level
+  SET is the scan mode. The two texts differ in the predicate and the
+  chunk-side join and nothing else; `test-schema.ts` holds them to the same
+  answer on the same rows. The earlier objection — a query
+  defined twice — is real and was judged smaller than what the single text
+  cost.
+- `hnsw.max_scan_tuples = 100000` **and** `hnsw.scan_mem_multiplier = 8`. The
+  first pass of this change set only the tuple cap and reported that raising it
+  from 20,000 to 400,000 changed nothing; the second review pass found why:
+  pgvector also stops the iterative scan when its memory passes
+  `work_mem * scan_mem_multiplier`, 4 MB by default, about 19,000 visited
+  tuples — so the tuple cap was never the operative bound. Re-measured with
+  valid data (below), the memory bound left a 15-row filter at 6.3 of 10 and a
+  110-row filter at 42 of 50 under the generic plan; with the multiplier at 8
+  both complete. Arithmetic for the cap: `v_fetch / selectivity`; pgvector's
+  default covers a 0.1% filter to `match_count` 5 on a million rows, 100,000
+  covers 25. They are seeded ONCE at **database** level by a DO block in the
+  migration, and only where nothing has set them — not declared on the function.
+  The third and fourth drafts put them on the function and then built a
+  compensating layer: a function-level SET overrides any database or role value
+  and is rewritten by every `CREATE OR REPLACE`, so an operator's tuning had
+  nowhere durable to live except a template variable threaded through config,
+  compose, tests and preflight, each of which then needed its own validation.
+  The fifth review pass named that for what it was. One `ALTER DATABASE … SET`
+  by the owner is now the whole tuning surface: every session honours it, no
+  redefinition of the function touches it, and re-running 014 leaves it alone —
+  `test-schema.ts` asserts both the seeding and the leaving-alone. Where the
+  migrating role does not own the database the DO block warns with the two
+  statements and the migration still applies; the fix does not depend on the
+  bounds, only the depth of a rare walk does.
+- `match_count` is clamped inside the function, as 012 clamps its `p_limit` —
+  to 500, the largest count any caller in the repo sends (enhanced-mcp asks for
+  up to 500 under a date filter, rest-api and agent-memory-api up to 200), and
+  `search_thoughts` bounds its own `limit` to 1–100 in both servers, as the
+  keyword tool already did. 007 capped each CTE near 40 candidates whatever
+  was asked; this function honours `v_fetch`, so an unbounded count became
+  unbounded scan work — `limit: 5000` would walk each CTE to 20,000 passing
+  candidates — and the callers who send a filter are outside the servers'
+  bound. What the clamp changes, named: 0 and negative counts return one row,
+  NULL returns ten, a count above 500 returns 500 and raises a NOTICE saying
+  so. The fourth pass asked for the tool bound, the sixth for the clamp, the
+  seventh for the edges to be stated and tested, and the tenth found the
+  ceiling — 100, borrowed from 012 without 012's `total_count` — unmeasured and
+  cutting two integrations' post-filter headroom with no signal; it is now the
+  callers' maximum, timed in bench section A, and one definition in
+  `config.mjs` templated into the body.
+- The function body carries a contract sentinel, `-- ob1:filter-inside-scan`,
+  and preflight decides whether the deployed body has 014's semantics by that
+  sentinel plus a behavioural probe (a NULL filter returns a row under 014 and
+  nothing under any earlier body) rather than by grepping for a local
+  variable's name. The seventh pass moved the marker off the local's name and
+  into `COMMENT ON FUNCTION`; the eighth caught that a replace preserves the
+  OID `pg_description` is keyed on, so a successor that forgot its own COMMENT
+  inherited the claim — hence the body, which every replace rewrites, and the
+  probe. A successor that keeps the in-scan filter carries the sentinel; one
+  that reintroduces a post-LIMIT filter must not — and a successor that keeps
+  the sentinel but changes how a NULL filter is treated gets its own verdict
+  from the probe rather than the pre-014 remedy, which would have re-run 014
+  over it (ninth pass). Preflight also warns whenever the walk bounds are set
+  nowhere — judged by `pg_settings.source`, so a value from `ALTER SYSTEM`, a
+  parameter group or `ALTER ROLE` counts as set, and an operator who lowered one
+  on purpose is tuning, not failing — however 014 was recorded: `--baseline`
+  never runs the DO block and a non-owner cannot. The seed guard in 014 and the
+  migrator's check ask a narrower question — set where EVERY role sees it,
+  meaning server configuration or the database — because precedence is role >
+  database > server: a database-level seed would silently undo an operator's
+  `ALTER SYSTEM` (verified; the eighth-pass guard, which looked only for a
+  database-level row, would have), but it cannot touch a role-level value, and
+  a role-level value reaches one role. The ninth-pass guard counted any
+  non-default source, so an `ALTER ROLE` on the migrating role suppressed the
+  seed for everyone else, silently (tenth pass); `test-schema.ts` now sets the
+  value in the session and asserts the seed still lands. Preflight keeps the
+  wider question, since for the server's own connection a role-level value is
+  in force. One limit, named in the header and `.env.example`: the migrating
+  session sees server configuration as of its connect, so an `ALTER SYSTEM`
+  that has not been reloaded looks unset and is seeded over; reload before
+  migrating (eleventh pass). And the migrator's own check did not run at all
+  for one commit — it bound two JS arrays into `= ANY(...)` bare, which Bun
+  sends as comma-joined text, so every run fell into the catch that turns an
+  error into a soft warning and the remedy it exists to print was unreachable;
+  the live test asserted only the exit code and "applied N". It now binds
+  through `sql.array`, reads the seeded names from the migration's own text,
+  and the live test asserts neither warning appears.
+- The function-level SET is NOT a problem at call time, though the eighth pass
+  documented it as one and prescribed casting the argument. CREATE FUNCTION
+  and ALTER DATABASE validate a SET clause up front and refuse an unknown
+  `hnsw.*` placeholder to a non-superuser; function entry applies `proconfig`
+  through the ordinary set_config path, where the placeholder is user-settable
+  and pgvector converts it when the body's `<=>` loads the library. The tenth
+  pass reproduced it: a non-superuser owner and a plain reader, each in a
+  fresh session whose first statement fed an existing `embedding` value into
+  match_thoughts uncast, got their rows with `relaxed_order` in force, while
+  CREATE with the same clause in the same cold session was refused. The header
+  now says so; nothing in the repo had tested the earlier claim.
+- `hnsw.iterative_scan = relaxed_order`, declared as a **function-level SET**.
+  This is what makes an in-scan filter correct: without it the scan stops at its
+  first `ef_search` candidates, filter or no filter. A function-level SET is
+  scoped to the call and restored on exit — nothing leaks into the caller's
+  transaction as `SET LOCAL` would, and nothing depends on a pool preserving
+  session state. It is also validated at CREATE: on pgvector before 0.8.0 the
+  migration fails with `invalid configuration parameter name
+  "hnsw.iterative_scan"` — pgvector reserves the prefix — which is the intended
+  failure, reproduced on 0.7.4. That validation needs pgvector's library loaded
+  in the session, and the migration now loads it explicitly with a
+  `SELECT '[1]'::vector` on its first line. Earlier drafts credited the
+  `vector(N)` typmod in the signature with forcing the load; that was true only
+  for a superuser. Postgres checks a function's SET clauses before it resolves
+  its parameter types, and a non-superuser owner — Supabase's `postgres` role,
+  Neon, an RDS master user — in a session that had not yet touched pgvector was
+  refused with `permission denied to set parameter "hnsw.iterative_scan"` on
+  the upgrade path. Fresh installs passed because 001 had loaded the library in
+  the same session; every verification here ran as a superuser and never saw
+  it. The seventh review pass reproduced it. Every printed `ALTER DATABASE`
+  remedy now carries the same load. A version of this function that silently
+  ran without the setting would have exactly the recall 014 exists to fix.
+- `relaxed_order`, not `strict_order`: the final `ORDER BY b.sim DESC` re-sorts
+  the merged candidates anyway.
+- `hnsw.ef_search` is left alone. At the default `match_count`, `v_fetch` is 40
+  and the first batch satisfies the LIMIT, so the default unfiltered path returns
+  the same rows — asserted row for row on 441 real queries by the eval's
+  unfiltered control, which exits non-zero on any difference, and by row count
+  in the bench.
+- A NULL filter is unfiltered. 007 evaluated `NULL = '{}' OR metadata @> NULL`,
+  which excluded every row.
+- The plans, read from the deployed body (bench section C). The exact branch
+  has one shape under either plan mode: a GIN bitmap on `thoughts` for the
+  matched set, then index probes into `thought_chunks` with the matched ids as
+  an array — the array form is what keeps the planner off a scan of the whole
+  chunk table; written as a join, or as a LATERAL that Postgres pulls back up
+  into one, its fixed 1% estimate for `@>` chose a sequential scan plus hash,
+  6–11 ms at 100,000 rows and growing with the table rather than the match
+  (two intermediate runs of this bench measured exactly that). The walk branch
+  under the custom plan walks the HNSW index on both sides; under the generic
+  plan, where the filter is a parameter, the `thoughts` side takes the GIN
+  index and the chunk side walks its own HNSW index and looks each candidate's
+  parent up. Both are exact for the filter, because the walk is iterative and
+  bounded.
+
+**The second defect the mechanism predicted.** `ORDER BY embedding <=> q LIMIT
+200` returns 40 rows on a 10,000-row table, because the scan returns at most
+`ef_search` and stops. So `v_fetch` above 40 was never honoured: with no chunk
+rows `match_count = 50` returned 40, and with chunks the two CTEs together capped
+near 80 — asked 100, got 68 to 79. 007's header calling the factor "a recall
+budget, not a guess" was true only at `match_count <= 10`. The iterative scan
+fixes this too: asked 100, got 100; asked 500 — the ceiling — got 500, in
+6.8 ms at 10,000 rows and 28 ms at 100,000. (007 returned 69–77 for that ask
+at 100,000 rows, and 500 at 10,000 only because the planner abandoned the
+index for a sequential scan.)
+
+**Cost, and the plan it no longer depends on.** The default path — unfiltered,
+ten rows, what every first-party caller sends — costs what it did within the
+run-to-run noise of this machine: median 0.62 → 0.67 ms at 10,000 rows and
+1.26 → 1.37 ms at 100,000 in the seventh run, 0.61 → 0.61 and 1.32 → 1.28 in
+the fifth; its branch has no predicate and no join. A thin filter — at most
+1,000 matching thoughts, the exact branch — costs less than an unfiltered call:
+at 100,000 rows 0.18 ms for a filter matching nothing, 0.24 ms for one matching
+6 rows, 0.51 for 90, 2.6 for 998; at 10,000 rows 0.17–0.41 ms. The walk-only
+body had paid 60+ ms for the never-matching case, and between 0.7 and 190 ms
+for the thin tiers depending on which plan the planner's statistics sample
+happened to favour that run (the ninth pass documented the variance; one run
+took the 1% and 0.1% tiers to the GIN index at 2.2 and 0.7 ms, the next walked
+both sides at 44 and 190 ms, same seeded data). There is no plan to favour now:
+section C shows the exact branch as a GIN bitmap on `thoughts` and index probes
+into `thought_chunks` under both plan modes. The statement every filtered call
+runs first — the capped collection of matching ids that routes between the
+branches — is explained on its own: 0.01 ms for the empty filter, and for the
+50% filter at 100,000 rows 2.5 ms under either plan mode as a GIN bitmap over
+50,000 matches, because GIN builds the whole bitmap before the LIMIT can stop
+anything; that cost grows with the matches, and SMD-1018 measures it from a
+million rows up (the previous run had seen the custom plan take a sequential
+scan with a LIMIT at 0.4 ms for the same tier; the twelfth pass's scoreability
+predicate tipped the estimate to the bitmap — the planner's choice, complete
+either way). Broad filters take the walk: 1.6 ms at 10,000 rows for the 50%
+and 10% tiers, 5.0 ms (50%) and 9.0 ms (10%) at 100,000, where section C shows
+the custom plan walking both sides (7.9 ms) and the generic plan taking GIN for
+`thoughts` and walking the chunk index (7.8 ms) — the same rows either
+way, since the walk is iterative and bounded, and the function declares no plan
+mode. Section D runs the walk's own statement on the thin and empty filters at
+100,000 rows: about 63 ms each, every matching row returned, because both scan
+bounds are in force (seeded at database level, the session reconnected to read
+them). That is what the function no longer pays for those filters, and what
+the bounds buy when a table large enough to walk for them arrives — past ~2.5
+million rows at the default count, ~400,000 at the ceiling of 500.
+
+**Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
+containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
+tag, since 014 has a version floor. `preflight.ts` decides on the function's
+BODY first — by the `ob1:filter-inside-scan` sentinel in the function source,
+confirmed by a NULL-filter probe when there is a row to probe with — because no
+setting can repair 007's LIMIT-before-filter, and only then on whether an
+iterative scan is
+in force, from the function's own SET clause or inherited from the database or
+role. The version is consulted last, to explain an absence or to advise
+`ALTER EXTENSION vector UPDATE` where the catalog record lags a working library
+(the `hnsw.*` settings come from the loaded library, not from
+`pg_extension.extversion`; a new binary over an old volume runs 014 correctly
+while the catalog says 0.7.x, reproduced by the second review pass). The lookup
+matches its siblings (name, namespace, argument count) rather than casting a
+signature through `search_path`, the remedy is worded by the ledger since
+"apply 014" is a no-op when 014 is recorded and a redefinition dropped the
+clauses, the effective walk bounds are printed, and the whole check has its own
+error boundary so a hardened server that hides `pg_available_extensions` costs
+one warning rather than every check after it. On the PostgREST store, where the
+catalog cannot be read, it probes: one RPC with a NULL filter returns a row
+under 014's body and nothing under any earlier one — after confirming some row
+has an embedding at all, and treating a failed probe as a skip rather than
+evidence. (The first version was an unconditional warning that could never be
+cleared; passes three, four and five each caught a case.) The migrator judges
+the pgvector library version up front and refuses 014 itself, in `--dry-run`
+too, while still applying earlier pending migrations and still seeding the
+ledger under `--baseline`, and after 014 it reads `pg_db_role_setting` and
+prints the two `ALTER DATABASE` statements when a non-owner role could not seed
+the bounds — the DO block's WARNING is real but this client surfaces none. The
+destructive guard the evals carried — refuse to drop a schema on a host that is
+not this machine — lives in `dropSchema` now, and the one eval that drops
+tables itself calls it. "This machine" means loopback, and nothing wider: the
+fifth pass suggested sharing preflight's local-endpoint
+predicate, which accepts RFC1918 and compose service names, and the sixth
+caught that a LAN-hosted stack holding a real database is the documented
+topology — so that widening is reverted. An EMPTY host is refused, because the
+client resolves it through `PGHOST`. It honours the old
+`OB1_EVAL_ALLOW_REMOTE_DB=1` alongside `OB1_ALLOW_REMOTE_DB=1`.
+`test-schema.ts` [8b]
+arranges sixty nearer rows in front of the filtered ones and asserts both come
+back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
+a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
+
+**Not done here.** SMD-969 asks whether the *unfiltered* candidate scan reaches
+the HNSW index at scale; this bench explains only the filtered case, and only at
+1%. SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
+body so they do not reintroduce the post-filter.
 
 ## Detached from the fork network
 

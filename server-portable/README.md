@@ -120,11 +120,27 @@ On a container these are ordinary environment variables. On Workers use
 committed. For `wrangler dev`, copy `.dev.vars.example` to `.dev.vars`
 (gitignored).
 
-### 4. Apply the migration
+### 4. Apply the migrations
 
 `../db/migrations/004_upsert_thought_with_embedding.sql` is still required for
 the atomic capture path. Without it, capture falls back to the two-step write and
 logs a warning.
+
+Migration 014 matters here too. The guide's `match_thoughts` applies a metadata
+filter *after* choosing its candidates, so a selective filter silently returns
+fewer rows than match; preflight probes the RPC on every start and warns while
+that body is in place. To clear it, run the fork's migrator against the Supabase
+project's **direct** connection string (Project Settings → Database → connection
+string, not the pooler) — every migration is idempotent and 014 needs pgvector
+0.8.0, which Supabase ships:
+
+```bash
+cd ../db && bun migrate.ts --dry-run --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
+cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5432/postgres'
+```
+
+Or record the ones the dashboard already applied with `--baseline` and apply the
+rest; `db/README.md` §4 covers both routes.
 
 ## Expected outcome
 
@@ -138,7 +154,7 @@ bun run cf:build          # ~256 KiB gzipped
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`
-to start and remove a throwaway `pgvector/pgvector:pg16`.
+to start and remove a throwaway `pgvector/pgvector:0.8.6-pg16`.
 
 ## Testing
 

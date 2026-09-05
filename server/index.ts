@@ -264,7 +264,13 @@ function buildServer(): McpServer {
       },
       inputSchema: {
         query: z.string().describe("What to search for"),
-        limit: z.number().optional().default(10),
+        // Clamped, not rejected: any number a client sends lands in 1–100, so an
+        // existing connector that always asked for 200, or 7.5, keeps working.
+        // match_thoughts clamps too, to its own ceiling of 500 (migration 014);
+        // this one is about what to hand a model, and keeps a non-integer from
+        // ever reaching the function's int parameter.
+        limit: z.number().optional().default(10).describe("Results to return, clamped to 1-100.")
+          .transform((n) => Math.min(Math.max(Math.trunc(n), 1), 100)),
         threshold: z.number().optional().default(0.5),
       },
     },

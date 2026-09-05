@@ -129,3 +129,28 @@ export function embeddingConfigWarnings(
   model?: string,
   truncate?: boolean
 ): string[];
+
+/** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
+export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;
+
+/** Is this hostname the local machine or its private network? Empty is not local. */
+export function isLocalHostname(host: string, serviceNames?: string[]): boolean;
+
+/** What migration 014 seeds as the HNSW walk's bounds, by setting name; tuned with ALTER DATABASE, not here. */
+export const HNSW_SEEDS: Readonly<Record<string, number>>;
+export const HNSW_SEED_MAX_SCAN_TUPLES: number;
+export const HNSW_SEED_SCAN_MEM_MULTIPLIER: number;
+/** The bound names, in remedy order. Bind into Bun.sql with sql.array(HNSW_BOUNDS, "TEXT"). */
+export const HNSW_BOUNDS: string[];
+/** A database name as an SQL identifier. */
+export function quoteIdent(name: unknown): string;
+/** `SELECT name, value` of each bound as this session sees it (value NULL when pgvector is not loaded). */
+export const BOUNDS_IN_FORCE_SQL: string;
+/** match_thoughts clamps match_count to this inside the function (014). */
+export const MATCH_COUNT_CEILING: number;
+/** pg_settings.source values that reach every role: server configuration or the database. */
+export const SHARED_SETTING_SOURCES: string[];
+/** SELECT of the current database's pg_db_role_setting row as `cfg` (setconfig). */
+export const DB_LEVEL_SETTINGS_SQL: string;
+/** `["a=1"]` → `{a: "1"}`. */
+export function parseSetConfig(cfg: string[] | null | undefined): Record<string, string>;

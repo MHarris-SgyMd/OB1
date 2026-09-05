@@ -154,6 +154,57 @@ else {
   assert(/keyword search.*present/s.test(withKw.out), "…and reports it present once applied");
 
   /**
+   * Migration 014 lives in a SET clause on match_thoughts, which a later
+   * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
+   * event: same signature, no iterative scan. A warning, because every search
+   * still answers — with the filtered recall it had before 014.
+   */
+  assert(/filtered search.*scans iteratively/s.test(withKw.out), "a fully migrated match_thoughts is reported as scanning iteratively");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("007") });
+  const pre014 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(pre014.code === 0, "a match_thoughts without 014's SET clause still starts");
+  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…while saying the filtered scan is not iterative");
+  assert(/migration 014 is not applied/.test(pre014.out), "…and, with no ledger, calls it not applied");
+  assert(/014_filtered_match_thoughts\.sql/.test(pre014.out), "…with the migration to apply");
+
+  /**
+   * The other wording. With 014 RECORDED in the ledger and the function still
+   * 007's, "apply 014" is a no-op — migrate.ts skips it — so the remedy has to
+   * be the ALTER FUNCTION that puts the clauses back (or the body, when that
+   * was dropped too). This database has no ledger; one is created for the
+   * probe and removed after, so the earlier "no schema_migrations table"
+   * assertions stay true of the same fixture.
+   */
+  const ledger = new SQL({ url: LIVE, max: 1 });
+  await ledger.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  await ledger.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('014_filtered_match_thoughts.sql', 'test')`);
+  await ledger.close();
+  const dropped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(dropped.code === 0, "a recorded 014 whose function was replaced still starts");
+  // Re-applying 007 replaces the BODY as well as the clause, so this is the
+  // "replaced its body" wording with the body re-run as the remedy.
+  assert(/recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (--baseline or a redefinition), not a missing migration");
+  assert(/Re-run the body of db\/migrations\/014/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
+  // The other branch: 014's body intact, its SET clause gone — what a successor
+  // that redefined the function without the clause leaves. (An earlier draft
+  // asserted this wording with a regex alternative that could never match the
+  // singular the check prints, on a fixture that never reached the branch.)
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
+  const reset = new SQL({ url: LIVE, max: 1 });
+  await reset.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET ALL`);
+  await reset.close();
+  const noClause = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
+  assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
+  assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy");
+  const unledger = new SQL({ url: LIVE, max: 1 });
+  await unledger.unsafe(`DROP TABLE schema_migrations`);
+  await unledger.close();
+  // 007 also re-created the chunk writers without the context column, and the
+  // RESET above took 014's clause: restore 013 and 014.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
+
+  /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a
    * deployment that flips it afterwards and re-runs the migrator gets a clean
    * "already applied" and no change to the index — a silent no-op on an explicit

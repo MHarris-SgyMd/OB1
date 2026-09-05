@@ -314,7 +314,7 @@ new thought's id, which is what the other two take.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied thirteen migrations. `server` logs `preflight OK` and
+`migrate` exits 0 having applied fourteen migrations. `server` logs `preflight OK` and
 `Started server`. `smoke.sh` prints `6 checks: 6 passed, 0 failed`. A client shows
 nine tools for a write key, six for a read key.
 
@@ -325,7 +325,7 @@ no backups, no resource limits. For something durable:
 
 | | |
 | --- | --- |
-| **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector; the server as a container. `OB1_STORE=sql`, `DATABASE_URL`. The simplest data path. |
+| **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `OB1_STORE=sql`, `DATABASE_URL`. The simplest data path. |
 | **Cloudflare Workers** | `server-portable` builds for Workers at ~256 KiB gzipped. Workers cannot pool Postgres connections, so pair it with PostgREST (`OB1_STORE=postgrest`) or add Hyperdrive. |
 | **Self-hosted Supabase** | If you want the Supabase stack without supabase.com. Zero code change — see `recipes/local-brain-no-mcp`. |
 

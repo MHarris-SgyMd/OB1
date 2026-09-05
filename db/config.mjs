@@ -530,6 +530,13 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
+    // Not operator configuration — ALTER DATABASE owns that — but the one
+    // definition of what 014 seeds, so the SQL, the migrator's remedy,
+    // preflight's report and the schema test cannot disagree about it.
+    HNSW_SEED_MAX_SCAN_TUPLES: String(HNSW_SEED_MAX_SCAN_TUPLES),
+    HNSW_SEED_SCAN_MEM_MULTIPLIER: String(HNSW_SEED_SCAN_MEM_MULTIPLIER),
+    MATCH_COUNT_CEILING: String(MATCH_COUNT_CEILING),
+    SHARED_SETTING_SOURCES: SHARED_SETTING_SOURCES.map((s) => `'${s}'`).join(", "),
   };
 }
 
@@ -604,4 +611,139 @@ export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_M
     );
   }
   return warnings;
+}
+
+/**
+ * Version floor for "major.minor[.patch]" strings such as pg_extension's
+ * extversion. Compared numerically per component — as strings, "0.10.0" sorts
+ * before "0.8.0" — and defined once so preflight.ts and the live suite cannot
+ * disagree about the same value.
+ *
+ * @param {string} version
+ * @param {number} major
+ * @param {number} [minor]
+ * @param {number} [patch]
+ * @returns {boolean}
+ */
+export function versionAtLeast(version, major, minor = 0, patch = 0) {
+  const [a = 0, b = 0, c = 0] = String(version)
+    .split(".")
+    .map((n) => Number.parseInt(n, 10) || 0);
+  if (a !== major) return a > major;
+  if (b !== minor) return b > minor;
+  return c >= patch;
+}
+
+/**
+ * Is this hostname the local machine or the private network it sits on?
+ * Used by preflight alone (does a model endpoint need a credential?). It is
+ * deliberately NOT the test scaffolding's "may this database be dropped"
+ * test: that one is loopback-only (db/test-support.ts assertThrowawayDatabase),
+ * because a LAN-hosted stack holding a real brain is a documented deployment
+ * and "local enough to skip a credential" is a different question from "safe
+ * to drop". An earlier draft shared this predicate for both and widened the
+ * drop guard to every private network (sixth review pass); do not re-share
+ * it. Compose service names and the container-to-host aliases count; an EMPTY
+ * host does not — a URL with no host resolves through PGHOST, which is
+ * whatever the shell says it is.
+ *
+ * @param {string} host  as `new URL(...).hostname` reports it — IPv6 keeps its brackets
+ * @param {string[]} [serviceNames]  compose service names to accept, e.g. ["postgres"]
+ * @returns {boolean}
+ */
+export function isLocalHostname(host, serviceNames = []) {
+  const h = String(host).toLowerCase();
+  if (h === "") return false;
+  return (
+    h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h === "::1" || h === "0.0.0.0" ||
+    h === "host.docker.internal" || h === "host.containers.internal" ||
+    serviceNames.includes(h) ||
+    /^10\./.test(h) || /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+  );
+}
+
+/**
+ * What migration 014 seeds as the HNSW walk's bounds at database level, and
+ * what preflight and the migrator quote when they are missing. These are the
+ * measured defaults (014's header); they are NOT an operator setting — an
+ * operator tunes with `ALTER DATABASE … SET`, which 014 never overwrites — so
+ * there is no environment variable behind them. One definition, because the
+ * eighth review pass found the pair written as literals in seven places.
+ */
+export const HNSW_SEEDS = Object.freeze({
+  "hnsw.max_scan_tuples": 100000,
+  "hnsw.scan_mem_multiplier": 8,
+});
+export const HNSW_SEED_MAX_SCAN_TUPLES = HNSW_SEEDS["hnsw.max_scan_tuples"];
+export const HNSW_SEED_SCAN_MEM_MULTIPLIER = HNSW_SEEDS["hnsw.scan_mem_multiplier"];
+/**
+ * The bound names, in the order the remedies print them. Every place that
+ * reads, resets or asserts the bounds goes through this list (preflight,
+ * dropSchema, the bench, the live and schema tests, the eval), so a third
+ * bound added here is checked, reset and reported everywhere at once; the
+ * migrator reads the names a migration actually seeds from that migration's
+ * own text. Binding this array into Bun.sql needs `sql.array(HNSW_BOUNDS,
+ * "TEXT")` — a bare `${HNSW_BOUNDS}` is sent as comma-joined text, which
+ * Postgres rejects as a malformed array literal (eleventh review pass).
+ */
+export const HNSW_BOUNDS = Object.keys(HNSW_SEEDS);
+
+/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
+export function quoteIdent(name) {
+  return name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`;
+}
+
+/**
+ * The bounds as this session sees them: `current_setting` per name, NULL for
+ * a placeholder pgvector has not defined yet. One SQL text, with the names
+ * inlined as literals (they are this module's constants, not input), so a
+ * caller on any client — Bun.sql, PGlite — can run it with `unsafe`/`query`.
+ */
+export const BOUNDS_IN_FORCE_SQL =
+  `SELECT n AS name, current_setting(n, true) AS value FROM unnest(ARRAY[${HNSW_BOUNDS.map((n) => `'${n}'`).join(", ")}]) AS n`;
+
+/**
+ * match_thoughts clamps match_count to this INSIDE the function (migration
+ * 014, templated as {{MATCH_COUNT_CEILING}}). 500 covers every caller in the
+ * repo: enhanced-mcp asks for up to 500 under a date filter, rest-api up to
+ * 200, agent-memory-api up to 200. The servers' own search_thoughts tools
+ * clamp their `limit` to 100 separately — a tool-level choice about what to
+ * hand a model, not this cost bound. The bench measures asked-500.
+ */
+export const MATCH_COUNT_CEILING = 500;
+
+/**
+ * `pg_settings.source` values under which a setting reaches EVERY role in the
+ * database — the server's configuration (postgresql.conf and ALTER SYSTEM both
+ * report 'configuration file'; a managed parameter group, the command line,
+ * the environment likewise server-wide) or the database itself. 'global' and
+ * 'override' are internal sources kept for completeness. A role-level value
+ * ('user', 'database user') reaches one role, and a session value nobody else;
+ * neither is a reason for 014 to skip seeding the database-level default,
+ * which sits BELOW a role's value in precedence and ABOVE the server's — so
+ * seeding over a role-level value undoes nothing, and seeding over ALTER
+ * SYSTEM would silently undo it (tenth review pass). One limit: the migrating
+ * session sees server configuration as of its connect, so an ALTER SYSTEM that
+ * has not been reloaded looks unset and is seeded over; reload before
+ * migrating (deploy/.env.example says so).
+ */
+export const SHARED_SETTING_SOURCES = ["environment variable", "configuration file", "command line", "global", "override", "database"];
+
+/**
+ * The database-level settings row for the current database, as `setconfig`
+ * (`name=value` strings). One text because the tenth review pass found it
+ * written five times in three idioms. Parse with parseSetConfig.
+ */
+export const DB_LEVEL_SETTINGS_SQL =
+  "SELECT s.setconfig AS cfg FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database() AND s.setrole = 0";
+
+/** `["a=1","b=x"]` → `{a: "1", b: "x"}`; a value may itself contain `=`. */
+export function parseSetConfig(cfg) {
+  const out = {};
+  for (const kv of cfg ?? []) {
+    const eq = kv.indexOf("=");
+    if (eq > 0) out[kv.slice(0, eq)] = kv.slice(eq + 1);
+  }
+  return out;
 }

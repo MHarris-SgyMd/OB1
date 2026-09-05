@@ -17,19 +17,23 @@
  *
  *   3. The real planner on a real index. Whether HNSW is actually chosen.
  *
- * Requires DATABASE_URL pointing at a Postgres 15+ with pgvector, on a database
- * this file may freely modify. It creates and drops objects.
+ * Requires DATABASE_URL pointing at a Postgres 15+ with pgvector 0.8+, on a
+ * database this file may freely modify. It DROPS and recreates the schema, so
+ * `dropSchema` refuses any host that is not loopback unless
+ * OB1_ALLOW_REMOTE_DB=1 is set — that refusal is the safety net, the variable
+ * is the override, and the override is a thing you have to mean.
  *
  *   ./with-postgres.sh bun test-live.ts        # starts a throwaway container
- *   DATABASE_URL=... bun test-live.ts          # against one you already have
+ *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
+ *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  */
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { EMBEDDING_DIM } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, dropSchema } from "./test-support.ts";
+import { createAssert, dropSchema, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -38,13 +42,13 @@ if (!URL_) {
   console.error(
     "DATABASE_URL is not set.\n" +
       "  ./with-postgres.sh bun test-live.ts   (starts a throwaway container)\n" +
-      "  DATABASE_URL=postgres://… bun test-live.ts"
+      "  DATABASE_URL=postgres://… bun test-live.ts   (loopback host; OB1_ALLOW_REMOTE_DB=1 for anything else)"
   );
   process.exit(2);
 }
 
 
-const { assert, report } = createAssert();
+const { assert, skip, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 async function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
@@ -66,7 +70,7 @@ const unit = (i: number) => {
 // Start from an empty database so the run is repeatable.
 await dropSchema(URL_);
 
-const sql = new SQL({ url: URL_, max: 4 });
+let sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);
 
 // ── 1. The runner ────────────────────────────────────────────────────────────
@@ -82,6 +86,15 @@ console.log("[1] migrate.ts against a real server");
   const run = await migrate();
   assert(run.code === 0, "apply exits 0");
   assert(/applied \d+, skipped 0/.test(run.out), "apply reports every migration applied");
+  // The post-014 bounds check must actually run. It is wrapped in a catch that
+  // turns any error into a soft warning, and for a whole commit that catch
+  // swallowed a malformed-array-literal error on every run — so the check
+  // never confirmed anything and the remedy branch was unreachable — while
+  // this suite, asserting only the exit code and "applied N", stayed green
+  // (eleventh review pass). This role owns the throwaway database, so the
+  // seed lands and neither warning may appear.
+  assert(!/could not read pg_settings/.test(run.out), "the migrator's walk-bounds check runs without falling into its catch");
+  assert(!/were not seeded/.test(run.out), "…and, as the database owner, finds the bounds seeded");
 
   const again = await migrate();
   assert(again.code === 0, "re-run exits 0");
@@ -179,6 +192,86 @@ console.log("\n[5] The planner uses the HNSW index");
     .join(" ");
   assert(/thoughts_embedding_idx/.test(plan), "thoughts_embedding_idx appears in the plan");
   await sql`SET enable_seqscan = on`;
+}
+
+console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
+{
+  // 014 seeds the walk's bounds with ALTER DATABASE, which a session reads at
+  // connect. This pool predates the migration, so open a fresh one — and assert
+  // the bounds are in force, since the section claims to exercise them.
+  await sql.close();
+  sql = new SQL({ url: URL_, max: 1 });
+  // What the DATABASE has, not the shipped literals: 014 leaves an operator's
+  // earlier value alone, and a non-owner role cannot seed at all. Assert that
+  // whatever pg_db_role_setting holds is what a fresh session sees.
+  const [seeded] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+  const want = parseSetConfig(seeded?.cfg);
+  const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
+  if (HNSW_BOUNDS.every((b) => want[b])) {
+    assert(HNSW_BOUNDS.every((b) => inForce[b] === want[b]),
+      `a fresh session sees the database-level bounds (${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")})`);
+  } else {
+    skip("a fresh session sees the database-level bounds", "not seeded on this database — the migrating role does not own it");
+  }
+  // 2,000 random rows through a real HNSW index, 1% of them tagged. Under 007
+  // the tagged rows were almost never among the 40 nearest, so a filtered
+  // search returned almost nothing — db/bench-hnsw.ts has the numbers. The
+  // tagged filter matches 20 rows, under the exact threshold, so it MUST return
+  // what a full scan returns; the untagged filter matches 1,980, above it, so
+  // it takes the HNSW walk with the predicate inside the scan and is held to
+  // the exact answer within the index's approximation.
+  await sql`DELETE FROM thoughts`;
+  const { unitVector } = seededRandom(968);
+  const random = () => `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+  const N = 2000;
+  for (let i = 0; i < N; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => {
+      const tagged = (i + k) % 100 === 7; // exactly 1%
+      return `('row ${i + k}', '{"tagged": ${tagged}}'::jsonb, '${random()}'::vector)`;
+    }).join(",");
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  await sql.unsafe(`VACUUM ANALYZE thoughts`);
+
+  const exactTop = (qv: string, filter: string) =>
+    sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+      await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+      return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector LIMIT 10`);
+    });
+  let agree = 0;
+  let walkOverlap = 0;
+  let walkShort = 0;
+  const QUERIES = 10;
+  for (let q = 0; q < QUERIES; q++) {
+    const qv = random();
+    const thin = new Set((await exactTop(qv, '{"tagged": true}')).map((r: { id: string }) => r.id));
+    const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '{"tagged": true}'::jsonb)`);
+    if (got.length === 10 && got.every((r: { id: string }) => thin.has(r.id))) agree++;
+    const broad = new Set((await exactTop(qv, '{"tagged": false}')).map((r: { id: string }) => r.id));
+    const walked = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '{"tagged": false}'::jsonb)`);
+    if (walked.length !== 10) walkShort++;
+    walkOverlap += walked.filter((r: { id: string }) => broad.has(r.id)).length;
+  }
+  assert(agree === QUERIES, `a 1% filter (20 rows, the exact branch) returns the exact top-10 on ${agree}/${QUERIES} random queries`);
+  assert(walkShort === 0, `a 99% filter (1,980 rows, the walk branch) returns 10 rows on every query (${walkShort} short)`);
+  assert(walkOverlap >= 85, `…and ${walkOverlap}/100 of them are the exact top-10 (HNSW is approximate; random vectors are its hardest case)`);
+
+  // match_count is clamped inside the function, as 012 clamps its p_limit: the
+  // cost of a call is now proportional to it, and direct callers are unbounded.
+  // The ceiling is the one config.mjs defines, so the doc and the body agree.
+  const many = await sql.unsafe(`SELECT count(*)::int AS c FROM match_thoughts('${random()}'::vector, -1.0, ${MATCH_COUNT_CEILING * 2}, '{}'::jsonb)`);
+  assert(Number(many[0].c) === MATCH_COUNT_CEILING, `match_count ${MATCH_COUNT_CEILING * 2} over ${N} rows returns ${MATCH_COUNT_CEILING} — the function's own ceiling (got ${many[0].c})`);
+
+  const [{ cfg }] = await sql`
+    SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
+    WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`;
+  assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg ?? "")), "match_thoughts carries hnsw.iterative_scan on a real server");
+  // The LIBRARY's version, not the catalog record: a binary upgraded under an
+  // old volume runs 014 fine while pg_extension still says 0.7.x — the state
+  // the second review pass reproduced — and this section just proved it works.
+  const [{ library }] = await sql`SELECT default_version AS library FROM pg_available_extensions WHERE name = 'vector'`;
+  assert(versionAtLeast(String(library), 0, 8), `the server's pgvector library (${library}) supports the iterative scan 014 declares`);
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");

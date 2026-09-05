@@ -26,13 +26,18 @@ import {
   DEFAULT_TRGM_INDEX,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
+  DB_LEVEL_SETTINGS_SQL,
+  HNSW_SEEDS,
+  HNSW_SEED_MAX_SCAN_TUPLES,
+  MATCH_COUNT_CEILING,
   migrationValues,
+  parseSetConfig,
   substituteMigration,
   DEFAULT_CHUNK_CONTEXT,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert } from "./test-support.ts";
+import { createAssert, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -355,6 +360,250 @@ console.log("\n[8] match_thoughts ranks by cosine similarity");
 
   const l = await db.query(`SELECT * FROM match_thoughts($1::vector, 0.0, 1, '{}'::jsonb)`, [unit(0)]);
   assert(l.rows.length === 1, "match_count caps the result set");
+}
+
+// ── 8b. The filter reaches the candidate scan (migration 014) ────────────────
+//
+// 007 took each CTE's top-40 by distance and applied the metadata filter to
+// those 40. So a filtered search whose matches were not among the 40 globally
+// nearest rows returned nothing, silently. These rows are arranged so that the
+// crowd fills the candidate budget before the filtered row can appear: sixty
+// near-copies of the query in kind "a", and one orthogonal row in kind "b".
+// Plan-independent — the LIMIT sat before the filter whatever the planner did.
+
+console.log("\n[8b] match_thoughts applies the metadata filter inside the candidate scan");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  for (let i = 0; i < 60; i++) {
+    await db.query(`SELECT upsert_thought($1, '{"metadata":{"kind":"a"}}'::jsonb, $2::vector)`, [
+      `crowd ${i}`,
+      blend(0, 1, 1, 0.001 * (i + 1)),
+    ]);
+  }
+  await db.query(`SELECT upsert_thought('the one b', '{"metadata":{"kind":"b"}}'::jsonb, $1::vector)`, [unit(1)]);
+  // A second kind "b" row whose ONLY evidence is a chunk: no whole-content
+  // vector, so the direct CTE cannot see it and the chunk CTE must.
+  //
+  // The chunk is inserted directly rather than through upsert_thought's jsonb
+  // path. Observed, not explained: under PGlite a chunk stored through that
+  // path prints its vector correctly but returns NULL from every distance
+  // operator (`vector_norm`, `<=>`, `<->`), so the row is silently unrankable
+  // and the HNSW scan never yields it. Real Postgres does not do this — the
+  // live suite, test-chunking.ts and evals/eval-filtered.ts all store chunks
+  // through upsert_thought there and search them. This section is about
+  // match_thoughts, so it takes the path PGlite gets right.
+  const b2 = await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('b via chunk', '{"metadata":{"kind":"b"}}'::jsonb, NULL::vector) AS r`
+  );
+  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, 'window', $2::vector)`, [
+    b2.rows[0].r.id,
+    unit(1),
+  ]);
+
+  const f = await db.query<{ content: string }>(
+    `SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"b"}'::jsonb)`,
+    [unit(0)]
+  );
+  const got = f.rows.map((r) => r.content).sort();
+  assert(got.length === 2, `both kind "b" rows come back past sixty nearer kind "a" rows (got ${got.length})`);
+  assert(got[0] === "b via chunk", "…including the one reachable only through its chunk");
+  assert(got[1] === "the one b", "…and the one reachable through its own vector");
+
+  const none = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"z"}'::jsonb)`, [unit(0)]);
+  assert(none.rows[0].c === 0, "a filter nothing matches still returns nothing");
+
+  // The unfiltered path must not depend on metadata being an object, or on it
+  // being present at all. 001 declares the column nullable with no type check,
+  // and the `||` merges in 005 and 013 can turn an object into an array. A
+  // "simplification" to `metadata @> COALESCE(filter, '{}')` would drop these
+  // rows from every unfiltered search: `NULL @> '{}'` is NULL and
+  // `'[1]' @> '{}'` is false. The unfiltered branch carries no predicate at
+  // all, which is what these rows pin.
+  await db.exec(`UPDATE thoughts SET metadata = NULL WHERE content = 'crowd 0'`);
+  await db.exec(`UPDATE thoughts SET metadata = '[1]'::jsonb WHERE content = 'crowd 1'`);
+  const odd = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [unit(0)]);
+  const oddNames = odd.rows.map((r) => r.content);
+  assert(oddNames.includes("crowd 0"), "a row with NULL metadata is returned by an unfiltered search");
+  assert(oddNames.includes("crowd 1"), "a row with array metadata is returned by an unfiltered search");
+  const oddFiltered = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
+  assert(oddFiltered.rows[0].c === 10, `…and a filter simply does not match them, without error (got ${oddFiltered.rows[0].c} of the 58 remaining kind "a")`);
+
+  // 007 evaluated `NULL = '{}' OR metadata @> NULL` → NULL → every row excluded.
+  const nul = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, NULL::jsonb)`, [unit(0)]);
+  assert(nul.rows[0].c === 10, `a NULL filter is unfiltered (got ${nul.rows[0].c} rows, 007 gave 0)`);
+
+  // The overfetch is honoured above the default: 62 rows stored, 50 asked, 50 back.
+  // Under 007 each CTE stopped at hnsw.ef_search (40) candidates.
+  const big = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 50, '{}'::jsonb)`, [unit(0)]);
+  assert(big.rows[0].c === 50, `match_count 50 returns 50 of 62 rows (got ${big.rows[0].c})`);
+
+  // The clamp's edges, named in the header: 0 and negative give 1 row, NULL
+  // gives the default 10. 007 gave 0, an error, and the whole candidate set.
+  for (const [arg, want, label] of [["0", 1, "match_count 0 returns 1 row"], ["-5", 1, "a negative match_count returns 1 row, not an error"], ["NULL", 10, "a NULL match_count returns the default 10"]] as const) {
+    const r = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, ${arg}, '{}'::jsonb)`, [unit(0)]);
+    assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
+  }
+  // The body, read once: the ceiling and the sentinel are both in it.
+  const prosrc = String((await db.query<{ s: string | null }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`)).rows[0]?.s ?? "");
+  // The ceiling is the one config.mjs defines, templated into the body — so the
+  // assertion is built from the constant, not from a literal that would have to
+  // be hand-edited when the constant moves (an earlier draft pinned 500 twice).
+  // Its value is exercised on a real server in db/test-live.ts [5b]; 62 rows
+  // cannot show it here.
+  assert(new RegExp(`LEAST\\(GREATEST\\(COALESCE\\(match_count, 10\\), 1\\), ${MATCH_COUNT_CEILING}\\)`).test(prosrc),
+    `match_count is clamped to MATCH_COUNT_CEILING (${MATCH_COUNT_CEILING}) inside the function`);
+
+  // The contract sentinel preflight reads — in the BODY, which a replace
+  // rewrites, not in the COMMENT, which a replace leaves on the preserved OID.
+  assert(/ob1:filter-inside-scan/.test(prosrc), "the function body carries the ob1:filter-inside-scan sentinel a successor must keep");
+
+  // The setting that makes the in-scan filter correct lives on the function.
+  // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
+  // the defined-twice class FORK.md keeps finding — fails here, not in search.
+  const cfg = await db.query<{ cfg: string | null }>(
+    `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
+     WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
+  );
+  assert(
+    /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
+    `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
+  );
+  // The scan mode is the ONLY function-level SET: the two walk bounds are
+  // deliberately not on the function, because a function-level value would
+  // override the database-level one that is the operator's tuning knob, and
+  // the plan mode an earlier draft forced is unnecessary once the filter is a
+  // plain predicate in its own branch.
+  const proconfig = cfg.rows[0]?.cfg ?? "";
+  assert(!/hnsw\.max_scan_tuples|hnsw\.scan_mem_multiplier|plan_cache_mode/.test(proconfig), "…and nothing else — neither walk bound nor a forced plan mode");
+
+  // The branches must be the same function: the filtered answer for kind "a"
+  // (58 matching rows — the EXACT branch, under the 1,000-row threshold) must
+  // be the unfiltered branch's answer with the non-"a" rows taken out — same
+  // rows, same order. By this point crowd 0 and crowd 1 carry NULL and array
+  // metadata, so they are excluded along with the two "b" rows. The walk
+  // branch is held to the exact answer in [8c], which has enough rows to
+  // reach it.
+  const viaFilter = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"a"}'::jsonb)`, [unit(0)]);
+  const viaNone = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 20, '{}'::jsonb)`, [unit(0)]);
+  const notA = new Set(["crowd 0", "crowd 1", "the one b", "b via chunk"]);
+  const expected = viaNone.rows.map((r) => r.content).filter((c) => !notA.has(c)).slice(0, 10);
+  assert(
+    viaFilter.rows.length === 10 && viaFilter.rows.every((r, i) => r.content === expected[i]),
+    "the filtered and unfiltered branches rank the same rows the same way when the filter admits them"
+  );
+
+  // The bounds are seeded at database level, once. A value an operator set
+  // first is left alone by re-applying 014; the seeded default is restored at
+  // the end so later sections see the shipped state.
+  const dbSettings = async () => parseSetConfig((await db.query<{ cfg: string[] | null }>(DB_LEVEL_SETTINGS_SQL)).rows[0]?.cfg);
+  // The database's name as an identifier, quoted the way the migrator quotes
+  // its printed remedy — the value could be `open-brain`.
+  const alterDb = async (setting: string) =>
+    db.exec((await db.query<{ q: string }>(`SELECT format('ALTER DATABASE %I SET %s', current_database(), $1::text) AS q`, [setting])).rows[0].q);
+  const seeded = await dbSettings();
+  for (const [name, value] of Object.entries(HNSW_SEEDS)) {
+    assert(seeded[name] === String(value), `${name}=${value} is seeded on the database (${JSON.stringify(seeded)})`);
+  }
+  await alterDb("hnsw.max_scan_tuples = 250000");
+  const f014 = files.find((f) => f.startsWith("014"))!;
+  await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
+  assert((await dbSettings())["hnsw.max_scan_tuples"] === "250000", "re-applying 014 leaves an operator's database-level bound alone");
+  // A ROLE-level value is not a reason to skip the seed: it reaches one role,
+  // sits ABOVE the database level in precedence (so the seed cannot undo it),
+  // and the ninth-pass guard let it suppress the seed for every other role.
+  // Session-level SET stands in for ALTER ROLE here — PGlite has one role and
+  // one session, and both report a non-shared source — so: clear the database
+  // row, set the value in the session, re-apply, and the row must come back.
+  await db.exec((await db.query<{ q: string }>(`SELECT format('ALTER DATABASE %I RESET hnsw.max_scan_tuples', current_database()) AS q`)).rows[0].q);
+  await db.exec(`SET hnsw.max_scan_tuples = 5000`);
+  await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
+  assert((await dbSettings())["hnsw.max_scan_tuples"] === String(HNSW_SEED_MAX_SCAN_TUPLES),
+    "a value set only for this role/session does not stop 014 seeding the database-level default for everyone else");
+  await db.exec(`RESET hnsw.max_scan_tuples`);
+  await alterDb(`hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}`);
+}
+
+// ── 8c. The walk branch, held to the exact answer ────────────────────────────
+//
+// Filters matching at most 1,000 thoughts are answered exactly, from the rows
+// themselves; [8b] covers that and the never-matching case. Above 1,000 the
+// function walks the HNSW index with the predicate inside the scan, and that
+// branch needs more rows than [8b] has to be reached at all.
+
+console.log("\n[8c] above the exact threshold, the walk branch agrees with an exact scan");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const { unitVector } = seededRandom(968);
+  const N = 1200;
+  for (let i = 0; i < N; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => `('walk ${i + k}', '{"kind":"c"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  // Two that must not be found: a different kind, nearest to the query.
+  const q = unitVector(EMBEDDING_DIM);
+  await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ('near but d', '{"kind":"d"}'::jsonb, $1::vector)`, [`[${q.join(",")}]`]);
+  const matches = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"c"}'`);
+  assert(matches.rows[0].c > 1000, `${matches.rows[0].c} matching rows, above the 1,000-row exact threshold — the walk branch`);
+
+  let overlap = 0;
+  let wrongKind = 0;
+  let returned = 0;
+  const QUERIES = 3;
+  for (let i = 0; i < QUERIES; i++) {
+    const qv = `[${(i === 0 ? q : unitVector(EMBEDDING_DIM)).join(",")}]`;
+    await db.exec(`SET enable_indexscan = off`);
+    await db.exec(`SET enable_bitmapscan = off`);
+    const exact = await db.query<{ id: string }>(`SELECT id FROM thoughts WHERE metadata @> '{"kind":"c"}' ORDER BY embedding <=> $1::vector LIMIT 10`, [qv]);
+    await db.exec(`RESET enable_indexscan`);
+    await db.exec(`RESET enable_bitmapscan`);
+    const want = new Set(exact.rows.map((r) => r.id));
+    const got = await db.query<{ id: string; metadata: { kind: string } }>(`SELECT id, metadata FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"c"}'::jsonb)`, [qv]);
+    returned += got.rows.length;
+    overlap += got.rows.filter((r) => want.has(r.id)).length;
+    wrongKind += got.rows.filter((r) => r.metadata.kind !== "c").length;
+  }
+  assert(returned === 10 * QUERIES, `the walk returns 10 rows for each of ${QUERIES} queries (got ${returned})`);
+  assert(wrongKind === 0, "…every one of them matching the filter");
+  // HNSW is approximate; the iterative scan keeps it honest under the filter
+  // but does not make it exact. Random vectors are its hardest case.
+  assert(overlap >= 27, `…and at least 27 of the 30 are the exact top-10 (got ${overlap})`);
+}
+
+// ── 8d. Unscoreable rows do not count towards the walk threshold ─────────────
+//
+// A thought captured through the 2-arg fallback has no vector and no chunks. It
+// matches a metadata filter but can never be a candidate on either side, so it
+// must not push a filter over the exact threshold: routed to the walk, a filter
+// whose scoreable matches are fewer than v_fetch runs to the scan bound and
+// returns short (twelfth review pass). The walk is made to fail here on
+// purpose — hnsw.max_scan_tuples clamped to its minimum for the session — so
+// only the exact branch can return every scoreable row.
+
+console.log("\n[8d] rows without a vector or chunks do not count towards the walk threshold");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const { unitVector } = seededRandom(1018);
+  // Enough indexed rows of another kind that a bounded walk cannot stumble on
+  // the wanted ones by luck.
+  for (let i = 0; i < 300; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
+  for (let i = 0; i < 1200; i += 200) {
+    const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  for (let i = 0; i < 5; i++) {
+    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+  }
+  const matching = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"u"}'`);
+  assert(matching.rows[0].c === 1205, `1,205 rows match the filter, 1,200 of them unscoreable (got ${matching.rows[0].c})`);
+  await db.exec(`SET hnsw.max_scan_tuples = 1`);
+  const got = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"u"}'::jsonb)`, [`[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+  await db.exec(`RESET hnsw.max_scan_tuples`);
+  assert(got.rows.length === 5, `all five scoreable rows come back through the exact branch (got ${got.rows.length}; a walk clamped to one tuple could not have found them)`);
+  assert(got.rows.every((r) => r.content.startsWith("scoreable")), "…and only those");
 }
 
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");

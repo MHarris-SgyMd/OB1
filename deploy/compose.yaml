@@ -17,8 +17,22 @@ name: open-brain
 
 services:
   # Replaces: the Supabase-hosted Postgres.
+  #
+  # Pinned to a pgvector release, not the floating `pg16` tag. Migration 014
+  # declares `hnsw.iterative_scan` on match_thoughts, which exists from pgvector
+  # 0.8.0; on an older image the migrator fails on 014 and the stack does not
+  # start. A floating tag could also move under a working deployment. Change
+  # the pin deliberately and re-run the schema tests against it.
+  #
+  # Memory: 014 seeds hnsw.scan_mem_multiplier = 8 on the database, so a
+  # filtered search that reaches the HNSW walk may use work_mem x 8 (32 MB at
+  # the 4 MB default) per scan node, two per call, per connection — up to
+  # ~640 MB across the server's default pool of ten on top of shared_buffers.
+  # Thin filters never walk (they are answered exactly), so this is a ceiling
+  # for broad filters on large tables; lower the multiplier with ALTER DATABASE
+  # where memory is tighter than latency (deploy/.env.example has the form).
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.6-pg16
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       POSTGRES_DB: openbrain
