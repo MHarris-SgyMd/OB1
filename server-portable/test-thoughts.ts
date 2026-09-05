@@ -14,7 +14,10 @@
  */
 
 import { createAssert } from "../db/test-support.ts";
+import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS } from "../db/config.mjs";
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
+import { resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 
 const { assert, report } = createAssert();
 
@@ -74,6 +77,47 @@ console.log("\n[6] Citation URLs join cleanly whatever the base looks like");
   assert(thoughtUrl("https://x.test", id) === "https://x.test/abc-123", "no trailing slash");
   assert(thoughtUrl("https://x.test/", id) === "https://x.test/abc-123", "one trailing slash is not doubled");
   assert(thoughtUrl("https://x.test/brain/", id) === "https://x.test/brain/abc-123", "a path base keeps its path");
+}
+
+// ── 7. The embedding path's pure rules ───────────────────────────────────────
+//
+// Two defects the first review of SMD-946 found in embed.ts, both invisible to
+// every suite that drives the server with a stub provider, because the stub
+// model has no prompt template and the suites set every chunk variable.
+
+console.log("\n[7] Prompt templates and provider settings take their inputs literally");
+{
+  // String.replace with a STRING replacement reads `$&`, `$'`, `` $` `` and `$$`
+  // as substitution patterns. A note with a price, or a shell snippet, was
+  // embedded from rewritten text; a query containing `$&` became the template's
+  // own placeholder.
+  const awkward = "price $$5, shell $'\\n', and $& here";
+  assert(applyEmbeddingPrompt("qwen3-embedding:4b", awkward, false) === awkward,
+         "the document template inserts a text full of $-sequences unchanged");
+  assert(applyEmbeddingPrompt("qwen3-embedding:4b", awkward, true).endsWith(`Query: ${awkward}`),
+         "…and so does the query template");
+  assert(applyEmbeddingPrompt("embeddinggemma", awkward, true) === awkward, "a model with no template gets the bare text");
+  // The chunk-context template has two placeholders, and a document may contain
+  // the literal text of the second: chained replaces put the window there.
+  const doc = `a note that says {chunk} and costs $$5`;
+  const filled = applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document: doc, chunk: "the window" });
+  assert(filled.includes(`<document>\n${doc}\n</document>`), "the document goes into the context prompt exactly, its own {chunk} and $$ intact");
+  assert(filled.includes(`<chunk>\nthe window\n</chunk>`), "…and the window lands in the placeholder, not in the document");
+  assert(applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.document, { document: doc }) === CHUNK_CONTEXT_PROMPTS.document.split("{document}").join(doc),
+         "the one-placeholder template is filled the same way");
+
+  // deploy/compose.yaml forwards every optional variable as `${VAR:-}`, so a
+  // composed server sees "" wherever nothing was set. Number("") is 0, which
+  // passed the overlap's `>= 0` and windowed long captures with no overlap at
+  // all — while reembed.ts, run from a shell where the variable is unset, used
+  // 150. Two consumers of one function chunking differently is the drift the
+  // function exists to prevent.
+  assert(resolveEmbedConfig({}).chunkOverlap === DEFAULT_OVERLAP_TOKENS, `an unset overlap is the default (${DEFAULT_OVERLAP_TOKENS})`);
+  assert(resolveEmbedConfig({ OB1_CHUNK_OVERLAP: "" }).chunkOverlap === DEFAULT_OVERLAP_TOKENS,
+         "OB1_CHUNK_OVERLAP='' — what compose forwards for an unset variable — is the default too, not zero overlap");
+  assert(resolveEmbedConfig({ OB1_CHUNK_OVERLAP: "0" }).chunkOverlap === 0, "…while an explicit 0 is honoured");
+  assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokens === DEFAULT_MAX_TOKENS, `and OB1_CHUNK_TOKENS='' is the default window (${DEFAULT_MAX_TOKENS})`);
+  assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "900", OB1_CHUNK_OVERLAP: "50" }).chunkTokens === 900, "explicit values are read");
 }
 
 report();

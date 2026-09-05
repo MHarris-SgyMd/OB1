@@ -964,4 +964,134 @@ console.log("\n[14] Migration 013 declares chunk context without disturbing anyt
          `ob1_config records the configured setting (got ${cfg.rows[0]?.value})`);
 }
 
+// ── 15. Migration 015 — thought_work_claims ──────────────────────────────────
+//
+// The pool, the lease and the release, on one connection. PGlite has one
+// session, so nothing here can be concurrent: two claims made in a row are
+// disjoint whether or not FOR UPDATE SKIP LOCKED does anything, which is the
+// exact false pass the ticket's Verify section names. The concurrent proof —
+// workers overlapping in time, a lease held open across another worker's claim
+// — is db/test-live.ts [8]. This section owns the state machine: expiry back to
+// the pool, the attempt cap, who may release, the cascade.
+
+console.log("\n[15] thought_work_claims: the pool, the lease, the release");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  for (let i = 0; i < 10; i++) {
+    await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [`claim probe ${i}`]);
+  }
+  const JOB = "test:probe";
+  const claim = async (worker: string, batch: number, ttl = 900, maxAttempts = 3) =>
+    (await db.query<{ thought_id: string; attempt: number }>(
+      `SELECT thought_id, attempt FROM claim_thoughts($1, $2, $3, $4, $5)`, [JOB, worker, batch, ttl, maxAttempts])).rows;
+  const statusOf = async (id: string) =>
+    (await db.query<{ status: string; attempt_count: number; worker_id: string | null; ttl: string | null; last_error: string | null }>(
+      `SELECT status, attempt_count, worker_id, ttl_expires_at::text AS ttl, last_error FROM thought_work_claims WHERE thought_id = $1 AND work_type = $2`,
+      [id, JOB])).rows[0];
+  const raises = async (q: string, params: unknown[] = []): Promise<string> => {
+    try { await db.query(q, params); return ""; } catch (e) { return (e as Error).message; }
+  };
+
+  // The pool.
+  const first = await db.query<{ n: number }>(`SELECT enqueue_thoughts($1) AS n`, [JOB]);
+  assert(first.rows[0].n === 10, `enqueue_thoughts with no ids pools every thought (got ${first.rows[0].n} of 10)`);
+  const again = await db.query<{ n: number }>(`SELECT enqueue_thoughts($1) AS n`, [JOB]);
+  assert(again.rows[0].n === 0, `…and a second call adds nothing (got ${again.rows[0].n})`);
+  const ids = (await db.query<{ id: string }>(`SELECT id FROM thoughts ORDER BY created_at, id`)).rows.map((r) => r.id);
+  const subset = await db.query<{ n: number }>(`SELECT enqueue_thoughts($1, $2::uuid[]) AS n`, ["test:subset", [ids[0], ids[1], ids[1]]]);
+  assert(subset.rows[0].n === 2, `an explicit id list pools those ids once each under its own key (got ${subset.rows[0].n} of 2)`);
+  assert(/violates foreign key/.test(await raises(`SELECT enqueue_thoughts($1, $2::uuid[])`, ["test:subset", ["00000000-0000-0000-0000-000000000001"]])),
+         "an id that names no thought fails the foreign key rather than being skipped");
+  assert(/must name the pass/.test(await raises(`SELECT enqueue_thoughts('')`)), "an empty work_type is refused");
+  const pooled = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = $1 AND status = 'pending'`, [JOB])).rows[0].c;
+  assert(pooled === 10, `ten pending rows under the key, none under the other key's count (got ${pooled})`);
+
+  // The lease. Sequential here — see the section comment.
+  const a = await claim("A", 4);
+  assert(a.length === 4 && a.every((r) => r.attempt === 1), `A claims 4 rows on their first attempt (got ${a.length})`);
+  const b = await claim("B", 4);
+  const aIds = new Set(a.map((r) => r.thought_id));
+  assert(b.length === 4 && b.every((r) => !aIds.has(r.thought_id)), "B's 4 rows are none of A's");
+  const c = await claim("C", 4);
+  assert(c.length === 2, `C gets the 2 that remain, not 4 (got ${c.length})`);
+  assert((await claim("C", 4)).length === 0, "…and the pool is then empty");
+  const held = await statusOf(a[0].thought_id);
+  assert(held.status === "claimed" && held.worker_id === "A" && held.ttl !== null && held.attempt_count === 1,
+         `a claimed row records status, holder, lease and attempt (${JSON.stringify(held)})`);
+  assert(/must be positive/.test(await raises(`SELECT * FROM claim_thoughts($1, 'Z', 1, 0)`, [JOB])), "a non-positive TTL is refused, not stamped as already expired");
+  assert(/must identify the worker/.test(await raises(`SELECT * FROM claim_thoughts($1, '', 1)`, [JOB])), "an empty worker id is refused");
+
+  // Who may release.
+  const notHolder = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'B', 'succeeded') AS ok`, [a[0].thought_id, JOB]);
+  assert(notHolder.rows[0].ok === false, "a worker that does not hold the lease cannot release it");
+  assert((await statusOf(a[0].thought_id)).status === "claimed", "…and the row is still A's");
+  assert(/must be succeeded or failed/.test(await raises(`SELECT release_thought($1, $2, 'A', 'done')`, [a[0].thought_id, JOB])), "a status outside the two terminal ones is refused");
+  const holder = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'succeeded') AS ok`, [a[0].thought_id, JOB]);
+  assert(holder.rows[0].ok === true, "the holder releases it");
+  const done = await statusOf(a[0].thought_id);
+  assert(done.status === "succeeded" && done.ttl === null, "…to succeeded, with the lease cleared");
+  const twice = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'succeeded') AS ok`, [a[0].thought_id, JOB]);
+  assert(twice.rows[0].ok === false, "…and a second release of the same row is false, not a second success");
+  const failed = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'failed', 'provider 500') AS ok`, [a[1].thought_id, JOB]);
+  assert(failed.rows[0].ok === true && (await statusOf(a[1].thought_id)).last_error === "provider 500", "a failed release records the error");
+
+  // Clean shutdown: B hands its four back, and they did not count as attempts.
+  const freed = await db.query<{ n: number }>(`SELECT release_claims_for_worker($1, 'B') AS n`, [JOB]);
+  assert(freed.rows[0].n === 4, `release_claims_for_worker returns B's 4 rows to the pool (got ${freed.rows[0].n})`);
+  const bBack = await statusOf(b[0].thought_id);
+  assert(bBack.status === "pending" && bBack.attempt_count === 0 && bBack.ttl === null, `…pending again at attempt 0 with no lease (${JSON.stringify(bBack)})`);
+  assert((await db.query<{ n: number }>(`SELECT release_claims_for_worker($1, 'B') AS n`, [JOB])).rows[0].n === 0, "…and a second shutdown call finds nothing to return");
+
+  // Expiry is enforced by the next claim, not merely recorded.
+  const aRest = a.slice(2).map((r) => r.thought_id);   // A's two still-held rows
+  await db.query(`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 second' WHERE thought_id = ANY($1::uuid[]) AND work_type = $2`, [aRest, JOB]);
+  const d = await claim("D", 10);
+  const dById = new Map(d.map((r) => [r.thought_id, r.attempt]));
+  assert(d.length === 6, `D receives A's 2 expired rows and B's 4 returned rows (got ${d.length})`);
+  assert(aRest.every((id) => dById.get(id) === 2), "…A's expired rows on their second attempt");
+  assert(b.every((r) => dById.get(r.thought_id) === 1), "…B's returned rows on their first");
+  const aLate = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'succeeded') AS ok`, [aRest[0], JOB]);
+  assert(aLate.rows[0].ok === false, "A, finishing late, can no longer release a row D now holds");
+
+  // The attempt cap: expired three times means failed, not a fourth lease.
+  await db.query(`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 second' WHERE thought_id = ANY($1::uuid[]) AND work_type = $2`, [aRest, JOB]);
+  const e = await claim("E", 10);
+  assert(e.length === 2 && e.every((r) => r.attempt === 3 && aRest.includes(r.thought_id)), `E gets the same 2 rows on their third attempt (got ${JSON.stringify(e)})`);
+  await db.query(`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 second' WHERE thought_id = ANY($1::uuid[]) AND work_type = $2`, [aRest, JOB]);
+  const f = await claim("F", 10);
+  assert(f.length === 0, `F gets nothing: the two rows have used their attempts and the rest are held (got ${f.length})`);
+  const capped = await statusOf(aRest[0]);
+  assert(capped.status === "failed" && /expired 3 times; last held by E/.test(capped.last_error ?? ""),
+         `…they are failed, and the error names the count and the last holder (${JSON.stringify(capped)})`);
+  // A looser cap is the caller's to choose.
+  await db.query(`UPDATE thought_work_claims SET status = 'claimed', ttl_expires_at = now() - interval '1 second' WHERE thought_id = $1 AND work_type = $2`, [aRest[0], JOB]);
+  const g = await claim("G", 10, 900, 10);
+  assert(g.length === 1 && g[0].attempt === 4, "with p_max_attempts raised the same row is leased a fourth time");
+
+  // The cascade, and the constraint that keeps status and lease in step.
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [c[0].thought_id]);
+  const gone = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM thought_work_claims WHERE thought_id = $1`, [c[0].thought_id]);
+  assert(gone.rows[0].n === 0, "deleting a thought takes its claim rows with it");
+  const cLate = await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'C', 'succeeded') AS ok`, [c[0].thought_id, JOB]);
+  assert(cLate.rows[0].ok === false, "…and the holder's release returns false rather than raising");
+  assert(/check constraint/.test(await raises(`UPDATE thought_work_claims SET status = 'claimed', ttl_expires_at = NULL WHERE thought_id = $1 AND work_type = $2`, [c[1].thought_id, JOB])),
+         "a claimed row without a lease is refused by the CHECK, so expiry cannot be lost by a stray write");
+
+  const idx = await db.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'thought_work_claims' ORDER BY 1`);
+  const names = idx.rows.map((r) => r.indexname);
+  assert(names.includes("thought_work_claims_status_idx") && names.includes("thought_work_claims_worker_idx"),
+         `the reaper index and the per-worker partial index exist (${names.join(", ")})`);
+  const pendingIdx = (await db.query<{ def: string }>(`SELECT indexdef AS def FROM pg_indexes WHERE indexname = 'thought_work_claims_pending_idx'`)).rows[0]?.def ?? "";
+  assert(/\(work_type, enqueued_at\)/.test(pendingIdx) && /WHERE \(status = 'pending'::text\)/.test(pendingIdx),
+         `the claim's index is partial on pending rows and ordered by enqueued_at (${pendingIdx.replace(/^.*USING /, "")})`);
+  // 015 must be the fork's shape: no DELETE anywhere, since expiry and clean
+  // shutdown are UPDATEs and the record of a pass is meant to survive.
+  const f015 = files.find((f) => f.startsWith("015"))!;
+  const src015 = readFileSync(join(MIGRATIONS, f015), "utf8").replace(/--[^\n]*/g, "");
+  // `ON DELETE CASCADE` on the foreign key is a clause, not a statement.
+  assert(!/\bDELETE\s+FROM\b/i.test(src015), "015 contains no DELETE statement");
+
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();

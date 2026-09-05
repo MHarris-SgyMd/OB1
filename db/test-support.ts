@@ -29,6 +29,7 @@ const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 const TABLES = [
   "thought_audit",
   "thought_chunks",
+  "thought_work_claims",
   "thoughts",
   "ob1_agent_keys",
   "ob1_agents",
@@ -60,6 +61,10 @@ const FUNCTIONS = [
   "match_thoughts(vector, float, int, jsonb)",
   "search_thoughts_keyword(text, int, int, jsonb)",
   "update_updated_at()",
+  "enqueue_thoughts(text, uuid[])",
+  "claim_thoughts(text, text, int, int, int)",
+  "release_thought(uuid, text, text, text, text)",
+  "release_claims_for_worker(text, text)",
 ];
 
 export type SchemaOptions = {

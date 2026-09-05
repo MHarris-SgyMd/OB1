@@ -1,18 +1,6 @@
 
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
-import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
-import {
-  EMBEDDING_PROMPTS,
-  DEFAULT_EMBEDDING_MODEL,
-  DEFAULT_EMBEDDING_DIM,
-  DEFAULT_METADATA_MODEL,
-  DEFAULT_LLM_BASE_URL,
-  CHUNK_CONTEXT_PROMPTS,
-  composeChunkForEmbedding,
-  usableChunkContext,
-  resolveChunkContext,
-  resolveEmbeddingDimensions,
-} from "../db/config.mjs";
+import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -113,89 +101,29 @@ function agents(): AgentResolver {
 // /chat/completions shapes works, which includes OpenRouter, OpenAI itself, and
 // Ollama's compatibility layer — so a fully local brain is a URL change, not a
 // code change.
+//
+// How each provider-side setting is resolved from the environment lives in
+// embed.ts (resolveEmbedConfig), because db/reembed.ts must resolve them the
+// same way; these are the server's lazy readers over it, lazy so Cloudflare
+// Workers bindings — which arrive per request — still apply.
 
+function embedConfig(): EmbedConfig {
+  return resolveEmbedConfig(env());
+}
 function llmBase(): string {
-  return (env().OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, "");
+  return embedConfig().llmBase;
 }
-
-/**
- * A local endpoint needs no credential, so the key is optional there. Sending an
- * `Authorization: Bearer undefined` header to Ollama is harmless but confusing in
- * logs, so it is omitted entirely when there is no key.
- */
 function llmHeaders(): Record<string, string> {
-  const key = env().OB1_LLM_API_KEY || env().OPENROUTER_API_KEY;
-  return key
-    ? { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }
-    : { "Content-Type": "application/json" };
-}
-
-function embeddingModel(): string {
-  return env().OB1_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
-}
-function embeddingDim(): number {
-  const raw = env().OB1_EMBEDDING_DIM;
-  return raw ? Number(raw) : DEFAULT_EMBEDDING_DIM;
-}
-
-/**
- * Whether to ask the provider for a narrower vector, via the OpenAI `dimensions`
- * parameter.
- *
- * This exists so a model whose native width exceeds pgvector's 2000-dimension
- * HNSW ceiling can be used at all. `qwen3-embedding:4b` emits 2560 and cannot be
- * indexed, but truncated to 1024 it scored the best retrieval result measured on
- * real data — better than every model that fits natively (evals/README.md).
- *
- * It is OFF by default and deliberately so. Providers apply the parameter to any
- * model, including ones never trained for Matryoshka truncation: Ollama returns
- * 256 numbers for `all-minilm` just as happily as for `embeddinggemma`, with no
- * error either way. The result is a valid-looking vector that retrieves worse, and
- * silent quality loss is the failure mode this fork exists to eliminate rather
- * than add to. Opting in is a claim that you checked.
- */
-function embeddingDimensionsRequested(): boolean {
-  return resolveEmbeddingDimensions(env().OB1_EMBEDDING_DIMENSIONS, embeddingDim(), embeddingModel());
+  return embedConfig().headers;
 }
 function metadataModel(): string {
-  return env().OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL;
+  return embedConfig().metadataModel;
 }
-
-/**
- * Read per capture rather than snapshotted, like every other setting here, so
- * Cloudflare Workers bindings apply — and so flipping it takes effect on the
- * next capture rather than the next migration run. The consequence is a corpus
- * that can hold both kinds of chunk; `thought_chunks.context` records which is
- * which and preflight reports the split.
- */
-function chunkContextEnabled(): boolean {
-  return resolveChunkContext(env().OB1_CHUNK_CONTEXT);
-}
-
-/**
- * Thinking-capable models reason before answering unless told not to, and a
- * growing share of open-weight models default to it — Gemma 4, Qwen 3,
- * DeepSeek-R1. For a fixed-schema extraction on the interactive path of every
- * capture, that is mostly cost: measured on gemma4, reasoning bought +3 points on
- * the extraction benchmark for 5.5x the latency (7.7s vs 1.4s per capture).
- *
- * So reasoning is OFF by default and opt-in. Note that `think: false` is silently
- * IGNORED on the OpenAI-compatible endpoint — `reasoning_effort` is what it
- * honours, and it is harmless to models with no reasoning mode.
- */
 function metadataReasoning(): Record<string, unknown> {
-  const raw = (env().OB1_METADATA_REASONING ?? "").toLowerCase();
-  if (raw === "on" || raw === "true" || raw === "1") return {};
-  if (raw && raw !== "off" && raw !== "false" && raw !== "0") return { reasoning_effort: raw };
-  return { reasoning_effort: "none" };
+  return embedConfig().metadataReasoning;
 }
-
-/** Deterministic by default; overridable for anyone who wants variety. */
 function metadataTemperature(): number {
-  const raw = env().OB1_METADATA_TEMPERATURE;
-  if (raw === undefined || raw === "") return 0;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
+  return embedConfig().metadataTemperature;
 }
 
 function citationBase(): string {
@@ -209,264 +137,14 @@ function citationBase(): string {
 const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
 
-
-
-/**
- * Chunk sizing. The default is deliberately well under Ollama's 2048-token batch
- * rather than close to it: the token count is an estimate, and a chunk that
- * overshoots is silently truncated, which is the failure being fixed rather than a
- * degradation of it. Retrieval was measured perfect at 2000 tokens and at chance
- * by 4000, so crowding the ceiling buys nothing.
- */
-function chunkTokens(): number {
-  const raw = Number(env().OB1_CHUNK_TOKENS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_TOKENS;
-}
-function chunkOverlap(): number {
-  const raw = Number(env().OB1_CHUNK_OVERLAP);
-  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_OVERLAP_TOKENS;
-}
-
-/**
- * Generate the blurb that situates one window in its document.
- *
- * Returns "" on any failure, and the caller degrades to a bare window rather
- * than failing the capture. That choice is the one this feature turns on, so it
- * is worth stating why: the alternative — fail the capture — makes one flaky
- * local model call lose a thought outright, which is the failure migration 008
- * spent a whole atomic-capture design avoiding. The usual objection to
- * degrading is that it produces a silently inconsistent corpus, and that
- * objection is answered by the column rather than by the policy:
- * `thought_chunks.context` is NULL for a window embedded bare, preflight counts
- * both kinds, and the capture response says so at the time.
- */
-async function contextualiseChunk(document: string, chunk: string): Promise<string> {
-  const prompt = CHUNK_CONTEXT_PROMPTS.chunk
-    .replace("{document}", document)
-    .replace("{chunk}", chunk);
-  try {
-    const r = await fetch(`${llmBase()}/chat/completions`, {
-      method: "POST",
-      headers: llmHeaders(),
-      body: JSON.stringify({
-        model: metadataModel(),
-        // The same two settings extractMetadata sends, for the same reason: this
-        // is the other LLM call on the interactive capture path, and a thinking
-        // model left to reason costs 5.5x the latency there. `qwen3.8:27b` is
-        // suggested in db/config.mjs as an OB1_METADATA_MODEL, so the case is
-        // real rather than hypothetical — and reasoning text arriving in a blurb
-        // would be embedded along with it.
-        temperature: metadataTemperature(),
-        ...metadataReasoning(),
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!r.ok) {
-      console.error(`contextualiseChunk: ${llmBase()} returned ${r.status}`);
-      return "";
-    }
-    const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
-    const out = (d?.choices?.[0]?.message?.content ?? "").trim();
-    // The rule lives in db/config.mjs so the benchmark applies the same one. A
-    // blurb this file accepted and the harness rejected would mean every
-    // measured number described text the server does not embed.
-    if (!usableChunkContext(out, chunk)) {
-      if (out) console.error(`contextualiseChunk: rejected a ${out.length}-char blurb for a ${chunk.length}-char window`);
-      return "";
-    }
-    return out;
-  } catch (e) {
-    console.error(`contextualiseChunk: ${(e as Error).message}`);
-    return "";
-  }
-}
-
-/**
- * Set when the provider rejects a whole-content embedding outright. Process-
- * scoped and one-way: the only thing that flips it is a 4xx, which is a property
- * of the configured model rather than a transient condition.
- */
-let wholeContentRefused = false;
-
-/**
- * Embed a capture: one vector for `thoughts.embedding`, plus per-window vectors
- * when the content is too long to embed in a single provider call.
- *
- * Short content — nearly everything — takes exactly the path it always did: one
- * call, one vector, no chunk rows.
- *
- * ── Long content: the whole-content vector is kept ──────────────────────────
- * `thoughts.embedding` is the whole content's vector, and the windows go to
- * `thought_chunks`, so `match_thoughts` scores the thought as the best of both.
- *
- * It used to be the FIRST WINDOW's vector, on the reasoning that sending the
- * whole content would exceed the provider's batch and be silently truncated.
- * That reasoning was sound and is no longer true of the configured default:
- * `evals/eval-contextual.ts` measures the ceiling directly, by bisecting for the
- * shortest prefix that embeds to a bit-identical vector, and `qwen3-embedding:4b`
- * read all 15,812 characters of the longest real document in the corpus. The
- * head-window rule was discarding a vector the provider would have given us.
- *
- * Measured, on 37 queries that name a document's subject and ask for a detail
- * inside one window: keeping the whole-content vector scores 0.935 MRR against
- * 0.904 for windows alone — three queries better, none worse. On
- * `embeddinggemma`, which genuinely does truncate at ~8,150 characters, it is
- * still +0.020 with none worse: a head-truncated whole-content vector is a
- * longer head than the first window, not a worse one. The 426 unchunked
- * documents move by 0.001, which is noise.
- *
- * The cost is one extra provider call on the 3.4% of captures long enough to
- * chunk, and it is best-effort: a provider that REFUSES over-length input rather
- * than truncating it — which hosted APIs do, where Ollama truncates — must not
- * turn a capture that used to succeed into one that fails, so that failure falls
- * back to the old head-window behaviour.
- *
- * ONLY NEW CAPTURES. A long thought stored before this change still has its head
- * window in `thoughts.embedding`, and nothing upgrades it: there is no backfill,
- * and preflight cannot even report the split the way it reports chunk context.
- * The obvious detector — `thoughts.embedding` equal to chunk 0's — has a false
- * positive it cannot distinguish, because a provider that refuses over-length
- * input produces exactly that state legitimately, for every long capture,
- * forever. A check that nags a hosted deployment about rows that are correct is
- * worse than no check, so this one is written down instead. Re-capture a long
- * thought to give it the better vector.
- *
- * Windows are embedded concurrently; they are independent, and serialising them
- * would multiply the latency of a long capture for no benefit.
- *
- * WITH THE FLAG ON, that concurrency has a cost worth knowing before turning it
- * on. The blurbs are generated concurrently too, and each prompt carries the
- * WHOLE document — so a six-window capture fires six simultaneous generation
- * requests, each several thousand tokens, at whatever OB1_LLM_BASE_URL points
- * at. On a local box running a large model that is a real spike. It is left
- * concurrent rather than bounded because the alternative is six sequential
- * generations on the interactive capture path, and neither is obviously right:
- * anyone turning this on has already been told to measure it first.
- */
-async function embedCapture(content: string): Promise<{
-  embedding: number[];
-  chunks: { content: string; embedding: number[]; context?: string }[];
-  contextFailures: number;
-}> {
-  const windows = chunkContent(content, { maxTokens: chunkTokens(), overlapTokens: chunkOverlap() });
-  if (!windows.length) {
-    return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0 };
-  }
-
-  const wantContext = chunkContextEnabled();
-  const contexts = wantContext
-    ? await Promise.all(windows.map((w) => contextualiseChunk(content, w.content)))
-    : windows.map(() => "");
-
-  const [whole, ...windowVectors] = await Promise.all([
-    wholeContentRefused
-      ? Promise.resolve(null)
-      : getEmbedding(content).catch((e: Error & { status?: number }) => {
-          // A 4xx here means the provider REFUSED the input rather than
-          // truncating it, which is a fact about the model and will be just as
-          // true for the next long capture. Remembering it turns a wasted round
-          // trip on every long capture into one per process. A 5xx or a network
-          // error says nothing durable, so it is not latched.
-          if (e.status !== undefined && e.status >= 400 && e.status < 500) {
-            wholeContentRefused = true;
-            console.error(
-              `embedCapture: ${embeddingModel()} refused the whole content (${e.status}); ` +
-                `falling back to the head window here and skipping the attempt for the rest ` +
-                `of this process.`
-            );
-          } else {
-            console.error(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
-          }
-          return null;
-        }),
-    ...windows.map((w, i) => getEmbedding(composeChunkForEmbedding(contexts[i], w.content))),
-  ]);
-
-  return {
-    embedding: whole ?? windowVectors[0],
-    chunks: windows.map((w, i) => ({
-      content: w.content,
-      embedding: windowVectors[i],
-      ...(contexts[i] ? { context: contexts[i] } : {}),
-    })),
-    contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
-  };
-}
-
-/**
- * Some embedding models are trained to see a query and a document differently, and
- * sending both bare is not a small loss: `qwen3-embedding:4b` scores 0.933 MRR on
- * 97 real issues with its query instruction and 0.860 without — unprompted, worse
- * than a model a quarter its size. The templates live in db/config.mjs, keyed by
- * model, so the migration runner and the server cannot disagree about them.
- *
- * A model with no entry is sent bare, which is right for most: `embeddinggemma`
- * gains 0.002 from its documented format, and nomic's prefixes measurably hurt.
- *
- * This is baked into stored vectors. Changing the template invalidates them
- * exactly as changing the model does — which is why it is keyed off the model name
- * rather than exposed as its own setting, so preflight's existing model-change
- * check already covers it.
- */
-type EmbedKind = "query" | "document";
-function applyPrompt(text: string, kind: EmbedKind): string {
-  const tpl = (EMBEDDING_PROMPTS as Record<string, { query: string; document: string } | undefined>)[
-    embeddingModel()
-  ];
-  if (!tpl) return text;
-  return kind === "query" ? tpl.query.replace("{q}", text) : tpl.document.replace("{d}", text);
-}
-
-async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
-  const r = await fetch(`${llmBase()}/embeddings`, {
-    method: "POST",
-    headers: llmHeaders(),
-    body: JSON.stringify({
-      model: embeddingModel(),
-      input: applyPrompt(text, kind),
-      ...(embeddingDimensionsRequested() ? { dimensions: embeddingDim() } : {}),
-    }),
-  });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    const err = new Error(`Embeddings request to ${llmBase()} failed: ${r.status} ${msg}`);
-    // Attached rather than parsed back out of the message: embedCapture has to
-    // distinguish "this input is too large for this model", which is a stable
-    // property worth remembering, from a transient outage, which is not.
-    (err as Error & { status?: number }).status = r.status;
-    throw err;
-  }
-  const d = await r.json();
-  const embedding = d?.data?.[0]?.embedding;
-  if (!Array.isArray(embedding)) {
-    throw new Error(`${llmBase()} returned no embedding for model ${embeddingModel()}`);
-  }
-
-  // Refuse a width the column cannot hold. Postgres would reject the insert
-  // anyway, but the error surfaces as an opaque cast failure inside a tool
-  // response; naming the model and both widths makes the cause obvious. A
-  // same-width model from a different family is NOT detectable here — it produces
-  // valid numbers that mean something else, which is why the model is recorded in
-  // ob1_config and checked by preflight.
-  const expected = embeddingDim();
-  if (embedding.length !== expected) {
-    // The cost of changing model is always worth stating; the truncation hint is
-    // only worth stating when truncation could actually resolve it.
-    const hint = embeddingDimensionsRequested()
-      ? ` OB1_EMBEDDING_DIMENSIONS=on was set, so the provider was asked for ${expected} and ` +
-        `ignored it — not every provider or model supports the parameter.`
-      : embedding.length > expected
-        ? ` If the model supports Matryoshka truncation, set OB1_EMBEDDING_DIMENSIONS=on to ` +
-          `request ${expected} instead of ${embedding.length}.`
-        : "";
-    throw new Error(
-      `Embedding width mismatch: model ${embeddingModel()} returned ${embedding.length} ` +
-        `dimensions but thoughts.embedding is vector(${expected}). Changing embedding model ` +
-        `requires a schema migration and re-embedding every existing row.${hint}`
-    );
-  }
-  return embedding;
-}
+// How a capture becomes vectors — chunking, the blurb rule, the prompt
+// template, the whole-content-then-head-window fallback, the width check — is
+// embed.ts, shared with db/reembed.ts so a re-embed produces exactly what a
+// capture would. The embedder remembers one thing across calls: whether the
+// provider refused a whole-content embedding, which is a property of the model.
+const embedder = createEmbedder(embedConfig);
+const embedCapture = (content: string) => embedder.embedCapture(content);
+const getEmbedding = (text: string, kind: EmbedKind = "document") => embedder.getEmbedding(text, kind);
 
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {

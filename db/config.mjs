@@ -14,7 +14,7 @@
 /** Width of the `thoughts.embedding` column. */
 /**
  * Environment access that survives Cloudflare Workers, which has no `process`.
- * This module is imported by server-portable/index.ts, which bundles for Workers,
+ * This module is imported by server-portable/embed.ts, which index.ts bundles for Workers,
  * so a bare `process.env` at module scope would throw at load. The values below
  * are defaults only; the server reads live configuration through its own lazy
  * `env()` so Workers bindings still apply.
@@ -41,7 +41,7 @@ const ENV = new Proxy(/** @type {Record<string, string|undefined>} */ ({}), {
 });
 
 /**
- * Defaults, exported so server-portable/index.ts uses these exact values rather
+ * Defaults, exported so server-portable/embed.ts uses these exact values rather
  * than its own copy. They drifted before; one definition cannot.
  *
  * `qwen3-embedding:4b` at 1024 dimensions is the best configuration measured on
@@ -273,7 +273,11 @@ export const EMBEDDING_PROMPTS = {
 export function applyEmbeddingPrompt(model, text, isQuery) {
   const tpl = EMBEDDING_PROMPTS[model];
   if (!tpl) return text;
-  return isQuery ? tpl.query.replace("{q}", text) : tpl.document.replace("{d}", text);
+  // A replacer FUNCTION, not the string: String.replace reads `$&`, `$'`, `` $` ``
+  // and `$$` in a string replacement as substitution patterns, so a note with a
+  // price written `$$5` embedded as `$5`, and a query containing `$&` became
+  // the template's own placeholder. The function form inserts the text as it is.
+  return isQuery ? tpl.query.replace("{q}", () => text) : tpl.document.replace("{d}", () => text);
 }
 
 /**
@@ -332,6 +336,26 @@ export const CHUNK_CONTEXT_PROMPTS = {
     "decision it concerns. Do not begin with \"This\". Do not describe the excerpt " +
     "or the document. Answer with the phrase and nothing else.",
 };
+
+/**
+ * Fill a CHUNK_CONTEXT_PROMPTS template with the document and, for the
+ * per-window templates, the window.
+ *
+ * One pass, with a function, for the same reason applyEmbeddingPrompt uses one:
+ * a string replacement reads `$&`, `$'` and `$$` in the document as
+ * substitution patterns, and two chained replaces would drop the window into a
+ * document that itself contains the literal `{chunk}` and leave the real
+ * placeholder unfilled. Shared by server-portable/embed.ts and
+ * evals/eval-contextual.ts so the harness measures the prompt the server sends;
+ * the eval kept its own chained replaces after the server's were fixed, which
+ * is the defect this file exists to prevent.
+ */
+export function applyChunkContextPrompt(template, fill) {
+  return template.replace(/\{document\}|\{chunk\}/g, (m) => {
+    const v = m === "{document}" ? fill.document : fill.chunk;
+    return v === undefined ? m : v;
+  });
+}
 
 /**
  * Whether a generated blurb is worth prepending.
