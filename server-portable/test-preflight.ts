@@ -183,7 +183,7 @@ else {
   assert(dropped.code === 0, "a recorded 014 whose function was replaced still starts");
   // Re-applying 007 replaces the BODY as well as the clause, so this is the
   // "replaced its body" wording with the body re-run as the remedy.
-  assert(/recorded as applied — a later redefinition replaced its body/.test(dropped.out), "…and is described as a later redefinition, not a missing migration");
+  assert(/recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (--baseline or a redefinition), not a missing migration");
   assert(/Re-run the body of db\/migrations\/014/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
   // The other branch: 014's body intact, its SET clause gone — what a successor
   // that redefined the function without the clause leaves. (An earlier draft

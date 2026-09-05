@@ -25,13 +25,12 @@ import {
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
-  HNSW_BOUNDS,
-  HNSW_SEED_MAX_SCAN_TUPLES,
-  HNSW_SEED_SCAN_MEM_MULTIPLIER,
+  HNSW_SEEDS,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   migrationValues,
   parseSetConfig,
+  quoteIdent,
   substituteMigration,
   validateEmbeddingConfig,
   versionAtLeast,
@@ -61,8 +60,8 @@ type Migration = {
   sha: string;
   /** From a `-- requires: pgvector >= X.Y.Z` line in the file's header, if any. */
   requiresPgvector: [number, number, number] | null;
-  /** The file seeds database-level settings through a DO block that can only warn. */
-  seedsSettings: boolean;
+  /** Database-level settings the file seeds through a DO block that can only warn — read from its text. */
+  seeds: string[];
 };
 
 /**
@@ -97,7 +96,7 @@ function loadMigrations(): Migration[] {
       return {
         name,
         requiresPgvector: requiresPgvector(template),
-        seedsSettings: /ALTER DATABASE %I SET hnsw\./.test(template),
+        seeds: [...new Set([...template.matchAll(/ALTER DATABASE %I SET (hnsw\.\w+)/g)].map((x) => x[1]))],
         sql: substitute(template, name),
         // Hash the TEMPLATE, not the substituted SQL. Otherwise choosing a
         // different embedding dimension would look like an edited migration and
@@ -157,8 +156,6 @@ const applied = new Map<string, string>(
  * way. Unknown means proceed: a server whose control file is unreadable will
  * still say so on the migration.
  */
-/** A database name as an SQL identifier — `open-brain` and `OpenBrain` both need the quotes. */
-const quoteIdent = (name: unknown) => (name == null ? "<database>" : `"${String(name).replace(/"/g, '""')}"`);
 let pgvectorLibrary: string | null = null;
 if (migrations.some((m) => m.requiresPgvector && !applied.has(m.name))) {
   try {
@@ -265,27 +262,33 @@ for (const m of migrations) {
   // the protocol. Outside the try above: the migration is applied and recorded
   // by now, and a catalog this role cannot read must not turn that into
   // "FAILED".
-  if (m.seedsSettings) {
+  if (m.seeds.length) {
     try {
       // "Set" means set where every role sees it: server configuration or the
       // database (SHARED_SETTING_SOURCES, as THIS session resolved them at
       // connect), or the database-level row the migration itself may just have
       // written — which this session, opened before the ALTER DATABASE, does
       // not yet see in pg_settings. A role-level value on the migrating role
-      // is neither: it reaches this role alone (tenth review pass).
+      // is neither: it reaches this role alone (tenth review pass). The arrays
+      // go through sql.array: a bare `${array}` is sent as comma-joined text,
+      // and this whole check silently fell into the catch below on every run
+      // until the eleventh review pass ran the migrator and read the output.
       const [row] = await sql`SELECT current_database() AS db`;
       const shared = (await sql`
-        SELECT name FROM pg_settings WHERE name = ANY(${HNSW_BOUNDS}) AND source = ANY(${SHARED_SETTING_SOURCES})`) as { name: string }[];
+        SELECT name FROM pg_settings
+        WHERE name = ANY(${sql.array(m.seeds, "TEXT")}) AND source = ANY(${sql.array(SHARED_SETTING_SOURCES, "TEXT")})`) as { name: string }[];
       const [dbRow] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
       const dbLevel = parseSetConfig(dbRow?.cfg);
-      const missing = HNSW_BOUNDS.filter((name) => !shared.some((r) => r.name === name) && !(name in dbLevel));
+      const missing = m.seeds.filter((name) => !shared.some((r) => r.name === name) && !(name in dbLevel));
       if (missing.length) {
+        const statements = missing
+          .map((name) => `       ALTER DATABASE ${quoteIdent(row?.db)} SET ${name} = ${(HNSW_SEEDS as Record<string, number>)[name] ?? "<value>"};`)
+          .join("\n");
         console.error(
           `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
             `     the migrating role does not own the database, or the platform refused ALTER DATABASE. Run as the owner, in one session:\n` +
             `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
-            `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES};\n` +
-            `       ALTER DATABASE ${quoteIdent(row?.db)} SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};\n` +
+            `${statements}\n` +
             `     Until then a broad filter's walk runs with pgvector's defaults, which return short on large tables; preflight warns about it.`
         );
       }

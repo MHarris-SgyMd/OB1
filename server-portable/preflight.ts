@@ -403,7 +403,7 @@ if (configFailed) {
          * with the recall it had before 014.
          */
         try {
-          const { versionAtLeast, HNSW_SEED_MAX_SCAN_TUPLES, HNSW_SEED_SCAN_MEM_MULTIPLIER } = await import("../db/config.mjs");
+          const { versionAtLeast, HNSW_BOUNDS, HNSW_SEEDS, HNSW_SEED_MAX_SCAN_TUPLES, HNSW_SEED_SCAN_MEM_MULTIPLIER, BOUNDS_IN_FORCE_SQL } = await import("../db/config.mjs");
           // The one signature the servers call, resolved as the call would
           // resolve it; to_regprocedure is NULL rather than an error when it
           // is not defined, so "not defined" stays a verdict and not a throw.
@@ -464,9 +464,10 @@ if (configFailed) {
           } catch {
             /* no ledger */
           }
-          const bounds = await sql`
-            SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
-          const boundsText = `walk bounded at ${bounds[0]?.t ?? "default"} tuples, memory x${bounds[0]?.m ?? "default"}`;
+          const bounds = Object.fromEntries(
+            (await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value])
+          ) as Record<string, string | null>;
+          const boundsText = `walk bounded at ${bounds["hnsw.max_scan_tuples"] ?? "default"} tuples, memory x${bounds["hnsw.scan_mem_multiplier"] ?? "default"}`;
           // Whether the bounds are SET for THIS connection — from anywhere it
           // resolves them: ALTER DATABASE, ALTER ROLE on the server's role,
           // ALTER SYSTEM, a parameter group — not whether they are large, and
@@ -479,11 +480,13 @@ if (configFailed) {
           // above loaded pgvector, so hnsw.* rows are present; if the probe did
           // not run, load it here.
           await sql`SELECT '[1]'::vector`;
+          // sql.array, not a bare `${HNSW_BOUNDS}`: Bun sends a bare array as
+          // comma-joined text and Postgres rejects it (eleventh review pass).
           const srcRows = await sql`
-            SELECT name, source FROM pg_settings WHERE name IN ('hnsw.max_scan_tuples', 'hnsw.scan_mem_multiplier')`;
-          const boundsUnset = srcRows.length < 2 || srcRows.some((r: { source: string }) => r.source === "default");
+            SELECT name, source FROM pg_settings WHERE name = ANY(${sql.array(HNSW_BOUNDS, "TEXT")})`;
+          const boundsUnset = srcRows.length < HNSW_BOUNDS.length || srcRows.some((r: { source: string }) => r.source === "default");
           const seedBounds =
-            `Run as the database owner, in one session: SELECT '[1]'::vector; ALTER DATABASE <db> SET hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}; ALTER DATABASE <db> SET hnsw.scan_mem_multiplier = ${HNSW_SEED_SCAN_MEM_MULTIPLIER};  then restart the server so its pool reconnects.`;
+            `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
           const putBack =
             "Put it back: SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order;  and carry it into the migration that redefined it.";
           const staleRecord = installedOld && libraryNew;
@@ -519,7 +522,14 @@ if (configFailed) {
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.
-            const dropped = ledgerHas014 ? " although migration 014 is recorded as applied — a later redefinition replaced its body" : " — migration 014 is not applied";
+            // Recorded without 014's body in place has two causes and the ledger
+            // cannot tell them apart: `migrate.ts --baseline` records a migration
+            // without running it (the documented route for a database built by
+            // hand from the guide, whose match_thoughts is 007's), or a later
+            // redefinition replaced the body. Name both (eleventh review pass).
+            const dropped = ledgerHas014
+              ? " although migration 014 is recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body"
+              : " — migration 014 is not applied";
             const setting = declared
               ? `carries hnsw.iterative_scan=${declared} as a SET clause, which cannot help this body, whose LIMIT sits before the filter`
               : inForce

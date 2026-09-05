@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, migrationValues, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -168,8 +168,7 @@ export async function dropSchema(url: string): Promise<void> {
     try {
       await admin`SELECT '[1]'::vector`;
       const [{ db }] = await admin`SELECT current_database() AS db`;
-      await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.max_scan_tuples`);
-      await admin.unsafe(`ALTER DATABASE "${String(db).replace(/"/g, '""')}" RESET hnsw.scan_mem_multiplier`);
+      for (const bound of HNSW_BOUNDS) await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET ${bound}`);
     } catch {
       /* not the owner of the database, or no pgvector to load — left as found */
     }

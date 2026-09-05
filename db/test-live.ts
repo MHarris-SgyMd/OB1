@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, dropSchema, seededRandom } from "./test-support.ts";
@@ -86,6 +86,15 @@ console.log("[1] migrate.ts against a real server");
   const run = await migrate();
   assert(run.code === 0, "apply exits 0");
   assert(/applied \d+, skipped 0/.test(run.out), "apply reports every migration applied");
+  // The post-014 bounds check must actually run. It is wrapped in a catch that
+  // turns any error into a soft warning, and for a whole commit that catch
+  // swallowed a malformed-array-literal error on every run — so the check
+  // never confirmed anything and the remedy branch was unreachable — while
+  // this suite, asserting only the exit code and "applied N", stayed green
+  // (eleventh review pass). This role owns the throwaway database, so the
+  // seed lands and neither warning may appear.
+  assert(!/could not read pg_settings/.test(run.out), "the migrator's walk-bounds check runs without falling into its catch");
+  assert(!/were not seeded/.test(run.out), "…and, as the database owner, finds the bounds seeded");
 
   const again = await migrate();
   assert(again.code === 0, "re-run exits 0");
@@ -197,10 +206,10 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   // whatever pg_db_role_setting holds is what a fresh session sees.
   const [seeded] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
   const want = parseSetConfig(seeded?.cfg);
-  const [{ t, mm }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS mm`;
-  if (want["hnsw.max_scan_tuples"] && want["hnsw.scan_mem_multiplier"]) {
-    assert(t === want["hnsw.max_scan_tuples"] && mm === want["hnsw.scan_mem_multiplier"],
-      `a fresh session sees the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${mm})`);
+  const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
+  if (HNSW_BOUNDS.every((b) => want[b])) {
+    assert(HNSW_BOUNDS.every((b) => inForce[b] === want[b]),
+      `a fresh session sees the database-level bounds (${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")})`);
   } else {
     skip("a fresh session sees the database-level bounds", "not seeded on this database — the migrating role does not own it");
   }

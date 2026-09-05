@@ -52,7 +52,10 @@
  *      may use either, and 014 declares no plan mode. The walk branch is
  *      explained on the 10% filter and the exact branch on the 1% filter,
  *      which is where the function routes them (the exact branch takes any
- *      filter matching at most 1,000 thoughts). That inspects the SQL actually
+ *      filter matching at most 1,000 thoughts); the routing statement itself —
+ *      the capped id collection every filtered call runs first — on the 50%
+ *      filter, where GIN builds its largest bitmap before the LIMIT can stop
+ *      anything, and on the empty one. That inspects the SQL actually
  *      deployed rather than a copy of it kept here, and it fails loudly if the
  *      function no longer has the shape the rewrite expects.
  *
@@ -77,7 +80,7 @@
 
 import { SQL } from "bun";
 import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
-import { DB_LEVEL_SETTINGS_SQL, parseSetConfig } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
@@ -297,20 +300,41 @@ async function filtered(
  * four parameters and the two DECLAREd locals — and refuses anything it does
  * not recognise rather than explaining a statement that is not the function's.
  */
-type Branch = "walk" | "exact";
+/**
+ * `route` is the statement that decides between the other two: the capped
+ * collection of matching ids that runs on EVERY filtered call. It is a plpgsql
+ * SELECT INTO rather than a RETURN QUERY, so it is extracted on its own.
+ */
+type Branch = "walk" | "exact" | "route";
 
 async function extractBody(sql: SQL, branch: Branch): Promise<string> {
   const [{ def }] = await sql.unsafe(
     `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
   );
-  // 014 has three RETURN QUERY branches: unfiltered, the exact answer for a
-  // thin filter, and the HNSW walk for a broad one. The two filtered ones
-  // both test `metadata @> filter`; only the walk LIMITs its candidate CTEs.
-  const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|ELSIF|END IF;|END;)/g)].map((x) => x[1]);
-  const filteredBlocks = blocks.filter((b) => /@>\s*filter/.test(b));
-  const block = filteredBlocks.find((b) => /LIMIT\s+v_fetch/.test(b) === (branch === "walk"));
-  if (!block) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s), ${filteredBlocks.length} filtered, and no ${branch} branch; the bench's rewrite does not apply`);
+  let block: string | undefined;
+  if (branch === "route") {
+    // `SELECT array_agg(s.id) INTO v_ids FROM (...) s;` — minus the INTO.
+    const m = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
+    if (!m) throw new Error("match_thoughts has no `SELECT array_agg(s.id) INTO v_ids` routing statement; the bench's rewrite does not apply");
+    block = `SELECT array_agg(s.id) ${m[1]}`;
+  } else {
+    // Three RETURN QUERY branches: unfiltered, the exact answer for a thin
+    // filter, and the HNSW walk for a broad one. Only the walk tests
+    // `metadata @> filter` and LIMITs its candidate CTEs; the exact branch
+    // reads the ids the routing statement collected.
+    const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|ELSIF|END IF;|END;)/g)].map((x) => x[1]);
+    block =
+      branch === "walk"
+        ? blocks.find((b) => /@>\s*filter/.test(b) && /LIMIT\s+v_fetch/.test(b))
+        : blocks.find((b) => /ANY \(v_ids\)/.test(b));
+    if (!block) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s) and no ${branch} branch; the bench's rewrite does not apply`);
+  }
   let body = block;
+  // The exact branch reads `v_ids`, which the routing statement fills; splice
+  // that statement in as a scalar subquery so the explained text stands alone —
+  // before the locals are substituted, since that statement uses v_exact.
+  const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
+  if (route) body = body.replace(/\bv_ids\b/g, () => `((SELECT array_agg(s.id) ${route[1]})::uuid[])`);
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
   const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
@@ -442,7 +466,7 @@ type Result = {
   ms10: number;
   msMax: number;
   cells: Cell[];
-  plan?: Record<Branch, { tier: string; matches: number; custom: PlanShape; generic: PlanShape }>;
+  plan?: Record<string, { branch: Branch; tier: string; matches: number; custom: PlanShape; generic: PlanShape }>;
 };
 const results: Result[] = [];
 const walk: (FilteredResult & { scale: number; key: string; share: number; matches: number })[] = [];
@@ -495,13 +519,13 @@ for (const n of SCALES) {
     if (arm === "after (014)") {
       await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
       await reconnect(); // the database-level bounds 014 just seeded are read at connect
-      const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
+      const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
       const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
       const cfg = parseSetConfig(row?.cfg);
-      if (cfg["hnsw.max_scan_tuples"] !== t || cfg["hnsw.scan_mem_multiplier"] !== m) {
-        throw new Error(`session did not pick up the database-level bounds (max_scan_tuples=${t}, scan_mem_multiplier=${m}; database has ${JSON.stringify(cfg)})`);
+      if (HNSW_BOUNDS.some((b) => cfg[b] !== inForce[b])) {
+        throw new Error(`session did not pick up the database-level bounds (in force ${JSON.stringify(inForce)}; database has ${JSON.stringify(cfg)})`);
       }
-      console.log(`  bounds in force: max_scan_tuples=${t}, scan_mem_multiplier=${m}`);
+      console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10, msMax } = await unfiltered(sql, queries);
@@ -515,11 +539,16 @@ for (const n of SCALES) {
     // branch on the tier the function routes there — 10% is above the
     // 1,000-row exact threshold at both scales, 1% below it.
     const tierOf = (key: string) => tiers.find((t) => t.key === key)!;
+    // The routing statement is explained on the broadest filter — GIN builds
+    // the whole bitmap before the LIMIT can stop anything, so 50% is its worst
+    // case — and on the empty one, the shape one integration sends every call.
     const plan =
       arm === "after (014)"
         ? {
-            walk: { tier: "10%", matches: tierOf("t10").matches, ...(await plans(sql, queries[0], tierFilter("t10"), "walk")) },
-            exact: { tier: "1%", matches: tierOf("t1").matches, ...(await plans(sql, queries[0], tierFilter("t1"), "exact")) },
+            walk: { branch: "walk" as Branch, tier: "10%", matches: tierOf("t10").matches, ...(await plans(sql, queries[0], tierFilter("t10"), "walk")) },
+            exact: { branch: "exact" as Branch, tier: "1%", matches: tierOf("t1").matches, ...(await plans(sql, queries[0], tierFilter("t1"), "exact")) },
+            route50: { branch: "route" as Branch, tier: "50%", matches: tierOf("t50").matches, ...(await plans(sql, queries[0], tierFilter("t50"), "route")) },
+            routeNone: { branch: "route" as Branch, tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "route")) },
           }
         : undefined;
     results.push({ scale: n, arm, counts, ms10, msMax, cells, plan });
@@ -581,24 +610,25 @@ for (const r of results) {
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown.\n");
+console.log("`route` is the capped id collection that runs on every filtered call and decides between the other two; it has no chunk side.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
   if (!r.plan) continue;
-  for (const branch of ["walk", "exact"] as Branch[]) {
-    const { tier, matches, custom, generic } = r.plan[branch];
+  for (const { branch, tier, matches, custom, generic } of Object.values(r.plan)) {
+    const chunks = branch === "route" ? "—" : `${custom.chunks} / ${generic.chunks}`;
     console.log(
-      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches} | ${custom.thoughts} / ${generic.thoughts} | ${custom.chunks} / ${generic.chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} |`
+      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} |`
     );
   }
 }
 if (PRINT_PLANS) {
   for (const r of results) {
     if (!r.plan) continue;
-    for (const branch of ["walk", "exact"] as Branch[]) {
-      for (const mode of ["custom", "generic"] as const) {
-        console.log(`\n#### ${r.scale.toLocaleString()} rows, ${branch} branch, ${mode} plan\n`);
-        console.log(r.plan[branch][mode].text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
+    for (const [key, { branch, tier, custom, generic }] of Object.entries(r.plan)) {
+      for (const [mode, shape] of [["custom", custom], ["generic", generic]] as const) {
+        console.log(`\n#### ${r.scale.toLocaleString()} rows, ${branch} branch (${key}, ${tier}), ${mode} plan\n`);
+        console.log(shape.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
       }
     }
   }

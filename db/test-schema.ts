@@ -27,8 +27,8 @@ import {
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
   DB_LEVEL_SETTINGS_SQL,
+  HNSW_SEEDS,
   HNSW_SEED_MAX_SCAN_TUPLES,
-  HNSW_SEED_SCAN_MEM_MULTIPLIER,
   MATCH_COUNT_CEILING,
   migrationValues,
   parseSetConfig,
@@ -443,19 +443,19 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     const r = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, ${arg}, '{}'::jsonb)`, [unit(0)]);
     assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
   }
-  // The ceiling is the one config.mjs defines, templated into the body — not a
-  // literal that could drift from the docs — and covers the largest count any
-  // caller in the repo sends. (Its value is exercised on a real server in
-  // db/test-live.ts [5b]; 62 rows cannot show it here.)
-  assert(/LEAST\(GREATEST\(COALESCE\(match_count, 10\), 1\), 500\)/.test(String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`)).rows[0].s)) && MATCH_COUNT_CEILING === 500,
+  // The body, read once: the ceiling and the sentinel are both in it.
+  const prosrc = String((await db.query<{ s: string | null }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`)).rows[0]?.s ?? "");
+  // The ceiling is the one config.mjs defines, templated into the body — so the
+  // assertion is built from the constant, not from a literal that would have to
+  // be hand-edited when the constant moves (an earlier draft pinned 500 twice).
+  // Its value is exercised on a real server in db/test-live.ts [5b]; 62 rows
+  // cannot show it here.
+  assert(new RegExp(`LEAST\\(GREATEST\\(COALESCE\\(match_count, 10\\), 1\\), ${MATCH_COUNT_CEILING}\\)`).test(prosrc),
     `match_count is clamped to MATCH_COUNT_CEILING (${MATCH_COUNT_CEILING}) inside the function`);
 
   // The contract sentinel preflight reads — in the BODY, which a replace
   // rewrites, not in the COMMENT, which a replace leaves on the preserved OID.
-  const src = await db.query<{ s: string | null }>(
-    `SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
-  );
-  assert(/ob1:filter-inside-scan/.test(src.rows[0]?.s ?? ""), "the function body carries the ob1:filter-inside-scan sentinel a successor must keep");
+  assert(/ob1:filter-inside-scan/.test(prosrc), "the function body carries the ob1:filter-inside-scan sentinel a successor must keep");
 
   // The setting that makes the in-scan filter correct lives on the function.
   // Asserted by name so a later CREATE OR REPLACE that forgets the SET clause —
@@ -501,8 +501,9 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   const alterDb = async (setting: string) =>
     db.exec((await db.query<{ q: string }>(`SELECT format('ALTER DATABASE %I SET %s', current_database(), $1::text) AS q`, [setting])).rows[0].q);
   const seeded = await dbSettings();
-  assert(seeded["hnsw.max_scan_tuples"] === String(HNSW_SEED_MAX_SCAN_TUPLES), `hnsw.max_scan_tuples=${HNSW_SEED_MAX_SCAN_TUPLES} is seeded on the database (${JSON.stringify(seeded)})`);
-  assert(seeded["hnsw.scan_mem_multiplier"] === String(HNSW_SEED_SCAN_MEM_MULTIPLIER), `hnsw.scan_mem_multiplier=${HNSW_SEED_SCAN_MEM_MULTIPLIER} is seeded on the database`);
+  for (const [name, value] of Object.entries(HNSW_SEEDS)) {
+    assert(seeded[name] === String(value), `${name}=${value} is seeded on the database (${JSON.stringify(seeded)})`);
+  }
   await alterDb("hnsw.max_scan_tuples = 250000");
   const f014 = files.find((f) => f.startsWith("014"))!;
   await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));

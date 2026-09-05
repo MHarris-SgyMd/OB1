@@ -46,21 +46,21 @@
 --     filter matches   returned   in exact top-10   empty results
 --     50%                 10.0        7.9               0/50
 --     10%                  5.4        5.0               1/50
---      1%                  0.9        0.9              24/50
+--      1%                  0.8        0.8              23/50
 --      0.1% (9 rows)        0.1        0.1              46/50
 --
 --   After: 10.0 returned at every tier that has 10 rows, 10.0 in the exact
 --   top-10 at 10% and below, 9.4 at 50%, 0 empty. At 100,000 rows the before
---   column is the same shape (29 of 50 empty at 1%, 48 of 50 at 0.1%) and the
+--   column is the same shape (30 of 50 empty at 1%, 48 of 50 at 0.1%) and the
 --   after column is complete at 1% and thinner, while at 50% and 10% it holds
---   6.4 and 8.8 of the exact top-10 against 007's 4.7 and 3.8. That residue is
+--   6.4 and 9.0 of the exact top-10 against 007's 4.3 and 3.7. That residue is
 --   the HNSW approximation: random uniform vectors are the index's hardest
 --   case, the approximation was always there, and the iterative scan improves
 --   it because it keeps going. Thin filters cost less than an unfiltered call:
---   at 100,000 rows 0.19 ms for a filter matching nothing, 0.28 ms for one
---   matching 6 rows, 0.63 for 90, 2.6 for 998 (the exact branch below); broad
---   ones 2.9 ms (50%) and 9.1 ms (10%), the walk. Asking for the ceiling, 500
---   rows unfiltered, costs 6.5 ms at 10,000 rows and 27 ms at 100,000. The
+--   at 100,000 rows 0.18 ms for a filter matching nothing, 0.24 ms for one
+--   matching 6 rows, 0.52 for 90, 2.7 for 998 (the exact branch below); broad
+--   ones 3.4 ms (50%) and 9.9 ms (10%), the walk. Asking for the ceiling, 500
+--   rows unfiltered, costs 7.8 ms at 10,000 rows and 30 ms at 100,000. The
 --   full tables, and the real-corpus measurement, are in FORK.md change 28.
 --
 -- Design
@@ -73,9 +73,18 @@
 --
 --   * A filter matching at most v_exact thoughts (GREATEST(v_fetch * 4, 1000))
 --     is answered EXACTLY, from the matching rows and their chunks, with no
---     index walk: one capped GIN count decides, then a GIN lookup and index
---     probes into thought_chunks with the matched ids score everything that
---     matches.
+--     index walk: one GIN pass collects up to v_exact + 1 matching ids, and
+--     if they fit, primary-key probes into thoughts and index probes into
+--     thought_chunks with that array score everything that matches. One pass
+--     over the filter — an earlier draft counted, then re-evaluated the
+--     predicate to build the matched set (eleventh review pass). That pass is
+--     the one statement every filtered call runs, so db/bench-hnsw.ts section
+--     C explains it on its own: for the empty filter 0.01 ms; for the 50%
+--     filter at 100,000 rows 0.4 ms as a sequential scan with a LIMIT under
+--     the custom plan and 2.6 ms as a GIN bitmap over 50,000 matches under the
+--     generic — the bitmap is built whole before the LIMIT can stop anything,
+--     so that cost grows with the matches, which is what SMD-1018 measures
+--     at a million rows and up.
 --     Two things made this necessary rather than nice. A filter no row can
 --     pass — the shape one integration sends on every call — made the
 --     walk-only draft run each CTE to the scan bound and return the same empty
@@ -173,17 +182,17 @@
 --     pass caught that — db/bench-hnsw.ts section D runs the walk branch's own
 --     statement on the thin filters at 100,000 rows (the function itself never
 --     walks for them, see the exact branch) and the walk completes: 90
---     matching rows → 10 of 10, 6 → 6 of 6, nothing → nothing, about 60 ms
+--     matching rows → 10 of 10, 6 → 6 of 6, nothing → nothing, about 65 ms
 --     each. Since the walk is taken only above v_exact matching rows, it
 --     visits about v_fetch * N / v_exact tuples — N / 25 at the default count,
 --     N / 4 at match_count 500 — so 100,000 covers tables to ~2.5 million rows
 --     at the default count and ~400,000 at the ceiling; pgvector's default of
 --     20,000 covers 500,000 and 80,000. Above the threshold which plan the
 --     walk gets is the planner's, and it does not matter for the answer: at
---     100,000 rows the 10% tier ran 7.7 ms under the custom plan (HNSW on both
---     sides) and 7.8 ms under the generic (GIN for thoughts, HNSW for chunks),
+--     100,000 rows the 10% tier ran 8.5 ms under the custom plan (HNSW on both
+--     sides) and 8.9 ms under the generic (GIN for thoughts, HNSW for chunks),
 --     the same rows, because the walk is iterative and bounded. Below it there
---     is no plan to pick — the exact branch is a GIN lookup and index probes,
+--     is no plan to pick — the exact branch is a GIN pass and index probes,
 --     0.2–2.7 ms at 100,000 rows under either mode — where the ninth draft's
 --     walk-or-GIN choice for the same tiers had varied between 0.7 and 190 ms
 --     on the same seeded data from one run to the next.
@@ -204,7 +213,12 @@
 --     value reaches one role, so that is no reason to leave every other role
 --     at pgvector's defaults (the ninth draft's `source <> 'default'` test let
 --     an ALTER ROLE on the migrating role do exactly that; tenth review pass).
---     The cost is that the
+--     One limit: the migrating session sees server configuration as of its
+--     connect, so an ALTER SYSTEM that has not been reloaded looks unset and
+--     is seeded over — and the database value then outranks it. Reload before
+--     migrating; one ALTER DATABASE ... RESET undoes it otherwise
+--     (deploy/.env.example carries the note; eleventh review pass). The cost
+--     is that the
 --     migrating role must own the database to seed the defaults; where it does
 --     not, the DO block warns with the two statements and the migration still
 --     applies — the fix does not depend on the bounds, only the depth of a rare
@@ -294,6 +308,11 @@ RETURNS TABLE (
   created_at  timestamptz
 )
 LANGUAGE plpgsql
+-- STABLE, as 012's search_thoughts_keyword is: the body only reads, so the
+-- planner may treat it as such and PostgREST runs its POST RPC — the form every
+-- caller in the repo uses — in a READ ONLY transaction. (The DO block below is
+-- a separate statement; nothing here executes DDL.)
+STABLE
 -- Scoped to this call and restored on exit. Requires pgvector >= 0.8.0, and the
 -- CREATE fails on anything older rather than producing a function that quietly
 -- stops at the first ef_search candidates. The walk's two BOUNDS are
@@ -324,6 +343,13 @@ DECLARE
   -- thousand parents and their chunks are a few thousand distance
   -- computations — milliseconds at any width — and no walk is cheaper.
   v_exact      int     := GREATEST(v_fetch * 4, 1000);
+  -- The matching thoughts' ids, at most v_exact + 1 of them — collected once,
+  -- through the GIN index, and used both to ROUTE (more than v_exact means the
+  -- walk) and to DRIVE the exact branch by primary key. One pass over the
+  -- filter: an earlier draft counted first and re-evaluated `metadata @>
+  -- filter` to build the matched set, two GIN scans and two rounds of heap
+  -- fetches per call, under two snapshots (eleventh review pass).
+  v_ids        uuid[];
 BEGIN
   IF match_count > {{MATCH_COUNT_CEILING}} THEN
     RAISE NOTICE 'match_thoughts: match_count % clamped to {{MATCH_COUNT_CEILING}}', match_count;
@@ -348,19 +374,22 @@ BEGIN
   -- `metadata @> filter` the planner has the GIN index whichever plan mode
   -- plpgsql picks, and none of that is load-bearing.
   --
-  -- The filtered case then splits on how many thoughts match, counted through
-  -- the GIN index and capped at v_exact + 1 so the count costs at most that
-  -- many heap fetches. At most v_exact matching: score those rows and their
-  -- chunks directly — exact, no index walk, and a filter matching NOTHING
-  -- (the shape one integration sends on every call) costs one GIN probe and
-  -- returns empty, where the walk-only draft ran to the scan bound and
-  -- returned the same empty answer at 60+ ms (tenth review pass). More than
-  -- v_exact matching: the HNSW walk with the predicate inside the scan, which
-  -- has at least v_exact rows to find its v_fetch among, so it visits about
-  -- v_fetch * N / v_exact tuples — N / 25 at the default count — and the
-  -- database-level bounds are its ceiling on tables past ~2.5 million rows.
-  -- db/test-schema.ts [8b]/[8c] hold all three branches to the exact answer on
-  -- the same rows.
+  -- The filtered case then splits on how many thoughts match. Their ids are
+  -- collected through the GIN index, at most v_exact + 1 of them: GIN builds
+  -- its whole bitmap for the filter before the first row comes back, so what
+  -- the LIMIT caps is the heap fetches (and the recheck each one carries), not
+  -- the bitmap — db/bench-hnsw.ts section C explains this statement on the
+  -- broadest and the empty filter for that reason. At most v_exact matching:
+  -- score those rows and their chunks directly by id — exact, no index walk,
+  -- and a filter matching NOTHING (the shape one integration sends on every
+  -- call) costs that one GIN probe and returns empty, where the walk-only
+  -- draft ran to the scan bound and returned the same empty answer at 60+ ms
+  -- (tenth review pass). More than v_exact matching: the HNSW walk with the
+  -- predicate inside the scan, which has at least v_exact rows to find its
+  -- v_fetch among, so it visits about v_fetch * N / v_exact tuples — N / 25
+  -- at the default count — and the database-level bounds are its ceiling on
+  -- tables past ~2.5 million rows. db/test-schema.ts [8b]/[8c] hold all three
+  -- branches to the exact answer on the same rows.
   IF filter IS NULL OR filter = '{}'::jsonb THEN
     -- Unfiltered. A NULL filter is unfiltered: 007 evaluated
     -- `NULL = '{}' OR metadata @> NULL`, which excluded every row.
@@ -389,81 +418,82 @@ BEGIN
     WHERE b.sim > match_threshold
     ORDER BY b.sim DESC
     LIMIT v_count;
-  ELSIF (SELECT count(*) FROM (SELECT 1 FROM thoughts t WHERE t.metadata @> filter LIMIT v_exact + 1) s) <= v_exact THEN
-    -- Thin filter: the exact answer over the matching rows. `matched` is read
-    -- twice, so Postgres materialises it — one GIN lookup. The chunk side
-    -- probes thought_chunks_thought_id_idx with the matched ids as an ARRAY:
-    -- with the matched set capped at v_exact, index probes are the right plan
-    -- by construction, and the array form is the one the planner cannot turn
-    -- into a scan of the whole chunk table — written as a join (or a LATERAL,
-    -- which it pulls back up into one) its default 1% estimate for `@>` chose a
-    -- sequential scan plus hash instead: measured at 100,000 rows, 6–11 ms for
-    -- a filter matching 6–998 thoughts, a cost that grows with the table and
-    -- not with the match. No ORDER BY over an index and no LIMIT inside the
-    -- CTEs: nothing here can walk.
-    RETURN QUERY
-    WITH matched AS (
-      SELECT t.id, t.embedding
-      FROM thoughts t
-      WHERE t.metadata @> filter
-    ),
-    direct AS (
-      SELECT m.id AS tid, 1 - (m.embedding <=> query_embedding) AS sim
-      FROM matched m
-      WHERE m.embedding IS NOT NULL
-    ),
-    chunked AS (
-      SELECT k.thought_id AS tid, 1 - (k.embedding <=> query_embedding) AS sim
-      FROM thought_chunks k
-      WHERE k.thought_id = ANY ((SELECT array_agg(m.id) FROM matched m)::uuid[])
-    ),
-    best AS (
-      SELECT u.tid, MAX(u.sim) AS sim
-      FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
-      GROUP BY u.tid
-    )
-    SELECT t.id, t.content, t.metadata, b.sim, t.created_at
-    FROM best b
-    JOIN thoughts t ON t.id = b.tid
-    WHERE b.sim > match_threshold
-    ORDER BY b.sim DESC
-    LIMIT v_count;
   ELSE
-    -- Broad filter: the walk. The predicate sits INSIDE each candidate CTE,
-    -- so the scan applies it to every candidate it produces and keeps going
-    -- until v_fetch pass — the iterative scan declared above is what lets it
-    -- keep going. The chunk side joins its parent row for the metadata; a
-    -- join rather than EXISTS because inside an OR (an earlier shape) EXISTS
-    -- became a hashed subplan — one full pass over thoughts per call — and a
-    -- join is one primary-key lookup per candidate.
-    RETURN QUERY
-    WITH direct AS (
-      SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
-      FROM thoughts t
-      WHERE t.embedding IS NOT NULL
-        AND t.metadata @> filter
-      ORDER BY t.embedding <=> query_embedding
-      LIMIT v_fetch
-    ),
-    chunked AS (
-      SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
-      FROM thought_chunks c
-      JOIN thoughts p ON p.id = c.thought_id
-      WHERE p.metadata @> filter
-      ORDER BY c.embedding <=> query_embedding
-      LIMIT v_fetch
-    ),
-    best AS (
-      SELECT u.tid, MAX(u.sim) AS sim
-      FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
-      GROUP BY u.tid
-    )
-    SELECT t.id, t.content, t.metadata, b.sim, t.created_at
-    FROM best b
-    JOIN thoughts t ON t.id = b.tid
-    WHERE b.sim > match_threshold
-    ORDER BY b.sim DESC
-    LIMIT v_count;
+    SELECT array_agg(s.id) INTO v_ids
+    FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> filter LIMIT v_exact + 1) s;
+
+    IF COALESCE(cardinality(v_ids), 0) <= v_exact THEN
+      -- Thin filter: the exact answer over the matching rows, driven by the ids
+      -- already collected — primary-key probes for the thoughts, and
+      -- thought_chunks_thought_id_idx probes for their chunks, both with the
+      -- array. With the set capped at v_exact, index probes are the right plan
+      -- by construction, and the array form is the one the planner cannot turn
+      -- into a scan of the whole table: written as a join (or a LATERAL, which
+      -- it pulls back up into one) its default 1% estimate for `@>` chose a
+      -- sequential scan of the chunk table plus a hash instead — measured at
+      -- 100,000 rows, 6–11 ms for a filter matching 6–998 thoughts, a cost that
+      -- grew with the table and not with the match. No ORDER BY over an index
+      -- and no LIMIT inside the CTEs: nothing here can walk.
+      RETURN QUERY
+      WITH direct AS (
+        SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
+        FROM thoughts t
+        WHERE t.id = ANY (v_ids)
+          AND t.embedding IS NOT NULL
+      ),
+      chunked AS (
+        SELECT k.thought_id AS tid, 1 - (k.embedding <=> query_embedding) AS sim
+        FROM thought_chunks k
+        WHERE k.thought_id = ANY (v_ids)
+      ),
+      best AS (
+        SELECT u.tid, MAX(u.sim) AS sim
+        FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
+        GROUP BY u.tid
+      )
+      SELECT t.id, t.content, t.metadata, b.sim, t.created_at
+      FROM best b
+      JOIN thoughts t ON t.id = b.tid
+      WHERE b.sim > match_threshold
+      ORDER BY b.sim DESC
+      LIMIT v_count;
+    ELSE
+      -- Broad filter: the walk. The predicate sits INSIDE each candidate CTE,
+      -- so the scan applies it to every candidate it produces and keeps going
+      -- until v_fetch pass — the iterative scan declared above is what lets it
+      -- keep going. The chunk side joins its parent row for the metadata; a
+      -- join rather than EXISTS because inside an OR (an earlier shape) EXISTS
+      -- became a hashed subplan — one full pass over thoughts per call — and a
+      -- join is one primary-key lookup per candidate.
+      RETURN QUERY
+      WITH direct AS (
+        SELECT t.id AS tid, 1 - (t.embedding <=> query_embedding) AS sim
+        FROM thoughts t
+        WHERE t.embedding IS NOT NULL
+          AND t.metadata @> filter
+        ORDER BY t.embedding <=> query_embedding
+        LIMIT v_fetch
+      ),
+      chunked AS (
+        SELECT c.thought_id AS tid, 1 - (c.embedding <=> query_embedding) AS sim
+        FROM thought_chunks c
+        JOIN thoughts p ON p.id = c.thought_id
+        WHERE p.metadata @> filter
+        ORDER BY c.embedding <=> query_embedding
+        LIMIT v_fetch
+      ),
+      best AS (
+        SELECT u.tid, MAX(u.sim) AS sim
+        FROM (SELECT * FROM direct UNION ALL SELECT * FROM chunked) u
+        GROUP BY u.tid
+      )
+      SELECT t.id, t.content, t.metadata, b.sim, t.created_at
+      FROM best b
+      JOIN thoughts t ON t.id = b.tid
+      WHERE b.sim > match_threshold
+      ORDER BY b.sim DESC
+      LIMIT v_count;
+    END IF;
   END IF;
 END;
 $$;

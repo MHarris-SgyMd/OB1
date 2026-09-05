@@ -1250,23 +1250,23 @@ rows with index scans disabled:
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 10,000 | 50% | 10.0 | 7.9 | 0/50 | 10.0 | 9.4 | 0/50 |
 | 10,000 | 10% | 5.4 | 5.0 | 1/50 | 10.0 | 10.0 | 0/50 |
-| 10,000 | 1% | 0.9 | 0.9 | 24/50 | 10.0 | 10.0 | 0/50 |
+| 10,000 | 1% | 0.8 | 0.8 | 23/50 | 10.0 | 10.0 | 0/50 |
 | 10,000 | 0.1% (9 rows) | 0.1 | 0.1 | 46/50 | 9.0 | 9.0 | 0/50 |
-| 100,000 | 50% | 10.0 | 4.7 | 0/50 | 10.0 | 6.4 | 0/50 |
-| 100,000 | 10% | 5.9 | 3.8 | 0/50 | 10.0 | 8.8 | 0/50 |
-| 100,000 | 1% | 0.5 | 0.5 | 29/50 | 10.0 | 10.0 | 0/50 |
+| 100,000 | 50% | 10.0 | 4.3 | 0/50 | 10.0 | 6.4 | 0/50 |
+| 100,000 | 10% | 5.7 | 3.7 | 0/50 | 10.0 | 9.0 | 0/50 |
+| 100,000 | 1% | 0.5 | 0.5 | 30/50 | 10.0 | 10.0 | 0/50 |
 | 100,000 | 0.1% | 0.0 | 0.0 | 48/50 | 10.0 | 10.0 | 0/50 |
 | 100,000 | 0.01% (6 rows) | 0.0 | 0.0 | 50/50 | 6.0 | 6.0 | 0/50 |
 
-Two things in the after column are not the fix. The 6.4 and 8.8 at 100,000
+Two things in the after column are not the fix. The 6.4 and 9.0 at 100,000
 rows for the broad filters are the HNSW approximation — random uniform vectors
-are the index's hardest case, and 007 scored 4.7 and 3.8 on the same rows; the
+are the index's hardest case, and 007 scored 4.3 and 3.7 on the same rows; the
 iterative scan improves it because it keeps going, but `ef_search` is unchanged
 and so is the index. And the two thinnest rows return fewer than ten because
 fewer than ten exist; they are there to show the scan reaching past its
 candidate budget for every matching row and finding them all.
 
-**These tables were measured five times.** The first bench's random generator was an
+**These tables were measured six times.** The first bench's random generator was an
 LCG multiplied in doubles; past 2^53 its low bits are rounding noise and the
 stream repeats every 10,466 draws, so at 100,000 rows the corpus held ~10,000
 distinct vectors stored up to ten times each and every "random" query was
@@ -1283,9 +1283,10 @@ database level, and `RESET ALL` does not fetch those — so the bounds section D
 claimed to exercise were not in force. The bench now reconnects and asserts the
 session sees them before measuring. The fourth came after the ninth pass
 replaced the body's OR with two branches; the fifth after the tenth added the
-exact branch and raised the ceiling (below). The recall columns have moved by
-at most 0.1 since the second; the latencies have moved a great deal, and the
-tables are from the fifth run.
+exact branch and raised the ceiling (below); the sixth after the eleventh
+folded the routing count into that branch. The recall columns have moved by at
+most 0.2 since the second; the latencies have moved a great deal, and the
+tables are from the sixth run.
 
 **Then on the real corpus.** `evals/eval-filtered.ts`, the 441 issues with their
 real labels, stored the way the server stores them (whole-content vector plus
@@ -1331,11 +1332,13 @@ document lacks and scores against the exact answer within it.
   10,000 rows. The join is one primary-key lookup per candidate, and it exists
   only in the walk branch; the unfiltered branch has no predicate and no join.
 - **A thin filter is answered exactly, with no index walk.** The function
-  counts the matching thoughts through the GIN index, capped at the threshold
-  plus one, and when at most `GREATEST(v_fetch * 4, 1000)` match it scores those
-  rows and their chunks directly (a GIN lookup, then index probes into the
-  chunk table with the matched ids as an array). The tenth review pass forced
-  this: the
+  collects the matching thoughts' ids through the GIN index, at most the
+  threshold plus one of them, and when at most `GREATEST(v_fetch * 4, 1000)`
+  match it scores those rows and their chunks directly by id — primary-key
+  probes and chunk-index probes with that array, one pass over the filter (the
+  tenth-pass draft counted first and re-evaluated the predicate to build the
+  matched set; the eleventh folded the two into one). The tenth review pass
+  forced the branch: the
   enhanced-mcp integration sends `exclude_restricted: true` on every semantic
   call and nothing writes that key, so every one of its calls matched nothing,
   and the walk-only body ran each CTE to the scan bound to return the same
@@ -1430,7 +1433,16 @@ document lacks and scores against the exact answer within it.
   seed for everyone else, silently (tenth pass); `test-schema.ts` now sets the
   value in the session and asserts the seed still lands. Preflight keeps the
   wider question, since for the server's own connection a role-level value is
-  in force.
+  in force. One limit, named in the header and `.env.example`: the migrating
+  session sees server configuration as of its connect, so an `ALTER SYSTEM`
+  that has not been reloaded looks unset and is seeded over; reload before
+  migrating (eleventh pass). And the migrator's own check did not run at all
+  for one commit — it bound two JS arrays into `= ANY(...)` bare, which Bun
+  sends as comma-joined text, so every run fell into the catch that turns an
+  error into a soft warning and the remedy it exists to print was unreachable;
+  the live test asserted only the exit code and "applied N". It now binds
+  through `sql.array`, reads the seeded names from the migration's own text,
+  and the live test asserts neither warning appears.
 - The function-level SET is NOT a problem at call time, though the eighth pass
   documented it as one and prescribed casting the argument. CREATE FUNCTION
   and ALTER DATABASE validate a SET clause up front and refuse an unknown
@@ -1493,31 +1505,38 @@ rows `match_count = 50` returned 40, and with chunks the two CTEs together cappe
 near 80 — asked 100, got 68 to 79. 007's header calling the factor "a recall
 budget, not a guess" was true only at `match_count <= 10`. The iterative scan
 fixes this too: asked 100, got 100; asked 500 — the ceiling — got 500, in
-6.5 ms at 10,000 rows and 27 ms at 100,000. (007 returned 71–78 for that ask
+7.8 ms at 10,000 rows and 30 ms at 100,000. (007 returned 71–77 for that ask
 at 100,000 rows, and 500 at 10,000 only because the planner abandoned the
 index for a sequential scan.)
 
 **Cost, and the plan it no longer depends on.** The default path — unfiltered,
-ten rows, what every first-party caller sends — costs what it did: median
-0.61 → 0.61 ms at 10,000 rows, 1.32 → 1.28 ms at 100,000; its branch has no
-predicate and no join. A thin filter — at most 1,000 matching thoughts, the
-exact branch — now costs less than an unfiltered call: at 100,000 rows 0.19 ms
-for a filter matching nothing, 0.28 ms for one matching 6 rows, 0.63 for 90,
-2.6 for 998; at 10,000 rows 0.19–0.43 ms. The walk-only body had paid 60+ ms
-for the never-matching case, and between 0.7 and 190 ms for the thin tiers
-depending on which plan the planner's statistics sample happened to favour
-that run (the ninth pass documented the variance; one run took the 1% and 0.1%
-tiers to the GIN index at 2.2 and 0.7 ms, the next walked both sides at 44 and
-190 ms, same seeded data). There is no plan to favour now: section C shows the
-exact branch as a GIN bitmap on `thoughts` and index probes into
-`thought_chunks` under both plan modes, 2.7 / 2.4 ms for the 1% tier at
-100,000 rows. Broad filters take the walk: 1.4 ms at 10,000 rows for the 50%
-and 10% tiers, 2.9 ms (50%) and 9.1 ms (10%) at 100,000, where section C shows
-the custom plan walking both sides (7.7 ms) and the generic plan taking GIN for
-`thoughts` and walking the chunk index (7.8 ms) — the same rows either way,
-since the walk is iterative and bounded, and the function declares no plan
+ten rows, what every first-party caller sends — costs what it did within the
+run-to-run noise of this machine: median 0.63 → 0.81 ms at 10,000 rows and
+1.55 → 1.51 ms at 100,000 in the sixth run, 0.61 → 0.61 and 1.32 → 1.28 in the
+fifth; its branch has no predicate and no join. A thin filter — at most 1,000
+matching thoughts, the exact branch — costs less than an unfiltered call: at
+100,000 rows 0.18 ms for a filter matching nothing, 0.24 ms for one matching 6
+rows, 0.52 for 90, 2.7 for 998; at 10,000 rows 0.18–0.43 ms. The walk-only
+body had paid 60+ ms for the never-matching case, and between 0.7 and 190 ms
+for the thin tiers depending on which plan the planner's statistics sample
+happened to favour that run (the ninth pass documented the variance; one run
+took the 1% and 0.1% tiers to the GIN index at 2.2 and 0.7 ms, the next walked
+both sides at 44 and 190 ms, same seeded data). There is no plan to favour now:
+section C shows the exact branch as a GIN bitmap on `thoughts` and index probes
+into `thought_chunks` under both plan modes. The statement every filtered call
+runs first — the capped collection of matching ids that routes between the
+branches — is explained on its own: 0.01 ms for the empty filter, and for the
+50% filter at 100,000 rows 0.4 ms as a sequential scan with a LIMIT under the
+custom plan against 2.6 ms as a GIN bitmap over 50,000 matches under the
+generic, because GIN builds the whole bitmap before the LIMIT can stop
+anything; that cost grows with the matches, and SMD-1018 measures it from a
+million rows up. Broad filters take the walk: 1.5–1.6 ms at 10,000 rows for the
+50% and 10% tiers, 3.4 ms (50%) and 9.9 ms (10%) at 100,000, where section C
+shows the custom plan walking both sides (8.5 ms) and the generic plan taking
+GIN for `thoughts` and walking the chunk index (8.9 ms) — the same rows either
+way, since the walk is iterative and bounded, and the function declares no plan
 mode. Section D runs the walk's own statement on the thin and empty filters at
-100,000 rows: about 60 ms each, every matching row returned, because both scan
+100,000 rows: about 65 ms each, every matching row returned, because both scan
 bounds are in force (seeded at database level, the session reconnected to read
 them). That is what the function no longer pays for those filters, and what
 the bounds buy when a table large enough to walk for them arrives — past ~2.5

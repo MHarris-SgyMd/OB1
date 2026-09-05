@@ -67,7 +67,7 @@ import { createHash } from "node:crypto";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chunkContent, DEFAULT_MAX_TOKENS } from "../server-portable/chunk.ts";
-import { DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DEFAULT_EMBEDDING_MODEL } from "../db/config.mjs";
 import { applyMigrations, assertThrowawayDatabase, requireDatabaseUrl, resetSchema, seededRandom } from "../db/test-support.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
 
@@ -279,8 +279,8 @@ await applyMigrations(DB_URL, { dim: DIM, model: spec.name, only: (f) => f.start
 await sql.close();
 sql = new SQL({ url: DB_URL, max: 1 });
 {
-  const [{ t, m }] = await sql`SELECT current_setting('hnsw.max_scan_tuples', true) AS t, current_setting('hnsw.scan_mem_multiplier', true) AS m`;
-  console.log(`  after arm runs with hnsw.max_scan_tuples=${t}, hnsw.scan_mem_multiplier=${m}`);
+  const bounds = await sql.unsafe(BOUNDS_IN_FORCE_SQL);
+  console.log(`  after arm runs with ${bounds.map((r: { name: string; value: string | null }) => `${r.name}=${r.value}`).join(", ")}`);
 }
 const after = await run("after (014)");
 await sql.close();
