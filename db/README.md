@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `148 assertions: 148 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports fourteen migrations applied, and
+`bun test-schema.ts` prints `187 assertions: 187 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports fifteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -86,6 +86,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
 | `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
+| `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the consumer — see below | Ported from `schemas/thought-work-claims` |
 
 ## What changed relative to the guide
 
@@ -159,16 +160,107 @@ The blurb still reaches the vector — the server composes the embedded text bef
 the database sees it — so what is dropped is the record, and with it any way to
 tell a contextualized chunk from a bare one afterwards.
 
-There is no backfill. Re-contextualizing an existing corpus is a bulk pass over
-every chunked thought, which wants the claim/lease table from SMD-946.
+The backfill is `reembed.ts` (next section): a pass under a job key of your own
+naming re-embeds every thought exactly as a capture would under the current
+setting, so flipping the flag and running it brings the whole corpus to one
+kind of chunk.
 
 The same applies to the whole-content vector that change 27 restored: a long
 thought captured before it still has its head window in `thoughts.embedding`,
-and re-capturing is the only way to upgrade it. Preflight does **not** report
-that split, unlike the chunk-context one, because it cannot be told apart from a
-legitimate state — a provider that refuses over-length input falls back to the
-head window for every long capture, forever, and a check that nags a correct
-deployment is worse than no check.
+and re-capturing — or the same pass — is what upgrades it. Preflight does
+**not** report that split, unlike the chunk-context one, because it cannot be
+told apart from a legitimate state — a provider that refuses over-length input
+falls back to the head window for every long capture, forever, and a check that
+nags a correct deployment is worse than no check.
+
+## Re-embedding, and bulk passes in general
+
+Migration 015 adds `thought_work_claims`, ported from
+`schemas/thought-work-claims`, and `reembed.ts` is the first thing built on it.
+
+**Why a table.** Any pass over the whole corpus — re-embedding after a model
+change, entity extraction, a chunk-context backfill — was one process walking
+the table with no record of where it got to, or several processes each
+selecting "the next unprocessed rows" and picking the same ones. The table is
+the pool and the record: `enqueue_thoughts(key)` adds every thought (or a list
+of ids) as `pending` rows under a job key; `claim_thoughts(key, worker, batch,
+ttl)` hands out up to `batch` of them with `FOR UPDATE SKIP LOCKED` under a
+lease, so two workers claiming at the same moment receive disjoint sets;
+`release_thought` marks one `succeeded` or `failed`, and only the holder may;
+`release_claims_for_worker` hands a stopping worker's rows straight back. A
+worker that dies keeps nothing: when its lease expires the next claim returns
+the rows to the pool with the attempt counted, and after three expiries a row
+is marked failed rather than handed out again. Terminal rows stay, so running
+a pass twice does nothing for the rows already done and picks up the thoughts
+captured since.
+
+Three things differ from upstream's version, each with a reason in the
+migration header: the database picks the batch (upstream's workers chose
+candidates themselves and mostly collided), an expired lease returns to the
+pool rather than being deleted (so `attempt_count` and `last_error` survive),
+and there is nothing for Supabase — no grants, no RLS, no `NOTIFY pgrst`.
+
+**The job key names the target.** `reembed:qwen3-embedding:4b@1024`, not
+`reembed`. Passes with different keys share nothing but the table, so a re-embed
+and an extraction pass run at once, and a later re-embed to a third model is a
+fresh pool rather than a no-op against the first one's terminal rows.
+
+### `reembed.ts`
+
+```bash
+OB1_EMBEDDING_MODEL=bge-m3 bun reembed.ts --url postgres://… --switch-model
+bun reembed.ts --url … --status              # where the pass stands
+bun reembed.ts --url … --dry-run             # what a run would do; writes nothing
+bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model
+bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
+#   --workers N (2)   --batch N (8)   --ttl SECONDS (900)
+```
+
+It reads the same variables the server does — model, width, provider URL and
+key, chunk sizing, chunk context — through the same function
+(`server-portable/embed.ts`, lifted out of the server for exactly this reason),
+so what it stores is byte-for-byte what a capture would store. Each thought is
+re-embedded and written through `update_thought`, which replaces the chunk rows
+wholesale as an edit does. A thought edited between the claim and the write is
+re-read and embedded again; one deleted mid-pass is skipped.
+
+**Changing model.** Same width only: `thoughts.embedding` is `vector(N)` and N
+is baked into two columns, two HNSW indexes and every function signature, so a
+width change is a migration that does not exist yet, and the tool refuses a
+configured width that differs from the column's. When the configured model
+differs from the one `ob1_config` records, the run needs `--switch-model`, and
+the first thing it does is record the new model — from that moment a server
+configured for it passes preflight and should be switched. Until the pass
+finishes, searches mix vectors from two models; `--status` says how far along
+it is, and a re-run adds anything captured meanwhile.
+
+**What the audit log records: almost nothing, on purpose.** Migration 008's
+trigger diffs the embedding's *presence*, not its value, so a vector replaced
+by a vector is `{}` and `{}` is not an event. A full re-embed therefore does not
+double `thought_audit`; only a row that had no vector and gains one is audited,
+with `reembed` as the actor and the job key as the session. The claim row is
+the per-thought record of the pass. SMD-946 expected one audit row per thought;
+`test-live.ts` [9] asserts the count is unchanged, so the expectation is written
+down as corrected rather than quietly unmet. Every re-embedded row's
+`updated_at` does move, because the row was updated.
+
+**Cost.** Dominated by the provider. The claim itself is flat across the pass —
+0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
+against a 0.15 ms round trip — and the header of 015 has the table showing what
+the first draft cost instead (2.90 ms by the end, unchanged by `VACUUM`): the
+planner served "any sixteen pending rows" with a sequential scan that stops at
+sixteen hits, and the done rows accumulate at the front of the heap. Ordering
+by `enqueued_at` over a partial index is what makes the index the cheapest
+estimate whatever the statistics say. The lease is stamped per claim, so it has
+to outlast the whole batch: the defaults leave close to two minutes per
+thought.
+
+**Writing another consumer.** The loop is: `enqueue_thoughts` once, then per
+worker `claim_thoughts` → do the work → `release_thought` per row, and
+`release_claims_for_worker` on shutdown. Give every process a globally unique
+worker id (hostname, pid and a random suffix — `release_claims_for_worker`
+matches on it alone). Entity extraction (SMD-947) is the next pass expected to
+use it.
 
 ## Extensions
 
@@ -334,8 +426,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 148 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 47 assertions, real server, throwaway container
+bun test-schema.ts                    # 187 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 98 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -356,6 +448,19 @@ container.
 - **Filtered recall at scale.** [5b] loads 1,000 random rows through a real HNSW
   index, tags 1% of them, and asserts a filtered `match_thoughts` returns exactly
   what a full scan returns. Under 007 that filter returned almost nothing.
+- **Concurrent claims.** [8] holds ten leases open in one transaction while
+  another connection claims under a 2 s `lock_timeout` — a wait would fail it —
+  then races four workers on four connections through a 600-row pool and
+  asserts on ids: none claimed twice, the union exactly the pool. A worker
+  "dies" on a 1 s lease and a second worker receives its rows after expiry,
+  on their second attempt. PGlite has one connection, so two sequential claims
+  there are disjoint whether or not `SKIP LOCKED` does anything.
+- **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
+  stub provider: refused without `--switch-model`, then two workers over
+  thirty-three rows including a chunked one, a poisoned one and one with no
+  vector; asserts every vector, the chunk rows, one audit row rather than
+  thirty-two, `ob1_config`, `--status`, a re-run that processes only a later
+  capture, and `--retry-failed`.
 
 ### What test-schema.ts asserts
 
@@ -413,6 +518,12 @@ asserts 148 properties, including:
 - `thought_chunks.context` exists and is nullable, and **both** functions that
   write chunk rows carry it through. Checking only `upsert_thought` would pass
   against a migration that strips context on the first edit
+- `thought_work_claims`' state machine: the pool is idempotent to build, an
+  unknown id fails the foreign key rather than being skipped, only the holder
+  can release and only once, a clean shutdown returns rows without counting an
+  attempt, an expired lease is handed out again with the attempt counted and
+  is marked failed after three, a deleted thought takes its claims with it,
+  and the `CHECK` refuses a claimed row without a lease
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the
@@ -446,7 +557,8 @@ default — are unaffected.
 - **HNSW index build time is not represented.** On an empty table it is instant; on
   a populated one it is not. Build it after a bulk load, not before.
 - **Data migration is not covered here.** These migrations create the schema. Moving
-  rows is `pg_dump --data-only` plus a re-embed if the model family changes.
+  rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
+  family changes at the same width.
 
 ## Related
 

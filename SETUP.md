@@ -19,7 +19,9 @@ good default that suits everyone.
 
 `thoughts.embedding` is a fixed-width column, and the model that fills it must
 produce exactly that many numbers. Changing either later means a schema migration
-**and re-embedding every row** — which costs an API call per thought.
+**and re-embedding every row** — which costs an API call per thought. Changing
+the model at the *same* width is the case `db/reembed.ts` handles, in parallel
+and resumably; changing the width is not, yet.
 
 | Model | Width | Note |
 | --- | --- | --- |

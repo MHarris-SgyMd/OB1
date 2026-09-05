@@ -93,7 +93,8 @@ if the deployment serves correctly, 1 otherwise.
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
-  re-embed if the embedding model family changes.
+  re-embed if the embedding model family changes — `db/reembed.ts`, run from a
+  checkout with the provider reachable, not from this stack.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 

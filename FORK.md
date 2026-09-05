@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Twenty-eight numbered changes on top of the pin. Seven fix defects found in an
+Twenty-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–28 are the numbered `###` sections** further down, which is
+sections. Changes **18–29 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -151,6 +151,9 @@ evals/eval-contextual.ts         # fix 27  (new file — contextual retrieval, m
 db/migrations/014_*.sql          # fix 28  (new file — the filter inside the scan)
 db/bench-hnsw.ts                 # fix 28  (new file — filtered recall against an exact scan)
 evals/eval-filtered.ts           # fix 28  (new file — the same, on the real corpus)
+db/migrations/015_*.sql          # fix 29  (new file — thought_work_claims)
+db/reembed.ts                    # fix 29  (new file — the parallel, resumable re-embed)
+server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
@@ -1597,6 +1600,105 @@ a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
 the HNSW index at scale; this bench explains only the filtered case, and only at
 1%. SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
 body so they do not reintroduce the post-filter.
+
+### 29. A lease per thought, and the re-embed that proves it
+
+Migration 015 and `db/reembed.ts` (Linear SMD-946). Every bulk pass over the
+corpus was single-threaded or racy: two workers that both select "the next
+unprocessed thoughts" pick overlapping rows, and a script that walks the table
+once cannot be resumed after it dies. Changing the embedding model — which
+`db/config.mjs` has said since change 15 means re-embedding every row — had no
+tool at all. Three earlier changes deferred a backfill to this ticket by name
+(013's header, change 27's whole-content vector, the README's chunk-context
+section).
+
+**The table.** `thought_work_claims`, ported from `schemas/thought-work-claims`:
+one row per (thought, job key). `enqueue_thoughts` builds the pool,
+`claim_thoughts` hands out batches under a TTL lease, `release_thought` and
+`release_claims_for_worker` finish or hand back. Three departures from
+upstream, each argued in the header. The database picks the batch with `SELECT
+… FOR UPDATE SKIP LOCKED` — upstream's workers chose their own candidate ids and
+the claim only arbitrated, so every worker selected the same newest page and
+the losers backed off, a symptom its own README lists under Troubleshooting.
+The ticket's framing needed one correction on the way: upstream's claim is
+race-safe as it stands (the primary key and `ON CONFLICT DO NOTHING` let exactly
+one inserter win); what `SKIP LOCKED` buys is selection that does not contend,
+and the status predicate re-evaluated under READ COMMITTED is what keeps a
+lease committed a moment earlier from being handed out twice. Both are needed
+and the header says which does what. Second, an expired lease returns to the
+pool rather than being deleted, so `attempt_count` and `last_error` survive,
+and after three expiries a row is marked failed — a thought that kills every
+worker that touches it must not cycle for ever. Third, nothing for Supabase.
+
+**The proof is concurrent, because a sequential one passes against a broken
+implementation** — the ticket's own warning, and true: on PGlite's single
+connection two claims in a row are disjoint whether or not `SKIP LOCKED` does
+anything. `db/test-live.ts` [8] holds ten leases open in one transaction while
+another connection claims under a 2 s `lock_timeout` that a wait would trip,
+then races four workers on four connections through a 600-row pool and asserts
+on ids: none claimed twice, the union exactly the pool. A worker dies on a 1 s
+lease and a second worker receives its rows after expiry, on attempt 2; the
+dead one, back late, cannot release them.
+
+**The claim's cost was not flat, and the first measurement said so.** The first
+draft took "any sixteen pending rows", and at 100,000 rows in a container the
+claim went from 0.48 ms at the start of the pass to 2.90 ms at the end —
+`VACUUM` at the halfway point changing nothing, which ruled out the dead index
+entries the draft header had blamed. The planner was serving it with a
+sequential scan that stops after sixteen hits: the cheapest estimate, correct at
+the start, and linear in the done rows by the end because they sit at the front
+of the heap. `ORDER BY enqueued_at` over a partial index on the pending rows
+makes a sequential scan sort the whole pool, so the index wins whatever the
+statistics say: 0.48 ms first hundred, 0.56 ms at 50,000 done, 0.47 ms last
+hundred, against a 0.15 ms round trip. [8] asserts the plan and the ratio at
+10,000 rows. The other planner trap — a large enqueue leaving statistics that
+describe the table before it — is closed by an `ANALYZE` after the enqueue in
+`reembed.ts` rather than by waiting a minute for autovacuum.
+
+**The consumer.** `db/reembed.ts` walks the corpus through the claims with N
+workers, resumes where it stopped, and re-embeds *exactly as a capture would*,
+because the server's embedding path is now `server-portable/embed.ts` and both
+call it. That extraction is the one change to the server here and it is a pure
+move: chunking, the blurb rule, the prompt template, the whole-content-then-
+head-window fallback and the width check are unchanged in what they decide, and
+the six suites that exercise them pass unchanged. A second copy in a script
+would have been this fork's recurring defect — a value defined twice — with the
+value being every stored vector. The write goes through `update_thought`, so
+chunks are replaced wholesale as on an edit, an `if_unchanged_since` race
+re-reads instead of letting a stale vector win, and the tool is also the
+backfill the three earlier changes deferred: a long thought captured before
+change 27 gets its whole-content vector, and a corpus captured under one
+`OB1_CHUNK_CONTEXT` setting is brought to the current one under a job key of
+its own (`--job`).
+
+**Same width only.** `thoughts.embedding` is `vector(N)` and N is baked into
+two columns, two HNSW indexes and every function signature. The tool refuses a
+configured width that differs from the column's, because a width change is a
+migration that does not exist yet, not a re-embed. A model change needs
+`--switch-model` and records the new model in `ob1_config` first, so a server
+configured for it passes preflight and can be switched; until the pass finishes
+searches mix two models' vectors, `--status` says how far along it is, and a
+re-run adds anything captured meanwhile. Failed rows are terminal until
+`--retry-failed`; the run exits 1 while any remain and names them.
+
+**The audit premise in the ticket was false.** SMD-946 says a re-embed is an
+update, so a bulk pass writes an audit row per thought and doubles the audit
+table — "correct and wanted, note it, do not suppress it." Migration 008's
+trigger diffs the embedding's *presence*, not its value: a vector replaced by a
+vector is `{}`, and `{}` was ruled not-an-event when 008 stopped a repeated
+import from writing ten thousand empty rows. So a full re-embed writes no audit
+rows for rows that had a vector, and exactly one for a row that had none.
+`test-live.ts` [9] asserts one row for thirty-three thoughts. Nothing was
+suppressed; the trigger never recorded this, and the claim row — job key,
+worker, attempts, error, times — is the per-thought record of the pass. Making
+the trigger record vector changes would be a new migration and would reintroduce
+the doubling the ticket worried about; it is left as a decision rather than made
+in passing.
+
+**Not done here.** Preflight does not report an incomplete pass (`--status`
+does); a width-changing migration; the entity-extraction consumer (SMD-947),
+which this exists for. `deploy/compose.yaml` does not run the tool — it needs
+the provider, and runs from a checkout.
 
 ## Detached from the fork network
 
