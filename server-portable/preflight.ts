@@ -283,7 +283,7 @@ if (configFailed) {
             // revert it, so the remedy names both (tenth review pass).
             add("filtered search", "warn",
                 `match_thoughts returned nothing for a NULL filter, which every body before 014 does — either the migrations are not applied through 014 (then ${EXPOSURE}) or a later migration redefined match_thoughts and changed how a NULL filter is treated; over PostgREST the two cannot be told apart (${CATALOG_HINT})`,
-                `If the ledger stops before 014: ${APPLY_014} If a later migration redefined match_thoughts, verify it kept the filter inside the scan rather than re-running 014 over it.`);
+                `If the ledger stops before 014 — including a Supabase project built from the guide, which has never run the fork's migrator — apply db/migrations through 014 against the project's direct connection (server-portable/README.md §4). If a later migration redefined match_thoughts, verify it kept the filter inside the scan rather than re-running 014 over it.`);
           }
         } catch (e) {
           // A failed probe is not evidence either way — a width mismatch or a
@@ -389,10 +389,12 @@ if (configFailed) {
          * version only explains an absence or advises `ALTER EXTENSION vector
          * UPDATE` where the catalog record lags a working library.
          *
-         * The lookup matches its siblings — proname, namespace, argument count —
-         * rather than casting a signature through search_path. The migration
-         * ledger is consulted to word the remedy: "apply 014" is a no-op when
-         * 014 is recorded and a later redefinition dropped the clause.
+         * The lookup resolves the one signature the servers call, through
+         * to_regprocedure, which is NULL rather than an error when the function
+         * is not defined (an earlier draft matched by name and arity and read
+         * the first of however many overloads existed). The migration ledger is
+         * consulted to word the remedy: "apply 014" is a no-op when 014 is
+         * recorded and a later redefinition dropped the clause.
          *
          * Everything here has its own error boundary. These catalog reads can
          * fail on a hardened server (pg_available_extensions is not always

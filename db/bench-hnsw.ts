@@ -535,22 +535,30 @@ for (const n of SCALES) {
       cells.push({ ...r, key: t.key, share: t.share, matches: t.matches });
       process.stdout.write(".");
     }
-    // Plans only for the function under test: see shapeOf. Each filtered
-    // branch on the tier the function routes there — 10% is above the
-    // 1,000-row exact threshold at both scales, 1% below it.
-    const tierOf = (key: string) => tiers.find((t) => t.key === key)!;
-    // The routing statement is explained on the broadest filter — GIN builds
-    // the whole bitmap before the LIMIT can stop anything, so 50% is its worst
-    // case — and on the empty one, the shape one integration sends every call.
-    const plan =
-      arm === "after (014)"
-        ? {
-            walk: { branch: "walk" as Branch, tier: "10%", matches: tierOf("t10").matches, ...(await plans(sql, queries[0], tierFilter("t10"), "walk")) },
-            exact: { branch: "exact" as Branch, tier: "1%", matches: tierOf("t1").matches, ...(await plans(sql, queries[0], tierFilter("t1"), "exact")) },
-            route50: { branch: "route" as Branch, tier: "50%", matches: tierOf("t50").matches, ...(await plans(sql, queries[0], tierFilter("t50"), "route")) },
-            routeNone: { branch: "route" as Branch, tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "route")) },
-          }
-        : undefined;
+    // Plans only for the function under test: see shapeOf. Each branch is
+    // explained on a tier the function actually routes to it, chosen by match
+    // count against the exact threshold rather than by name: a small scale
+    // drops tiers (n * share < 1) and would otherwise dereference a missing one
+    // after the whole load, and at 1,000 rows the "10%" tier is 100 matches —
+    // the exact branch, not the walk (twelfth review pass). The walk gets the
+    // thinnest tier above the threshold; the exact branch the broadest tier
+    // under it; the routing statement the broadest tier of all — GIN builds the
+    // whole bitmap before the LIMIT can stop anything, so that is its worst
+    // case — and the empty one, the shape one integration sends every call.
+    const V_EXACT = Math.max(Math.max(K * 4, 20) * 4, 1000); // 014's GREATEST(v_fetch * 4, 1000) at K
+    const withRows = tiers.filter((t) => t.matches > 0).sort((a, b) => a.matches - b.matches);
+    const walkTier = withRows.find((t) => t.matches > V_EXACT);
+    const exactTier = [...withRows].reverse().find((t) => t.matches <= V_EXACT);
+    const broadest = withRows[withRows.length - 1];
+    const pct = (t: { share: number }) => `${t.share * 100}%`;
+    const plan: Result["plan"] = arm === "after (014)" ? {} : undefined;
+    if (plan) {
+      if (walkTier) plan.walk = { branch: "walk", tier: pct(walkTier), matches: walkTier.matches, ...(await plans(sql, queries[0], tierFilter(walkTier.key), "walk")) };
+      else console.log(`\n  (no tier above the exact threshold of ${V_EXACT} rows at this scale; the walk branch is not explained)`);
+      if (exactTier) plan.exact = { branch: "exact", tier: pct(exactTier), matches: exactTier.matches, ...(await plans(sql, queries[0], tierFilter(exactTier.key), "exact")) };
+      if (broadest) plan.routeBroad = { branch: "route", tier: pct(broadest), matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "route")) };
+      plan.routeNone = { branch: "route", tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "route")) };
+    }
     results.push({ scale: n, arm, counts, ms10, msMax, cells, plan });
     console.log(" done");
   }

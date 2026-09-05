@@ -77,6 +77,14 @@ const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? `${DEFAULT_EMBEDDING_MODEL}@10
 const CACHE = process.env.OB1_EVAL_EMBED_CACHE ?? "/tmp/ob1-filtered-embed-cache.json";
 /** Queries per filter in the other-label arm. 0 means every eligible document. */
 const PER_FILTER = Number(process.env.OB1_EVAL_PER_FILTER ?? 60);
+// Validated as the bench validates its knob: a typo would become NaN, which the
+// sampler below reads exactly as the documented 0 ("every eligible document")
+// — a seven-fold longer run with a different n column and no warning (twelfth
+// review pass).
+if (!Number.isInteger(PER_FILTER) || PER_FILTER < 0) {
+  console.error(`OB1_EVAL_PER_FILTER must be a non-negative integer (0 = every eligible document); got ${JSON.stringify(process.env.OB1_EVAL_PER_FILTER)}`);
+  process.exit(2);
+}
 const K = 10;
 
 for (const [what, p] of [["corpus", CORPUS], ["embedding cache", CACHE]] as const) {

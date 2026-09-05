@@ -569,6 +569,43 @@ console.log("\n[8c] above the exact threshold, the walk branch agrees with an ex
   assert(overlap >= 27, `…and at least 27 of the 30 are the exact top-10 (got ${overlap})`);
 }
 
+// ── 8d. Unscoreable rows do not count towards the walk threshold ─────────────
+//
+// A thought captured through the 2-arg fallback has no vector and no chunks. It
+// matches a metadata filter but can never be a candidate on either side, so it
+// must not push a filter over the exact threshold: routed to the walk, a filter
+// whose scoreable matches are fewer than v_fetch runs to the scan bound and
+// returns short (twelfth review pass). The walk is made to fail here on
+// purpose — hnsw.max_scan_tuples clamped to its minimum for the session — so
+// only the exact branch can return every scoreable row.
+
+console.log("\n[8d] rows without a vector or chunks do not count towards the walk threshold");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const { unitVector } = seededRandom(1018);
+  // Enough indexed rows of another kind that a bounded walk cannot stumble on
+  // the wanted ones by luck.
+  for (let i = 0; i < 300; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => `('other ${i + k}', '{"kind":"o"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  // 1,200 kind "u" rows with no vector (the fallback's shape), plus five with one.
+  for (let i = 0; i < 1200; i += 200) {
+    const values = Array.from({ length: 200 }, (_, k) => `('unscoreable ${i + k}', '{"kind":"u"}'::jsonb, NULL)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  for (let i = 0; i < 5; i++) {
+    await db.query(`INSERT INTO thoughts (content, metadata, embedding) VALUES ($1, '{"kind":"u"}'::jsonb, $2::vector)`, [`scoreable ${i}`, `[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+  }
+  const matching = await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE metadata @> '{"kind":"u"}'`);
+  assert(matching.rows[0].c === 1205, `1,205 rows match the filter, 1,200 of them unscoreable (got ${matching.rows[0].c})`);
+  await db.exec(`SET hnsw.max_scan_tuples = 1`);
+  const got = await db.query<{ content: string }>(`SELECT content FROM match_thoughts($1::vector, -1.0, 10, '{"kind":"u"}'::jsonb)`, [`[${unitVector(EMBEDDING_DIM).join(",")}]`]);
+  await db.exec(`RESET hnsw.max_scan_tuples`);
+  assert(got.rows.length === 5, `all five scoreable rows come back through the exact branch (got ${got.rows.length}; a walk clamped to one tuple could not have found them)`);
+  assert(got.rows.every((r) => r.content.startsWith("scoreable")), "…and only those");
+}
+
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
 {
   await db.exec(`DELETE FROM thoughts`);

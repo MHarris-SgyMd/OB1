@@ -203,7 +203,13 @@ for (const m of migrations) {
   if (dryRun) {
     if (tooOldFor(m)) {
       console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorLibrary} < ${tooOldFor(m)}`);
-      floorBlocked = m;
+      floorBlocked ??= m;
+      continue;
+    }
+    // The live run exits at the first refusal, so nothing after it applies;
+    // saying "would apply" for those would promise what the run cannot do.
+    if (floorBlocked) {
+      console.log(`  ·  ${m.name}  blocked behind ${floorBlocked.name}`);
       continue;
     }
     console.log(`  →  ${m.name}  would apply (${m.sha})`);

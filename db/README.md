@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `145 assertions: 145 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `148 assertions: 148 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports fourteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -334,7 +334,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 145 assertions, PGlite, no container
+bun test-schema.ts                    # 148 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 47 assertions, real server, throwaway container
 ```
 
@@ -360,7 +360,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 145 properties, including:
+asserts 148 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -404,7 +404,8 @@ asserts 145 properties, including:
   bound or a plan mode to the function, fails here rather than in search. The
   exact branch is held to the unfiltered answer on the same rows, and [8c]
   holds the walk branch — reached only above 1,000 matching rows — to an exact
-  scan; the bounds' seeding is asserted, that re-applying 014 leaves an
+  scan, and [8d] that rows with no vector and no chunks do not count towards
+  that threshold; the bounds' seeding is asserted, that re-applying 014 leaves an
   operator's database-level value alone, and that a value set only for the
   session (standing in for `ALTER ROLE`) does not stop the seed
 - no `auth.uid()`, `auth.role()`, `service_role` grant, or RLS survives

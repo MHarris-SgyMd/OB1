@@ -45,22 +45,22 @@
 --
 --     filter matches   returned   in exact top-10   empty results
 --     50%                 10.0        7.9               0/50
---     10%                  5.4        5.0               1/50
+--     10%                  5.4        4.9               1/50
 --      1%                  0.8        0.8              23/50
 --      0.1% (9 rows)        0.1        0.1              46/50
 --
 --   After: 10.0 returned at every tier that has 10 rows, 10.0 in the exact
---   top-10 at 10% and below, 9.4 at 50%, 0 empty. At 100,000 rows the before
---   column is the same shape (30 of 50 empty at 1%, 48 of 50 at 0.1%) and the
+--   top-10 at 10% and below, 9.3 at 50%, 0 empty. At 100,000 rows the before
+--   column is the same shape (28 of 50 empty at 1%, 47 of 50 at 0.1%) and the
 --   after column is complete at 1% and thinner, while at 50% and 10% it holds
---   6.4 and 9.0 of the exact top-10 against 007's 4.3 and 3.7. That residue is
+--   6.3 and 8.9 of the exact top-10 against 007's 4.5 and 3.9. That residue is
 --   the HNSW approximation: random uniform vectors are the index's hardest
 --   case, the approximation was always there, and the iterative scan improves
 --   it because it keeps going. Thin filters cost less than an unfiltered call:
 --   at 100,000 rows 0.18 ms for a filter matching nothing, 0.24 ms for one
---   matching 6 rows, 0.52 for 90, 2.7 for 998 (the exact branch below); broad
---   ones 3.4 ms (50%) and 9.9 ms (10%), the walk. Asking for the ceiling, 500
---   rows unfiltered, costs 7.8 ms at 10,000 rows and 30 ms at 100,000. The
+--   matching 6 rows, 0.51 for 90, 2.6 for 998 (the exact branch below); broad
+--   ones 5.0 ms (50%) and 9.0 ms (10%), the walk. Asking for the ceiling, 500
+--   rows unfiltered, costs 6.8 ms at 10,000 rows and 28 ms at 100,000. The
 --   full tables, and the real-corpus measurement, are in FORK.md change 28.
 --
 -- Design
@@ -80,11 +80,12 @@
 --     predicate to build the matched set (eleventh review pass). That pass is
 --     the one statement every filtered call runs, so db/bench-hnsw.ts section
 --     C explains it on its own: for the empty filter 0.01 ms; for the 50%
---     filter at 100,000 rows 0.4 ms as a sequential scan with a LIMIT under
---     the custom plan and 2.6 ms as a GIN bitmap over 50,000 matches under the
---     generic — the bitmap is built whole before the LIMIT can stop anything,
---     so that cost grows with the matches, which is what SMD-1018 measures
---     at a million rows and up.
+--     filter at 100,000 rows 2.5 ms under either plan mode, a GIN bitmap over
+--     50,000 matches — built whole before the LIMIT can stop anything, so that
+--     cost grows with the matches, which is what SMD-1018 measures at a
+--     million rows and up (an earlier run, before the scoreability predicate
+--     joined the statement, saw the custom plan take a sequential scan with a
+--     LIMIT at 0.4 ms instead; the planner's choice, either way complete).
 --     Two things made this necessary rather than nice. A filter no row can
 --     pass — the shape one integration sends on every call — made the
 --     walk-only draft run each CTE to the scan bound and return the same empty
@@ -182,18 +183,18 @@
 --     pass caught that — db/bench-hnsw.ts section D runs the walk branch's own
 --     statement on the thin filters at 100,000 rows (the function itself never
 --     walks for them, see the exact branch) and the walk completes: 90
---     matching rows → 10 of 10, 6 → 6 of 6, nothing → nothing, about 65 ms
+--     matching rows → 10 of 10, 6 → 6 of 6, nothing → nothing, about 63 ms
 --     each. Since the walk is taken only above v_exact matching rows, it
 --     visits about v_fetch * N / v_exact tuples — N / 25 at the default count,
 --     N / 4 at match_count 500 — so 100,000 covers tables to ~2.5 million rows
 --     at the default count and ~400,000 at the ceiling; pgvector's default of
 --     20,000 covers 500,000 and 80,000. Above the threshold which plan the
 --     walk gets is the planner's, and it does not matter for the answer: at
---     100,000 rows the 10% tier ran 8.5 ms under the custom plan (HNSW on both
---     sides) and 8.9 ms under the generic (GIN for thoughts, HNSW for chunks),
+--     100,000 rows the 10% tier ran 7.9 ms under the custom plan (HNSW on both
+--     sides) and 7.8 ms under the generic (GIN for thoughts, HNSW for chunks),
 --     the same rows, because the walk is iterative and bounded. Below it there
 --     is no plan to pick — the exact branch is a GIN pass and index probes,
---     0.2–2.7 ms at 100,000 rows under either mode — where the ninth draft's
+--     0.2–2.6 ms at 100,000 rows under either mode — where the ninth draft's
 --     walk-or-GIN choice for the same tiers had varied between 0.7 and 190 ms
 --     on the same seeded data from one run to the next.
 --
@@ -419,8 +420,20 @@ BEGIN
     ORDER BY b.sim DESC
     LIMIT v_count;
   ELSE
+    -- Only rows a branch can SCORE count towards the threshold: a thought
+    -- captured through the 2-arg fallback has no vector and, until re-embedded,
+    -- no chunks, so it can never be a candidate on either side. Counting those
+    -- (the eleventh draft did) could route a filter with 1,200 matches of which
+    -- 30 are scoreable to the walk, which then needs 40 passing rows that do not
+    -- exist, runs to the scan bound and returns short — where the exact branch
+    -- scores all 30 (twelfth review pass; db/test-schema.ts [8d] pins it).
     SELECT array_agg(s.id) INTO v_ids
-    FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> filter LIMIT v_exact + 1) s;
+    FROM (
+      SELECT t.id FROM thoughts t
+      WHERE t.metadata @> filter
+        AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id))
+      LIMIT v_exact + 1
+    ) s;
 
     IF COALESCE(cardinality(v_ids), 0) <= v_exact THEN
       -- Thin filter: the exact answer over the matching rows, driven by the ids
