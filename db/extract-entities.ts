@@ -18,7 +18,7 @@
  *   bun db/extract-entities.ts --url … --dry-run              # what a run would do; writes nothing
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
- *   --workers N (1)   --batch N (4)   --ttl SECONDS (900)   --timeout SECONDS (300, per model call)
+ *   --workers N (2)   --batch N (4)   --ttl SECONDS (900)   --timeout SECONDS (300, per model call)
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought, recurring: every new capture is extracted too. On
@@ -28,13 +28,17 @@
  * provider rather than only the ones someone searches for. FORK.md change 30
  * has the measured wall clock for a full pass.
  *
- * ONE worker by default, unlike reembed.ts. Ollama serves one request at a
- * time unless told otherwise, so a second worker does not shorten the pass —
- * it doubles the queue each call waits in. Measured on the 441-issue corpus at
- * two workers: 9,870 s of model calls inside a 4,941 s wall clock, and 21
- * thoughts failed on the then-120 s timeout because their wait included
- * another thought's call. Against a hosted provider, or an Ollama with
- * OLLAMA_NUM_PARALLEL raised, more workers do help; pass --workers.
+ * Two workers by default, and the number was measured twice because the first
+ * reading of it was wrong. The 441-issue corpus at two workers: 4,941 s wall
+ * clock with 9,870 s of model calls inside it, and 21 thoughts failed a 120 s
+ * per-call timeout — read at the time as two calls queueing behind each other
+ * on a one-at-a-time Ollama. At one worker with a 300 s timeout: 6,793 s, and
+ * 11 thoughts still timed out. So Ollama was serving both calls at once (its
+ * default parallelism is above one on a machine with the memory for it), the
+ * second worker bought 27% of the wall clock, and the timeouts are long
+ * documents whose extraction genuinely takes minutes on a 7B model, not queue
+ * time. Raise --timeout for those, or accept the failures and --retry-failed
+ * later; --workers beyond two is for a hosted provider.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
@@ -89,7 +93,7 @@ if (!url) {
   process.exit(2);
 }
 
-const WORKERS = numberFlag("workers", 1, 1);
+const WORKERS = numberFlag("workers", 2, 1);
 const BATCH = numberFlag("batch", 4, 1);
 const TTL = numberFlag("ttl", 900, 1);
 const TIMEOUT_S = numberFlag("timeout", 300, 1);

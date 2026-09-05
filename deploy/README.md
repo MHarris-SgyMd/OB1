@@ -95,6 +95,10 @@ if the deployment serves correctly, 1 otherwise.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
   checkout with the provider reachable, not from this stack.
+- **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
+  worker with a per-thought model cost; it is not a service here. Run it from a
+  checkout, with `OB1_WORKER_KEY` set to a key whose hash is in
+  `MCP_ACCESS_KEYS`, when you have decided to pay that cost.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 
