@@ -463,13 +463,12 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // with VACUUM changing nothing, because the done rows sit at the front of the
   // heap. ORDER BY enqueued_at makes that scan sort the pool, so the partial
   // index wins whatever the statistics say (015's header has the table). The
-  // plan is asserted on the same statement shape with a literal key, and the
-  // statistics are refreshed after the enqueue as reembed.ts does. Medians,
-  // because a single slow round trip is noise, not a trend.
+  // plan is asserted on the same statement shape with a literal key; the
+  // statistics are refreshed by enqueue_thoughts itself. Medians, because a
+  // single slow round trip is noise, not a trend.
   const JOB3 = "test:cost";
   await sql.unsafe(`INSERT INTO thoughts (content) SELECT 'cost ' || g FROM generate_series(1, 9400) g`);
   await sql`SELECT enqueue_thoughts(${JOB3})`;
-  await sql.unsafe(`ANALYZE thought_work_claims`);
   const [{ pooled }] = await sql`SELECT count(*)::int AS pooled FROM thought_work_claims WHERE work_type = ${JOB3} AND status = 'pending'`;
   assert(Number(pooled) === 10000, `10,000 rows pooled for the timing run (got ${pooled})`);
   const [{ body }] = await sql`SELECT prosrc AS body FROM pg_proc WHERE oid = 'claim_thoughts(text, text, int, int, int)'::regprocedure`;
@@ -502,7 +501,11 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 // from its characters and never axis 0, so a corpus seeded on axis 0 shows
 // exactly which rows the pass rewrote. One text is poison — refused with a 500
 // until the test says otherwise — to exercise the failed path and
-// --retry-failed. Ten milliseconds per embedding so two workers really overlap.
+// --retry-failed. The first whole-content request for either of two long
+// thoughts is throttled with a 429, once: exactly one of them must end with its
+// head window's vector and the other with the whole content's, which fails
+// against the latch-on-any-4xx the first review found. Ten milliseconds per
+// embedding so two workers really overlap.
 
 console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
 {
@@ -510,12 +513,16 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const REEMBED_JOB = "test:reembed";
   const DIM = EMBEDDING_DIM;
   let poison = true;
+  let throttled = false;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
     let h = 0;
     for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
     return 1 + (h % (DIM - 1));
   };
+  // Long enough to chunk at the default 1,200-token window.
+  const long = Array.from({ length: 1500 }, (_, k) => `word${k}`).join(" ");
+  const long2 = Array.from({ length: 1500 }, (_, k) => `term${k}`).join(" ");
   const provider = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -524,6 +531,10 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       const input = String(body.input ?? "");
       if (poison && input.includes("hemlock")) {
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
+      }
+      if (!throttled && (input === long || input === long2)) {
+        throttled = true;
+        return Response.json({ error: { message: "stub: rate limited" } }, { status: 429 });
       }
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
@@ -539,9 +550,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const shorts = Array.from({ length: 30 }, (_, i) => `short thought ${i} about topic ${i}`);
   for (const s of shorts) await sql`SELECT upsert_thought(${s}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
-  // Long enough to chunk at the default 1,200-token window.
-  const long = Array.from({ length: 1500 }, (_, k) => `word${k}`).join(" ");
   await sql`SELECT upsert_thought(${long}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
+  await sql`SELECT upsert_thought(${long2}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   const poisonText = "the hemlock note";
   await sql`SELECT upsert_thought(${poisonText}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   const bare = "captured through the two-argument fallback";
@@ -587,8 +597,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because one row failed (exit ${first.code})`);
-  assert(/32 re-embedded, 1 failed/.test(first.out), `…and says so: 32 re-embedded, 1 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(/33 re-embedded, 1 failed/.test(first.out), `…and says so: 33 re-embedded, 1 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the failed row");
+  assert(/1 long thought\(s\) stored with the head window's vector/.test(first.out), "…and counting the one long thought whose whole-content call was throttled");
   const [{ model: nowRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(nowRecorded === "stub-embed", `ob1_config now records the new model (${nowRecorded})`);
   assert(modelsSeen.has("stub-embed"), "the provider was asked for the configured model");
@@ -598,17 +609,25 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(shorts.every((s) => axisOf(byContent.get(s)!.e) === axisFor(s)), "every short thought carries the stub's vector for its own text");
   assert(axisOf(byContent.get(poisonText)!.e) === 0, "the poison row keeps its old vector");
   assert(axisOf(byContent.get(bare)!.e) === axisFor(bare), "the row that had no vector has one now");
-  assert(axisOf(byContent.get(long)!.e) === axisFor(long), "the long thought's row carries the whole-content vector");
-  const chunks = (await sql`
-    SELECT c.content, c.embedding::text AS e, c.context FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id
-    WHERE t.content = ${long} ORDER BY c.chunk_index`) as { content: string; e: string; context: string | null }[];
-  assert(chunks.length >= 2, `…and gained chunk rows it never had (${chunks.length})`);
-  assert(chunks.every((c) => axisOf(c.e) === axisFor(c.content) && c.context === null), "…each embedded from its own window text, bare, as the server would with context off");
+  const chunksOf = async (doc: string) =>
+    (await sql`
+      SELECT c.content, c.embedding::text AS e, c.context FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id
+      WHERE t.content = ${doc} ORDER BY c.chunk_index`) as { content: string; e: string; context: string | null }[];
+  const chunks = await chunksOf(long);
+  const chunks2 = await chunksOf(long2);
+  assert(chunks.length >= 2 && chunks2.length >= 2, `both long thoughts gained chunk rows they never had (${chunks.length}, ${chunks2.length})`);
+  assert([...chunks, ...chunks2].every((c) => axisOf(c.e) === axisFor(c.content) && c.context === null), "…each embedded from its own window text, bare, as the server would with context off");
+  // One whole-content call was throttled, so one of the two carries its head
+  // window and the other the whole content. Both would carry the head window
+  // if a 429 latched the fallback for the rest of the process.
+  const whole = [long, long2].filter((d) => axisOf(byContent.get(d)!.e) === axisFor(d));
+  const head = [long, long2].filter((d) => axisOf(byContent.get(d)!.e) === axisFor((d === long ? chunks : chunks2)[0].content));
+  assert(whole.length === 1 && head.length === 1, `one long thought carries the whole-content vector and the throttled one its head window (${whole.length} whole, ${head.length} head)`);
   assert(shorts.every((s) => byContent.get(s)!.u > updatedBefore.get(s)!), "updated_at moved on every re-embedded row");
   assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…and not on the one that failed");
 
   const after1 = await claimCounts();
-  assert(after1.succeeded === 32 && after1.failed === 1 && !after1.pending && !after1.claimed, `the claims record 32 succeeded and 1 failed (${JSON.stringify(after1)})`);
+  assert(after1.succeeded === 33 && after1.failed === 1 && !after1.pending && !after1.claimed, `the claims record 33 succeeded and 1 failed (${JSON.stringify(after1)})`);
   const [{ err }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND status = 'failed'`;
   assert(/stub: refused this text/.test(String(err)), "…with the provider's error on the failed row");
   const [{ workers }] = await sql`SELECT count(DISTINCT worker_id)::int AS workers FROM thought_work_claims WHERE work_type = ${REEMBED_JOB}`;
@@ -617,7 +636,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // The audit log: nothing for a vector replaced by a vector, one row for a
   // vector where there was none — 008's trigger diffs presence, not value.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
-  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-two (${Number(auditAfter) - Number(auditBefore)})`);
+  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-three (${Number(auditAfter) - Number(auditBefore)})`);
   const [auditRow] = await sql`
     SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;
@@ -625,7 +644,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…for the row that gained a vector, attributed to the tool and the job (${JSON.stringify(auditRow)})`);
 
   const status = await reembed("--status");
-  assert(status.code === 0 && /32 succeeded, 1 failed/.test(status.out), "--status reports the pass");
+  assert(status.code === 0 && /33 succeeded, 1 failed/.test(status.out), "--status reports the pass");
 
   // A capture made after the first run, then a re-run: only the new row is
   // processed, the failed one stays failed, and the exit code says so.
@@ -640,10 +659,27 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   poison = false;
   const retried = await reembed("--retry-failed");
   assert(retried.code === 0 && /1 re-embedded, 0 failed/.test(retried.out), `--retry-failed re-embeds the failed row once the provider recovers (exit ${retried.code})`);
-  const [{ e: poisonVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${poisonText}`;
+  const [{ e: poisonVec, attempts: poisonAttempts }] = await sql`
+    SELECT t.embedding::text AS e, c.attempt_count AS attempts FROM thoughts t
+    JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${poisonText}`;
   assert(axisOf(poisonVec) === axisFor(poisonText), "…and it now carries the new vector");
+  assert(Number(poisonAttempts) === 1, `…on what counts as its first attempt: --retry-failed reset the count (${poisonAttempts})`);
   const final = await claimCounts();
-  assert(final.succeeded === 34 && !final.failed, `every row is succeeded (${JSON.stringify(final)})`);
+  assert(final.succeeded === 35 && !final.failed, `every row is succeeded (${JSON.stringify(final)})`);
+
+  // A lease held by some other process: this run must not report the pass done.
+  const held = "held by another process";
+  await sql`SELECT upsert_thought(${held}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
+  await sql`SELECT enqueue_thoughts(${REEMBED_JOB})`;
+  const ghost = await sql`SELECT thought_id FROM claim_thoughts(${REEMBED_JOB}, 'ghost', 1)`;
+  assert(ghost.length === 1, "another process holds the one pending row");
+  const blocked = await reembed();
+  assert(blocked.code === 1 && /1 row\(s\) are still leased/.test(blocked.out), `a run that finds only another process's lease exits 1 and says so (exit ${blocked.code})`);
+  const [{ e: heldVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${held}`;
+  assert(axisOf(heldVec) === 0, "…and did not touch the held row");
+  await sql`SELECT release_claims_for_worker(${REEMBED_JOB}, 'ghost')`;
+  const finish = await reembed();
+  assert(finish.code === 0 && /1 re-embedded, 0 failed/.test(finish.out), `once the lease is returned a run finishes the row and exits 0 (exit ${finish.code})`);
   const noop = await reembed();
   assert(noop.code === 0 && /Nothing to do/.test(noop.out), "a further run has nothing to do and exits 0");
 

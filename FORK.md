@@ -1615,8 +1615,9 @@ section).
 **The table.** `thought_work_claims`, ported from `schemas/thought-work-claims`:
 one row per (thought, job key). `enqueue_thoughts` builds the pool,
 `claim_thoughts` hands out batches under a TTL lease, `release_thought` and
-`release_claims_for_worker` finish or hand back. Three departures from
-upstream, each argued in the header. The database picks the batch with `SELECT
+`release_claims_for_worker` finish or hand back. Four departures from
+upstream, each argued in the header; three are below and the fourth is that
+terminal rows stay, as the record of the pass, and block re-enqueue. The database picks the batch with `SELECT
 … FOR UPDATE SKIP LOCKED` — upstream's workers chose their own candidate ids and
 the claim only arbitrated, so every worker selected the same newest page and
 the losers backed off, a symptom its own README lists under Troubleshooting.
@@ -1652,8 +1653,9 @@ makes a sequential scan sort the whole pool, so the index wins whatever the
 statistics say: 0.48 ms first hundred, 0.56 ms at 50,000 done, 0.47 ms last
 hundred, against a 0.15 ms round trip. [8] asserts the plan and the ratio at
 10,000 rows. The other planner trap — a large enqueue leaving statistics that
-describe the table before it — is closed by an `ANALYZE` after the enqueue in
-`reembed.ts` rather than by waiting a minute for autovacuum.
+describe the table before it — is closed by an `ANALYZE` inside
+`enqueue_thoughts` whenever it added rows, so every consumer gets it rather than
+the one that knew to wait a minute for autovacuum.
 
 **The consumer.** `db/reembed.ts` walks the corpus through the claims with N
 workers, resumes where it stopped, and re-embeds *exactly as a capture would*,
@@ -1688,12 +1690,38 @@ trigger diffs the embedding's *presence*, not its value: a vector replaced by a
 vector is `{}`, and `{}` was ruled not-an-event when 008 stopped a repeated
 import from writing ten thousand empty rows. So a full re-embed writes no audit
 rows for rows that had a vector, and exactly one for a row that had none.
-`test-live.ts` [9] asserts one row for thirty-three thoughts. Nothing was
+`test-live.ts` [9] asserts one row for thirty-four thoughts. Nothing was
 suppressed; the trigger never recorded this, and the claim row — job key,
 worker, attempts, error, times — is the per-thought record of the pass. Making
 the trigger record vector changes would be a new migration and would reintroduce
 the doubling the ticket worried about; it is left as a decision rather than made
 in passing.
+
+**What the first review pass found, and what it changed.** Two defects that
+predate this change and that the extraction put in the touched code. The prompt
+templates were applied with `String.replace` and a string replacement, which
+reads `$&`, `$'` and `$$` in the thought's text as substitution patterns — a
+price written `$$5` embedded as `$5`, and a query containing `$&` became the
+template's placeholder; fixed once, in `db/config.mjs`, which `embed.ts` now
+calls instead of keeping its own copy. And `OB1_CHUNK_OVERLAP=""` resolved to
+zero overlap rather than the 150 default, while `deploy/compose.yaml` forwards
+every optional variable as `${VAR:-}` — so **every long capture made through
+the compose stack was windowed with no overlap**, and a re-embed from a shell
+would have re-windowed them differently. Empty now means unset, as
+`db/config.mjs` always said; the re-embed is the backfill. In the new code: the
+whole-content fallback latched on any 4xx, so one 429 in a bulk pass would have
+downgraded every later long thought to its head window while recording success
+— it latches on 400 and 413 only now, and the pass counts the fallbacks it did
+make; a worker's `finally` returned its leases only on a signal, so a database
+error stranded them for the TTL and a re-run reported nothing to do with exit 0
+— it releases unconditionally now, and a run exits 1 while any row is leased;
+a window whose blurb failed under `OB1_CHUNK_CONTEXT=on` was recorded succeeded
+and terminal — it is a failure now, so `--retry-failed` can revisit it;
+`--retry-failed` did not reset the attempt count; a second Ctrl-C could not end
+a run parked on a hung provider. `test-thoughts.ts` [7] and `test-live.ts` [9]
+cover each. Three findings went to tickets rather than code: the fallback as a
+per-row outcome, `update_thought` refusing unchanged content that duplicates a
+pre-fingerprint row, and lease renewal.
 
 **Not done here.** Preflight does not report an incomplete pass (`--status`
 does); a width-changing migration; the entity-extraction consumer (SMD-947),

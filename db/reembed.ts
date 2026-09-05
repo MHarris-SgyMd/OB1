@@ -271,17 +271,13 @@ if (modelChange || recorded.embedding_model === undefined) {
 if (RETRY_FAILED) {
   const [{ n }] = await sql`
     WITH retried AS (
-      UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL
+      UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
       WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
   console.log(`  --retry-failed: ${n} failed row(s) returned to the pool`);
 }
 
 const [{ added }] = await sql`SELECT enqueue_thoughts(${JOB}) AS added`;
-// A large enqueue leaves the table's statistics describing the table before it,
-// and the reaper's plan is chosen from them; autovacuum would catch up within a
-// minute, but the first claims of a pass need not wait for it.
-if (Number(added) > 0) await sql.unsafe(`ANALYZE thought_work_claims`);
 const before = await counts();
 console.log(`  pool: ${added} thought(s) added`);
 printCounts(before, "before");
@@ -306,6 +302,10 @@ let stopping = false;
 let done = 0;
 let failed = 0;
 let vanished = 0;
+/** Long thoughts stored with the head window's vector because the whole-content call failed. */
+let headWindow = 0;
+/** Worker ids with leases possibly outstanding, for a forced exit. */
+const activeWorkers = new Set<string>();
 const started = Date.now();
 const lastReport = { at: 0 };
 
@@ -334,6 +334,16 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
   let current = row;
   for (let attempt = 0; attempt < 3; attempt++) {
     const embedded = await embedder.embedCapture(current.content);
+    if (embedded.wholeContentFellBack) headWindow++;
+    // The server stores a bare window and tells the caller; here there is no
+    // caller, and a terminal claim cannot be re-run. So it is a failure, which
+    // --retry-failed can revisit once the metadata model behaves.
+    if (embedConfig.chunkContext && embedded.contextFailures > 0) {
+      return {
+        outcome: "failed",
+        error: `${embedded.contextFailures} of ${embedded.chunks.length} windows embedded without context — the blurb call failed or its answer was unusable; fix the metadata model, then --retry-failed`,
+      };
+    }
     const chunks = embedded.chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }));
     const [r] = await sql`
       SELECT update_thought(
@@ -356,6 +366,16 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
       current = fresh;
       continue;
     }
+    if (result.error === "DUPLICATE_CONTENT") {
+      // The content is unchanged, so this can only be another thought that
+      // normalises to the same text: a duplicate from before migration 003's
+      // fingerprint, or a bulk load that bypassed upsert_thought. Re-embedding
+      // the first of the pair gave it a fingerprint; the second now collides.
+      return {
+        outcome: "failed",
+        error: "update_thought: DUPLICATE_CONTENT — another thought normalises to the same text (a duplicate that predates the fingerprint, or was loaded around upsert_thought); remove one of the pair, then --retry-failed",
+      };
+    }
     return { outcome: "failed", error: `update_thought: ${result.error}` };
   }
   return { outcome: "failed", error: "update_thought: STALE_READ three times in a row — the thought is being edited faster than it can be re-embedded" };
@@ -365,15 +385,25 @@ async function worker(n: number): Promise<void> {
   // Globally unique: release_claims_for_worker matches on this alone, and a
   // bare pid collides across containers.
   const workerId = `reembed-${hostname()}-${process.pid}-${n}-${randomUUID().slice(0, 8)}`;
+  activeWorkers.add(workerId);
   try {
     while (!stopping) {
-      const batch = (await sql`
-        SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
-      if (batch.length === 0) return;
-      const ids = batch.map((b) => b.thought_id);
-      const rows = (await sql`
-        SELECT id, content, updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
-      const byId = new Map(rows.map((r) => [r.id, r]));
+      let batch: { thought_id: string; attempt: number }[];
+      let byId: Map<string, Row>;
+      try {
+        batch = (await sql`
+          SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
+        if (batch.length === 0) return;
+        const ids = batch.map((b) => b.thought_id);
+        const rows = (await sql`
+          SELECT id, content, updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
+        byId = new Map(rows.map((r) => [r.id, r]));
+      } catch (e) {
+        // A database error here is not about one thought. This worker stops;
+        // the others carry on, and the finally below hands back what it holds.
+        console.error(`  ${workerId}: ${(e as Error).message} — this worker stops`);
+        return;
+      }
       for (const b of batch) {
         if (stopping) return;
         const row = byId.get(b.thought_id);
@@ -394,9 +424,18 @@ async function worker(n: number): Promise<void> {
           vanished++;
           continue;
         }
-        const [{ ok }] = await sql`
-          SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                 ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
+        let ok: boolean;
+        try {
+          [{ ok }] = await sql`
+            SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
+                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
+        } catch (e) {
+          // The write to `thoughts`, if there was one, stands. The claim stays
+          // this worker's until the finally below returns it to the pool, and
+          // the row is then done again — the same vector twice, harmless.
+          console.error(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
+          return;
+        }
         if (!ok) {
           // The lease expired and another worker holds the row now; its write
           // will stand and ours already did — the same vector twice, harmless.
@@ -412,17 +451,36 @@ async function worker(n: number): Promise<void> {
       }
     }
   } finally {
-    if (stopping) {
+    // Unconditionally: a worker that stops for any reason — an empty pool, a
+    // signal, a database error — must not leave its leases to expire. Normally
+    // there is nothing to return and this is one cheap statement.
+    try {
       const [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       if (freed > 0) console.error(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
+    } catch (e) {
+      console.error(`  ${workerId}: could not return its leases (${(e as Error).message}); they expire within ${TTL} s`);
     }
+    activeWorkers.delete(workerId);
   }
 }
 
 const stop = () => {
-  if (stopping) return;
+  if (stopping) {
+    // A second signal while a provider call hangs: the workers cannot reach
+    // their own finally, so return their leases from here, best effort and
+    // bounded, then leave.
+    console.error(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
+    const hardStop = setTimeout(() => process.exit(130), 3000);
+    void Promise.all(
+      [...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null))
+    ).finally(() => {
+      clearTimeout(hardStop);
+      process.exit(130);
+    });
+    return;
+  }
   stopping = true;
-  console.error("\n  stopping after the current thought; unfinished claims go back to the pool");
+  console.error("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
@@ -435,9 +493,22 @@ const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass, in ${elapsed}s`);
 printCounts(after, "after");
+if (headWindow > 0) {
+  console.error(
+    `\n  ${headWindow} long thought(s) stored with the head window's vector: the whole-content embedding was refused or\n` +
+      `  failed (see above). They are recorded succeeded, as the server would record them; to try again, clear their\n` +
+      `  claim rows or re-capture them.`
+  );
+}
 if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();
 }
+if (after.claimed > 0) {
+  console.error(
+    `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +
+      `  They return to the pool when their leases expire (within ${TTL} s of being taken); re-run then, or watch --status.`
+  );
+}
 await sql.close();
-process.exit(stopping ? 130 : after.failed > 0 ? 1 : 0);
+process.exit(stopping ? 130 : after.failed > 0 || after.claimed > 0 ? 1 : 0);

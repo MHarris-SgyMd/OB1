@@ -24,7 +24,7 @@
 
 import { chunkContent, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 import {
-  EMBEDDING_PROMPTS,
+  applyEmbeddingPrompt,
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIM,
   DEFAULT_METADATA_MODEL,
@@ -86,8 +86,14 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
   // logs, so the header is omitted entirely when there is no key.
   const key = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
-  const chunkTokens = Number(env.OB1_CHUNK_TOKENS);
-  const chunkOverlap = Number(env.OB1_CHUNK_OVERLAP);
+  // Number("") is 0, which passes the overlap's `>= 0` below and windowed long
+  // captures with NO overlap — and deploy/compose.yaml forwards every optional
+  // variable as `${VAR:-}`, so a composed server saw "" wherever the operator
+  // set nothing. Empty means unset, as db/config.mjs's ENV proxy already says;
+  // the first review of SMD-946 found the server and reembed.ts chunking
+  // differently over the same corpus for exactly this reason.
+  const chunkTokens = env.OB1_CHUNK_TOKENS ? Number(env.OB1_CHUNK_TOKENS) : NaN;
+  const chunkOverlap = env.OB1_CHUNK_OVERLAP ? Number(env.OB1_CHUNK_OVERLAP) : NaN;
   return {
     llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
     headers: key
@@ -151,6 +157,12 @@ export type EmbeddedCapture = {
   chunks: { content: string; embedding: number[]; context?: string }[];
   /** Windows that were meant to carry a blurb and went in bare instead. */
   contextFailures: number;
+  /**
+   * The content was long enough to chunk and the whole-content embedding could
+   * not be had, so `embedding` is the head window's vector. The server accepts
+   * this silently, as it always has; a bulk pass wants to count it.
+   */
+  wholeContentFellBack: boolean;
 };
 
 export type Embedder = {
@@ -196,11 +208,15 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
    * exactly as changing the model does — which is why it is keyed off the model
    * name rather than exposed as its own setting, so preflight's existing
    * model-change check already covers it.
+   *
+   * Applied by db/config.mjs's function rather than a copy of it: the server
+   * kept its own two-line version, and both it and the original read `$&`,
+   * `$'` and `$$` in the thought's text as String.replace substitution
+   * patterns — a price written `$$5` was embedded as `$5`. One definition, one
+   * fix, and evals/lib.ts measures the same text the server embeds.
    */
   function applyPrompt(cfg: EmbedConfig, text: string, kind: EmbedKind): string {
-    const tpl = (EMBEDDING_PROMPTS as Record<string, { query: string; document: string } | undefined>)[cfg.embeddingModel];
-    if (!tpl) return text;
-    return kind === "query" ? tpl.query.replace("{q}", text) : tpl.document.replace("{d}", text);
+    return applyEmbeddingPrompt(cfg.embeddingModel, text, kind === "query");
   }
 
   async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
@@ -269,9 +285,12 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
    * both kinds, and the capture response says so at the time.
    */
   async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string): Promise<string> {
-    const prompt = CHUNK_CONTEXT_PROMPTS.chunk
-      .replace("{document}", document)
-      .replace("{chunk}", chunk);
+    // One pass, with a function. Two string replaces would read `$&` and its
+    // relatives in the document as substitution patterns, and a document that
+    // itself contains the literal `{chunk}` would receive the window where its
+    // own text was, leaving the real placeholder unfilled.
+    const fill: Record<string, string> = { "{document}": document, "{chunk}": chunk };
+    const prompt = CHUNK_CONTEXT_PROMPTS.chunk.replace(/\{document\}|\{chunk\}/g, (m) => fill[m]);
     try {
       const r = await fetch(`${cfg.llmBase}/chat/completions`, {
         method: "POST",
@@ -365,7 +384,7 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0 };
+      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, wholeContentFellBack: false };
     }
 
     const wantContext = cfg.chunkContext;
@@ -377,12 +396,16 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
       wholeContentRefused
         ? Promise.resolve(null)
         : getEmbedding(content).catch((e: Error & { status?: number }) => {
-            // A 4xx here means the provider REFUSED the input rather than
+            // 400 or 413 here means the provider REFUSED the input rather than
             // truncating it, which is a fact about the model and will be just as
             // true for the next long capture. Remembering it turns a wasted round
             // trip on every long capture into one per process. A 5xx or a network
-            // error says nothing durable, so it is not latched.
-            if (e.status !== undefined && e.status >= 400 && e.status < 500) {
+            // error says nothing durable, so it is not latched — and neither is
+            // any other 4xx: 429 is a rate limit, 408 a timeout, 401 and 403 a
+            // credential. This used to latch on every 4xx, so one throttled call
+            // in a bulk pass downgraded every later long thought to its head
+            // window while recording success (first review of SMD-946).
+            if (e.status === 400 || e.status === 413) {
               wholeContentRefused = true;
               console.error(
                 `embedCapture: ${cfg.embeddingModel} refused the whole content (${e.status}); ` +
@@ -405,6 +428,7 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
         ...(contexts[i] ? { context: contexts[i] } : {}),
       })),
       contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
+      wholeContentFellBack: whole === null,
     };
   }
 

@@ -116,8 +116,8 @@
 --   hundred claims of a 10,000-row pass to within twice the first hundred and
 --   checks the plan. A large enqueue also leaves the table's statistics
 --   describing the table before it, and the reaper's plan is chosen from them:
---   db/reembed.ts runs ANALYZE after adding rows rather than waiting a minute
---   for autovacuum to.
+--   enqueue_thoughts runs ANALYZE whenever it added rows, rather than leaving
+--   each consumer to wait a minute for autovacuum.
 --
 -- Safety
 --   * Additive. `thoughts` gains no columns and loses none.
@@ -212,6 +212,15 @@ BEGIN
     ON CONFLICT (thought_id, work_type) DO NOTHING;
   END IF;
   GET DIAGNOSTICS v_n = ROW_COUNT;
+
+  -- A large enqueue leaves the table's statistics describing the table before
+  -- it, and the reaper's plan is chosen from them. Autovacuum would catch up
+  -- within a minute; the first claims of a pass need not wait for it, and
+  -- doing it here means every consumer gets it rather than the one that knew.
+  -- ANALYZE, unlike VACUUM, may run inside a transaction.
+  IF v_n > 0 THEN
+    ANALYZE thought_work_claims;
+  END IF;
   RETURN v_n;
 END;
 $$;

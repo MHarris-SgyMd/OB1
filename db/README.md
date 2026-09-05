@@ -194,11 +194,12 @@ is marked failed rather than handed out again. Terminal rows stay, so running
 a pass twice does nothing for the rows already done and picks up the thoughts
 captured since.
 
-Three things differ from upstream's version, each with a reason in the
+Four things differ from upstream's version, each with a reason in the
 migration header: the database picks the batch (upstream's workers chose
 candidates themselves and mostly collided), an expired lease returns to the
 pool rather than being deleted (so `attempt_count` and `last_error` survive),
-and there is nothing for Supabase — no grants, no RLS, no `NOTIFY pgrst`.
+terminal rows stay as the record of the pass and block re-enqueue, and there is
+nothing for Supabase — no grants, no RLS, no `NOTIFY pgrst`.
 
 **The job key names the target.** `reembed:qwen3-embedding:4b@1024`, not
 `reembed`. Passes with different keys share nothing but the table, so a re-embed
@@ -255,9 +256,12 @@ estimate whatever the statistics say. The lease is stamped per claim, so it has
 to outlast the whole batch: the defaults leave close to two minutes per
 thought.
 
-**Writing another consumer.** The loop is: `enqueue_thoughts` once, then per
-worker `claim_thoughts` → do the work → `release_thought` per row, and
-`release_claims_for_worker` on shutdown. Give every process a globally unique
+**Writing another consumer.** The loop is: `enqueue_thoughts` once (it runs
+`ANALYZE` itself when it added rows, so the first claims plan against real
+statistics), then per worker `claim_thoughts` → do the work → `release_thought`
+per row, and `release_claims_for_worker` on shutdown — unconditionally, in a
+`finally`, so a worker that stops for any reason hands its leases back rather
+than leaving them to expire. Give every process a globally unique
 worker id (hostname, pid and a random suffix — `release_claims_for_worker`
 matches on it alone). Entity extraction (SMD-947) is the next pass expected to
 use it.
@@ -427,7 +431,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 187 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 98 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 104 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -457,10 +461,12 @@ container.
   there are disjoint whether or not `SKIP LOCKED` does anything.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
-  thirty-three rows including a chunked one, a poisoned one and one with no
-  vector; asserts every vector, the chunk rows, one audit row rather than
-  thirty-two, `ob1_config`, `--status`, a re-run that processes only a later
-  capture, and `--retry-failed`.
+  thirty-four rows including two chunked ones (one of whose whole-content calls
+  is throttled with a 429, once — the other must still get its whole vector), a
+  poisoned one and one with no vector; asserts every vector, the chunk rows, one
+  audit row rather than thirty-three, `ob1_config`, `--status`, a re-run that
+  processes only a later capture, `--retry-failed` resetting the attempt count,
+  and exit 1 while another process holds a lease.
 
 ### What test-schema.ts asserts
 
