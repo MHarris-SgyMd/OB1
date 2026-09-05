@@ -700,6 +700,207 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`DELETE FROM thoughts`;
 }
 
+// ── 10. db/extract-entities.ts — the second consumer, end to end ─────────────
+//
+// A stub model answers from a table keyed by a word in each thought, so the
+// expected graph is known exactly; one thought gets prose instead of JSON to
+// exercise the failed path. The worker authenticates with a minted key, so the
+// rows carry a stable agent id. Then the four things SMD-947 asks to verify:
+// a second run writes nothing, an edit re-extracts and the stale entity goes,
+// a delete leaves no edge citing the thought, and the cost is recorded.
+
+console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const KEY = "extract:stub-meta@p1";
+  const answers: Record<string, { entities: unknown[]; relationships: unknown[] }> = {
+    migrated: {
+      entities: [
+        { name: "Anita", type: "person", confidence: 0.9 },
+        { name: "Open Brain", type: "project", confidence: 0.9 },
+        { name: "PostgreSQL", type: "tool", confidence: 0.95, aliases: ["Postgres"] },
+      ],
+      relationships: [
+        { from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.8 },
+        { from: "Open Brain", to: "PostgreSQL", relation: "uses", confidence: 0.9 },
+      ],
+    },
+    paired: {
+      entities: [
+        { name: "Dev", type: "person", confidence: 0.9 },
+        { name: "Anita", type: "person", confidence: 0.9 },
+        { name: "Open Brain", type: "project", confidence: 0.8 },
+      ],
+      relationships: [
+        { from: "Dev", to: "Open Brain", relation: "works_on", confidence: 0.8 },
+        { from: "Anita", to: "Open Brain", relation: "works_on", confidence: 0.8 },
+      ],
+    },
+    session: {
+      entities: [{ name: "Priya", type: "person", confidence: 0.9 }, { name: "Redis", type: "tool", confidence: 0.9 }],
+      relationships: [{ from: "Priya", to: "Redis", relation: "uses", confidence: 0.8 }],
+    },
+    memcached: {
+      entities: [{ name: "Priya", type: "person", confidence: 0.9 }, { name: "Memcached", type: "tool", confidence: 0.9 }],
+      relationships: [{ from: "Priya", to: "Memcached", relation: "uses", confidence: 0.8 }],
+    },
+    grafana: {
+      entities: [{ name: "Sam", type: "person", confidence: 0.9 }, { name: "Grafana", type: "tool", confidence: 0.9 }],
+      relationships: [],
+    },
+    observability: {
+      entities: [{ name: "observability", type: "topic", confidence: 0.7 }],
+      relationships: [],
+    },
+  };
+  let calls = 0;
+  let hemlockIsProse = true;
+  const model = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      calls++;
+      // The thought is the user message; the rules are the system message.
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      await Bun.sleep(5);
+      if (hemlockIsProse && /hemlock/.test(prompt)) {
+        return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
+      }
+      const key = Object.keys(answers).find((k) => prompt.includes(k));
+      const answer = key ? answers[key] : { entities: [], relationships: [] };
+      return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+    },
+  });
+
+  const seed = async (content: string) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const t1 = await seed("Anita migrated Open Brain to PostgreSQL 16 last week.");
+  const t2 = await seed("Dev paired with Anita on the Open Brain search index.");
+  const t3 = await seed("Priya prefers Redis for the session cache.");
+  const poison = await seed("The hemlock note.");
+  for (let i = 0; i < 6; i++) await seed(`Filler ${i} about observability dashboards.`);
+  assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0,
+         "before the worker has ever run, captures enqueue nothing — the trigger waits for the key");
+
+  const rawKey = "a".repeat(64);
+  const { hashKey } = await import("../server-portable/auth.ts");
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DATABASE_URL: URL_,
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
+    OB1_METADATA_MODEL: "stub-meta",
+    OB1_WORKER_KEY: rawKey,
+    MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
+  };
+  const extract = async (...extra: string[]): Promise<{ code: number; out: string }> => {
+    const p = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    return { code: await p.exited, out };
+  };
+  const graph = async () => (await sql`
+    SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
+           (SELECT count(*)::int FROM thought_entities) AS mentions,
+           (SELECT count(*)::int FROM ob1_entity_edges) AS edges`)[0] as { entities: number; mentions: number; edges: number };
+  const entityByName = async (n: string) => (await sql`SELECT id, name, aliases FROM ob1_entities WHERE normalized_name = normalize_entity_name(${n})`)[0];
+  const claimCounts = async () =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY status`)
+      .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+
+  const dry = await extract("--dry-run");
+  assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 10 thoughts to the pool/.test(dry.out),
+         `--dry-run counts the ten thoughts and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 0, "…including the key");
+
+  const first = await extract("--workers", "2", "--batch", "2");
+  assert(first.code === 1 && /9 extracted, 1 failed/.test(first.out), `the first run extracts nine and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
+  assert(/not JSON of the expected shape/.test(first.out), "…naming the failure");
+  const [{ key }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  assert(key === KEY, `the run recorded the extraction key (${key})`);
+  const [agent] = await sql`SELECT canonical_agent_id AS id, label FROM ob1_agents WHERE label = 'entity-worker'`;
+  assert(agent?.id != null, "the worker resolved itself to a stable agent id under its key's name");
+  const [{ attributed, total }] = await sql`
+    SELECT count(*) FILTER (WHERE canonical_agent_id = ${agent.id}::uuid)::int AS attributed, count(*)::int AS total FROM thought_entities`;
+  assert(Number(total) > 0 && Number(attributed) === Number(total), `every mention carries that agent id (${attributed} of ${total})`);
+  const g1 = await graph();
+  // Anita, Open Brain, PostgreSQL, Dev, Priya, Redis, observability = 7 entities;
+  // mentions 3 + 3 + 2 + 6 = 14; edges 2 + 2 + 1 = 5.
+  assert(g1.entities === 7 && g1.mentions === 14 && g1.edges === 5, `the graph is exactly what the stub said: 7 entities, 14 mentions, 5 edges (${JSON.stringify(g1)})`);
+  const anita = await entityByName("Anita");
+  assert((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE entity_id = ${anita.id}::uuid`)[0].c === 2, "Anita, named by two thoughts, is one entity with two mentions");
+  const worksOn = await sql`
+    SELECT count(*)::int AS support FROM ob1_entity_edges g
+    WHERE g.relation = 'works_on' AND g.from_entity_id = ${anita.id}::uuid`;
+  assert(Number(worksOn[0].support) === 2, `"Anita works_on Open Brain" has two evidence rows, one per thought (${worksOn[0].support})`);
+  assert(((await entityByName("PostgreSQL")).aliases as string[]).includes("Postgres"), "the alias the model offered is recorded on the entity");
+  const c1 = await claimCounts();
+  assert(c1.succeeded === 9 && c1.failed === 1, `claims: 9 succeeded, 1 failed (${JSON.stringify(c1)})`);
+  const callsAfterFirst = calls;
+
+  // A second run over an unchanged corpus.
+  const ids1 = (await sql`SELECT id FROM ob1_entities ORDER BY id`).map((r: { id: string }) => r.id);
+  const second = await extract();
+  assert(second.code === 1 && /0 extracted, 0 failed/.test(second.out), "a second run has nothing to extract (and still exits 1 for the failed row)");
+  assert(calls === callsAfterFirst, "…and made no model call");
+  const ids2 = (await sql`SELECT id FROM ob1_entities ORDER BY id`).map((r: { id: string }) => r.id);
+  assert(JSON.stringify(ids1) === JSON.stringify(ids2) && JSON.stringify(await graph()) === JSON.stringify(g1), "…the graph is unchanged, entity ids included");
+
+  // An edit: Priya moves to Memcached, so Redis must not survive.
+  const [{ r: edit }] = await sql`SELECT update_thought(${t3}::uuid, ${"Priya moved the cache to memcached."}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb) AS r`;
+  assert(edit.ok === true, "the thought is edited through update_thought");
+  const [{ status: requeued }] = await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${t3}::uuid AND work_type = ${KEY}`;
+  assert(requeued === "pending", "…and the trigger put it back in the pool");
+  const third = await extract();
+  assert(/1 extracted/.test(third.out), "the next run extracts exactly the edited thought");
+  assert((await entityByName("Redis")) === undefined && (await entityByName("Memcached")) !== undefined, "Redis is gone and Memcached is here: the stale entity did not survive the edit");
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${t3}::uuid`)[0].c === 1, "…and the edited thought has exactly its new edge");
+
+  // A delete: the edges it evidenced go with it.
+  await sql`SELECT delete_thought(${t1}::uuid, NULL::jsonb)`;
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_entity_edges WHERE thought_id = ${t1}::uuid`)[0].c === 0, "deleting a thought leaves no edge citing it");
+  const worksOnAfter = await sql`SELECT count(*)::int AS support FROM ob1_entity_edges WHERE relation = 'works_on' AND from_entity_id = ${anita.id}::uuid`;
+  assert(Number(worksOnAfter[0].support) === 1, `…and the relation the other thought still evidences keeps that one row (${worksOnAfter[0].support})`);
+  assert((await entityByName("PostgreSQL")) !== undefined, "…while the entity it introduced remains until pruned");
+  const [{ n: prunedN }] = await sql`SELECT prune_orphan_entities() AS n`;
+  assert(Number(prunedN) === 1 && (await entityByName("PostgreSQL")) === undefined, `prune_orphan_entities removes it (${prunedN})`);
+
+  // --status, then --retry-failed with a --limit.
+  const status = await extract("--status");
+  assert(status.code === 0 && /8 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
+  hemlockIsProse = false;
+  answers.hemlock = { entities: [{ name: "Socrates", type: "person", confidence: 0.9 }], relationships: [] };
+  const retried = await extract("--retry-failed", "--limit", "1");
+  assert(retried.code === 0 && /1 extracted, 0 failed/.test(retried.out), `--retry-failed with --limit 1 extracts the one failed row and exits 0 (exit ${retried.code})`);
+  assert((await entityByName("Socrates")) !== undefined, "…and its entity is in the graph");
+
+  // --follow: a capture made while the worker is polling is extracted without a
+  // new run, and the first signal ends the process with exit 0.
+  const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
+  await Bun.sleep(1500);
+  const sam = await seed("Sam adopted grafana for the on-call dashboards.");
+  let extracted = false;
+  for (let i = 0; i < 40 && !extracted; i++) {
+    await Bun.sleep(250);
+    extracted = (await sql`SELECT count(*)::int AS c FROM thought_entities WHERE thought_id = ${sam}::uuid`)[0].c > 0;
+  }
+  follower.kill("SIGINT");
+  const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+  const followCode = await follower.exited;
+  assert(extracted, "a thought captured while --follow polls is extracted by the trigger and the poll, with no new run");
+  assert(followCode === 0, `the follower exits 0 on SIGINT (exit ${followCode}; ${followOut.split("\n").filter(Boolean).slice(-2).join(" | ")})`);
+  assert((await entityByName("Grafana")) !== undefined, "…and Grafana is in the graph");
+
+  // Nothing in this section wrote thought_audit through the worker: it writes
+  // entities, not thoughts. The edit and delete above are audited as the tools
+  // that made them.
+  const [{ actors }] = await sql`SELECT count(*) FILTER (WHERE actor_name = 'entity-worker')::int AS actors FROM thought_audit`;
+  assert(Number(actors) === 0, "the worker writes no thought_audit rows — it never mutates thoughts; its rows carry its agent id instead");
+
+  model.stop(true);
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  await sql`DELETE FROM thoughts`;
+}
+
 await sql.close();
 
 report();

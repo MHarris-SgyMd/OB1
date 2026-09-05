@@ -38,6 +38,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, seededRandom } from "./test-support.ts";
+import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
@@ -1091,6 +1092,183 @@ console.log("\n[15] thought_work_claims: the pool, the lease, the release");
   // `ON DELETE CASCADE` on the foreign key is a clause, not a statement.
   assert(!/\bDELETE\s+FROM\b/i.test(src015), "015 contains no DELETE statement");
 
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 16. Migration 016 — entities, mentions, edges, and the trigger ───────────
+//
+// The resolution rule, the atomic write, the human merge, and the trigger that
+// feeds the pool — everything except the model call, which db/test-live.ts [10]
+// drives through the worker against a stub. The vocabulary in the CHECK
+// constraints is compared to the one server-portable/entities.ts parses
+// against, so the two cannot disagree about what an entity type is.
+
+console.log("\n[16] entities, mentions and edges: the rule, the write, the merge, the trigger");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
+  const KEY = "extract:stub@p1";
+  const norm = async (s: string) => (await db.query<{ n: string | null }>(`SELECT normalize_entity_name($1) AS n`, [s])).rows[0].n;
+  const record = async (id: string, entities: unknown[], relations: unknown[] = [], fp: string | null = null) =>
+    (await db.query<{ r: Record<string, unknown> }>(
+      `SELECT record_thought_entities($1::uuid, $2, $3::jsonb, $4::jsonb, $5::text, NULL::uuid) AS r`,
+      [id, KEY, JSON.stringify(entities), JSON.stringify(relations), fp])).rows[0].r;
+  const thought = async (content: string) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [content])).rows[0].r.id;
+  const entities = async () =>
+    (await db.query<{ id: string; entity_type: string; name: string; normalized_name: string; aliases: string[] }>(
+      `SELECT id, entity_type, name, normalized_name, aliases FROM ob1_entities ORDER BY entity_type, normalized_name`)).rows;
+  const count = async (table: string, where = "true", params: unknown[] = []) =>
+    (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM ${table} WHERE ${where}`, params)).rows[0].c;
+
+  // The rule.
+  assert((await norm("  Postgres ")) === "postgres", "the rule lower-cases and trims");
+  assert((await norm("PostgreSQL")) === "postgresql", "…and PostgreSQL is a different name — the rule does not guess at abbreviations");
+  assert((await norm(`"Anita",`)) === "anita", "…strips surrounding quotes and punctuation");
+  assert((await norm("Open   Brain\n")) === "open brain", "…collapses internal whitespace");
+  assert((await norm("ﬁle")) === "file", "…and applies NFKC, so a ligature is its letters");
+  assert((await norm("Ana Lúcia")) === "ana lúcia", "…without stripping accents, which are part of a name");
+  assert((await norm("clinician-portal")) === "clinician portal" && (await norm("state_of_care")) === "state of care",
+         "…and reads hyphen and underscore as spaces, which the corpus run found were most of the near-duplicates");
+  assert((await norm("siggymd/infrastructure")) === "siggymd infrastructure" && (await norm("platform PR #469")) === "platform pr 469",
+         "…and slash likewise, with # stripped");
+  assert((await norm("...")) === null, "a name that is only punctuation normalises to NULL and cannot be an entity");
+
+  // The vocabulary, in the constraints and in the module.
+  const cons = (await db.query<{ conname: string; def: string }>(
+    `SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+     WHERE conrelid IN ('ob1_entities'::regclass, 'ob1_entity_edges'::regclass) AND contype = 'c'`)).rows;
+  const typeCheck = cons.find((c) => /entity_type/.test(c.def))?.def ?? "";
+  const relCheck = cons.find((c) => /relation/.test(c.def))?.def ?? "";
+  assert(ENTITY_TYPES.every((t) => typeCheck.includes(`'${t}'`)) && (typeCheck.match(/'[a-z_]+'/g) ?? []).length === ENTITY_TYPES.length,
+         `the entity_type CHECK lists exactly the module's ${ENTITY_TYPES.length} types`);
+  assert(RELATIONS.every((r) => relCheck.includes(`'${r}'`)) && (relCheck.match(/'[a-z_]+'/g) ?? []).length === RELATIONS.length,
+         `the relation CHECK lists exactly the module's ${RELATIONS.length} relations`);
+
+  // The write.
+  const a = await thought("Anita migrated Open Brain to PostgreSQL.");
+  const r1 = await record(a, [
+    { name: "Anita", type: "person", confidence: 0.9 },
+    { name: "PostgreSQL", type: "tool", confidence: 0.95, aliases: ["Postgres", "PostgreSQL"] },
+    { name: "Open Brain", type: "project", confidence: 0.8 },
+    { name: "carrot", type: "vegetable", confidence: 0.9 },
+    { name: "", type: "person", confidence: 0.9 },
+    { name: "open  brain", type: "project", confidence: 0.4 },
+  ], [
+    { from: "Anita", to: "PostgreSQL", relation: "uses", confidence: 0.8 },
+    { from: "Open Brain", to: "PostgreSQL", relation: "depends_on", confidence: 0.7 },
+    { from: "PostgreSQL", to: "Anita", relation: "co_occurs_with", confidence: 0.6 },
+    { from: "Anita", to: "Redis", relation: "uses", confidence: 0.9 },
+    { from: "Anita", to: "PostgreSQL", relation: "loves", confidence: 0.9 },
+  ]);
+  assert(r1.ok === true && r1.entities === 3 && r1.new_entities === 3, `three valid entities written, the unknown type and the empty name dropped (${JSON.stringify(r1)})`);
+  assert(r1.mentions === 3 && r1.edges === 3, "…three mentions and three edges");
+  assert(r1.dropped_relations === 1, "…the relation to an entity the model did not list is dropped and counted; an unknown relation is simply not one");
+  const pg = (await entities()).find((e) => e.normalized_name === "postgresql")!;
+  assert(pg.name === "PostgreSQL" && pg.aliases.length === 1 && pg.aliases[0] === "Postgres",
+         `the entity keeps the name as given and the alias, minus the alias that equals the name (${JSON.stringify(pg.aliases)})`);
+  const sym = (await db.query<{ ok: boolean }>(
+    `SELECT from_entity_id < to_entity_id AS ok FROM ob1_entity_edges WHERE relation = 'co_occurs_with'`)).rows;
+  assert(sym.length === 1 && sym[0].ok === true, "a symmetric relation is stored with from < to");
+
+  // Idempotent.
+  const before = await entities();
+  const r2 = await record(a, [
+    { name: "Anita", type: "person", confidence: 0.9 },
+    { name: "PostgreSQL", type: "tool", confidence: 0.95, aliases: ["Postgres"] },
+    { name: "Open Brain", type: "project", confidence: 0.8 },
+  ], [
+    { from: "Anita", to: "PostgreSQL", relation: "uses", confidence: 0.8 },
+    { from: "Open Brain", to: "PostgreSQL", relation: "depends_on", confidence: 0.7 },
+    { from: "Anita", to: "PostgreSQL", relation: "co_occurs_with", confidence: 0.6 },
+  ]);
+  assert(r2.new_entities === 0 && r2.mentions === 3 && r2.edges === 3 && r2.pruned_entities === 0, `the same extraction again creates nothing (${JSON.stringify(r2)})`);
+  const after = await entities();
+  assert(JSON.stringify(after) === JSON.stringify(before), "…and the entities are byte-identical, ids included");
+  assert((await count("thought_entities")) === 3 && (await count("ob1_entity_edges")) === 3, "…with the same three mentions and three edges");
+
+  // Two spellings the rule keeps apart, and one it does not.
+  const b = await thought("Dev likes postgres, and Postgresql too.");
+  const r3 = await record(b, [
+    { name: "Dev", type: "person", confidence: 0.9 },
+    { name: "postgres", type: "tool", confidence: 0.7 },
+    { name: "Postgresql", type: "tool", confidence: 0.7 },
+  ]);
+  assert(r3.new_entities === 2, `"postgres" is a NEW entity — the rule does not merge abbreviations — while "Postgresql" resolves to the existing one (${r3.new_entities} new)`);
+  const pg2 = (await entities()).find((e) => e.normalized_name === "postgresql")!;
+  assert(pg2.name === "PostgreSQL" && pg2.aliases.includes("Postgresql") && pg2.aliases.includes("Postgres"),
+         `the existing entity keeps its name and gains the new spelling as an alias (${JSON.stringify(pg2.aliases)})`);
+
+  // Re-extraction replaces, and prunes what nothing mentions any more.
+  const r4 = await record(a, [{ name: "Anita", type: "person", confidence: 0.9 }]);
+  assert(r4.mentions === 1 && r4.edges === 0 && r4.pruned_entities === 1,
+         `re-extracting thought A with one entity leaves it one mention, no edges, and prunes "Open Brain", which nothing else mentioned (${JSON.stringify(r4)})`);
+  assert((await entities()).some((e) => e.normalized_name === "postgresql"), "…while PostgreSQL survives on thought B's mention");
+  assert((await count("ob1_entity_edges", "thought_id = $1", [a])) === 0, "…and A's edges are gone");
+
+  // The content guard.
+  const [{ fp }] = (await db.query<{ fp: string }>(`SELECT content_fingerprint AS fp FROM thoughts WHERE id = $1`, [a])).rows;
+  const stale = await record(a, [{ name: "Ghost", type: "person", confidence: 0.9 }], [], "0000");
+  assert(stale.ok === false && stale.stale === true, "a fingerprint that no longer matches is refused as stale, and nothing is written");
+  assert(!(await entities()).some((e) => e.normalized_name === "ghost"), "…so the stale extraction's entity does not exist");
+  const fresh = await record(a, [{ name: "Anita", type: "person", confidence: 0.9 }], [], fp);
+  assert(fresh.ok === true, "…and the matching fingerprint is accepted");
+  const missing = await record("00000000-0000-0000-0000-000000000001", [{ name: "x", type: "person", confidence: 0.9 }]);
+  assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown thought is NOT_FOUND, not an insert");
+  let raised = "";
+  try { await db.query(`SELECT record_thought_entities($1::uuid, $2, '{"a":1}'::jsonb)`, [a, KEY]); } catch (e) { raised = (e as Error).message; }
+  assert(/must be a JSON array/.test(raised), "a non-array p_entities raises rather than writing nothing quietly");
+
+  // The human merge.
+  const es = await entities();
+  const postgres = es.find((e) => e.normalized_name === "postgres")!;
+  const postgresql = es.find((e) => e.normalized_name === "postgresql")!;
+  const dev = es.find((e) => e.normalized_name === "dev")!;
+  const mismatch = (await db.query<{ r: Record<string, unknown> }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [dev.id, postgres.id])).rows[0].r;
+  assert(mismatch.ok === false && mismatch.error === "TYPE_MISMATCH", "merging a tool into a person is refused");
+  const same = (await db.query<{ r: Record<string, unknown> }>(`SELECT merge_entities($1::uuid, $1::uuid) AS r`, [postgresql.id])).rows[0].r;
+  assert(same.ok === false && same.error === "SAME_ENTITY", "…as is merging an entity into itself");
+  const merged = (await db.query<{ r: Record<string, unknown> }>(`SELECT merge_entities($1::uuid, $2::uuid) AS r`, [postgresql.id, postgres.id])).rows[0].r;
+  assert(merged.ok === true && merged.mentions_moved === 0, `merging "postgres" into PostgreSQL: thought B already mentions the survivor, so no mention moves (${JSON.stringify(merged)})`);
+  const survivor = (await entities()).find((e) => e.normalized_name === "postgresql")!;
+  assert(!(await entities()).some((e) => e.normalized_name === "postgres") && survivor.aliases.includes("postgres"),
+         `the loser is gone and its name is an alias of the survivor (${JSON.stringify(survivor.aliases)})`);
+  assert((await count("thought_entities", "thought_id = $1", [b])) === 2, "thought B now mentions Dev and PostgreSQL, once each");
+
+  // Delete: cascade, and the orphan it leaves.
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [b]);
+  assert((await count("thought_entities", "thought_id = $1", [b])) === 0 && (await count("ob1_entity_edges", "thought_id = $1", [b])) === 0,
+         "deleting a thought takes its mentions and edges with it");
+  assert((await entities()).some((e) => e.normalized_name === "dev"), "…and leaves the entity it alone introduced, orphaned");
+  const pruned = (await db.query<{ n: number }>(`SELECT prune_orphan_entities() AS n`)).rows[0].n;
+  assert(pruned === 2 && !(await entities()).some((e) => e.normalized_name === "dev"), `prune_orphan_entities removes Dev and PostgreSQL, which nothing mentions now (${pruned})`);
+
+  // The trigger: silent until the key is set, then feeding the pool.
+  const c = await thought("captured before anyone asked for extraction");
+  assert((await count("thought_work_claims", "thought_id = $1", [c])) === 0, "with no extraction key recorded, a capture enqueues nothing");
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', $1)`, [KEY]);
+  const d = await thought("captured after the key was set");
+  const dRow = async () => (await db.query<{ status: string; worker_id: string | null; attempt_count: number }>(
+    `SELECT status, worker_id, attempt_count FROM thought_work_claims WHERE thought_id = $1 AND work_type = $2`, [d, KEY])).rows[0];
+  assert((await dRow())?.status === "pending", "with the key set, a capture is enqueued under it");
+  assert((await count("thought_work_claims", "thought_id = $1", [c])) === 0, "…and the earlier capture is not — the worker's enqueue_thoughts pools the backlog");
+  await db.query(`UPDATE thoughts SET metadata = '{"x":1}'::jsonb WHERE id = $1`, [d]);
+  assert((await dRow()).status === "pending" && (await count("thought_work_claims", "thought_id = $1", [d])) === 1, "a metadata-only edit changes nothing in the pool");
+  const claimed = (await db.query<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'W', 10)`, [KEY])).rows;
+  assert(claimed.length === 1 && (await dRow()).status === "claimed", "a worker takes the lease");
+  await db.query(`UPDATE thoughts SET content = 'edited while a worker held it' WHERE id = $1`, [d]);
+  const revoked = await dRow();
+  assert(revoked.status === "pending" && revoked.worker_id === null && revoked.attempt_count === 0,
+         `a content edit under a live lease sets the claim back to pending and revokes the lease (${JSON.stringify(revoked)})`);
+  const late = (await db.query<{ ok: boolean }>(`SELECT release_thought($1::uuid, $2, 'W', 'succeeded') AS ok`, [d, KEY])).rows[0].ok;
+  assert(late === false, "…so the worker's release returns false and the new text will be extracted");
+  await db.query(`UPDATE thought_work_claims SET status = 'succeeded' WHERE thought_id = $1 AND work_type = $2`, [d, KEY]);
+  await db.query(`SELECT upsert_thought('edited while a worker held it', '{"metadata":{"again":true}}'::jsonb)`);
+  assert((await dRow()).status === "succeeded", "a re-capture of the same text (upsert_thought's ON CONFLICT branch) does not re-enqueue");
+  await db.query(`UPDATE thoughts SET content = 'edited again' WHERE id = $1`, [d]);
+  assert((await dRow()).status === "pending", "…while a real content change re-enqueues a succeeded thought");
+
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);
   await db.exec(`DELETE FROM thoughts`);
 }
 
