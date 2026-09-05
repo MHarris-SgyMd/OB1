@@ -14,7 +14,7 @@
  */
 
 import { createAssert } from "../db/test-support.ts";
-import { applyEmbeddingPrompt } from "../db/config.mjs";
+import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS } from "../db/config.mjs";
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { resolveEmbedConfig } from "./embed.ts";
 import { DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
@@ -97,6 +97,14 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(applyEmbeddingPrompt("qwen3-embedding:4b", awkward, true).endsWith(`Query: ${awkward}`),
          "…and so does the query template");
   assert(applyEmbeddingPrompt("embeddinggemma", awkward, true) === awkward, "a model with no template gets the bare text");
+  // The chunk-context template has two placeholders, and a document may contain
+  // the literal text of the second: chained replaces put the window there.
+  const doc = `a note that says {chunk} and costs $$5`;
+  const filled = applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document: doc, chunk: "the window" });
+  assert(filled.includes(`<document>\n${doc}\n</document>`), "the document goes into the context prompt exactly, its own {chunk} and $$ intact");
+  assert(filled.includes(`<chunk>\nthe window\n</chunk>`), "…and the window lands in the placeholder, not in the document");
+  assert(applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.document, { document: doc }) === CHUNK_CONTEXT_PROMPTS.document.split("{document}").join(doc),
+         "the one-placeholder template is filled the same way");
 
   // deploy/compose.yaml forwards every optional variable as `${VAR:-}`, so a
   // composed server sees "" wherever nothing was set. Number("") is 0, which

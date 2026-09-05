@@ -441,11 +441,14 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   const JOB2 = "test:crash";
   const eight = [...pool].slice(0, 8);
   await sql`SELECT enqueue_thoughts(${JOB2}, ${sql.array(eight, "TEXT")}::uuid[])`;
-  const dead = (await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'dead', 5, 1)`).map((r: { thought_id: string }) => r.thought_id);
-  assert(dead.length === 5, `a worker takes five rows on a 1 s lease and dies (got ${dead.length})`);
+  // Two seconds, not one: the "before it expires" claim below is a separate
+  // round trip, and a one-second lease is a cliff a stalled CI runner can fall
+  // off with no defect in the migration.
+  const dead = (await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'dead', 5, 2)`).map((r: { thought_id: string }) => r.thought_id);
+  assert(dead.length === 5, `a worker takes five rows on a 2 s lease and dies (got ${dead.length})`);
   const tooSoon = await sql`SELECT thought_id FROM claim_thoughts(${JOB2}, 'second', 10)`;
   assert(tooSoon.length === 3, `before the lease expires a second worker gets only the three unclaimed rows (got ${tooSoon.length})`);
-  await Bun.sleep(1200);
+  await Bun.sleep(2200);
   const second = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB2}, 'second', 10)`) as { thought_id: string; attempt: number }[];
   assert(second.length === 5, `after it expires the second worker receives the dead worker's five (got ${second.length})`);
   assert(dead.every((id) => second.find((r) => r.thought_id === id)?.attempt === 2), "…each on its second attempt");
@@ -502,10 +505,12 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 // exactly which rows the pass rewrote. One text is poison — refused with a 500
 // until the test says otherwise — to exercise the failed path and
 // --retry-failed. The first whole-content request for either of two long
-// thoughts is throttled with a 429, once: exactly one of them must end with its
-// head window's vector and the other with the whole content's, which fails
-// against the latch-on-any-4xx the first review found. Ten milliseconds per
-// embedding so two workers really overlap.
+// thoughts is throttled with a 429, once: the other must still end with the
+// whole content's vector (a latch on any 4xx, which the first review found,
+// would give both the head window), and the throttled one must carry its head
+// window AND be recorded failed rather than succeeded, so --retry-failed can
+// give it the whole content once the provider is willing (second review). Ten
+// milliseconds per embedding so two workers really overlap.
 
 console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
 {
@@ -596,10 +601,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(stillRecorded === recordedModel && Object.keys(await claimCounts()).length === 0, "…touching neither ob1_config nor the pool");
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
-  assert(first.code === 1, `the run exits 1 because one row failed (exit ${first.code})`);
-  assert(/33 re-embedded, 1 failed/.test(first.out), `…and says so: 33 re-embedded, 1 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
-  assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the failed row");
-  assert(/1 long thought\(s\) stored with the head window's vector/.test(first.out), "…and counting the one long thought whose whole-content call was throttled");
+  assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
+  assert(/32 re-embedded, 2 failed/.test(first.out), `…and says so: 32 re-embedded, 2 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the poisoned row");
+  assert(/whole-content embedding failed transiently/.test(first.out), "…and, for the throttled long thought, that its head window stands in until a retry");
+  assert(!/stored with the head window's vector/.test(first.out), "…which is not counted as a permanent head-window outcome, since the provider did not refuse the length");
   const [{ model: nowRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(nowRecorded === "stub-embed", `ob1_config now records the new model (${nowRecorded})`);
   assert(modelsSeen.has("stub-embed"), "the provider was asked for the configured model");
@@ -623,13 +629,17 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const whole = [long, long2].filter((d) => axisOf(byContent.get(d)!.e) === axisFor(d));
   const head = [long, long2].filter((d) => axisOf(byContent.get(d)!.e) === axisFor((d === long ? chunks : chunks2)[0].content));
   assert(whole.length === 1 && head.length === 1, `one long thought carries the whole-content vector and the throttled one its head window (${whole.length} whole, ${head.length} head)`);
+  const throttledDoc = head[0];
   assert(shorts.every((s) => byContent.get(s)!.u > updatedBefore.get(s)!), "updated_at moved on every re-embedded row");
   assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…and not on the one that failed");
 
   const after1 = await claimCounts();
-  assert(after1.succeeded === 33 && after1.failed === 1 && !after1.pending && !after1.claimed, `the claims record 33 succeeded and 1 failed (${JSON.stringify(after1)})`);
-  const [{ err }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND status = 'failed'`;
-  assert(/stub: refused this text/.test(String(err)), "…with the provider's error on the failed row");
+  assert(after1.succeeded === 32 && after1.failed === 2 && !after1.pending && !after1.claimed, `the claims record 32 succeeded and 2 failed (${JSON.stringify(after1)})`);
+  const errs = (await sql`
+    SELECT t.content, c.last_error AS err FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id
+    WHERE c.work_type = ${REEMBED_JOB} AND c.status = 'failed'`) as { content: string; err: string }[];
+  assert(/stub: refused this text/.test(errs.find((e) => e.content === poisonText)?.err ?? ""), "…with the provider's error on the poisoned row");
+  assert(/failed transiently/.test(errs.find((e) => e.content === throttledDoc)?.err ?? ""), "…and the transient whole-content failure on the throttled one");
   const [{ workers }] = await sql`SELECT count(DISTINCT worker_id)::int AS workers FROM thought_work_claims WHERE work_type = ${REEMBED_JOB}`;
   assert(Number(workers) === 2, `both workers took rows (${workers} distinct worker ids)`);
 
@@ -644,7 +654,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…for the row that gained a vector, attributed to the tool and the job (${JSON.stringify(auditRow)})`);
 
   const status = await reembed("--status");
-  assert(status.code === 0 && /33 succeeded, 1 failed/.test(status.out), "--status reports the pass");
+  assert(status.code === 0 && /32 succeeded, 2 failed/.test(status.out), "--status reports the pass");
 
   // A capture made after the first run, then a re-run: only the new row is
   // processed, the failed one stays failed, and the exit code says so.
@@ -658,7 +668,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   poison = false;
   const retried = await reembed("--retry-failed");
-  assert(retried.code === 0 && /1 re-embedded, 0 failed/.test(retried.out), `--retry-failed re-embeds the failed row once the provider recovers (exit ${retried.code})`);
+  assert(retried.code === 0 && /2 re-embedded, 0 failed/.test(retried.out), `--retry-failed re-embeds both failed rows once the provider recovers (exit ${retried.code})`);
+  const [{ e: throttledVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${throttledDoc}`;
+  assert(axisOf(throttledVec) === axisFor(throttledDoc), "…and the throttled long thought now carries its whole-content vector");
   const [{ e: poisonVec, attempts: poisonAttempts }] = await sql`
     SELECT t.embedding::text AS e, c.attempt_count AS attempts FROM thoughts t
     JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${poisonText}`;

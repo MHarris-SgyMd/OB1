@@ -431,7 +431,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 187 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 104 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 107 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -456,7 +456,7 @@ container.
   another connection claims under a 2 s `lock_timeout` — a wait would fail it —
   then races four workers on four connections through a 600-row pool and
   asserts on ids: none claimed twice, the union exactly the pool. A worker
-  "dies" on a 1 s lease and a second worker receives its rows after expiry,
+  "dies" on a 2 s lease and a second worker receives its rows after expiry,
   on their second attempt. PGlite has one connection, so two sequential claims
   there are disjoint whether or not `SKIP LOCKED` does anything.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
@@ -465,13 +465,14 @@ container.
   is throttled with a 429, once — the other must still get its whole vector), a
   poisoned one and one with no vector; asserts every vector, the chunk rows, one
   audit row rather than thirty-three, `ob1_config`, `--status`, a re-run that
-  processes only a later capture, `--retry-failed` resetting the attempt count,
-  and exit 1 while another process holds a lease.
+  processes only a later capture, `--retry-failed` resetting the attempt count
+  and giving the throttled thought its whole-content vector, and exit 1 while
+  another process holds a lease.
 
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 148 properties, including:
+asserts 187 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

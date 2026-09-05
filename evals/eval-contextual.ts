@@ -14,7 +14,7 @@
  * `eval-real.ts` embeds each document with ONE call and compares one vector per
  * document. That is not what the server stores for a long capture, and the
  * difference is the whole subject of this file. For content over the chunking
- * threshold, `embedCapture` in server-portable/index.ts:
+ * threshold, `embedCapture` in server-portable/embed.ts:
  *
  *   * splits the content into overlapping windows,
  *   * embeds each window,
@@ -79,6 +79,7 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_METADATA_MODEL,
   CHUNK_CONTEXT_PROMPTS,
+  applyChunkContextPrompt,
   composeChunkForEmbedding,
   usableChunkContext,
 } from "../db/config.mjs";
@@ -309,7 +310,7 @@ const docBlurb: Record<string, string> = {};
 for (const d of CHUNKED) {
   docBlurb[d.id] = await blurb(
     `doc::${d.id}`,
-    CHUNK_CONTEXT_PROMPTS.document.replace("{document}", d.text),
+    applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.document, { document: d.text }),
     d.text
   );
 }
@@ -322,7 +323,7 @@ for (const d of CHUNKED) {
     chunkBlurb[d.id].push(
       await blurb(
         `chunk::${d.id}::${i}`,
-        CHUNK_CONTEXT_PROMPTS.chunk.replace("{document}", d.text).replace("{chunk}", d.windows[i]),
+        applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document: d.text, chunk: d.windows[i] }),
         d.windows[i]
       )
     );
@@ -337,7 +338,7 @@ for (const d of CHUNKED) {
     tightBlurb[d.id].push(
       await blurb(
         `tight::${d.id}::${i}`,
-        CHUNK_CONTEXT_PROMPTS.chunkTight.replace("{document}", d.text).replace("{chunk}", d.windows[i]),
+        applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunkTight, { document: d.text, chunk: d.windows[i] }),
         d.windows[i]
       )
     );

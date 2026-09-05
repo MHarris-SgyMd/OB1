@@ -57,7 +57,13 @@ export function applyEmbeddingPrompt(model: string, text: string, isQuery: boole
  * `{document}` and `{chunk}` placeholders. `document` situates a whole document
  * in one call; `chunk` situates one window and costs a call per window.
  */
-export const CHUNK_CONTEXT_PROMPTS: { document: string; chunk: string };
+export const CHUNK_CONTEXT_PROMPTS: { document: string; chunk: string; chunkTight: string };
+
+/**
+ * Fill a CHUNK_CONTEXT_PROMPTS template in one pass, inserting the texts as
+ * they are. A placeholder with no value supplied is left in place.
+ */
+export function applyChunkContextPrompt(template: string, fill: { document?: string; chunk?: string }): string;
 
 /**
  * Whether a generated blurb is worth prepending: non-empty, and under 60% of the

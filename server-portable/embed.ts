@@ -30,6 +30,7 @@ import {
   DEFAULT_METADATA_MODEL,
   DEFAULT_LLM_BASE_URL,
   CHUNK_CONTEXT_PROMPTS,
+  applyChunkContextPrompt,
   composeChunkForEmbedding,
   usableChunkContext,
   resolveChunkContext,
@@ -163,6 +164,13 @@ export type EmbeddedCapture = {
    * this silently, as it always has; a bulk pass wants to count it.
    */
   wholeContentFellBack: boolean;
+  /**
+   * The provider has refused a whole-content embedding outright (400 or 413) at
+   * some point in this process, so the fallback above is the permanent answer
+   * for this model rather than a transient one — the distinction a bulk pass
+   * needs between "recorded, done" and "retry later".
+   */
+  wholeContentRefused: boolean;
 };
 
 export type Embedder = {
@@ -285,12 +293,12 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
    * both kinds, and the capture response says so at the time.
    */
   async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string): Promise<string> {
-    // One pass, with a function. Two string replaces would read `$&` and its
-    // relatives in the document as substitution patterns, and a document that
-    // itself contains the literal `{chunk}` would receive the window where its
-    // own text was, leaving the real placeholder unfilled.
-    const fill: Record<string, string> = { "{document}": document, "{chunk}": chunk };
-    const prompt = CHUNK_CONTEXT_PROMPTS.chunk.replace(/\{document\}|\{chunk\}/g, (m) => fill[m]);
+    // Filled by db/config.mjs's function, shared with evals/eval-contextual.ts,
+    // so the harness measures the prompt the server sends; it is one pass with
+    // a function, because two string replaces read `$&` and its relatives in
+    // the document as substitution patterns and would drop the window into a
+    // document that itself contains the literal `{chunk}`.
+    const prompt = applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document, chunk });
     try {
       const r = await fetch(`${cfg.llmBase}/chat/completions`, {
         method: "POST",
@@ -384,7 +392,7 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, wholeContentFellBack: false };
+      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, wholeContentFellBack: false, wholeContentRefused };
     }
 
     const wantContext = cfg.chunkContext;
@@ -429,6 +437,7 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
       })),
       contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
       wholeContentFellBack: whole === null,
+      wholeContentRefused,
     };
   }
 

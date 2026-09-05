@@ -1720,8 +1720,30 @@ and terminal — it is a failure now, so `--retry-failed` can revisit it;
 `--retry-failed` did not reset the attempt count; a second Ctrl-C could not end
 a run parked on a hung provider. `test-thoughts.ts` [7] and `test-live.ts` [9]
 cover each. Three findings went to tickets rather than code: the fallback as a
-per-row outcome, `update_thought` refusing unchanged content that duplicates a
-pre-fingerprint row, and lease renewal.
+per-row outcome (SMD-1021), `update_thought` refusing unchanged content that
+duplicates a pre-fingerprint row (SMD-1022), and lease renewal (SMD-1023).
+
+**A second pass, and the stopping signal.** Three of its ten findings were in
+code the first pass added, which is the sign the loop is converging rather than
+finding new ground; what it added was small. The stale-read guard was passed the
+raw `updated_at`, which 001 leaves nullable, so a row loaded around
+`upsert_thought` had no guard at all — the worker now selects the
+`COALESCE(updated_at, created_at)` the guard compares against. A blurb failure
+under chunk context was declared before the write, leaving the old model's
+vector in place; the write comes first now and the claim is what fails. A
+transient failure of the whole-content call (429, 5xx) stored the head window
+and recorded success — terminal, unreachable by `--retry-failed` — while the
+same failure on a window embedding was retryable; `embedCapture` now reports
+whether the provider has refused the length outright, and the pass records the
+transient case failed with the head window stored. A run whose every worker
+stopped on a database error exited 0 with rows pending; it exits 1. A
+`release_thought` that returned false for a deleted thought was reported as a
+lease problem. The chunk-context template fill moved into `db/config.mjs` and
+`evals/eval-contextual.ts` uses it, so the harness prompts as the server does.
+The 1 s lease in the live suite became 2 s. Writing the new model into
+`ob1_config` before the pass stays as it is — it is what lets the server be
+switched, and a later run resumes the same key — and preflight not seeing an
+incomplete pass is SMD-1024.
 
 **Not done here.** Preflight does not report an incomplete pass (`--status`
 does); a width-changing migration; the entity-extraction consumer (SMD-947),

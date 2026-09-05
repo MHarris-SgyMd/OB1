@@ -65,12 +65,22 @@
  *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the
- * pass continues; the run exits 1 if any row is failed at the end and says
- * which. Failed rows are terminal — a re-run does not retry them — until
- * --retry-failed returns them to the pool. A thought edited between the claim
- * and the write is re-read and re-embedded (update_thought's if_unchanged_since
- * guard reports the race rather than letting the stale vector win); one deleted
- * mid-pass is skipped, its claim row gone with it.
+ * pass continues; the run exits 1 if any row is failed, still leased or still
+ * pending at the end, and says which. Failed rows are terminal — a re-run does
+ * not retry them — until --retry-failed returns them to the pool. A thought
+ * edited between the claim and the write is re-read and re-embedded
+ * (update_thought's if_unchanged_since guard reports the race rather than
+ * letting the stale vector win); one deleted mid-pass is skipped, its claim row
+ * gone with it.
+ *
+ * Whatever was embedded is always written before the outcome is decided, since
+ * under --switch-model the vector already in the row is another model's. Then:
+ * a long thought whose whole-content call failed transiently (429, 5xx, a lost
+ * connection) has its head window stored and its claim marked failed, so
+ * --retry-failed tries the whole content again; one the provider refused
+ * outright (400, 413) has the head window stored and is succeeded, as a capture
+ * would be, and is counted in the summary; a window whose blurb failed under
+ * OB1_CHUNK_CONTEXT=on is stored bare and the claim marked failed.
  */
 
 import { SQL } from "bun";
@@ -324,6 +334,13 @@ function progress(force = false): void {
   );
 }
 
+/**
+ * `updated_at` is `COALESCE(updated_at, created_at)` — the expression
+ * update_thought's guard compares against. Migration 001 leaves the column
+ * nullable, and a row loaded around upsert_thought can carry NULL there; passing
+ * that NULL as `p_if_unchanged_since` would disable the guard and let this pass
+ * write a concurrent edit back to its old text.
+ */
 type Row = { id: string; content: string; updated_at: Date };
 
 /**
@@ -334,16 +351,6 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
   let current = row;
   for (let attempt = 0; attempt < 3; attempt++) {
     const embedded = await embedder.embedCapture(current.content);
-    if (embedded.wholeContentFellBack) headWindow++;
-    // The server stores a bare window and tells the caller; here there is no
-    // caller, and a terminal claim cannot be re-run. So it is a failure, which
-    // --retry-failed can revisit once the metadata model behaves.
-    if (embedConfig.chunkContext && embedded.contextFailures > 0) {
-      return {
-        outcome: "failed",
-        error: `${embedded.contextFailures} of ${embedded.chunks.length} windows embedded without context — the blurb call failed or its answer was unusable; fix the metadata model, then --retry-failed`,
-      };
-    }
     const chunks = embedded.chunks.map((c) => ({ content: c.content, embedding: toVector(c.embedding), context: c.context ?? null }));
     const [r] = await sql`
       SELECT update_thought(
@@ -356,12 +363,37 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
         ${actor}::jsonb
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string };
-    if (result.ok) return { outcome: "succeeded" };
+    if (result.ok) {
+      // The write is done in every case below: whatever was embedded is better
+      // than the vector the row had, and under --switch-model the old one is
+      // from another model. What differs is whether the claim may go terminal.
+      if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
+        // The whole-content call failed for a reason that says nothing about
+        // the next attempt — a 429, a 5xx, a dropped connection — so the head
+        // window is in the row and the claim is retryable rather than final.
+        return {
+          outcome: "failed",
+          error: "whole-content embedding failed transiently and the head window's vector was stored — --retry-failed will try the whole content again",
+        };
+      }
+      if (embedded.wholeContentFellBack) headWindow++;
+      // The server stores a bare window and tells the caller; here there is no
+      // caller, and a terminal claim cannot be re-run. So the new vectors are
+      // written, bare, and the claim is a failure --retry-failed can revisit
+      // once the metadata model behaves.
+      if (embedConfig.chunkContext && embedded.contextFailures > 0) {
+        return {
+          outcome: "failed",
+          error: `${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context — the blurb call failed or its answer was unusable; the bare vectors are stored; fix the metadata model, then --retry-failed`,
+        };
+      }
+      return { outcome: "succeeded" };
+    }
     if (result.error === "NOT_FOUND") return { outcome: "vanished" };
     if (result.error === "STALE_READ") {
       // Edited between the claim and the write. Re-read and embed what is there
       // now; the guard exists so the stale vector never wins.
-      const [fresh] = (await sql`SELECT id, content, updated_at FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
+      const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
       if (!fresh) return { outcome: "vanished" };
       current = fresh;
       continue;
@@ -396,7 +428,7 @@ async function worker(n: number): Promise<void> {
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
         const rows = (await sql`
-          SELECT id, content, updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
+          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
         // A database error here is not about one thought. This worker stops;
@@ -425,16 +457,30 @@ async function worker(n: number): Promise<void> {
           continue;
         }
         let ok: boolean;
+        let gone = false;
         try {
           [{ ok }] = await sql`
             SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
                                    ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
+          // False has two causes and only one of them is about the lease: the
+          // thought may have been deleted between the write and this call, its
+          // claim row cascading away with it.
+          if (!ok) {
+            const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${b.thought_id}::uuid) AS exists`;
+            gone = !exists;
+          }
         } catch (e) {
           // The write to `thoughts`, if there was one, stands. The claim stays
           // this worker's until the finally below returns it to the pool, and
           // the row is then done again — the same vector twice, harmless.
           console.error(`  ${b.thought_id}: could not release the claim (${(e as Error).message}) — this worker stops`);
           return;
+        }
+        if (gone) {
+          vanished++;
+          console.error(`  ${b.thought_id}: deleted while it was being re-embedded`);
+          progress();
+          continue;
         }
         if (!ok) {
           // The lease expired and another worker holds the row now; its write
@@ -495,9 +541,9 @@ console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-
 printCounts(after, "after");
 if (headWindow > 0) {
   console.error(
-    `\n  ${headWindow} long thought(s) stored with the head window's vector: the whole-content embedding was refused or\n` +
-      `  failed (see above). They are recorded succeeded, as the server would record them; to try again, clear their\n` +
-      `  claim rows or re-capture them.`
+    `\n  ${headWindow} long thought(s) stored with the head window's vector: the provider refuses input that long\n` +
+      `  (400 or 413), so this is the vector a capture would have stored too. They are recorded succeeded. A transient\n` +
+      `  failure of the whole-content call is recorded failed instead, and --retry-failed tries it again.`
   );
 }
 if (after.failed > 0) {
@@ -510,5 +556,10 @@ if (after.claimed > 0) {
       `  They return to the pool when their leases expire (within ${TTL} s of being taken); re-run then, or watch --status.`
   );
 }
+if (after.pending > 0 && !stopping) {
+  // Every worker stopped before the pool was empty — a database error each
+  // (their messages are above) — and handed its leases back. Not done.
+  console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
+}
 await sql.close();
-process.exit(stopping ? 130 : after.failed > 0 || after.claimed > 0 ? 1 : 0);
+process.exit(stopping ? 130 : after.failed > 0 || after.claimed > 0 || after.pending > 0 ? 1 : 0);

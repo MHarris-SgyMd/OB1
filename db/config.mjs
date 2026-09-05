@@ -338,6 +338,26 @@ export const CHUNK_CONTEXT_PROMPTS = {
 };
 
 /**
+ * Fill a CHUNK_CONTEXT_PROMPTS template with the document and, for the
+ * per-window templates, the window.
+ *
+ * One pass, with a function, for the same reason applyEmbeddingPrompt uses one:
+ * a string replacement reads `$&`, `$'` and `$$` in the document as
+ * substitution patterns, and two chained replaces would drop the window into a
+ * document that itself contains the literal `{chunk}` and leave the real
+ * placeholder unfilled. Shared by server-portable/embed.ts and
+ * evals/eval-contextual.ts so the harness measures the prompt the server sends;
+ * the eval kept its own chained replaces after the server's were fixed, which
+ * is the defect this file exists to prevent.
+ */
+export function applyChunkContextPrompt(template, fill) {
+  return template.replace(/\{document\}|\{chunk\}/g, (m) => {
+    const v = m === "{document}" ? fill.document : fill.chunk;
+    return v === undefined ? m : v;
+  });
+}
+
+/**
  * Whether a generated blurb is worth prepending.
  *
  * Here rather than in the server for the same reason as the composition rule
