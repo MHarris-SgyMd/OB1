@@ -44,6 +44,7 @@ import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { loadLinearCorpus, linearThoughtId, linearThoughtText, entityAnswersPath } from "./linear-corpus.ts";
 
 loadEnv();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -244,24 +245,24 @@ if (!has("corpus")) {
 
 // ── The corpus ──────────────────────────────────────────────────────────────
 
-const corpusPath = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
-type Doc = { id: string; title: string; text: string };
-const docs = (JSON.parse(readFileSync(corpusPath, "utf8")) as Doc[]).filter((d) => (d.text ?? "").trim().length > 0);
+const { path: corpusPath, docs } = loadLinearCorpus();
 const WORKERS = Number(flag("workers") ?? 2);
 const LIMIT = flag("limit");
 const REPLAY = has("replay");
-const answersPath = process.env.OB1_EVAL_ANSWERS ?? `/tmp/entity-answers-${cfg.metadataModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.jsonl`;
+const answersPath = entityAnswersPath(cfg.metadataModel);
 const chars = docs.reduce((n, d) => n + d.title.length + 2 + d.text.length, 0);
 console.log(`  corpus: ${docs.length} documents, ${chars.toLocaleString()} characters, from ${corpusPath}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, ${WORKERS} worker(s)${LIMIT ? `, first ${LIMIT} only` : ""}${REPLAY ? ` — REPLAY of ${answersPath}, no model calls` : ""}\n`);
 
 await sql`DELETE FROM thoughts`;
 // Fixed ids, so a replay's answers find their thoughts on a fresh database.
+// The fingerprint is the product's own function. An inline copy of the rule
+// used to sit here and cooked its '\s+' to 's+' inside the template literal,
+// so it hashed the text with runs of the letter s replaced by spaces — a
+// different fingerprint from the one the worker's stale-content guard computes.
 for (const d of docs) {
   await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
-            VALUES (${Bun.hash.crc32(d.id).toString(16).padStart(8, "0") + "-0000-4000-8000-" + Bun.hash.xxHash64(d.id).toString(16).padStart(16, "0").slice(0, 12)}::uuid,
-                    ${`${d.title}\n\n${d.text}`}, ${{ source: "linear", issue: d.id }}::jsonb,
-                    encode(sha256(convert_to(lower(trim(regexp_replace(${`${d.title}\n\n${d.text}`}, '\s+', ' ', 'g'))), 'UTF8')), 'hex'))
+            VALUES (${linearThoughtId(d.id)}::uuid, ${linearThoughtText(d)}, ${{ source: "linear", issue: d.id }}::jsonb, content_fingerprint_of(${linearThoughtText(d)}))
             ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
 }
 const [{ n: loaded }] = await sql`SELECT count(*)::int AS n FROM thoughts`;

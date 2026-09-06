@@ -159,6 +159,7 @@ server-portable/entities.ts      # fix 30  (new file — the prompt and the pars
 evals/eval-entities.ts           # fix 30  (new file — labelled precision/recall, and the corpus run)
 evals/eval-graphrag.ts           # fix 31  (new file — graph retrieval against the vector baseline)
 evals/graphrag-questions.json    # fix 31  (new file — the multi-hop question set)
+evals/linear-corpus.ts           # fix 31  (new file — the corpus/dump contract eval-entities and eval-graphrag share)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1762,8 +1763,9 @@ Migration 016, `db/extract-entities.ts` and `server-portable/entities.ts`
 (Linear SMD-947). Every thought was opaque text plus the `metadata` the capture
 model attached; nothing recorded that two thoughts mention the same person or
 that one system depends on another, so "everything touching X, and what X
-connects to" could not be asked. This is the prerequisite for SMD-948
-(GraphRAG), and the second consumer of change 29's lease table.
+connects to" could not be asked. This was built as the prerequisite for SMD-948
+(GraphRAG — measured in change 31 and not built), and is the second consumer of
+change 29's lease table.
 
 **A rewrite, not a port, as the ticket predicted.** `schemas/entity-extraction`
 carries 36 Supabase couplings and an Edge Function worker. What survived is the
@@ -1855,7 +1857,7 @@ of which 1,129 are `uses`. The most-mentioned entities are the ones an engineer
 on this corpus would name: Linear, pnpm, Healthie, Auth0, Sentry, Terraform,
 Slack, PostHog, GitHub. 1,767 of the 2,044 entities are mentioned by exactly
 one thought: the graph is a long tail with a small connected core, which is the
-shape SMD-948 will have to work with.
+shape SMD-948 had to work with — and, change 31 found, one reason it lost.
 
 **What the strict rule leaves, and what it cost to find out.** The first run
 reported 1,853 near-duplicate pairs by a loose metric (same type, trigram
@@ -1938,7 +1940,8 @@ so the re-capture inserted a new row) and the eval scoring a reversed
 directional relation as a hit. Stopped here.
 
 **Not done here.** A read API for the graph — the MCP tools do not expose
-entities yet, and SMD-948 will decide the shape; a `list_thoughts` filter by
+entities yet; SMD-948 was to decide the shape and decided (change 31) that the
+shape is not retrieval, so a read API is an unticketed follow-up; a `list_thoughts` filter by
 entity; injection resistance on a small model; and typed reasoning edges
 between thoughts (`schemas/typed-reasoning-edges`), which the ticket names as a
 later issue.
@@ -1963,8 +1966,11 @@ back in the top K, because any answer is generated from what came back.
 
 **Five arms, no framework.** Vector (`match_thoughts`); a local graph walk
 written in one SQL statement over `ob1_entities`, `thought_entities` and
-`ob1_entity_edges` — question entities as IDF-weighted seeds, one hop at 0.3,
-thoughts ranked by summed entity weight; reciprocal-rank fusion of those two;
+`ob1_entity_edges` — question entities found by the extraction prompt, the
+product's resolution rule, trigram similarity and a whole-word literal match
+(more generous than the product's rule, on purpose), IDF-weighted, one hop at
+0.3 with the same rarity cap on hop targets, thoughts ranked by summed entity
+weight; reciprocal-rank fusion of those two;
 global mode — label-propagation communities over co-mention weights, one
 generated summary each, question matched to summaries, thoughts of the best
 two communities vector-ranked; and `search_thoughts_keyword` (change 26) with
@@ -1973,16 +1979,21 @@ is replayed from the change 30 run's dumped answers, so the eval does not
 repeat the 82-minute extraction.
 
 **Vector wins every comparison.** Recall@10 0.98 and 25 of 27 questions
-complete, every multi-hop question among them; the local graph 0.50 and 9,
-losing on 18 questions and winning on none; fusion 0.93 and 21 — mixing the
-graph in makes vector worse on four questions and better on none; global
-0.25–0.33 across two runs, the worst arm on every question type. At K = 5
-the order is the same. The reasons are in `evals/README.md`: the question-side
-and document-side extractions do not agree on names; 1,767 of 2,044 entities
-are mentioned once, so a hop reaches nothing; common seeds dominate until
-removed and removing them leaves recall unchanged; communities depend on the
-node visiting order (18, 6 and 17 from the same graph) and their summaries are
-not deterministic even at temperature 0 on Ollama.
+complete, every multi-hop question among them; the local graph 0.48 and 7,
+losing on 20 questions and winning on none; fusion 0.91 and 21 — mixing the
+graph in makes vector worse on five questions and better on none; global 0.57,
+forty points behind on every question type. At K = 5 the order is the same
+and the gaps are wider. The reasons are in `evals/README.md`: the
+question-side and document-side extractions do not agree on names; 1,767 of
+2,044 entities are mentioned once, so a hop reaches nothing; common seeds
+dominate until removed and removing them leaves recall unchanged; communities
+depend on the node visiting order (18, 6 and 17 from the same graph until the
+order was pinned to the table's unique key). A review pass found the first
+version of the harness generous to its own conclusion in small ways — MRR taken
+over the whole returned list, a substring seed match that read "Expo" out of
+"exposes", hubs re-entering through the hop, an unordered title list feeding
+each community summary — and fixing them moved the graph arm by two points
+and the global arm from 0.25–0.33 to 0.57. The decision did not move.
 
 **The set was too easy for vector, and that is the finding, not a flaw in the
 set.** Documents about one feature in a tracker share vocabulary — the backend
@@ -1992,11 +2003,12 @@ question. GraphRAG earns its cost where documents are joined by an entity and
 nothing else; on this corpus those questions were hard to find, which is
 itself the answer to whether the corpus is the kind that needs a graph.
 
-**Where vector misses, keyword has it.** The only misses are two of the six
-`Decision:` records and two of the eight `Promote …` issues, both series named
-by a literal string; `search_thoughts_keyword` returns the first set complete
-and the second to its page size. The headroom that exists is closed by a tool
-that ships.
+**Where vector misses, keyword mostly has it.** The only misses are two of the
+six `Decision:` records and two of the eight `Promote …` issues, both series
+named by a literal string; `search_thoughts_keyword` returns the first set
+complete and half of the second, scored by the same rule as every arm. The
+headroom that exists is a ranking problem inside a tool that ships, not a case
+for a graph.
 
 **Decision: not built.** No graph retrieval mode, no fusion step, no follow-up
 ticket. The entity layer stays for what it is for — "what does X connect to",
