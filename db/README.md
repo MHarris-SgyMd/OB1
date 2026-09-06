@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `235 assertions: 235 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `240 assertions: 240 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -316,7 +316,8 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-#   --workers N (2)  --batch N (4)  --ttl SECONDS (900)  --timeout SECONDS (300, per model call)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (300, per model call)
+bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
 
 **The cost, stated up front.** One call to the metadata model per thought,
@@ -534,8 +535,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 235 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 139 assertions, real server, throwaway container
+bun test-schema.ts                    # 240 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 145 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -586,7 +587,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 235 properties, including:
+asserts 240 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

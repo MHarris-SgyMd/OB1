@@ -18,7 +18,8 @@
  *   bun db/extract-entities.ts --url … --dry-run              # what a run would do; writes nothing
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
- *   --workers N (2)   --batch N (4)   --ttl SECONDS (900)   --timeout SECONDS (300, per model call)
+ *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --timeout SECONDS (300, per model call)
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought, recurring: every new capture is extracted too. On
@@ -57,9 +58,20 @@
  * The model is asked for names and types; deciding whether two names are one
  * entity is the database's (`normalize_entity_name`, migration 016). A
  * malformed answer — not JSON, or not the shape — is a failure for that
- * thought, retryable with --retry-failed; a content edit that lands while the
- * thought is being extracted makes `record_thought_entities` refuse with
- * stale=true and the thought is re-read and extracted again.
+ * thought, retryable with --retry-failed; so is a timeout, which the corpus run
+ * showed is a property of the longest thoughts rather than of the moment. A
+ * rate limit, a server error or a lost connection is neither: the worker
+ * pauses and retries, and stops if the provider stays down, leaving its leases
+ * to return to the pool rather than marking thoughts failed for it. A content
+ * edit that lands while a thought is being extracted makes
+ * `record_thought_entities` refuse with stale=true; the trigger has already
+ * re-queued the thought, so the worker moves on and the pool redoes it.
+ *
+ * Changing the model or the prompt version changes the key. A run under a key
+ * other than the recorded one needs --switch-key, as a re-embed under another
+ * model needs --switch-model: record_thought_entities replaces a thought's rows
+ * whatever key wrote them, so a partial run under a second model leaves a
+ * per-thought mixture that nothing repairs.
  */
 
 import { SQL } from "bun";
@@ -76,9 +88,21 @@ const flag = (name: string): string | undefined => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const has = (name: string) => args.includes(`--${name}`);
-const numberFlag = (name: string, fallback: number, min: number): number => {
+/**
+ * A numeric flag. A flag that is present with no value is an error, not the
+ * default: `--limit` typed alone meant "no limit" once, and sent the whole
+ * backlog to the model. `optional` is for --follow, whose value is a poll
+ * interval with a sensible default.
+ */
+const numberFlag = (name: string, fallback: number, min: number, optional = false): number => {
   const raw = flag(name);
-  if (raw === undefined || raw.startsWith("--")) return fallback;
+  if (raw === undefined || raw.startsWith("--")) {
+    if (has(name) && !optional) {
+      console.error(`--${name} needs a value (an integer >= ${min}).`);
+      process.exit(2);
+    }
+    return fallback;
+  }
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min) {
     console.error(`--${name} must be an integer >= ${min}, got "${raw}"`);
@@ -94,15 +118,31 @@ if (!url) {
 }
 
 const WORKERS = numberFlag("workers", 2, 1);
-const BATCH = numberFlag("batch", 4, 1);
+// One thought per claim. A claim costs half a millisecond against a model call
+// of ten seconds or more, and the lease is stamped per claim: a batch of four
+// at a 300 s timeout could outlive a 900 s lease, be reaped, and be extracted
+// twice.
+const BATCH = numberFlag("batch", 1, 1);
 const TTL = numberFlag("ttl", 900, 1);
 const TIMEOUT_S = numberFlag("timeout", 300, 1);
+if (BATCH * TIMEOUT_S > TTL) {
+  console.error(
+    `--batch ${BATCH} × --timeout ${TIMEOUT_S} s can exceed the --ttl ${TTL} s lease, which is stamped once per batch.\n` +
+      `A batch that outlives its lease is reaped and extracted again by another worker. Lower --batch or raise --ttl.`
+  );
+  process.exit(2);
+}
 /** Append every model answer here as JSONL — {id, fingerprint, entities, relations} — for evals/eval-entities.ts --replay. */
 const DUMP = flag("dump");
+if (DUMP !== undefined && DUMP.startsWith("--")) {
+  console.error("--dump needs a file path.");
+  process.exit(2);
+}
 const LIMIT = has("limit") ? numberFlag("limit", 0, 1) : 0;
-const FOLLOW = has("follow") ? numberFlag("follow", 15, 1) : 0;
+const FOLLOW = has("follow") ? numberFlag("follow", 15, 1, true) : 0;
 const STATUS_ONLY = has("status");
 const DRY_RUN = has("dry-run");
+const SWITCH_KEY = has("switch-key");
 const RETRY_FAILED = has("retry-failed");
 
 const cfg = resolveEmbedConfig(process.env);
@@ -126,21 +166,33 @@ if (Number(tables) < 4) {
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
+/**
+ * The same decision the server makes: MCP_ACCESS_KEYS says whether a key is
+ * valid and what it is called and may do; resolve_agent says who it belongs to.
+ * So the key must be in MCP_ACCESS_KEYS — a key the server would refuse is not
+ * an identity here either — and the record's own name and scope are what get
+ * registered, not a guessed label and a hardcoded 'write' that the server's
+ * next request would flip back. Resolution writes (first sight registers, every
+ * call touches last_used_at), so --status and --dry-run do not resolve.
+ */
 let agentId: string | null = null;
-{
+if (!STATUS_ONLY && !DRY_RUN) {
   const rawKey = process.env.OB1_WORKER_KEY;
   if (rawKey) {
+    if (!process.env.MCP_ACCESS_KEYS) {
+      console.error("\n  OB1_WORKER_KEY is set but MCP_ACCESS_KEYS is not, so the key cannot be checked or named. Set both, as the server has them.");
+      await sql.close();
+      process.exit(2);
+    }
     const hash = hashKey(rawKey);
-    const records = process.env.MCP_ACCESS_KEYS ? parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys : [];
-    const record = records.find((k) => k.sha256 === hash);
-    const label = record?.name ?? process.env.OB1_WORKER_NAME ?? "extract-entities";
-    if (!record && process.env.MCP_ACCESS_KEYS) {
+    const record = parseKeyRecords(process.env.MCP_ACCESS_KEYS).keys.find((k) => k.sha256 === hash);
+    if (!record) {
       console.error("\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this.");
       await sql.close();
       process.exit(2);
     }
     try {
-      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${label}::text, 'write') AS r`;
+      const [{ r }] = await sql`SELECT resolve_agent(${hash}::text, ${record.name}::text, ${record.scope}::text) AS r`;
       const res = r as { ok: boolean; error?: string; agent_id?: string; revoked_at?: string; reason?: string | null };
       if (!res.ok && res.error === "REVOKED") {
         console.error(`\n  The worker's key was revoked at ${res.revoked_at}${res.reason ? ` (${res.reason})` : ""}. Refusing to run.`);
@@ -149,7 +201,7 @@ let agentId: string | null = null;
       }
       if (res.ok && res.agent_id) {
         agentId = res.agent_id;
-        console.log(`  agent:  ${label} (${agentId})`);
+        console.log(`  agent:  ${record.name} (${record.scope}, ${agentId})`);
       } else {
         console.error(`  ⚠  resolve_agent answered ${res.error ?? "without an id"}; rows will carry no agent id`);
       }
@@ -206,7 +258,22 @@ async function printFailures(limit = 10): Promise<void> {
 
 const recordedKey: string | undefined = ((await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`) as { key: string }[])[0]?.key;
 if (recordedKey && recordedKey !== JOB) {
-  console.log(`  ob1_config.entity_extraction_key is ${recordedKey}; this run uses ${JOB} (a different model or prompt version) and will record it`);
+  console.log(`  ob1_config.entity_extraction_key is ${recordedKey}; this run uses ${JOB} — a different model or prompt version`);
+  if (!SWITCH_KEY && !STATUS_ONLY && !DRY_RUN) {
+    // The same gate reembed.ts has. record_thought_entities replaces a
+    // thought's rows whatever key wrote them, so a run under another model —
+    // a --limit trial with OB1_METADATA_MODEL changed in the shell — would
+    // leave a per-thought mixture of two models' extractions and re-point the
+    // trigger at the new key. Make the operator say so.
+    console.error(
+      `\n  Refusing to extract under a key other than the one ob1_config records without --switch-key.\n` +
+        `  Every thought this run touches would carry ${JOB}'s extraction in place of ${recordedKey}'s, and new captures\n` +
+        `  would enqueue under ${JOB}. If that is the intent, pass --switch-key and run the whole backlog; if\n` +
+        `  OB1_METADATA_MODEL is simply set differently in this shell, fix it instead.`
+    );
+    await sql.close();
+    process.exit(2);
+  }
 } else if (!recordedKey) {
   console.log(`  ob1_config.entity_extraction_key is not set: the trigger has enqueued nothing yet; this run sets it`);
 }
@@ -254,9 +321,10 @@ let stopping = false;
 let done = 0;
 let failed = 0;
 let vanished = 0;
+let superseded = 0;
 let malformed = 0;
 let llmMs = 0;
-const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0 };
+const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0 };
 const activeWorkers = new Set<string>();
 const started = Date.now();
 let total = 0;
@@ -279,55 +347,73 @@ function progress(force = false): void {
 }
 
 type Row = { id: string; content: string; fingerprint: string | null };
-type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
+type Outcome =
+  | { outcome: "succeeded" }
+  | { outcome: "failed"; error: string }
+  | { outcome: "vanished" }
+  /** Edited while it was being extracted; the trigger has already re-queued it and the pool will redo it. */
+  | { outcome: "superseded" };
 
 async function processRow(row: Row): Promise<Outcome> {
-  let current = row;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const t0 = Date.now();
-    let extraction: Extraction;
-    try {
-      extraction = await extractEntities(current.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
-    } finally {
-      llmMs += Date.now() - t0;
-    }
-    if (extraction.malformed) {
-      malformed++;
-      return { outcome: "failed", error: "the model's answer was not JSON of the expected shape" };
-    }
-    if (DUMP) {
-      // The model's answer as parsed, before the database applies the rule —
-      // what a replay needs to re-score a rule change without the model.
-      appendFileSync(DUMP, JSON.stringify({ id: current.id, fingerprint: current.fingerprint, entities: extraction.entities, relations: extraction.relations }) + "\n");
-    }
-    const [r] = await sql`
-      SELECT record_thought_entities(
-        ${current.id}::uuid, ${JOB}::text,
-        ${extraction.entities}::jsonb, ${extraction.relations}::jsonb,
-        ${current.fingerprint}::text, ${agentId}::uuid
-      ) AS r`;
-    const res = r.r as { ok: boolean; stale?: boolean; error?: string; entities?: number; new_entities?: number; mentions?: number; edges?: number; dropped_relations?: number };
-    if (res.ok) {
-      totals.entities += res.mentions ?? 0;
-      totals.newEntities += res.new_entities ?? 0;
-      totals.mentions += res.mentions ?? 0;
-      totals.edges += res.edges ?? 0;
-      totals.dropped += res.dropped_relations ?? 0;
-      return { outcome: "succeeded" };
-    }
-    if (res.error === "NOT_FOUND") return { outcome: "vanished" };
-    if (res.stale) {
-      // Edited between the claim and the write. What was extracted describes
-      // text that is no longer there; read what is, and extract that.
-      const [fresh] = (await sql`SELECT id, content, content_fingerprint AS fingerprint FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
-      if (!fresh) return { outcome: "vanished" };
-      current = fresh;
-      continue;
-    }
-    return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
+  const t0 = Date.now();
+  let extraction: Extraction;
+  try {
+    extraction = await extractEntities(row.content, cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
+  } finally {
+    llmMs += Date.now() - t0;
   }
-  return { outcome: "failed", error: "the thought was edited three times while it was being extracted" };
+  if (extraction.malformed) {
+    malformed++;
+    return { outcome: "failed", error: "the model's answer was not JSON of the expected shape" };
+  }
+  if (DUMP) {
+    // The model's answer as parsed, before the database applies the rule —
+    // what a replay needs to re-score a rule change without the model.
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, entities: extraction.entities, relations: extraction.relations }) + "\n");
+  }
+  const [r] = await sql`
+    SELECT record_thought_entities(
+      ${row.id}::uuid, ${JOB}::text,
+      ${extraction.entities}::jsonb, ${extraction.relations}::jsonb,
+      ${row.fingerprint}::text, ${agentId}::uuid
+    ) AS r`;
+  const res = r.r as { ok: boolean; stale?: boolean; error?: string; entities?: number; new_entities?: number; mentions?: number; edges?: number; dropped_relations?: number; ambiguous_relations?: number };
+  if (res.ok) {
+    totals.entities += res.mentions ?? 0;
+    totals.newEntities += res.new_entities ?? 0;
+    totals.mentions += res.mentions ?? 0;
+    totals.edges += res.edges ?? 0;
+    totals.dropped += res.dropped_relations ?? 0;
+    totals.ambiguous += res.ambiguous_relations ?? 0;
+    return { outcome: "succeeded" };
+  }
+  if (res.error === "NOT_FOUND") return { outcome: "vanished" };
+  // Edited between the claim and the write. What was extracted describes text
+  // that is no longer there — and migration 016's trigger has already put the
+  // thought back in the pool for the new text, so re-extracting it here would
+  // be a second model call for work the pool is about to do. One mechanism.
+  if (res.stale) return { outcome: "superseded" };
+  return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
 }
+
+/**
+ * Whether an error from the provider says nothing about the thought: a rate
+ * limit, a server error, a dropped connection. Those are retried with a pause
+ * and, if they persist, stop this worker so the pool is not burnt through
+ * marking every thought failed in seconds. A timeout is NOT transient here: the
+ * corpus run showed the same long documents exceed the limit every time, so it
+ * is a fact about the thought, recorded failed and revisited with a longer
+ * --timeout.
+ */
+function isTransient(e: unknown): boolean {
+  const status = (e as { status?: number }).status;
+  if (status === 429 || (status !== undefined && status >= 500)) return true;
+  const msg = (e as Error).message ?? "";
+  const name = (e as Error).name ?? "";
+  if (name === "TimeoutError" || /timed out/i.test(msg)) return false;
+  return /ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg);
+}
+const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
 
 function limitReached(): boolean {
   return LIMIT > 0 && done + failed >= LIMIT;
@@ -357,18 +443,38 @@ async function worker(n: number): Promise<void> {
         if (stopping || limitReached()) return;
         const row = byId.get(b.thought_id);
         if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
-        let outcome: Outcome;
+        let outcome: Outcome | null = null;
         if (!row) {
           outcome = { outcome: "vanished" };
         } else {
-          try {
-            outcome = await processRow(row);
-          } catch (e) {
-            outcome = { outcome: "failed", error: (e as Error).message.slice(0, 500) };
+          for (let attempt = 0; outcome === null; attempt++) {
+            try {
+              outcome = await processRow(row);
+            } catch (e) {
+              if (!isTransient(e)) {
+                outcome = { outcome: "failed", error: (e as Error).message.slice(0, 500) };
+              } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
+                console.error(`  ${workerId}: provider unavailable (${(e as Error).message.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
+                await Bun.sleep(TRANSIENT_PAUSES_MS[attempt]);
+              } else {
+                // Still failing after the pauses. Stop this worker; the finally
+                // below returns its leases, this thought's included, so nothing
+                // is marked failed for a provider that was merely down.
+                console.error(`  ${workerId}: provider still unavailable — this worker stops; re-run when it is back`);
+                return;
+              }
+            }
           }
         }
         if (outcome.outcome === "vanished") {
           vanished++;
+          continue;
+        }
+        if (outcome.outcome === "superseded") {
+          // The claim is already pending again with no holder — the trigger
+          // did that — so there is nothing to release.
+          superseded++;
+          console.error(`  ${b.thought_id}: edited while it was being extracted; it is pending again and will be extracted from the new text`);
           continue;
         }
         let ok: boolean;
@@ -430,13 +536,18 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
+let firstPass = true;
 async function pass(): Promise<Counts> {
-  const [{ added }] = await sql`SELECT enqueue_thoughts(${JOB}) AS added`;
+  // The backlog is pooled once. While following, the trigger enqueues every
+  // new capture, so re-running enqueue_thoughts — a scan of every thought —
+  // each poll would find nothing and cost the table.
+  const added = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
+  firstPass = false;
   const before = await counts();
-  if (Number(added) > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
+  if (added > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
   total += before.pending + before.claimed;
   if (before.pending + before.claimed === 0) return before;
-  if (!FOLLOW || Number(added) > 0 || before.pending > 0) {
+  if (!FOLLOW || added > 0 || before.pending > 0) {
     printCounts(before, "before");
   }
   await Promise.all(Array.from({ length: WORKERS }, (_, i) => worker(i)));
@@ -448,7 +559,8 @@ console.log(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ${TI
 
 let after = await pass();
 if (FOLLOW) {
-  while (!stopping) {
+  // "This many thoughts, then stop" holds while following too.
+  while (!stopping && !limitReached()) {
     await Bun.sleep(FOLLOW * 1000);
     if (stopping) break;
     after = await pass();
@@ -457,10 +569,13 @@ if (FOLLOW) {
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
-  `\n  ${done} extracted, ${failed} failed, ${vanished} deleted mid-pass, in ${elapsed}s ` +
+  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass, in ${elapsed}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s))`
 );
-console.log(`  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; dropped ${totals.dropped} relation(s) naming an unlisted entity`);
+console.log(
+  `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +
+    `dropped ${totals.dropped} relation(s) naming an unlisted entity; ${totals.ambiguous} attached to a name listed under two types`
+);
 if (malformed > 0) console.error(`  ${malformed} answer(s) were not JSON of the expected shape — recorded failed`);
 printCounts(after, "after");
 await printGraph();

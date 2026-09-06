@@ -69,6 +69,7 @@ const FUNCTIONS = [
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
   "normalize_entity_name(text)",
+  "content_fingerprint_of(text)",
   "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)",
   "merge_entities(uuid, uuid)",
   "prune_orphan_entities()",

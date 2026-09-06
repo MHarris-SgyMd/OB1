@@ -152,7 +152,7 @@ const norm = async (s: string) => ((await sql`SELECT normalize_entity_name(${s})
 async function scoreModel(model: string) {
   const c = { ...cfg, metadataModel: model };
   const key = extractionKey(model);
-  let tp = 0, fp = 0, fn = 0, forbidden = 0, relHit = 0, relTotal = 0, malformed = 0, rejected = 0, ms = 0;
+  let tp = 0, fp = 0, fn = 0, forbidden = 0, relHit = 0, relTotal = 0, malformed = 0, errors = 0, rejected = 0, ms = 0;
   const misses: string[] = [];
   const extras: string[] = [];
   const forbiddenHits: string[] = [];
@@ -165,7 +165,13 @@ async function scoreModel(model: string) {
     try {
       ex = await extractEntities(cs.text, c, AbortSignal.timeout(120_000));
     } catch (e) {
+      // A thrown call is scored like a malformed answer — every labelled entity
+      // missed — not skipped: a skipped case inflated recall while the header
+      // still claimed all fourteen captures.
       console.error(`    ${model}: ${(e as Error).message.slice(0, 120)}`);
+      errors++;
+      fn += cs.entities.length;
+      for (const l of cs.entities) misses.push(`${l.name}/${l.type} ← "${cs.text.slice(0, 40)}…" (call failed)`);
       continue;
     } finally {
       ms += Date.now() - t0;
@@ -200,7 +206,7 @@ async function scoreModel(model: string) {
   }
   const precision = tp + fp ? tp / (tp + fp) : 1;
   const recall = tp + fn ? tp / (tp + fn) : 1;
-  return { model, tp, fp, fn, forbidden, forbiddenHits, precision, recall, relHit, relTotal, malformed, rejected, seconds: ms / 1000, misses, extras };
+  return { model, tp, fp, fn, forbidden, forbiddenHits, precision, recall, relHit, relTotal, malformed: malformed + errors, rejected, seconds: ms / 1000, misses, extras };
 }
 
 if (!has("corpus")) {

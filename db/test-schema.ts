@@ -1215,6 +1215,29 @@ console.log("\n[16] entities, mentions and edges: the rule, the write, the merge
   assert(fresh.ok === true, "…and the matching fingerprint is accepted");
   const missing = await record("00000000-0000-0000-0000-000000000001", [{ name: "x", type: "person", confidence: 0.9 }]);
   assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown thought is NOT_FOUND, not an insert");
+  // A row with no fingerprint column value — pre-003, or loaded around
+  // upsert_thought — must not leave the guard silent: both sides compute it.
+  const bare = (await db.query<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('legacy row, no fingerprint') RETURNING id`)).rows[0].id;
+  const [{ computed }] = (await db.query<{ computed: string }>(`SELECT content_fingerprint_of('legacy row, no fingerprint') AS computed`)).rows;
+  assert((await record(bare, [{ name: "Legacy", type: "topic", confidence: 0.9 }], [], computed)).ok === true, "a NULL-fingerprint row accepts the fingerprint computed from its content");
+  await db.query(`UPDATE thoughts SET content = 'legacy row, edited' WHERE id = $1`, [bare]);
+  const legacyStale = await record(bare, [{ name: "Legacy", type: "topic", confidence: 0.9 }], [], computed);
+  assert(legacyStale.ok === false && legacyStale.stale === true, "…and refuses the old one after an edit, though the column is still NULL");
+  // One name under two types: the endpoint choice is deterministic and counted.
+  const amb = await thought("Sentry the company and Sentry the tool");
+  const rAmb = await record(amb, [
+    { name: "Sentry", type: "tool", confidence: 0.9 }, { name: "Sentry", type: "organization", confidence: 0.9 }, { name: "Open Brain", type: "project", confidence: 0.9 },
+  ], [{ from: "Open Brain", to: "Sentry", relation: "uses", confidence: 0.8 }]);
+  assert(rAmb.edges === 1 && rAmb.ambiguous_relations === 1, `a relation to a name the model listed under two types is stored once and counted ambiguous (${JSON.stringify(rAmb)})`);
+  const picked = (await db.query<{ t: string }>(`SELECT e.entity_type AS t FROM ob1_entity_edges g JOIN ob1_entities e ON e.id = g.to_entity_id WHERE g.thought_id = $1`, [amb])).rows[0].t;
+  assert(picked === "organization", `…attached to the organization by the fixed type order, not heap order (${picked})`);
+  // The entity side of the keys restricts: a referenced entity cannot be
+  // deleted out from under its mentions, which is what makes the prune safe.
+  let fk = "";
+  try { await db.query(`DELETE FROM ob1_entities WHERE normalized_name = 'sentry' AND entity_type = 'organization'`); } catch (e) { fk = (e as Error).message; }
+  assert(/foreign key/.test(fk), "deleting an entity that a mention or edge references is refused by the foreign key");
+  await db.query(`DELETE FROM thoughts WHERE id IN ($1, $2)`, [bare, amb]);
+  await db.query(`SELECT prune_orphan_entities()`);
   let raised = "";
   try { await db.query(`SELECT record_thought_entities($1::uuid, $2, '{"a":1}'::jsonb)`, [a, KEY]); } catch (e) { raised = (e as Error).message; }
   assert(/must be a JSON array/.test(raised), "a non-array p_entities raises rather than writing nothing quietly");

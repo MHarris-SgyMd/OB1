@@ -152,7 +152,9 @@ COMMENT ON TABLE ob1_entities IS
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS thought_entities (
   thought_id       uuid        NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
-  entity_id        uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE CASCADE,
+  -- RESTRICT, not CASCADE, on the entity side: see "Why the entity keys
+  -- restrict" above record_thought_entities.
+  entity_id        uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE RESTRICT,
   confidence       numeric(3,2) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   -- The pass that wrote this row: `extract:<model>@p<prompt version>`. What a
   -- later pass under another key replaces, and what a reader can trust
@@ -181,8 +183,8 @@ CREATE INDEX IF NOT EXISTS thought_entities_entity_idx
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ob1_entity_edges (
   thought_id       uuid        NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
-  from_entity_id   uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE CASCADE,
-  to_entity_id     uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE CASCADE,
+  from_entity_id   uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE RESTRICT,
+  to_entity_id     uuid        NOT NULL REFERENCES ob1_entities(id) ON DELETE RESTRICT,
   relation         text        NOT NULL
     CHECK (relation IN ('works_on', 'uses', 'member_of', 'located_in', 'depends_on', 'related_to', 'co_occurs_with')),
   confidence       numeric(3,2) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
@@ -202,6 +204,42 @@ CREATE INDEX IF NOT EXISTS ob1_entity_edges_to_idx
   ON ob1_entity_edges (to_entity_id, relation);
 
 -- ---------------------------------------------------------------------------
+-- content_fingerprint_of — migration 003's rule, as a function
+--
+-- Rows from before 003, and rows loaded around upsert_thought, carry a NULL
+-- content_fingerprint. The stale-content guard below cannot be allowed to fall
+-- silent for them — that is exactly the row an old extraction could overwrite a
+-- newer one on — so both sides compute the fingerprint from the content when
+-- the column is NULL, with this one definition. Byte-identical to 003's and
+-- 009's inline expression.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION content_fingerprint_of(p_content text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE STRICT
+AS $$
+  SELECT encode(sha256(convert_to(lower(trim(regexp_replace(p_content, '\s+', ' ', 'g'))), 'UTF8')), 'hex')
+$$;
+
+COMMENT ON FUNCTION content_fingerprint_of(text) IS
+  'The content fingerprint rule of migration 003 as a function, for rows whose content_fingerprint column is NULL.';
+
+-- ---------------------------------------------------------------------------
+-- Why the entity keys restrict
+--
+-- The prune at the end of record_thought_entities decides "no mention and no
+-- edge references this entity" from its own snapshot. Under READ COMMITTED
+-- another worker can have committed a mention of that entity a moment before,
+-- after this call's snapshot was taken: the DELETE waits on the row lock that
+-- worker held, re-checks its WHERE against the new row version, but the
+-- NOT EXISTS subqueries still see the old snapshot, and the entity is deleted.
+-- With ON DELETE CASCADE that removed the other worker's committed mention and
+-- edges, silently, both calls reporting ok. With ON DELETE RESTRICT the
+-- foreign-key check runs against the latest committed state and raises
+-- instead, and the prune below catches that and keeps the entity: a referenced
+-- entity is not an orphan, whatever the snapshot said. The thought side of the
+-- keys still cascades — deleting a thought deletes its own rows.
+--
 -- record_thought_entities — one thought's extraction, written atomically
 --
 -- p_entities:  [{"name": "PostgreSQL", "type": "tool", "confidence": 0.9,
@@ -219,12 +257,20 @@ CREATE INDEX IF NOT EXISTS ob1_entity_edges_to_idx
 -- list, and a node with no mention would be an edge to nothing.
 --
 -- p_content_fingerprint is the fingerprint of the content the extraction was
--- made FROM. When it differs from the thought's current fingerprint the
--- content changed under the worker; nothing is written and stale=true comes
--- back, so the caller re-reads and extracts again. NULL skips the check.
+-- made FROM — content_fingerprint_of() it if the column was NULL, as the worker
+-- does. When it differs from the thought's current fingerprint (likewise
+-- computed when NULL) the content changed under the worker; nothing is written
+-- and stale=true comes back. NULL skips the check, for callers that have no
+-- content to compare — the eval's replay.
+--
+-- A relation endpoint is resolved by normalised name among the entities the
+-- model listed for this thought. When the model listed the same name under two
+-- types the higher confidence wins, then the type order person, organization,
+-- project, tool, topic, place — deterministic rather than heap order — and the
+-- relation is counted in ambiguous_relations so the choice is visible.
 --
 -- Returns {ok, stale, entities, new_entities, mentions, edges, dropped_relations,
--- pruned_entities}.
+-- ambiguous_relations, pruned_entities}.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION record_thought_entities(
   p_thought_id          uuid,
@@ -244,6 +290,7 @@ DECLARE
   v_mentions   int := 0;
   v_edges      int := 0;
   v_dropped    int := 0;
+  v_ambiguous  int := 0;
   v_pruned     int := 0;
   v_entities   int := 0;
 BEGIN
@@ -257,7 +304,8 @@ BEGIN
     RAISE EXCEPTION 'record_thought_entities: p_relations must be a JSON array, got %', jsonb_typeof(p_relations);
   END IF;
 
-  SELECT true, t.content_fingerprint INTO v_exists, v_current_fp FROM thoughts t WHERE t.id = p_thought_id;
+  SELECT true, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))
+    INTO v_exists, v_current_fp FROM thoughts t WHERE t.id = p_thought_id;
   IF v_exists IS NULL THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
   END IF;
@@ -307,9 +355,14 @@ BEGIN
   )
   SELECT count(*) FILTER (WHERE created), count(*) INTO v_new, v_entities FROM up;
 
-  -- Replace the thought's rows.
-  DELETE FROM ob1_entity_edges WHERE thought_id = p_thought_id;
-  DELETE FROM thought_entities WHERE thought_id = p_thought_id;
+  -- Replace the thought's rows, remembering which entities they pointed at:
+  -- those are the only candidates for pruning.
+  CREATE TEMP TABLE IF NOT EXISTS _rte_touched (id uuid) ON COMMIT DROP;
+  DELETE FROM _rte_touched WHERE true;
+  WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_thought_id RETURNING from_entity_id, to_entity_id)
+  INSERT INTO _rte_touched SELECT from_entity_id FROM d UNION SELECT to_entity_id FROM d;
+  WITH d AS (DELETE FROM thought_entities WHERE thought_id = p_thought_id RETURNING entity_id)
+  INSERT INTO _rte_touched SELECT entity_id FROM d;
 
   INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key, canonical_agent_id)
   SELECT p_thought_id, en.id, i.confidence, p_extraction_key, p_agent_id
@@ -321,7 +374,9 @@ BEGIN
   -- model listed for this thought. Symmetric relations are ordered.
   WITH rel AS (
     SELECT r.relation, r.confidence, f.id AS from_id, t.id AS to_id,
-           (f.id IS NOT NULL AND t.id IS NOT NULL AND f.id <> t.id) AS resolvable
+           (f.id IS NOT NULL AND t.id IS NOT NULL AND f.id <> t.id) AS resolvable,
+           ((SELECT count(*) FROM _rte_in i WHERE i.nname = r.nfrom) > 1
+             OR (SELECT count(*) FROM _rte_in i WHERE i.nname = r.nto) > 1) AS ambiguous
       FROM (
         SELECT lower(btrim(x->>'relation')) AS relation,
                LEAST(GREATEST(COALESCE((x->>'confidence')::numeric, 0.5), 0), 1)::numeric(3,2) AS confidence,
@@ -332,10 +387,12 @@ BEGIN
       ) r
       LEFT JOIN LATERAL (
         SELECT en.id FROM _rte_in i JOIN ob1_entities en ON en.entity_type = i.ntype AND en.normalized_name = i.nname
-         WHERE i.nname = r.nfrom ORDER BY i.confidence DESC LIMIT 1) f ON true
+         WHERE i.nname = r.nfrom
+         ORDER BY i.confidence DESC, array_position(ARRAY['person','organization','project','tool','topic','place'], i.ntype) LIMIT 1) f ON true
       LEFT JOIN LATERAL (
         SELECT en.id FROM _rte_in i JOIN ob1_entities en ON en.entity_type = i.ntype AND en.normalized_name = i.nname
-         WHERE i.nname = r.nto ORDER BY i.confidence DESC LIMIT 1) t ON true
+         WHERE i.nname = r.nto
+         ORDER BY i.confidence DESC, array_position(ARRAY['person','organization','project','tool','topic','place'], i.ntype) LIMIT 1) t ON true
      WHERE r.relation IN ('works_on', 'uses', 'member_of', 'located_in', 'depends_on', 'related_to', 'co_occurs_with')
   ),
   ins AS (
@@ -350,22 +407,35 @@ BEGIN
      ORDER BY fid, tid, relation, confidence DESC
     RETURNING 1
   )
-  SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM rel WHERE NOT resolvable) INTO v_edges, v_dropped;
+  SELECT (SELECT count(*) FROM ins),
+         (SELECT count(*) FROM rel WHERE NOT resolvable),
+         (SELECT count(*) FROM rel WHERE resolvable AND ambiguous)
+    INTO v_edges, v_dropped, v_ambiguous;
 
-  -- Entities nothing mentions and nothing links any more — typically the
-  -- previous extraction's, for a thought whose content changed.
-  WITH gone AS (
-    DELETE FROM ob1_entities en
-     WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
-       AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
-    RETURNING 1
-  )
-  SELECT count(*) INTO v_pruned FROM gone;
+  -- Entities this thought used to reference and nothing references any more —
+  -- typically the previous extraction's, for a thought whose content changed.
+  -- Guarded: see "Why the entity keys restrict". A concurrent mention this
+  -- snapshot cannot see makes the DELETE fail its foreign key, and then every
+  -- candidate is kept; the next pass, or prune_orphan_entities(), gets the
+  -- ones that really are orphans.
+  BEGIN
+    WITH gone AS (
+      DELETE FROM ob1_entities en
+       WHERE en.id IN (SELECT id FROM _rte_touched)
+         AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
+         AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
+      RETURNING 1
+    )
+    SELECT count(*) INTO v_pruned FROM gone;
+  EXCEPTION WHEN foreign_key_violation THEN
+    v_pruned := 0;
+  END;
 
   RETURN jsonb_build_object(
     'ok', true, 'stale', false,
     'entities', v_entities, 'new_entities', v_new, 'mentions', v_mentions,
-    'edges', v_edges, 'dropped_relations', v_dropped, 'pruned_entities', v_pruned);
+    'edges', v_edges, 'dropped_relations', v_dropped, 'ambiguous_relations', v_ambiguous,
+    'pruned_entities', v_pruned);
 END;
 $$;
 
@@ -430,6 +500,9 @@ BEGIN
   )
   SELECT count(*) INTO v_edges FROM ins;
   DELETE FROM ob1_entity_edges WHERE from_entity_id = p_loser OR to_entity_id = p_loser;
+  -- The mentions the survivor already had, which did not move. Explicit, since
+  -- the entity key restricts rather than cascades.
+  DELETE FROM thought_entities WHERE entity_id = p_loser;
 
   UPDATE ob1_entities
      SET aliases = (SELECT ARRAY(SELECT DISTINCT a FROM unnest(aliases || v_l.aliases || ARRAY[v_l.name]) a WHERE a <> name ORDER BY a)),
@@ -458,12 +531,19 @@ RETURNS int
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_n int;
+  v_n int := 0;
 BEGIN
-  DELETE FROM ob1_entities en
-   WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
-     AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id);
-  GET DIAGNOSTICS v_n = ROW_COUNT;
+  -- Guarded for the same reason record_thought_entities' prune is: a mention
+  -- committed after this snapshot fails the foreign key rather than being
+  -- cascaded away, and the pass reports nothing pruned.
+  BEGIN
+    DELETE FROM ob1_entities en
+     WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
+       AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id);
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+  EXCEPTION WHEN foreign_key_violation THEN
+    v_n := 0;
+  END;
   RETURN v_n;
 END;
 $$;

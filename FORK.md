@@ -1883,6 +1883,36 @@ every row, so it carries no information on this model. The eleven timed-out
 thoughts are the longest issues, and a re-run with `--retry-failed --timeout
 900` would finish them at a cost of another hour.
 
+**What the review pass found, and what it changed.** The orphan prune at the
+end of `record_thought_entities` decided "nothing references this entity" from
+its own snapshot, and under READ COMMITTED another worker could have committed
+a mention a moment earlier: the prune waited on that worker's row lock,
+re-checked its WHERE against the new row, but its `NOT EXISTS` still saw the
+old snapshot, deleted the entity, and `ON DELETE CASCADE` took the other
+worker's committed mention with it — both calls reporting ok. The entity side
+of the keys is now `RESTRICT`, so that race is a foreign-key error the prune
+catches and the entity stays; the prune is also scoped to the entities the
+thought's own deleted rows pointed at. A NULL `content_fingerprint` (rows from
+before migration 003) silenced the stale-content guard; both sides now compute
+the fingerprint from the content through one function. A run under another
+model's key rewrote the recorded key and mixed extractions per thought; it needs
+`--switch-key`, as a re-embed needs `--switch-model`. The identity block
+registered an agent under `--dry-run`, minted a phantom write-scoped agent when
+`MCP_ACCESS_KEYS` was unset, and hardcoded the scope; it now requires the key
+to be in `MCP_ACCESS_KEYS`, registers the record's own name and scope, and does
+not run in the read-only modes. A 429 or a refused connection failed the
+thought terminally and both workers marched through the pool doing the same; a
+transient error now pauses and retries, and stops the worker with its leases
+returned if the provider stays down. A batch of four at a 300 s timeout could
+outlive a 900 s lease; the default is one thought per claim and a batch that
+could outlive its lease is refused. The stale-retry re-extracted a thought the
+trigger had already re-queued; it is reported as superseded and left to the
+pool. A bare `--limit` meant no limit and would have sent the backlog to the
+model; it is refused. Same name under two types picked an edge endpoint by heap
+order; the pick is deterministic and counted. The eval skipped a thrown call
+without counting its labels, inflating recall. Declined: folding the worker
+into a shared framework with `reembed.ts`, which is its own change.
+
 **Not done here.** A read API for the graph — the MCP tools do not expose
 entities yet, and SMD-948 will decide the shape; a `list_thoughts` filter by
 entity; injection resistance on a small model; and typed reasoning edges

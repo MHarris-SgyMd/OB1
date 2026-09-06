@@ -811,6 +811,11 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 10 thoughts to the pool/.test(dry.out),
          `--dry-run counts the ten thoughts and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-3).join(" | ").slice(0, 300)})`);
   assert((await sql`SELECT count(*)::int AS c FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].c === 0, "…including the key");
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'entity-worker'`)[0].c === 0, "…and it did not register the worker's agent either");
+  const bareLimit = await extract("--limit");
+  assert(bareLimit.code === 2 && /--limit needs a value/.test(bareLimit.out), "a bare --limit is refused rather than read as no limit");
+  const tooLong = await extract("--batch", "4", "--timeout", "300");
+  assert(tooLong.code === 2 && /exceed the --ttl/.test(tooLong.out), "a batch that could outlive its lease is refused");
 
   const first = await extract("--workers", "2", "--batch", "2");
   assert(first.code === 1 && /9 extracted, 1 failed/.test(first.out), `the first run extracts nine and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
@@ -819,6 +824,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(key === KEY, `the run recorded the extraction key (${key})`);
   const [agent] = await sql`SELECT canonical_agent_id AS id, label FROM ob1_agents WHERE label = 'entity-worker'`;
   assert(agent?.id != null, "the worker resolved itself to a stable agent id under its key's name");
+  const [{ scope: agentScope }] = await sql`SELECT scope FROM ob1_agent_keys WHERE canonical_agent_id = ${agent.id}::uuid`;
+  assert(agentScope === "write", `…registering the key record's own scope (${agentScope})`);
   const [{ attributed, total }] = await sql`
     SELECT count(*) FILTER (WHERE canonical_agent_id = ${agent.id}::uuid)::int AS attributed, count(*)::int AS total FROM thought_entities`;
   assert(Number(total) > 0 && Number(attributed) === Number(total), `every mention carries that agent id (${attributed} of ${total})`);
@@ -836,6 +843,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const c1 = await claimCounts();
   assert(c1.succeeded === 9 && c1.failed === 1, `claims: 9 succeeded, 1 failed (${JSON.stringify(c1)})`);
   const callsAfterFirst = calls;
+
+  // Another model's key, without saying so: refused before anything is touched.
+  const otherModel = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--limit", "1"], {
+    env: { ...env, OB1_METADATA_MODEL: "other-model" }, stdout: "pipe", stderr: "pipe", cwd: HERE,
+  });
+  const otherOut = (await new Response(otherModel.stdout).text()) + (await new Response(otherModel.stderr).text());
+  assert((await otherModel.exited) === 2 && /--switch-key/.test(otherOut), "a run under a different model's key is refused without --switch-key");
+  const [{ key: stillKey }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  assert(stillKey === KEY, "…and the recorded key is untouched");
 
   // A second run over an unchanged corpus.
   const ids1 = (await sql`SELECT id FROM ob1_entities ORDER BY id`).map((r: { id: string }) => r.id);
