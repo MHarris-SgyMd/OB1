@@ -1975,17 +1975,19 @@ global mode — label-propagation communities over co-mention weights, one
 generated summary each, question matched to summaries, thoughts of the best
 two communities vector-ranked; and `search_thoughts_keyword` (change 26) with
 the needle a person would type, on the ten questions that have one. The graph
-is replayed from the change 30 run's dumped answers, so the eval does not
-repeat the 82-minute extraction.
+is replayed from a dumped extraction pass, so the eval does not repeat the
+two-hour extraction; the pass scored here was re-run after the review pass
+below so that the dump's fingerprints verify against the loaded text.
 
 **Vector wins every comparison.** Recall@10 0.98 and 25 of 27 questions
-complete, every multi-hop question among them; the local graph 0.48 and 7,
-losing on 20 questions and winning on none; fusion 0.91 and 21 — mixing the
-graph in makes vector worse on five questions and better on none; global 0.57,
-forty points behind on every question type. At K = 5 the order is the same
-and the gaps are wider. The reasons are in `evals/README.md`: the
-question-side and document-side extractions do not agree on names; 1,767 of
-2,044 entities are mentioned once, so a hop reaches nothing; common seeds
+complete, every multi-hop question among them; the local graph 0.47 and 6,
+losing on 21 questions and winning on none; fusion 0.92 and 21 — mixing the
+graph in makes vector worse on five questions and better on none; global 0.50,
+half the baseline and near zero on the corpus-level questions. At K = 5 the
+order is the same and the gaps are wider. The reasons are in
+`evals/README.md`: the question-side and document-side extractions do not
+agree on names; 1,739 of 2,004 entities are mentioned once, so a hop reaches
+nothing; common seeds
 dominate until removed and removing them leaves recall unchanged; communities
 depend on the node visiting order (18, 6 and 17 from the same graph until the
 order was pinned to the table's unique key). A review pass found the first
@@ -1993,7 +1995,12 @@ version of the harness generous to its own conclusion in small ways — MRR take
 over the whole returned list, a substring seed match that read "Expo" out of
 "exposes", hubs re-entering through the hop, an unordered title list feeding
 each community summary — and fixing them moved the graph arm by two points
-and the global arm from 0.25–0.33 to 0.57. The decision did not move.
+and the global arm from 0.25–0.33 to 0.57 on the first dump (0.50 on the
+re-extracted one). The same pass found the corpus loader hashing the wrong
+text for its fingerprints — `'\s+'` in a Bun `sql` template literal reaches
+Postgres as `'s+'` — in this harness and in the entity eval it was copied
+from; both call `content_fingerprint_of()` now, and the corpus was
+re-extracted so the dump verifies. The decision did not move.
 
 **The set was too easy for vector, and that is the finding, not a flaw in the
 set.** Documents about one feature in a tracker share vocabulary — the backend

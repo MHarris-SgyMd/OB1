@@ -133,11 +133,10 @@ if (dropped.length) console.log(`  ! ${dropped.length} documents collapsed onto 
 const unreachable = questions.flatMap((q) => q.expected.filter((e) => !loadedIssues.has(e)).map((e) => `${q.id}:${e}`));
 if (unreachable.length) { console.error(`  expected documents not in this load — fix the question set or the corpus: ${unreachable.join(", ")}`); process.exit(2); }
 
-// The dump carries the fingerprint of the row as the entity eval loaded it. A
-// dump made since that loader started using content_fingerprint_of() can be
-// checked for stale text; the one this spike ran on predates that, so its
-// fingerprints match nothing and the replay is by id alone — reported, not
-// hidden.
+// The dump carries the fingerprint of the row as the entity eval loaded it, so
+// an extraction of text that has since changed is detectable. A dump made
+// before that loader used content_fingerprint_of() matches nothing and is
+// replayed by id alone — reported either way, never hidden.
 const key = extractionKey(cfg.metadataModel);
 let replayed = 0, missing = 0, fpMatched = 0;
 const dumpLines = readFileSync(answersPath, "utf8").split("\n").filter(Boolean);
