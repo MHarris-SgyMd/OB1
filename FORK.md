@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty numbered changes on top of the pin. Seven fix defects found in an
+Thirty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–30 are the numbered `###` sections** further down, which is
+sections. Changes **18–31 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -157,6 +157,8 @@ db/migrations/016_*.sql          # fix 30  (new file — entities, mentions, edg
 db/extract-entities.ts           # fix 30  (new file — the extraction worker)
 server-portable/entities.ts      # fix 30  (new file — the prompt and the parsing rules)
 evals/eval-entities.ts           # fix 30  (new file — labelled precision/recall, and the corpus run)
+evals/eval-graphrag.ts           # fix 31  (new file — graph retrieval against the vector baseline)
+evals/graphrag-questions.json    # fix 31  (new file — the multi-hop question set)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1940,6 +1942,70 @@ entities yet, and SMD-948 will decide the shape; a `list_thoughts` filter by
 entity; injection resistance on a small model; and typed reasoning edges
 between thoughts (`schemas/typed-reasoning-edges`), which the ticket names as a
 later issue.
+
+### 31. GraphRAG, measured — and not built
+
+`evals/eval-graphrag.ts` and `evals/graphrag-questions.json` (Linear SMD-948).
+No migration, no server change, no new tool: this change is a measurement and
+the decision it supports. The ticket asked whether retrieval over change 30's
+entity graph beats the vector search the product ships, warned that GraphRAG's
+published wins are on corpora unlike ours, that community summaries are a
+standing cost, and that a measured "not worth it at our scale" would be a
+successful outcome. It is the outcome.
+
+**The question set came first**, as the ticket required, so the graph was
+judged on questions written without it: 27 over the 441-issue Linear corpus,
+each answered by two or more documents, labelled by hand from the issue bodies
+— seventeen multi-hop, seven aggregation, three about the shape of the corpus,
+89 expected documents. Only the questions are committed; the corpus is internal
+and stays in `/tmp`. The metric is retrieval, did the expected documents come
+back in the top K, because any answer is generated from what came back.
+
+**Five arms, no framework.** Vector (`match_thoughts`); a local graph walk
+written in one SQL statement over `ob1_entities`, `thought_entities` and
+`ob1_entity_edges` — question entities as IDF-weighted seeds, one hop at 0.3,
+thoughts ranked by summed entity weight; reciprocal-rank fusion of those two;
+global mode — label-propagation communities over co-mention weights, one
+generated summary each, question matched to summaries, thoughts of the best
+two communities vector-ranked; and `search_thoughts_keyword` (change 26) with
+the needle a person would type, on the ten questions that have one. The graph
+is replayed from the change 30 run's dumped answers, so the eval does not
+repeat the 82-minute extraction.
+
+**Vector wins every comparison.** Recall@10 0.98 and 25 of 27 questions
+complete, every multi-hop question among them; the local graph 0.50 and 9,
+losing on 18 questions and winning on none; fusion 0.93 and 21 — mixing the
+graph in makes vector worse on four questions and better on none; global
+0.25–0.33 across two runs, the worst arm on every question type. At K = 5
+the order is the same. The reasons are in `evals/README.md`: the question-side
+and document-side extractions do not agree on names; 1,767 of 2,044 entities
+are mentioned once, so a hop reaches nothing; common seeds dominate until
+removed and removing them leaves recall unchanged; communities depend on the
+node visiting order (18, 6 and 17 from the same graph) and their summaries are
+not deterministic even at temperature 0 on Ollama.
+
+**The set was too easy for vector, and that is the finding, not a flaw in the
+set.** Documents about one feature in a tracker share vocabulary — the backend
+issue and the client issue consuming it name the same endpoint and field — so
+the documents a multi-hop question combines are already near neighbours of the
+question. GraphRAG earns its cost where documents are joined by an entity and
+nothing else; on this corpus those questions were hard to find, which is
+itself the answer to whether the corpus is the kind that needs a graph.
+
+**Where vector misses, keyword has it.** The only misses are two of the six
+`Decision:` records and two of the eight `Promote …` issues, both series named
+by a literal string; `search_thoughts_keyword` returns the first set complete
+and the second to its page size. The headroom that exists is closed by a tool
+that ships.
+
+**Decision: not built.** No graph retrieval mode, no fusion step, no follow-up
+ticket. The entity layer stays for what it is for — "what does X connect to",
+an entity filter, the UI a graph makes possible — and because a corpus of a
+different shape, people and projects across many sources with little shared
+wording, could measure differently. That is a re-run of `bun run graphrag`
+against that corpus's own question set, and the rule for reading it does not
+change: the graph has to beat `match_thoughts` on questions someone actually
+asked.
 
 ## Detached from the fork network
 

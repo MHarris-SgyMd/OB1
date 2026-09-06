@@ -267,7 +267,11 @@ Migration 016, rewritten from `schemas/entity-extraction`, and
 `extract-entities.ts`, its worker. Every thought was opaque text plus the
 `metadata` the capture model attached; nothing recorded that two thoughts
 mention the same person or that one system depends on another. This adds that
-layer, and it is the prerequisite for SMD-948 (GraphRAG).
+layer. It was built as the prerequisite for SMD-948 (GraphRAG), which was then
+measured and not built — `evals/README.md` has the numbers; the graph lost to
+plain vector search on every question type — so what this layer is for is the
+structured questions, which thoughts mention X and what X connects to, not
+retrieval.
 
 **The tables.** `ob1_entities` is one row per (type, normalised name) with the
 first form seen as `name` and the other forms in `aliases`. `thought_entities`
