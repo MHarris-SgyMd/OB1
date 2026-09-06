@@ -30,6 +30,9 @@ const TABLES = [
   "thought_audit",
   "thought_chunks",
   "thought_work_claims",
+  "ob1_entity_edges",
+  "thought_entities",
+  "ob1_entities",
   "thoughts",
   "ob1_agent_keys",
   "ob1_agents",
@@ -65,6 +68,13 @@ const FUNCTIONS = [
   "claim_thoughts(text, text, int, int, int)",
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
+  "normalize_entity_name(text)",
+  "content_fingerprint_of(text)",
+  "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)",
+  "merge_entities(uuid, uuid)",
+  "prune_orphan_entities()",
+  "requeue_thought_work(text, uuid)",
+  "thoughts_enqueue_entity_extraction()",
 ];
 
 export type SchemaOptions = {

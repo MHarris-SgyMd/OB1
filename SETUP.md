@@ -23,6 +23,12 @@ produce exactly that many numbers. Changing either later means a schema migratio
 the model at the *same* width is the case `db/reembed.ts` handles, in parallel
 and resumably; changing the width is not, yet.
 
+One more per-thought cost exists and is **off until you turn it on**: entity
+extraction (`db/extract-entities.ts`, migration 016) sends every thought to the
+metadata model once, and every new capture after that. Locally that is compute;
+on a hosted provider it is money per thought and every thought's text leaves
+your machine. `db/README.md` has the measured cost and quality.
+
 | Model | Width | Note |
 | --- | --- | --- |
 | **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.903 MRR vs `embeddinggemma`'s 0.873 over 441 real issues with full descriptions and comments — and the only local model that embeds a long capture whole. Costs ~5x the latency and 2.5 GB. Truncation is automatic. |
