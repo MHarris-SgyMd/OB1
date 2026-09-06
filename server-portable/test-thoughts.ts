@@ -17,6 +17,7 @@ import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS } from "../db/config.mjs";
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { resolveEmbedConfig } from "./embed.ts";
+import { parseExtraction } from "./entities.ts";
 import { DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 
 const { assert, report } = createAssert();
@@ -118,6 +119,28 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({ OB1_CHUNK_OVERLAP: "0" }).chunkOverlap === 0, "…while an explicit 0 is honoured");
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokens === DEFAULT_MAX_TOKENS, `and OB1_CHUNK_TOKENS='' is the default window (${DEFAULT_MAX_TOKENS})`);
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "900", OB1_CHUNK_OVERLAP: "50" }).chunkTokens === 900, "explicit values are read");
+}
+
+// ── 8. The extraction parser knows an answer from a non-answer ───────────────
+
+console.log("\n[8] parseExtraction requires the shape, not merely JSON");
+{
+  const ok = parseExtraction('{"entities":[],"relationships":[]}');
+  assert(!ok.malformed && ok.entities.length === 0, "an explicit empty extraction is a valid answer: nothing noteworthy");
+  for (const [raw, why] of [
+    ["{}", "an empty object"],
+    ['{"Entities":[{"name":"x","type":"tool","confidence":1}]}', "a capitalised key"],
+    ['{"error":"context too long"}', "an error object"],
+    ["I cannot help with that.", "prose"],
+    ["[]", "an array"],
+  ] as const) {
+    assert(parseExtraction(raw).malformed, `${why} is malformed, not an extraction of nothing — a thought must not go terminal on it`);
+  }
+  const fenced = parseExtraction('```json\n{"entities":[{"name":"Sentry","type":"tool","confidence":0.9}],"relationships":[]}\n```');
+  assert(!fenced.malformed && fenced.entities[0]?.name === "Sentry", "code fences around a valid answer are tolerated");
+  const rejected = parseExtraction('{"entities":[{"name":"x","type":"vegetable","confidence":1},{"name":"y","type":"tool","confidence":0.2}],"relationships":[{"from":"a","to":"b","relation":"loves","confidence":1}]}');
+  assert(!rejected.malformed && rejected.entities.length === 0 && rejected.rejected.entities === 2 && rejected.rejected.relations === 1,
+         "an unknown type, a low confidence and an unknown relation are dropped and counted, not treated as malformed");
 }
 
 report();

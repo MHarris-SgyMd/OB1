@@ -1257,6 +1257,13 @@ console.log("\n[16] entities, mentions and edges: the rule, the write, the merge
   assert(!(await entities()).some((e) => e.normalized_name === "postgres") && survivor.aliases.includes("postgres"),
          `the loser is gone and its name is an alias of the survivor (${JSON.stringify(survivor.aliases)})`);
   assert((await count("thought_entities", "thought_id = $1", [b])) === 2, "thought B now mentions Dev and PostgreSQL, once each");
+  // The merge survives the next extraction: the model saying "postgres" again
+  // resolves to the survivor instead of re-creating the loser.
+  const rAfterMerge = await record(b, [{ name: "Dev", type: "person", confidence: 0.9 }, { name: "postgres", type: "tool", confidence: 0.8 }, { name: "PostgreSQL", type: "tool", confidence: 0.9 }]);
+  assert(rAfterMerge.new_entities === 0 && rAfterMerge.mentions === 2, `re-extracting B with "postgres" creates nothing and mentions two entities (${JSON.stringify(rAfterMerge)})`);
+  assert(!(await entities()).some((e) => e.normalized_name === "postgres"), "…the merged-away name is not re-created");
+  const [{ mf }] = (await db.query<{ mf: string[] }>(`SELECT merged_from AS mf FROM ob1_entities WHERE id = $1`, [survivor.id])).rows;
+  assert(mf.includes("postgres"), `…because the survivor remembers it in merged_from (${JSON.stringify(mf)})`);
 
   // Delete: cascade, and the orphan it leaves.
   await db.query(`DELETE FROM thoughts WHERE id = $1`, [b]);
@@ -1279,16 +1286,22 @@ console.log("\n[16] entities, mentions and edges: the rule, the write, the merge
   assert((await dRow()).status === "pending" && (await count("thought_work_claims", "thought_id = $1", [d])) === 1, "a metadata-only edit changes nothing in the pool");
   const claimed = (await db.query<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'W', 10)`, [KEY])).rows;
   assert(claimed.length === 1 && (await dRow()).status === "claimed", "a worker takes the lease");
-  await db.query(`UPDATE thoughts SET content = 'edited while a worker held it' WHERE id = $1`, [d]);
+  // Through update_thought, so the fingerprint follows the content: a raw
+  // UPDATE would leave the old fingerprint, and the re-capture below would
+  // then INSERT a new thought instead of taking the ON CONFLICT branch — and
+  // the assertion about that branch would be reading the wrong row.
+  await db.query(`SELECT update_thought($1::uuid, 'edited while a worker held it')`, [d]);
   const revoked = await dRow();
   assert(revoked.status === "pending" && revoked.worker_id === null && revoked.attempt_count === 0,
          `a content edit under a live lease sets the claim back to pending and revokes the lease (${JSON.stringify(revoked)})`);
   const late = (await db.query<{ ok: boolean }>(`SELECT release_thought($1::uuid, $2, 'W', 'succeeded') AS ok`, [d, KEY])).rows[0].ok;
   assert(late === false, "…so the worker's release returns false and the new text will be extracted");
   await db.query(`UPDATE thought_work_claims SET status = 'succeeded' WHERE thought_id = $1 AND work_type = $2`, [d, KEY]);
-  await db.query(`SELECT upsert_thought('edited while a worker held it', '{"metadata":{"again":true}}'::jsonb)`);
-  assert((await dRow()).status === "succeeded", "a re-capture of the same text (upsert_thought's ON CONFLICT branch) does not re-enqueue");
-  await db.query(`UPDATE thoughts SET content = 'edited again' WHERE id = $1`, [d]);
+  const thoughtsBefore = await count("thoughts");
+  const recaptured = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('edited while a worker held it', '{"metadata":{"again":true}}'::jsonb) AS r`)).rows[0].r.id;
+  assert(recaptured === d && (await count("thoughts")) === thoughtsBefore, "the re-capture took the ON CONFLICT branch onto the same thought");
+  assert((await dRow()).status === "succeeded", "…and did not re-enqueue it");
+  await db.query(`SELECT update_thought($1::uuid, 'edited again')`, [d]);
   assert((await dRow()).status === "pending", "…while a real content change re-enqueues a succeeded thought");
 
   await db.exec(`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`);

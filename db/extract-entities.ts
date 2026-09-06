@@ -389,34 +389,57 @@ async function processRow(row: Row): Promise<Outcome> {
   }
   if (res.error === "NOT_FOUND") return { outcome: "vanished" };
   // Edited between the claim and the write. What was extracted describes text
-  // that is no longer there — and migration 016's trigger has already put the
-  // thought back in the pool for the new text, so re-extracting it here would
-  // be a second model call for work the pool is about to do. One mechanism.
-  if (res.stale) return { outcome: "superseded" };
+  // that is no longer there, so re-extracting it here would be a second model
+  // call for work the pool should do. The trigger has usually re-queued the
+  // thought already — but only under the key ob1_config records, and only if
+  // that key is set, so re-queue under THIS job explicitly (idempotent) rather
+  // than leave a lease held on a promise.
+  if (res.stale) {
+    await sql`SELECT requeue_thought_work(${JOB}, ${row.id}::uuid)`;
+    return { outcome: "superseded" };
+  }
   return { outcome: "failed", error: `record_thought_entities: ${res.error}` };
 }
 
 /**
- * Whether an error from the provider says nothing about the thought: a rate
- * limit, a server error, a dropped connection. Those are retried with a pause
- * and, if they persist, stop this worker so the pool is not burnt through
- * marking every thought failed in seconds. A timeout is NOT transient here: the
- * corpus run showed the same long documents exceed the limit every time, so it
- * is a fact about the thought, recorded failed and revisited with a longer
- * --timeout.
+ * What an error from the provider is about.
+ *
+ *   thought   — a fact about this thought: a timeout (the corpus run showed the
+ *               same long documents exceed the limit every time), a 400 naming
+ *               the input's length, a body that was not JSON. Recorded failed;
+ *               --retry-failed revisits it.
+ *   transient — says nothing about the thought: 429, 5xx, a dropped connection.
+ *               Paused and retried; if it persists, THIS row is recorded failed
+ *               with the error (so a thought that reliably draws a 500 becomes
+ *               visible rather than cycling through the pool for ever) and the
+ *               worker stops, leaving its other leases to the pool.
+ *   fatal     — the request itself is wrong for this provider: 401/403 (the
+ *               key), 404 (the model), or a 400 about the request's shape. The
+ *               next thought would fail the same way, so every worker stops at
+ *               once and the run exits 2, with nothing marked failed.
  */
-function isTransient(e: unknown): boolean {
+type ErrorKind = "thought" | "transient" | "fatal";
+function classifyError(e: unknown): ErrorKind {
   const status = (e as { status?: number }).status;
-  if (status === 429 || (status !== undefined && status >= 500)) return true;
   const msg = (e as Error).message ?? "";
   const name = (e as Error).name ?? "";
-  if (name === "TimeoutError" || /timed out/i.test(msg)) return false;
-  return /ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg);
+  if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
+  if (status === 429 || (status !== undefined && status >= 500)) return "transient";
+  if (status === 400 && /context|length|too long|tokens|too large/i.test(msg)) return "thought";
+  if (status !== undefined && status >= 400 && status < 500) return "fatal";
+  if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
+  return "thought";
 }
 const TRANSIENT_PAUSES_MS = [5_000, 15_000, 45_000];
+let configError: string | null = null;
 
+/**
+ * --limit counts thoughts CLAIMED, reserved at claim time, so two workers
+ * cannot each take one on a limit of one. A claimed row is always processed.
+ */
+let reserved = 0;
 function limitReached(): boolean {
-  return LIMIT > 0 && done + failed >= LIMIT;
+  return LIMIT > 0 && reserved >= LIMIT;
 }
 
 async function worker(n: number): Promise<void> {
@@ -427,43 +450,72 @@ async function worker(n: number): Promise<void> {
       let batch: { thought_id: string; attempt: number }[];
       let byId: Map<string, Row>;
       try {
-        const want = LIMIT > 0 ? Math.max(1, Math.min(BATCH, LIMIT - done - failed)) : BATCH;
+        const room = LIMIT > 0 ? LIMIT - reserved : BATCH;
+        if (room <= 0) return;
+        const want = Math.min(BATCH, room);
+        reserved += want;
         batch = (await sql`
           SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${want}, ${TTL})`) as { thought_id: string; attempt: number }[];
+        reserved -= want - batch.length;
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
         const rows = (await sql`
-          SELECT id, content, content_fingerprint AS fingerprint FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
+          SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint
+            FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
         console.error(`  ${workerId}: ${(e as Error).message} — this worker stops`);
         return;
       }
       for (const b of batch) {
-        if (stopping || limitReached()) return;
+        if (stopping) return;
         const row = byId.get(b.thought_id);
         if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
         let outcome: Outcome | null = null;
         if (!row) {
           outcome = { outcome: "vanished" };
         } else {
+          let stopAfter = false;
           for (let attempt = 0; outcome === null; attempt++) {
             try {
               outcome = await processRow(row);
             } catch (e) {
-              if (!isTransient(e)) {
-                outcome = { outcome: "failed", error: (e as Error).message.slice(0, 500) };
+              const kind = classifyError(e);
+              const msg = (e as Error).message.slice(0, 500);
+              if (kind === "thought") {
+                outcome = { outcome: "failed", error: msg };
+              } else if (kind === "fatal") {
+                // Every thought would fail the same way. Stop everyone, mark
+                // nothing, and say what to fix; this row goes back with the
+                // leases the finally returns.
+                configError = msg;
+                stopping = true;
+                console.error(`  ${workerId}: the provider refuses the request itself (${msg.slice(0, 160)}) — stopping every worker; nothing is marked failed`);
+                return;
               } else if (attempt < TRANSIENT_PAUSES_MS.length && !stopping) {
-                console.error(`  ${workerId}: provider unavailable (${(e as Error).message.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
+                console.error(`  ${workerId}: provider unavailable (${msg.slice(0, 120)}); pausing ${TRANSIENT_PAUSES_MS[attempt] / 1000} s`);
                 await Bun.sleep(TRANSIENT_PAUSES_MS[attempt]);
               } else {
-                // Still failing after the pauses. Stop this worker; the finally
-                // below returns its leases, this thought's included, so nothing
-                // is marked failed for a provider that was merely down.
-                console.error(`  ${workerId}: provider still unavailable — this worker stops; re-run when it is back`);
-                return;
+                // Still failing after the pauses. This row is recorded failed
+                // with the error — if the provider is down it is one row per
+                // worker, and if this thought is what draws the error every
+                // time it is now visible instead of cycling for ever — and the
+                // worker stops, its other leases going back to the pool.
+                outcome = { outcome: "failed", error: `provider error after ${TRANSIENT_PAUSES_MS.length} retries: ${msg}` };
+                stopAfter = true;
               }
             }
+          }
+          if (stopAfter) console.error(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
+          if (stopAfter && outcome.outcome === "failed") {
+            try {
+              await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`;
+            } catch (e) {
+              console.error(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
+            }
+            failed++;
+            console.error(`  ${b.thought_id}: ${outcome.error}`);
+            return;
           }
         }
         if (outcome.outcome === "vanished") {
@@ -590,5 +642,14 @@ if (after.pending > 0 && !stopping && !limitReached()) {
   console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
 }
 await sql.close();
+if (configError) {
+  console.error(
+    `\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
+      `  Check OB1_LLM_BASE_URL, OB1_LLM_API_KEY and OB1_METADATA_MODEL against the provider; a 400 about a request field\n` +
+      `  is usually reasoning_effort or response_format not being supported by this model. Nothing was marked failed.`
+  );
+  await Promise.resolve();
+  process.exit(2);
+}
 const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
 process.exit(stopping ? (FOLLOW ? 0 : 130) : incomplete ? 1 : 0);

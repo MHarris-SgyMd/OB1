@@ -1913,6 +1913,28 @@ order; the pick is deterministic and counted. The eval skipped a thrown call
 without counting its labels, inflating recall. Declined: folding the worker
 into a shared framework with `reembed.ts`, which is its own change.
 
+**A second pass, six of ten findings in the first pass's code — the stopping
+signal — and two of them defects in its fixes.** The NULL-fingerprint fix was
+half done: the function computed the fingerprint but the worker still passed
+the raw column, so the guard was still skipped; one `COALESCE`. The prune's
+exception guard was all-or-nothing, so one concurrent mention aborted a
+table-wide prune and reported zero; the prune now locks its candidates
+`FOR UPDATE` and deletes in a fresh statement, which is what makes it correct,
+and the `RESTRICT` key stays as the loud failure if that ordering is ever lost.
+The error classification treated every 4xx but 429 as the thought's fault, so
+a provider rejecting a request field marked the pool failed in a minute; a 400
+about the request or an auth error now stops every worker with exit 2 and marks
+nothing, and a thought that reliably draws a 500 is recorded failed after the
+retries instead of cycling for ever. A human merge was undone by the next
+extraction that said the loser's name: `merged_from` now routes those to the
+survivor, the one list that resolves. `{}` from the model parsed as nothing
+found and made the thought terminal; the `entities` array is required.
+`--limit` reserves at claim time so two workers cannot each take one on a
+limit of one. Superseded re-queues explicitly rather than trusting the trigger.
+Two test defects: a vacuous assertion (a raw `UPDATE` left the old fingerprint
+so the re-capture inserted a new row) and the eval scoring a reversed
+directional relation as a hit. Stopped here.
+
 **Not done here.** A read API for the graph — the MCP tools do not expose
 entities yet, and SMD-948 will decide the shape; a `list_thoughts` filter by
 entity; injection resistance on a small model; and typed reasoning edges

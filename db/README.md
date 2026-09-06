@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `240 assertions: 240 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `244 assertions: 244 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports sixteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -293,8 +293,12 @@ readily as the two Postgres spellings, and a wrong merge is far harder to undo
 than a duplicate is to merge. The prompt asks for the most complete common name
 and for aliases; aliases are recorded, never used to resolve. `merge_entities`
 is the human step: it re-points mentions and edges, keeps the loser's name as
-an alias, and refuses to merge across types. The corpus run below reports how
-many near-duplicates the strict rule leaves, so the trade is a number.
+an alias, records the loser's normalised name in `merged_from`, and refuses to
+merge across types. `merged_from` is the one list that does resolve: the next
+extraction that says "postgres" lands on the survivor rather than re-creating
+the loser, so a human's decision persists where a model's guess does not. The
+corpus run below reports how many near-duplicates the strict rule leaves, so
+the trade is a number.
 
 **The queue is migration 015's.** A trigger on `thoughts` enqueues new and
 edited content into `thought_work_claims` under the current extraction key
@@ -535,7 +539,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 240 assertions, PGlite, no container
+bun test-schema.ts                    # 244 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 145 assertions, real server, throwaway container
 ```
 
@@ -587,7 +591,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 240 properties, including:
+asserts 244 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

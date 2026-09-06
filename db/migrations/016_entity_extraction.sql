@@ -60,7 +60,11 @@
 --   model for the most complete common name and for aliases; aliases are
 --   RECORDED on the entity (`aliases`) and never used to resolve. A human
 --   merges with `merge_entities(survivor, loser)`, which re-points mentions and
---   edges and keeps the loser's name as an alias. evals/eval-entities.ts
+--   edges, keeps the loser's name as an alias, and records the loser's
+--   normalised name in `merged_from` — which DOES resolve, so the next
+--   extraction that says "postgres" lands on the survivor instead of
+--   re-creating the loser. A human's decision persists; a model's guess does
+--   not. evals/eval-entities.ts
 --   reports how many near-duplicates the strict rule leaves on the real corpus,
 --   so the trade is measured rather than asserted.
 --
@@ -139,13 +143,22 @@ CREATE TABLE IF NOT EXISTS ob1_entities (
   -- Other forms the model has offered for this entity. Recorded, never used to
   -- resolve; see the header.
   aliases          text[]      NOT NULL DEFAULT '{}',
+  -- Normalised names a human merged INTO this entity (merge_entities). Unlike
+  -- aliases these DO resolve: a later extraction naming one of them lands
+  -- here rather than re-creating the loser. A human decision persists; a
+  -- model's guess does not.
+  merged_from      text[]      NOT NULL DEFAULT '{}',
   first_seen_at    timestamptz NOT NULL DEFAULT now(),
   last_seen_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (entity_type, normalized_name)
 );
 
 COMMENT ON TABLE ob1_entities IS
-  'Typed entities extracted from thoughts, one row per (entity_type, normalized_name). The name is the first form seen; aliases collect the others. Nothing merges automatically — merge_entities() is the human step.';
+  'Typed entities extracted from thoughts, one row per (entity_type, normalized_name). The name is the first form seen; aliases collect the others and never resolve. merged_from holds the normalised names a human merged in with merge_entities(), and those DO resolve, so a merge survives re-extraction.';
+
+-- merged_from is consulted on every write; a GIN index answers `= ANY` over it.
+CREATE INDEX IF NOT EXISTS ob1_entities_merged_from_idx
+  ON ob1_entities USING gin (merged_from);
 
 -- ---------------------------------------------------------------------------
 -- Mentions: which thought mentioned which entity, with what confidence
@@ -234,11 +247,14 @@ COMMENT ON FUNCTION content_fingerprint_of(text) IS
 -- worker held, re-checks its WHERE against the new row version, but the
 -- NOT EXISTS subqueries still see the old snapshot, and the entity is deleted.
 -- With ON DELETE CASCADE that removed the other worker's committed mention and
--- edges, silently, both calls reporting ok. With ON DELETE RESTRICT the
--- foreign-key check runs against the latest committed state and raises
--- instead, and the prune below catches that and keeps the entity: a referenced
--- entity is not an orphan, whatever the snapshot said. The thought side of the
--- keys still cascades — deleting a thought deletes its own rows.
+-- edges, silently, both calls reporting ok. Two things fix it. The prune locks
+-- its candidate entities FOR UPDATE in a statement of its own before deleting
+-- in the next, so a concurrent mention either committed first and is seen, or
+-- waits on the lock; that is what makes the prune correct. And the keys are
+-- ON DELETE RESTRICT rather than CASCADE, so if that ordering is ever lost the
+-- failure is a foreign-key error in the log, not a mention gone without trace.
+-- The thought side of the keys still cascades — deleting a thought deletes its
+-- own rows.
 --
 -- record_thought_entities — one thought's extraction, written atomically
 --
@@ -339,6 +355,20 @@ BEGIN
      AND e.ntype IN ('person', 'organization', 'project', 'tool', 'topic', 'place')
    ORDER BY e.ntype, e.nname, e.confidence DESC;
 
+  -- A human merge is remembered. A name merge_entities() routed to a survivor
+  -- resolves to that survivor, whatever the model called it, and the form the
+  -- model used joins the survivor's aliases. Two inputs may now name one
+  -- entity, so the duplicates are collapsed again before the upsert.
+  UPDATE _rte_in i
+     SET nname   = en.normalized_name,
+         aliases = ARRAY(SELECT DISTINCT a FROM unnest(i.aliases || ARRAY[i.name]) a WHERE a <> en.name ORDER BY a),
+         name    = en.name
+    FROM ob1_entities en
+   WHERE en.entity_type = i.ntype AND i.nname = ANY(en.merged_from);
+  DELETE FROM _rte_in a USING _rte_in b
+   WHERE a.ntype = b.ntype AND a.nname = b.nname
+     AND (a.confidence < b.confidence OR (a.confidence = b.confidence AND a.ctid > b.ctid));
+
   -- Upsert the entities. A new row takes the name as given; an existing row
   -- keeps its name and collects the other forms as aliases.
   WITH up AS (
@@ -414,22 +444,21 @@ BEGIN
 
   -- Entities this thought used to reference and nothing references any more —
   -- typically the previous extraction's, for a thought whose content changed.
-  -- Guarded: see "Why the entity keys restrict". A concurrent mention this
-  -- snapshot cannot see makes the DELETE fail its foreign key, and then every
-  -- candidate is kept; the next pass, or prune_orphan_entities(), gets the
-  -- ones that really are orphans.
-  BEGIN
-    WITH gone AS (
-      DELETE FROM ob1_entities en
-       WHERE en.id IN (SELECT id FROM _rte_touched)
-         AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
-         AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
-      RETURNING 1
-    )
-    SELECT count(*) INTO v_pruned FROM gone;
-  EXCEPTION WHEN foreign_key_violation THEN
-    v_pruned := 0;
-  END;
+  -- Lock the candidates first, in their own statement: a concurrent worker
+  -- inserting a mention takes KEY SHARE on the entity and waits here, and one
+  -- that committed before the lock is visible to the DELETE below, which as a
+  -- new statement takes a new snapshot. So the NOT EXISTS is decided against
+  -- the current state, row by row, and the RESTRICT key never has to fire —
+  -- it is the loud failure if this ordering is ever lost, not the mechanism.
+  PERFORM 1 FROM ob1_entities en WHERE en.id IN (SELECT id FROM _rte_touched) FOR UPDATE;
+  WITH gone AS (
+    DELETE FROM ob1_entities en
+     WHERE en.id IN (SELECT id FROM _rte_touched)
+       AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
+       AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_pruned FROM gone;
 
   RETURN jsonb_build_object(
     'ok', true, 'stale', false,
@@ -506,6 +535,8 @@ BEGIN
 
   UPDATE ob1_entities
      SET aliases = (SELECT ARRAY(SELECT DISTINCT a FROM unnest(aliases || v_l.aliases || ARRAY[v_l.name]) a WHERE a <> name ORDER BY a)),
+         -- The decision, remembered: future extractions naming the loser land here.
+         merged_from = (SELECT ARRAY(SELECT DISTINCT m FROM unnest(merged_from || v_l.merged_from || ARRAY[v_l.normalized_name]) m ORDER BY m)),
          first_seen_at = LEAST(first_seen_at, v_l.first_seen_at),
          last_seen_at  = GREATEST(last_seen_at, v_l.last_seen_at)
    WHERE id = p_survivor;
@@ -517,7 +548,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION merge_entities(uuid, uuid) IS
-  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, the loser is deleted. The one resolution step that is a human''s to take.';
+  'Merge one entity into another of the same type: mentions and edges move to the survivor (duplicates and self-joins dropped), the loser''s name and aliases become aliases, its normalised name joins merged_from so later extractions resolve to the survivor, and the loser is deleted. The one resolution step that is a human''s to take.';
 
 -- ---------------------------------------------------------------------------
 -- prune_orphan_entities — entities no thought mentions and no edge joins
@@ -533,17 +564,18 @@ AS $$
 DECLARE
   v_n int := 0;
 BEGIN
-  -- Guarded for the same reason record_thought_entities' prune is: a mention
-  -- committed after this snapshot fails the foreign key rather than being
-  -- cascaded away, and the pass reports nothing pruned.
-  BEGIN
-    DELETE FROM ob1_entities en
-     WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
-       AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id);
-    GET DIAGNOSTICS v_n = ROW_COUNT;
-  EXCEPTION WHEN foreign_key_violation THEN
-    v_n := 0;
-  END;
+  -- Lock, then delete in a fresh statement — the same ordering as the prune in
+  -- record_thought_entities, for the same reason: a worker's concurrent
+  -- mention waits on the lock or is already visible, so each candidate is
+  -- decided against the current state and none is lost to the snapshot.
+  PERFORM 1 FROM ob1_entities en
+   WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
+     AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id)
+   FOR UPDATE;
+  DELETE FROM ob1_entities en
+   WHERE NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = en.id)
+     AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = en.id OR g.to_entity_id = en.id);
+  GET DIAGNOSTICS v_n = ROW_COUNT;
   RETURN v_n;
 END;
 $$;

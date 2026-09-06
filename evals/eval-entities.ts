@@ -200,7 +200,10 @@ async function scoreModel(model: string) {
         SELECT count(*)::int AS c FROM ob1_entity_edges g
         JOIN ob1_entities a ON a.id = g.from_entity_id JOIN ob1_entities b ON b.id = g.to_entity_id
         WHERE g.thought_id = ${id}::uuid AND g.relation = ${rel.relation}
-          AND ((a.normalized_name = ${from} AND b.normalized_name = ${to}) OR (a.normalized_name = ${to} AND b.normalized_name = ${from}))`;
+          AND ((a.normalized_name = ${from} AND b.normalized_name = ${to})
+               -- Only the two symmetric relations are stored ordered; a
+               -- directional one the model inverted must score as a miss.
+               OR (${rel.relation} IN ('related_to', 'co_occurs_with') AND a.normalized_name = ${to} AND b.normalized_name = ${from}))`;
       if (Number(hit) > 0) relHit++;
     }
   }

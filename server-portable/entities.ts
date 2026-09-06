@@ -57,7 +57,7 @@ export type Extraction = {
  * shape, kept after measuring the alternative. Splitting the rules into a
  * system message, the textbook defence against an instruction embedded in the
  * content, was tried on `qwen2.5:7b` against the labelled eval: precision fell
- * from 0.66 to 0.51 and recall from 0.84 to 0.76 (the model volunteered more
+ * from 0.68 to 0.51 and recall from 0.84 to 0.76 (the model volunteered more
  * marginal items), and the injection case still produced the entity the text
  * asked for. So the split bought nothing and cost accuracy, and the single
  * message stays. The injection weakness stays too, documented: a 7B model
@@ -147,9 +147,14 @@ export function parseExtraction(raw: string): Extraction {
   }
   if (!isRecord(parsed)) return { ...empty, malformed: true };
 
+  // The shape requires an `entities` array. `{}`, a capitalised key, or
+  // `{"error": …}` is not "nothing found" — it is an answer that was not an
+  // extraction, and recording it as empty would make the thought terminal with
+  // nothing in it.
+  if (!Array.isArray(parsed.entities)) return { ...empty, malformed: true };
   const out: Extraction = { entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false };
   const seen = new Set<string>();
-  if (Array.isArray(parsed.entities)) {
+  {
     for (const e of parsed.entities) {
       if (!isRecord(e)) { out.rejected.entities++; continue; }
       const name = cleanName(e.name);
@@ -164,8 +169,6 @@ export function parseExtraction(raw: string): Extraction {
         : [];
       out.entities.push({ name, type: type as EntityType, confidence, aliases });
     }
-  } else if (parsed.entities !== undefined) {
-    out.malformed = true;
   }
   if (Array.isArray(parsed.relationships)) {
     for (const r of parsed.relationships) {
