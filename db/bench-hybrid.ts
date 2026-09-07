@@ -59,6 +59,8 @@ const REPEATS = 7;
 const PROBE_CALLS = 13;
 const IDENT = "resolve_agent_zylotrope";
 const DECOY = "resolve-agent-zylotrope";
+/** In every tenth row: a needle too common to match, which the probe must dismiss without paging. */
+const COMMON = "omnimid_zylotrope";
 const MARKED = 5;
 
 const WORDS = (
@@ -81,6 +83,7 @@ async function load(sql: SQL, n: number): Promise<number[]> {
       for (let w = 0; w < 40; w++) words.push(WORDS[Math.floor(rnd() * WORDS.length)]);
       if (j < MARKED) words.splice(10, 0, IDENT);
       else if (j < MARKED * 2) words.splice(10, 0, DECOY);
+      else if (j % 10 === 0) words.splice(10, 0, COMMON);
       values.push(`('${words.join(" ")}', '{"doc":${j}}'::jsonb, '${lit(unitVector(DIM))}'::vector)`);
     }
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values.join(",")}`);
@@ -137,7 +140,9 @@ for (const n of SCALES) {
   for (let i = 0; i < PROBE_CALLS; i++) await hybrid();
   const after = { hnsw: await indexScans(sql, "thoughts_embedding_idx"), trgm: await indexScans(sql, "idx_thoughts_content_trgm") };
   const dh = after.hnsw - before.hnsw, dt = after.trgm - before.trgm;
-  console.log(`  index reach over ${PROBE_CALLS} calls (idx_scan deltas): HNSW ${dh}, trigram ${dt}${dh >= PROBE_CALLS ? "" : "  ← the vector arm did not use its index on every call"}${dt >= PROBE_CALLS ? "" : "  ← the keyword arm did not use its index on every call"}`);
+  // The trigram index is read twice per call with a needle: once by the probe
+  // that asks whether the needle is common, once by the page it then fetches.
+  console.log(`  index reach over ${PROBE_CALLS} calls (idx_scan deltas): HNSW ${dh}, trigram ${dt} (probe + page per call)${dh >= PROBE_CALLS ? "" : "  ← the vector arm did not use its index on every call"}${dt >= 2 * PROBE_CALLS ? "" : "  ← the keyword arm did not use its index for both the probe and the page on every call"}`);
 
   // ── Cost ───────────────────────────────────────────────────────────────────
   const tHybrid = await time(hybrid);
@@ -148,6 +153,18 @@ for (const n of SCALES) {
   const plain = "what happened with the scheduler";
   const tHybridPlain = await time(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${plain}, 0.5, 10, '{}'::jsonb)`);
   const tVectorPlain = await time(() => sql`SELECT id FROM match_thoughts(${q}::vector, 0.5, 10, '{}'::jsonb)`);
+  // A needle in a tenth of the rows: the probe must call it common and never
+  // page it. The keyword function's own cost for that needle is what the
+  // fused call would have paid before the probe existed.
+  const commonQ = `the scheduler around ${COMMON}`;
+  const commonRows = (await sql`SELECT common_needles FROM search_thoughts_hybrid(${q}::vector, ${commonQ}, 0.0, 10, '{}'::jsonb)`) as { common_needles: string[] }[];
+  if (!commonRows.length || commonRows[0].common_needles.join() !== COMMON) {
+    console.error(`  the common needle was not reported as common (${JSON.stringify(commonRows[0]?.common_needles)}) — refusing to time it`);
+    await sql.close();
+    process.exit(1);
+  }
+  const tHybridCommon = await time(() => sql`SELECT id FROM search_thoughts_hybrid(${q}::vector, ${commonQ}, 0.0, 10, '{}'::jsonb)`);
+  const tKeywordCommon = await time(() => sql`SELECT id FROM search_thoughts_keyword(${COMMON}, 100, 0, '{}'::jsonb)`);
   console.log(`\n  median of ${REPEATS}, wall clock with the round trip:\n`);
   console.log(`    fused, one needle                       ${fmt(tHybrid).padStart(9)}`);
   console.log(`      match_thoughts(-1, 10) on its own     ${fmt(tVector).padStart(9)}`);
@@ -156,6 +173,8 @@ for (const n of SCALES) {
   console.log(`    fused, no needle (every ordinary query) ${fmt(tHybridPlain).padStart(9)}`);
   console.log(`      match_thoughts(0.5, 10) on its own    ${fmt(tVectorPlain).padStart(9)}`);
   console.log(`      wrapper overhead                      ${fmt(tHybridPlain - tVectorPlain).padStart(9)}`);
+  console.log(`    fused, one needle in 10% of rows        ${fmt(tHybridCommon).padStart(9)}   (probed as common, not paged)`);
+  console.log(`      the keyword page it did not fetch     ${fmt(tKeywordCommon).padStart(9)}`);
   await sql.close();
 }
 console.log("");

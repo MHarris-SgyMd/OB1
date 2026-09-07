@@ -1730,8 +1730,10 @@ hash of the whole table over ~6,000 candidates, the estimate crossed
 `jit_above_cost`, and PostgreSQL JIT-compiled 112 expressions on every call.
 `auto_explain` with nested statements showed it; nothing at the SQL level did.
 The function no longer joins `thoughts` (both arms already return the row) and
-runs with `jit = off`. After: 0.90 ms fused against 0.43 + 0.23 for the arms;
-a query with no needle 0.75 ms against 0.40 for `match_thoughts` alone.
+runs with `jit = off`. After: 1.08 ms fused against 0.47 + 0.28 for the arms;
+a query with no needle 0.75 ms against 0.41 for `match_thoughts` alone; a
+needle in a tenth of the rows probed as common in 1.11 ms rather than paid for
+as the 5.12 ms keyword page it no longer fetches.
 
 ## Filtered search: what a metadata filter used to cost
 

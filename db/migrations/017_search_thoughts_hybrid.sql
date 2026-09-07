@@ -67,9 +67,12 @@
 -- Two consequences fall out, and both are what a caller wants: a row both arms
 -- return outranks any row only one returns (1/(k+1) + 1/(k+r) > 1/(k+1) for any
 -- r); and with no needle in the query the score is a monotone function of
--- vector rank, so THE RESULT IS match_thoughts' RESULT, row for row — which is
--- how "hybrid must not lose to vector on the semantic set" is met for every
--- query that has no identifier in it, and db/test-schema.ts asserts it.
+-- vector rank, so THE RESULT IS match_thoughts' RESULT — the same rows in the
+-- same order, up to ties in similarity, which match_thoughts leaves to the
+-- plan (its ORDER BY has no second key) and this function breaks by id. That
+-- is how "hybrid must not lose to vector on the semantic set" is met for
+-- every query that has no identifier in it, and db/test-schema.ts asserts it
+-- on rows at distinct angles.
 --
 -- ── The gate: a query that is only literals gives the vector arm no vote ─────
 -- Embedding `SMD-506` on its own is noise. 012 measured it: the containing
@@ -105,14 +108,16 @@
 --
 --   1. A span in double quotes or backticks is a needle as written. That is the
 --      caller saying "this part exactly": "App Store", `upsert_thought`. A span
---      outside 3–64 characters is not a needle, and its words fall through to
---      rule 2 — a pasted error message in quotes still yields its identifiers.
+--      outside 3–64 characters, or one the English parser keeps nothing of
+--      ("the"), is not a needle, and its words fall through to rule 2 — a
+--      pasted error message in quotes still yields its identifiers.
 --   2. Of the remaining tokens — split on whitespace and the punctuation that
 --      wraps an identifier rather than the punctuation inside one, the same
 --      delimiters evals/eval-keyword.ts uses — keep the identifier-shaped ones,
---      3 to 64 characters: a digit or underscore (but not a bare integer: 2024
---      is a year, not an identifier), an interior slash or dot (db/config.mjs,
---      pgvector 0.8.6), or an interior capital (getUserById). Ordinary words,
+--      3 to 64 characters: a digit or underscore (but not a bare integer, and
+--      not an ordinal or a unit — 2024 is a year, 1st and 3pm are words), an
+--      interior slash or dot (db/config.mjs, pgvector 0.8.6), or an interior
+--      capital (getUserById). Ordinary words,
 --      rare or not, are left to the vector arm: "harpsichord" has a meaningful
 --      embedding, "PGRST202" does not.
 --   3. Case-insensitive de-duplication, first eight.
@@ -126,9 +131,11 @@
 -- is a word, and the vector arm already handles words. Such needles are
 -- returned in `common_needles` so the tool can say so. The rule is written as
 -- the completeness test (rows fetched = total) rather than as the constant, so
--- a change to 012's clamp cannot move it silently. A needle that matches
--- nothing is complete too — it stays in `needles`, and the tool reports it as
--- searched for and absent rather than as matched.
+-- a change to 012's clamp cannot move it silently; a cheap probe for a 101st
+-- matching row runs first, so a common needle is never paged at all (see the
+-- query). A needle that matches nothing is complete too — it stays in
+-- `needles`, and the tool reports it as searched for and absent rather than
+-- as matched.
 --
 -- ═══════════════════════════════════════════════════════════════════════════
 -- The window, paging, threshold — decided once, and SMD-945 inherits them
@@ -324,6 +331,11 @@ BEGIN
   FOR m IN SELECT regexp_matches(v_q, '"([^"]+)"|`([^`]+)`', 'g') LOOP
     v_tok := coalesce(m[1], m[2]);
     CONTINUE WHEN trim(v_tok) = '' OR length(v_tok) < 3 OR length(v_tok) > 64;
+    -- A quoted span the English parser keeps nothing of — "the", "and so" —
+    -- is not a literal anyone means exactly, and as a needle it would be the
+    -- most expensive one possible: a substring of nearly every thought
+    -- (review pass).
+    CONTINUE WHEN length(to_tsvector('english', v_tok)) = 0;
     v_rest := replace(v_rest, CASE WHEN m[1] IS NOT NULL THEN '"' || v_tok || '"' ELSE '`' || v_tok || '`' END, ' ');
     CONTINUE WHEN lower(v_tok) = ANY (v_seen);
     v_out  := v_out  || v_tok;
@@ -341,6 +353,10 @@ BEGIN
     v_tok := regexp_replace(v_tok, '^[.\-]+|[.\-]+$', '', 'g');
     CONTINUE WHEN length(v_tok) < 3 OR length(v_tok) > 64;
     CONTINUE WHEN v_tok ~ '^[0-9]+$';                                   -- a bare number is not an identifier
+    -- Nor is a number with a one- or two-letter tail: 1st, 2nd, 3pm, 24h, 10x,
+    -- 5k. As substrings they are in every 21st and 31st, and each one would
+    -- have outranked every vector row below rank 1 (review pass).
+    CONTINUE WHEN v_tok ~ '^[0-9]+[A-Za-z]{1,2}$';
     -- A dotted or slashed token needs a run of two or more characters somewhere
     -- between its punctuation: "e.g." and "i.e." lose their trailing dot above
     -- and would otherwise pass as three-character identifiers (review pass).
@@ -355,7 +371,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION extract_search_needles(text) IS
-  'The literals search_thoughts_hybrid asks the keyword arm for: quoted or backticked spans as written, then identifier-shaped tokens (a digit or underscore, an interior slash or dot, an interior capital; 3-64 chars; not a bare number). Case-insensitively de-duplicated, at most eight. See the 017 header.';
+  'The literals search_thoughts_hybrid asks the keyword arm for: quoted or backticked spans as written (not a span of stopwords only), then identifier-shaped tokens (a digit or underscore, an interior slash or dot, an interior capital; 3-64 chars; not a bare number, an ordinal or a unit like 3pm). Case-insensitively de-duplicated, at most eight. See the 017 header.';
 
 CREATE OR REPLACE FUNCTION search_thoughts_hybrid(
   query_embedding  vector({{EMBEDDING_DIM}}),
@@ -425,26 +441,43 @@ BEGIN
   -- that page is the whole match set. `ord` keeps query order for the arrays.
   -- The row's columns ride along: both arms already return the whole row, so
   -- nothing below joins `thoughts` again (see "what this query must not do").
-  kw AS (
-    SELECT n.needle, n.ord, h.id AS hit_id, h.content AS hit_content, h.metadata AS hit_metadata,
-           h.created_at AS hit_created_at, h.total_count
+  -- Before a needle is paged, a probe asks whether it has more matches than a
+  -- page holds: the 101st matching row, found and abandoned, not counted.
+  -- 012's page materialises its whole match set to count it exactly — the
+  -- 731 ms per 100,000 rows its header prices for a needle in every row — and
+  -- for a common needle that page would only be discarded below. The pattern
+  -- is escaped exactly as 012 escapes it, and db/test-schema.ts [17b] plants
+  -- a decoy only an unescaped pattern matches so the two cannot drift.
+  probe AS (
+    SELECT n.needle, n.ord,
+           EXISTS (SELECT 1 FROM thoughts t
+                   WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\', '\\'), '%', '\%'), '_', '\_') || '%'
+                     AND (v_filter = '{}'::jsonb OR t.metadata @> v_filter)
+                   OFFSET 100 LIMIT 1) AS common
     FROM unnest(v_all) WITH ORDINALITY AS n(needle, ord)
-    CROSS JOIN LATERAL search_thoughts_keyword(n.needle, 100, 0, v_filter) AS h
   ),
-  -- A needle is USED when its page is its whole match set — the rows that came
-  -- back equal total_count — and COMMON when total_count says there were more.
-  -- The test is the completeness itself rather than the page constant, so a
-  -- change to 012's clamp cannot move this rule without anyone noticing.
+  kw AS (
+    SELECT p.needle, p.ord, h.id AS hit_id, h.content AS hit_content, h.metadata AS hit_metadata,
+           h.created_at AS hit_created_at, h.total_count
+    FROM probe p
+    CROSS JOIN LATERAL search_thoughts_keyword(p.needle, 100, 0, v_filter) AS h
+    WHERE NOT p.common
+  ),
+  -- A needle is USED when the probe found no 101st row AND its page is its
+  -- whole match set — the rows that came back equal total_count — and COMMON
+  -- otherwise. The second test is the completeness itself rather than the page
+  -- constant, so a change to 012's clamp cannot silently make the probe's 100
+  -- wrong: it would only make the probe late, never the rule.
   kw_needles AS (
-    SELECT n.needle, n.ord, coalesce(max(k2.total_count), 0) AS total, count(k2.hit_id) AS fetched
-    FROM unnest(v_all) WITH ORDINALITY AS n(needle, ord)
-    LEFT JOIN kw k2 ON k2.needle = n.needle
-    GROUP BY n.needle, n.ord
+    SELECT p.needle, p.ord, p.common, coalesce(max(k2.total_count), 0) AS total, count(k2.hit_id) AS fetched
+    FROM probe p
+    LEFT JOIN kw k2 ON k2.needle = p.needle
+    GROUP BY p.needle, p.ord, p.common
   ),
   used AS (
-    SELECT coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched = kn.total), '{}'::text[]) AS needles,
-           coalesce(array_agg(kn.total::int ORDER BY kn.ord) FILTER (WHERE kn.fetched = kn.total), '{}'::int[])  AS counts,
-           coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched < kn.total), '{}'::text[]) AS common
+    SELECT coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE NOT kn.common AND kn.fetched = kn.total), '{}'::text[]) AS needles,
+           coalesce(array_agg(kn.total::int ORDER BY kn.ord) FILTER (WHERE NOT kn.common AND kn.fetched = kn.total), '{}'::int[])  AS counts,
+           coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.common OR kn.fetched < kn.total), '{}'::text[]) AS common
     FROM kw_needles kn
   ),
   hits AS (
@@ -454,7 +487,7 @@ BEGIN
            (array_agg(k3.hit_metadata))[1] AS hit_metadata,
            min(k3.hit_created_at)          AS hit_created_at
     FROM kw k3
-    JOIN kw_needles kn ON kn.needle = k3.needle AND kn.fetched = kn.total
+    JOIN kw_needles kn ON kn.needle = k3.needle AND NOT kn.common AND kn.fetched = kn.total
     GROUP BY k3.hit_id
   ),
   -- Vector arm: ranks over the N rows match_thoughts would return, whatever
@@ -478,7 +511,13 @@ BEGIN
       coalesce(v.vmetadata,   h.hit_metadata)   AS metadata,
       coalesce(v.vcreated_at, h.hit_created_at) AS created_at,
       -- A keyword hit outside the vector window is scored directly, by the
-      -- rule match_thoughts uses: best of the thought's own vector and its chunks.
+      -- rule match_thoughts uses: best of the thought's own vector and its
+      -- chunks. THIS IS A SECOND COPY OF THAT RULE, and the one place a change
+      -- to match_thoughts' scoring must be mirrored — SMD-945 (recency) in
+      -- particular: an in-window row would carry the adjusted similarity and a
+      -- keyword-only row the raw one, and the tiebreak among exact hits would
+      -- compare two different quantities. db/test-live.ts [11] reaches this
+      -- path with a window of one and holds it to match_thoughts' number.
       coalesce(
         v.vsim,
         (SELECT max(1 - (x.e <=> query_embedding))
@@ -511,4 +550,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb) IS
-  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm, presence per matched needle on the keyword arm, each hit''s own cosine similarity as the tiebreak. Needles come from extract_search_needles(query_text). Fixed top-N (no paging); a query with no needle returns exactly what match_thoughts returns. See the 017 header for the decisions and the measurements.';
+  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm, presence per matched needle on the keyword arm, each hit''s own cosine similarity as the tiebreak. Needles come from extract_search_needles(query_text). Fixed top-N (no paging); a query with no needle returns match_thoughts'' rows in match_thoughts'' order, ties in similarity broken by id. See the 017 header for the decisions and the measurements.';

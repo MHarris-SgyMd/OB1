@@ -2066,8 +2066,10 @@ Among rows the keyword arm found, the order is the vector's judgement — each
 hit's own cosine similarity, computed directly (a primary-key probe, best of
 the thought's vector and its chunks, the rule `match_thoughts` uses), as the
 tiebreak. A row both arms return therefore outranks any row only one returns,
-and **a query with no identifier in it returns exactly what `match_thoughts`
-returns, row for row** — asserted in `db/test-schema.ts` at three thresholds.
+and **a query with no identifier in it returns `match_thoughts`' rows in
+`match_thoughts`' order** — up to ties in similarity, which `match_thoughts`
+leaves to the plan and this function breaks by id — asserted in
+`db/test-schema.ts` at three thresholds.
 
 **The needles come from one rule, in SQL.** `extract_search_needles` takes
 quoted or backticked spans as written, then identifier-shaped tokens — a digit
@@ -2084,7 +2086,7 @@ text-search parser keeps as a lexeme, the vector arm's rank term is dropped;
 exact hits come first and the rest follow by similarity. With a content word
 left, the arms are peers. Without the gate an identifier query ties its exact
 hit against the vector's meaningless top row and the similarity tiebreak hands
-first place to the noise: measured, MRR 0.958 at ten results and 0.850 at a
+first place to the noise: measured, MRR 0.925 at ten results and 0.850 at a
 hundred, against 1.000 with it.
 
 **The eval came before the ranker, because the existing one could not judge
@@ -2167,10 +2169,13 @@ Two changes, both kept: the function no longer joins `thoughts` (both arms
 already return the row, so only a keyword hit outside the vector window touches
 the table, by primary key), and it runs with `jit = off`, scoped to the call
 like 014's hnsw setting — nothing in it has enough rows for compilation to pay.
-After: fused with one needle 0.90 ms against 0.43 + 0.23 for the arms
-separately; a query with no needle 0.75 ms against 0.40 for `match_thoughts`
+After: fused with one needle 1.08 ms against 0.47 + 0.28 for the arms
+separately; a query with no needle 0.75 ms against 0.41 for `match_thoughts`
 alone, so every ordinary semantic search pays about a third of a millisecond
-for the needle rule, the stopword test and the wrapper.
+for the needle rule, the stopword test and the wrapper. A needle in a tenth of
+the rows is probed as common and never paged: 1.11 ms, against the 5.12 ms
+keyword page it no longer fetches. The trigram counter advances twice per call
+with a needle — once for the probe, once for the page.
 
 **What changed for callers.** `search` and `search_thoughts` are hybrid; their
 descriptions say what is matched literally. `search_thoughts` renders
@@ -2182,8 +2187,10 @@ the query was literal-only. A third store type,
 both stores from turning "no vector" into "orthogonal" (`Number(null)` is 0).
 `preflight.ts` fails on a database that stops at 016, because the two most-used
 tools now need 017. SMD-945 (recency) has not landed; when it does it belongs
-in `match_thoughts`, and this function inherits it through the vector arm's
-rank — the keyword arm is boolean here, so age is never counted twice.
+in `match_thoughts`, and rows in the vector window inherit it through their
+rank — the keyword arm is boolean here, so age is never counted twice. One
+place must be mirrored: a keyword hit outside the window is scored by 017's own
+copy of the best-of-vector-and-chunks rule, and the header marks it.
 
 **One review pass, triaged.** Ten confirmed findings; eleven fixes, two tickets,
 three declined. The one that mattered most was not in the new code: four
@@ -2238,6 +2245,27 @@ typed array, for which `Array.isArray` is false, so `needleCounts` was empty
 on that path until the normaliser accepted array-likes. Declined: `ALTER
 FUNCTION … ROWS` inside 017 (SMD-1041; a re-apply of 014 would reset it),
 and three cosmetic duplications.
+
+**A third pass, triaged: ten fixes, and the stop.** Three were behaviour.
+Ordinals and units — `1st`, `3pm`, `24h`, `10x` — passed the digit rule, and as
+substrings sat in every `21st`; reproduced, six junk rows pushed the right
+answer from second to eighth. They are excluded. A common needle was paged and
+then discarded, and 012's page materialises its whole match set to count it,
+so a quoted `"the"` on a large brain would have paid 012's worst case for
+nothing; a probe for a 101st matching row now runs first, and a quoted span the
+English parser keeps nothing of is not a needle at all. Preflight blamed 017
+for a missing 012, because the error text is the same and the PostgREST branch
+never checked 012; it probes the keyword function first and names the right
+migration, and the 017 check has the test the 012 check always had. The rest
+was wording made true — an exact hit is ranked *with* the strongest semantic
+results, not ahead of them; "row for row" holds up to similarity ties, which
+`match_thoughts` leaves to the plan and this function breaks by id; recency
+from SMD-945 is inherited only inside the vector window, and the probe that
+scores a keyword hit outside it is marked as the copy that must be mirrored —
+plus two harness controls that could report the wrong thing, the mixed set's
+appended token now checked against the product's rule, and stale numbers in
+this file and `db/README.md`. Nothing in this pass touched the fusion itself,
+which is the signal to stop reviewing and open the PR.
 
 ## Detached from the fork network
 

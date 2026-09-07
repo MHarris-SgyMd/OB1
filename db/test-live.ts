@@ -936,9 +936,16 @@ console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (mig
   assert(Math.abs(Number(rows[1].similarity) - 0) < 1e-6 && rows[1].matched_needles.join() === "SMD-507", "the orthogonal exact hit is second, similarity 0");
   assert(rows[2].content === "exact" && rows[2].matched_needles.length === 0 && rows[2].literal_only === true, "the vector arm fills after, and the query was literal-only");
 
-  // The direct probe and match_thoughts agree on what a keyword hit's similarity is.
+  // The direct probe and match_thoughts agree on what a keyword hit's
+  // similarity is. With a window of ONE the vector arm returns only "exact",
+  // so the chunked hit's 0.8 can only have come from 017's own probe — the
+  // copy of match_thoughts' best-of-vector-and-chunks rule that the header
+  // marks as the one to mirror (review pass: the first version of this test
+  // used a window of ten, every row was in it, and the probe never ran).
+  const [one] = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"SMD-507"}, 0.5, 1, ${{}}::jsonb)`;
+  assert(one.content === "long, mentions SMD-507 in a chunk", `with a window of one the chunked exact hit still leads (${one.content})`);
   const [mt] = await sql`SELECT similarity FROM match_thoughts(${unit(0)}::vector, -1.0, 10, ${{ kind: "b" }}::jsonb) WHERE content = ${"long, mentions SMD-507 in a chunk"}`;
-  assert(Math.abs(Number(mt.similarity) - Number(rows[0].similarity)) < 1e-9, "…and match_thoughts scores that row identically");
+  assert(Math.abs(Number(mt.similarity) - Number(one.similarity)) < 1e-9, `…scored by the probe to exactly match_thoughts' number (${one.similarity} vs ${mt.similarity})`);
   await sql`DELETE FROM thoughts`;
 }
 

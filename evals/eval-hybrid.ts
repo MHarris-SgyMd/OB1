@@ -179,6 +179,8 @@ async function raw(q: string): Promise<Raw> {
   if (missing.length) {
     // A Postgres array literal, not a bound JS array: Bun binds a one-element
     // array as its bare element, which uuid[] refuses.
+    // The thought's own vector only: this load has no chunk rows, so the
+    // function's best-of-vector-and-chunks probe reduces to this.
     const rows = await sql`SELECT id, 1 - (embedding <=> ${qv}::vector) AS sim FROM thoughts WHERE id = ANY(${`{${missing.join(",")}}`}::uuid[])`;
     for (const r of rows as { id: string; sim: number }[]) sims.set(idOf.get(r.id)!, Number(r.sim));
   }
@@ -273,8 +275,16 @@ for (const q of semantic) {
     .filter((t) => df.get(t)!.has(q.want) && shapeOf(t) !== "word" && !title.includes(t.toLowerCase()) && !wrongText.includes(t.toLowerCase()))
     .filter((t) => { const n = containers(t).length; return n >= 2 && n <= 30; })
     .sort();
-  if (!candidates.length) continue;
-  mixed.push({ set: "mixed", q: `${q.q} ${candidates[0]}`, want: q.want, note: `${candidates[0]} in ${containers(candidates[0]).length} docs; vector's top-1 was ${wrong}` });
+  // The appended token must be one the PRODUCT's rule extracts from the whole
+  // query, or the "mixed" query would be served semantic-only and counted as a
+  // fusion result (review pass). The TS shape rule is only the first pass.
+  let chosen: string | undefined;
+  for (const t of candidates) {
+    const [{ n }] = await sql`SELECT extract_search_needles(${`${q.q} ${t}`}) AS n`;
+    if ((n as string[]).some((x) => x.toLowerCase() === t.toLowerCase())) { chosen = t; break; }
+  }
+  if (!chosen) continue;
+  mixed.push({ set: "mixed", q: `${q.q} ${chosen}`, want: q.want, note: `${chosen} in ${containers(chosen).length} docs; vector's top-1 was ${wrong}` });
 }
 const decoy: Query[] = [];
 // A corpus with no identifier-shaped hapax has nothing to append; eval-keyword
@@ -305,14 +315,17 @@ for (const [q, r] of results) {
     if (ts.length !== got.length || ts.some((id, i) => id !== got[i])) disagreements.push(`${q.set} "${q.q.slice(0, 50)}" [${s.n}/${s.threshold}]: function ${got.slice(0, 5).join(",")}… harness ${ts.slice(0, 5).join(",")}…`);
   }
 }
-const notHapax = identifier.filter((q) => { const r = results.get(q)!; return r.kwOrder.length !== 1 || r.kwOrder[0].length !== 1 || r.kwOrder[0][0] !== q.want; });
+// An identifier the tokenizer chose but the product's rule does not extract is
+// not a control failure — it is scored as the product would serve it, and
+// reported below — so it is set aside before the hapax control looks.
+const notExtracted = identifier.filter((q) => results.get(q)!.needles.length === 0 && results.get(q)!.common.length === 0);
+const notHapax = identifier.filter((q) => { const r = results.get(q)!; return !notExtracted.includes(q) && (r.kwOrder.length !== 1 || r.kwOrder[0].length !== 1 || r.kwOrder[0][0] !== q.want); });
 if (disagreements.length || notHapax.length) {
   if (disagreements.length) console.error(`\n  ${disagreements.length} of ${results.size * SETTINGS.length} calls: the shipped function and the harness's fusion disagree — no table is printed until they say the same thing:\n    ${disagreements.slice(0, 6).join("\n    ")}`);
   if (notHapax.length) console.error(`\n  ${notHapax.length} identifier queries are hapax by the tokenizer but not by the SQL function:\n    ${notHapax.slice(0, 5).map((q) => `"${q.q}" → ${JSON.stringify(results.get(q)!.kwOrder)}`).join("\n    ")}`);
   await sql.close();
   process.exit(1);
 }
-const notExtracted = identifier.filter((q) => results.get(q)!.needles.length === 0 && results.get(q)!.common.length === 0);
 
 // ── Report ──────────────────────────────────────────────────────────────────
 

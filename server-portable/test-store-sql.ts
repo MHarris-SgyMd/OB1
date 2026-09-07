@@ -167,8 +167,8 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   // the literal's row 0.2, distant 0 — and a fifth, also carrying the literal,
   // with no vector at all. Distinct on purpose: match_thoughts breaks a
   // similarity tie in whatever order the plan produced, the fused function
-  // breaks it by created_at, and a test with two orthogonal rows compared the
-  // two conventions instead of the ranking.
+  // breaks it by id, and a test with two orthogonal rows compared the two
+  // conventions instead of the ranking.
   const faint = new Array(EMBEDDING_DIM).fill(0); faint[0] = 0.2; faint[1] = 0.98;
   await store.captureThought({ content: "ticket SMD-507 came up in the distant note", payload: { metadata: { kind: "b" } }, embedding: faint });
   const bare = new SQL({ url: URL_, max: 1 });

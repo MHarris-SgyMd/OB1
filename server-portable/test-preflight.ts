@@ -154,6 +154,24 @@ else {
   assert(/keyword search.*present/s.test(withKw.out), "…and reports it present once applied");
 
   /**
+   * Migration 017, the same shape of check on a bigger surface: search and
+   * search_thoughts call search_thoughts_hybrid unconditionally, so a database
+   * without it serves the two most-used tools broken while the handshake and
+   * every other tool look fine. The PostgREST branch probes by RPC and cannot
+   * be exercised here; this holds the SQL branch's message and remedy.
+   */
+  const noHybrid = new SQL({ url: LIVE, max: 1 });
+  await noHybrid.unsafe("DROP FUNCTION IF EXISTS search_thoughts_hybrid(vector, text, float, int, jsonb)");
+  await noHybrid.close();
+  const missingHy = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(missingHy.code === 1, "a database missing migration 017 does not start");
+  assert(/search_thoughts_hybrid is missing/.test(missingHy.out), "…and names the function search and search_thoughts depend on");
+  assert(/017_search_thoughts_hybrid\.sql/.test(missingHy.out), "…with the migration to apply");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("017") });
+  const withHy = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(/hybrid search.*present/s.test(withHy.out), "…and reports it present once applied");
+
+  /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
    * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
    * event: same signature, no iterative scan. A warning, because every search

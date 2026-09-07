@@ -1334,6 +1334,9 @@ console.log("\n[17] extract_search_needles picks literals and identifiers, not w
     ["v2 of the API", [], "two characters cannot reach the trigram index and are not asked for"],
     ["e.g. the scheduler timeout, i.e. the U.S. one at 3 p.m.", [], "abbreviations are not identifiers: a dotted token needs two characters together somewhere"],
     ["read a.b.cd and x/yz", ["a.b.cd", "x/yz"], "…and one with a two-character run is"],
+    ["the 1st meeting at 3pm took 24h and was 10x slower than the 2nd", [], "ordinals and units are words, not identifiers"],
+    ['what is "the" plan for Q3 and "and so"', [], "a quoted span of stopwords only is not a needle"],
+    ['"the plan" for Q3', ["the plan"], "…while a quoted span with a content word is"],
     ["plain english words only here", [], "ordinary words are left to the vector arm"],
     ["SMD-944 and smd-944 again SMD-944", ["SMD-944"], "de-duplicated case-insensitively, first spelling kept"],
     ["a1x b2x c3x d4x e5x f6x g7x h8x i9x j0x", ["a1x", "b2x", "c3x", "d4x", "e5x", "f6x", "g7x", "h8x"], "capped at eight, in order"],
@@ -1429,6 +1432,24 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
   assert(onlyCommon.every((r) => r.literal_only === true) && onlyCommon[0].content === "exact match about the scheduler",
          "a query that is only a common literal is literal-only, and falls back to similarity order");
   await db.exec(`DELETE FROM thoughts WHERE content LIKE 'filler %'`);
+
+  // The probe that decides "common" before paging escapes its pattern as 012
+  // does: 101 rows carry TOKEN-77, which only an unescaped '%TOKEN_77%' would
+  // match, and one row carries TOKEN_77 itself. The needle must be used, with a
+  // count of one, not dropped as common.
+  for (let i = 0; i < 101; i++) {
+    await db.query(`SELECT upsert_thought($1, '{"metadata":{"kind":"c"}}'::jsonb, $2::vector)`, [`decoy ${i} mentions TOKEN-77 in passing`, unit(2)]);
+  }
+  await db.query(`SELECT upsert_thought('the real TOKEN_77 row', '{"metadata":{"kind":"c"}}'::jsonb, $1::vector)`, [unit(2)]);
+  const escaped = await hybrid("the scheduler and TOKEN_77", 0.0);
+  assert(escaped.every((r) => r.needles.join() === "TOKEN_77" && r.needle_counts.join() === "1" && r.common_needles.length === 0),
+         `the probe's escaped pattern ignores 101 decoys and finds the one real row (${JSON.stringify(escaped[0]?.needles)} ${JSON.stringify(escaped[0]?.needle_counts)} ${JSON.stringify(escaped[0]?.common_needles)})`);
+  // Its own vector is orthogonal and 101 decoys tie it there, so it is outside
+  // the vector window: keyword-only, tied with the vector's top row on score,
+  // second on the similarity tiebreak — present, and the only row matched.
+  assert(escaped.filter((r) => r.matched_needles.length).map((r) => r.content).join() === "the real TOKEN_77 row" && escaped.slice(0, 2).some((r) => r.content === "the real TOKEN_77 row"),
+         `…and that row is the one exact hit, within the first two (${contents(escaped).slice(0, 3).join(" | ")})`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE 'decoy %' OR content = 'the real TOKEN_77 row'`);
 
   // The filter reaches both arms.
   const filtered = await hybrid("SMD-507", 0.0, 10, '{"kind":"a"}');

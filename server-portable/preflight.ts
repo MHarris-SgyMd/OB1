@@ -304,9 +304,30 @@ if (configFailed) {
      * first version of this check lived only on the SQL branch (review pass).
      */
     if (built.kind !== "sql") {
+      const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
       if (rowCount === null) {
+        add("keyword search", "skip", "not probed — the schema check above failed first");
         add("hybrid search", "skip", "not probed — the schema check above failed first");
       } else {
+        // 012 first, because 017 calls it: a missing search_thoughts_keyword
+        // surfaces inside search_thoughts_hybrid with the same "does not
+        // exist" wording, and a check that only probed 017 would send the
+        // operator to re-apply the wrong migration (review pass).
+        let keywordOk = false;
+        try {
+          await built.keywordThoughts({ query: "ob1-preflight-probe-zylotrope", limit: 1, offset: 0, filter: {} });
+          keywordOk = true;
+          add("keyword search", "ok", "search_thoughts_keyword answers over PostgREST");
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (missing(msg)) {
+            add("keyword search", "fail",
+                "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it, and every search through search_thoughts_hybrid, would fail",
+                "Apply db/migrations/012_search_thoughts_keyword.sql against the project's direct connection (server-portable/README.md §4).");
+          } else {
+            add("keyword search", "skip", `could not probe search_thoughts_keyword over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
+        }
         try {
           const probe = new Array(embDim).fill(0);
           probe[0] = 1;
@@ -314,7 +335,11 @@ if (configFailed) {
           add("hybrid search", "ok", "search_thoughts_hybrid answers over PostgREST");
         } catch (e) {
           const msg = (e as Error).message;
-          if (/could not find the function|does not exist/i.test(msg)) {
+          if (missing(msg) && (/search_thoughts_keyword/.test(msg) || !keywordOk)) {
+            add("hybrid search", "fail",
+                "search_thoughts_hybrid cannot run because search_thoughts_keyword is missing — every semantic search would fail",
+                "Apply db/migrations/012_search_thoughts_keyword.sql first; 017 is present or will run once it is.");
+          } else if (missing(msg)) {
             add("hybrid search", "fail",
                 "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
                 "Apply db/migrations/017_search_thoughts_hybrid.sql against the project's direct connection (server-portable/README.md §4).");
