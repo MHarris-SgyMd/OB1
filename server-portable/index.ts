@@ -941,7 +941,9 @@ function buildServer(principal: Principal): McpServer {
         // there, since capture would have merged them.
         const pair = result.duplicateOf
           ? `\nNote: this thought duplicates ${result.duplicateOf} — both were captured before deduplication existed, so the edit was kept and no fingerprint was written. Delete one of them if they should be one thought.`
-          : "";
+          : result.fingerprintHeldBy
+            ? `\nNote: ${result.fingerprintHeldBy} carries a stale fingerprint for this text under different content, so this thought could not take its own. Re-saving that thought's text corrects it.`
+            : "";
         return {
           content: [{
             type: "text" as const,

@@ -1586,6 +1586,25 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(r9.ok === true && r9.duplicate_of === twin1, `a row with a stale fingerprint re-saved as its own text is accepted and named a duplicate (${JSON.stringify(r9)})`);
   assert((await rowOf(stale)).fp === null, "…and the stale fingerprint is cleared rather than kept under text it does not describe");
 
+  // The stale key on the OTHER side: a row whose column still says hash('foo')
+  // while its text is 'bar'. Re-saving a legacy 'foo' row must not call that
+  // row its twin — the texts differ — but cannot take the key either.
+  const holder = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('bar', content_fingerprint_of('foo'), $1::vector) RETURNING id`,
+    [unit(0)])).rows[0].id;
+  const foo = await legacy("foo");
+  const r10 = await update(foo, "foo", null, unit(5), null) as { ok: boolean; duplicate_of?: string; fingerprint_held_by?: string };
+  assert(r10.ok === true && r10.duplicate_of === undefined, `a legacy row whose key another row holds under OTHER text is not told it has a twin (${JSON.stringify(r10)})`);
+  assert(r10.fingerprint_held_by === holder, `…but which row holds the key under a stale fingerprint (${r10.fingerprint_held_by})`);
+  assert((await rowOf(foo)).fp === null && (await rowOf(foo)).axis === 5, "…its fingerprint stays NULL and its vector is replaced");
+  const r11 = await update(other, "foo", null, unit(6), null);
+  assert(r11.ok === false && r11.error === "DUPLICATE_CONTENT", `editing a third row INTO a key a stale holder occupies is still refused — the key is taken (${JSON.stringify(r11)})`);
+  const r12 = await update(holder, "bar", null, unit(6), null) as { ok: boolean; duplicate_of?: string; fingerprint_held_by?: string };
+  assert(r12.ok === true && r12.duplicate_of === undefined && r12.fingerprint_held_by === undefined && (await rowOf(holder)).fp === (await fpOf("bar")),
+         "re-saving the holder's own text corrects its stale key");
+  const r13 = await update(foo, "foo", null, unit(7), null) as { ok: boolean; fingerprint_held_by?: string };
+  assert(r13.ok === true && r13.fingerprint_held_by === undefined && (await rowOf(foo)).fp === (await fpOf("foo")), "…after which the legacy row takes its fingerprint");
+
   // The carry-forward, read out of pg_proc: one function, and every earlier
   // migration's piece still in its body by name.
   const proc = await db.query<{ prosrc: string }>(
@@ -1597,6 +1616,7 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(/date_trunc\('milliseconds'/.test(src) && /p_if_unchanged_since IS NULL\s+OR/.test(src), "…009's millisecond-truncated guard as a predicate in the UPDATE");
   assert(/elem->>'context'/.test(src), "…013's context in the chunk insert");
   assert(/content_fingerprint_of\(/.test(src) && !/regexp_replace/.test(src), "…016's fingerprint function rather than a third inline copy of the rule");
+  assert(/FROM thoughts WHERE id = p_id FOR UPDATE/.test(src), "…the row read FOR UPDATE, so \"unchanged\" is decided against a row that cannot change under the call");
   assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
   assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
   await db.exec(`DELETE FROM thoughts`);

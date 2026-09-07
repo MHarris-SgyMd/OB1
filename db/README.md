@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `340 assertions: 340 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `347 assertions: 347 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -573,7 +573,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 340 assertions, PGlite, no container
+bun test-schema.ts                    # 347 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 164 assertions, real server, throwaway container
 ```
 
@@ -635,7 +635,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 340 properties, including:
+asserts 347 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

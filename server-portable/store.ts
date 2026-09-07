@@ -161,7 +161,7 @@ export type MutationResult =
  * before migration 003's fingerprint. The edit was kept and this row's
  * fingerprint left NULL; the caller is told so the pair can be resolved.
  */
-export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: string };
+export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string };
 
 /**
  * Both SQL functions return the same {ok, id|error} envelope; this turns it into
@@ -176,6 +176,9 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
       id: String(r.id),
       updatedAt: r.updated_at ? String(r.updated_at) : undefined,
       duplicateOf: r.duplicate_of ? String(r.duplicate_of) : undefined,
+      // Another row holds this text's key under different text — a stale
+      // fingerprint — so this row could not take the fingerprint it should have.
+      fingerprintHeldBy: r.fingerprint_held_by ? String(r.fingerprint_held_by) : undefined,
     };
   }
   return {

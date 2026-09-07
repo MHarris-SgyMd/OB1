@@ -328,17 +328,22 @@ console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, th
   assert(aResult?.ok === true && aResult.duplicate_of === undefined, `A re-embeds the first twin inside an open transaction (${aError || JSON.stringify(aResult)})`);
 
   let bError = "";
+  let bPid = -1;
   const bDone = connB.begin(async (tx: SQL) => {
     await tx`SET LOCAL statement_timeout = '5s'`;
+    bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
     return ((await tx`SELECT update_thought(${b.id}::uuid, 'legacy   twin', NULL, ${unit(2)}::vector) AS r`) as { r: R }[])[0].r;
   }).catch((e: Error) => { bError = e.message; return undefined; });
 
+  // B's own backend, not "any advisory waiter on the server": the suite
+  // accepts any DATABASE_URL, and a shared server may have others.
   let waitingOnAdvisory = 0;
   for (let i = 0; i < 250 && waitingOnAdvisory === 0; i++) {
     await Bun.sleep(20);
-    waitingOnAdvisory = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)[0].n);
+    if (bPid < 0) continue;
+    waitingOnAdvisory = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${bPid}`)[0].n);
   }
-  assert(waitingOnAdvisory === 1, `B waits on the advisory lock, not on the unique index (${waitingOnAdvisory} advisory waiter)`);
+  assert(waitingOnAdvisory === 1, `B's backend waits on the advisory lock, not on the unique index (${waitingOnAdvisory} advisory waiter for pid ${bPid})`);
 
   releaseA();
   await aDone;

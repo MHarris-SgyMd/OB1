@@ -75,8 +75,9 @@
  * violated, and names the other row in its result. A run requires 018 (the
  * read-only --status and --dry-run do not), says per row when it found a pair,
  * and prints every group of thoughts sharing one normalised text at the end
- * and under --status — one query over the corpus, so the list is the same
- * whenever it is asked for. Whether a pair should be one thought is the
+ * and under --status — one query over the corpus hashing every row's text, so
+ * the list is the same whenever it is asked for (it needs 016's function and
+ * says so on an older schema). Whether a pair should be one thought is the
  * operator's call; nothing is written to the claim row about it. 018's lock
  * serialises edits only: a capture of the same text committing while a worker
  * fingerprints a legacy row still raises the unique violation, which lands as
@@ -245,16 +246,22 @@ function printCounts(c: Counts, label: string): void {
 /**
  * Groups of thoughts that normalise to one text: pairs from before migration
  * 003's fingerprint, or a load that bypassed upsert_thought. One query over
- * the corpus — the hash is computed only for rows whose fingerprint column is
- * NULL — so the list is the same before, during and after a pass. Prints
- * nothing when there are none.
+ * the corpus, hashing every row's TEXT rather than trusting the column (a raw
+ * update around update_thought leaves a stale key), so the list is the same
+ * before, during and after a pass. Prints nothing when there are none. Needs
+ * 016's content_fingerprint_of; on an older schema it says so and returns.
  */
 async function printDuplicateGroups(limit = 10): Promise<number> {
+  const [{ present }] = await sql`SELECT to_regprocedure('content_fingerprint_of(text)') IS NOT NULL AS present`;
+  if (!present) {
+    console.error("  (the duplicate report needs migration 016's content_fingerprint_of — not applied here)");
+    return 0;
+  }
   const rows = (await sql`
     WITH g AS (
       SELECT array_agg(id ORDER BY created_at, id)::text[] AS ids, min(created_at) AS first
       FROM thoughts
-      GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
+      GROUP BY content_fingerprint_of(content)
       HAVING count(*) > 1)
     SELECT (SELECT count(*) FROM g)::int AS total, ids FROM g ORDER BY first LIMIT ${limit}`) as { total: number; ids: string[] }[];
   if (!rows.length) return 0;
@@ -428,8 +435,15 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
         ${current.updated_at}::timestamptz,
         ${actor}::jsonb
       ) AS r`;
-    const result = r.r as { ok: boolean; error?: string; duplicate_of?: string };
+    const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {
+      if (result.fingerprint_held_by) {
+        // Another row carries this text's key under DIFFERENT text — a stale
+        // fingerprint from a raw update around update_thought — so this row
+        // could not take the fingerprint it should have. Re-embedded; the key
+        // is the other row's problem, and re-saving its own text would fix it.
+        console.error(`  ${current.id}: could not take its fingerprint — ${result.fingerprint_held_by} holds that key under other text (a stale fingerprint; re-saving that thought's own text corrects it)`);
+      }
       // The write is done in every case below: whatever was embedded is better
       // than the vector the row had, and under --switch-model the old one is
       // from another model. What differs is whether the claim may go terminal.

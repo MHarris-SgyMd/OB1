@@ -2293,10 +2293,12 @@ setting and the chunk replacement out of `update_thought` — a value defined
 twice, the defect this fork keeps removing, with every stored vector as the
 value. Instead `update_thought` is redefined with one rule: when the new text
 normalises to what the row already holds, the edit cannot create a duplicate
-that was not already there, so it is not refused. If another row already
-carries that fingerprint, this row's is left as it is — necessarily NULL, since
-two fingerprinted rows cannot collide — so the partial index is never violated,
-and the result names the other row in `duplicate_of`. Otherwise the fingerprint
+that was not already there, so it is not refused. If another row already holds
+that key, this row's fingerprint is set to NULL — whatever a raw update around
+the function may have left there — so the partial index is never violated, and
+the result names the holder: `duplicate_of` when its text is the same, a twin;
+`fingerprint_held_by` when its key is stale and this row cannot take the
+fingerprint it should have. Otherwise the fingerprint
 is written: the backfill 003 never had, one row at a time, now stated rather
 than incidental. Editing a thought *into* another thought's text is refused
 exactly as before. The hash rule comes from 016's `content_fingerprint_of`
@@ -2328,7 +2330,7 @@ different texts while another does the reverse, which no caller does.
 migration otherwise — a pass against 013's body fails every legacy twin for
 ever), says per row when it found a pair, and prints every group of thoughts
 sharing one normalised text at the end of a run and under `--status`: one query
-over the corpus, hashing only the rows whose fingerprint column is NULL, so the
+over the corpus, hashing every row's text rather than trusting the column, so the
 list is the same before, during and after a pass. Both rows are re-embedded;
 only one carries the fingerprint, so a later capture of that text merges into
 it and not the other. Whether they should be one thought is the operator's
@@ -2364,6 +2366,34 @@ and `db/README.md`. To a ticket: the one-shot fingerprint backfill 003 never
 had (SMD-1042), feasible now that `content_fingerprint_of` exists and the
 right fix for every legacy singleton a pass never visits, but a data migration
 with its own questions about a full-table hash inside one transaction.
+
+**A second pass, triaged: eight fixes, one ticket, one declined.** Two were
+behaviour and both were about trusting a read. "Unchanged" was decided from a
+row read without a lock, so a caller passing no `if_unchanged_since` could
+read X, have another edit commit Y, and write X back over it as an unchanged
+edit — the interleaving 013 refused; the row is read `FOR UPDATE` now, before
+the advisory lock, which also puts the two locks in one order and removes the
+deadlock a transaction holding a row could have met from one ordinary
+concurrent edit. And the lookup trusted the other row's stored hash: a row
+whose column still said hash(X) while its text was something else was reported
+as the twin, and the operator sent to delete the wrong row. The holder's text is
+hashed again; `duplicate_of` means the same text, and a stale holder is
+reported as `fingerprint_held_by` instead, with [19] planting both sides of the
+stale case. The rest: the pairs report groups by the hash of every row's text
+rather than the column, so a stale row is bucketed by what it says and the list
+really is the same across a pass; `--status` on a brain at 015 crashed on the
+016 function the report needs and now says so in one line; [6b] counts advisory
+waiters for B's own backend rather than the whole server; the lock, the second
+hash and the lookup are skipped when the locked row already owns the key, which
+the unique index makes safe and which is every fingerprinted row a pass
+visits; and this section's design paragraph, which still said "left as it is".
+To a ticket: taking the same lock in `upsert_thought` (SMD-1043), which would
+make "writes of one fingerprint are serialised" simply true and delete the
+disclaimers, but redefines two capture overloads on the hot path. Declined:
+not writing the fingerprint on an unchanged edit at all — it would leave every
+legacy singleton unfingerprinted until SMD-1042 ships, and a recapture would
+create a second row where 013 already merged; the header now states that
+arrival order is the ownership rule until SMD-1042 replaces it.
 
 ## Detached from the fork network
 
