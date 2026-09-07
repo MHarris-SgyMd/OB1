@@ -267,7 +267,11 @@ Migration 016, rewritten from `schemas/entity-extraction`, and
 `extract-entities.ts`, its worker. Every thought was opaque text plus the
 `metadata` the capture model attached; nothing recorded that two thoughts
 mention the same person or that one system depends on another. This adds that
-layer, and it is the prerequisite for SMD-948 (GraphRAG).
+layer. It was built as the prerequisite for SMD-948 (GraphRAG), which was then
+measured and not built — `evals/README.md` has the numbers; the graph lost to
+plain vector search on every question type — so what this layer is for is the
+structured questions, which thoughts mention X and what X connects to, not
+retrieval.
 
 **The tables.** `ob1_entities` is one row per (type, normalised name) with the
 first form seen as `name` and the other forms in `aliases`. `thought_entities`
@@ -333,9 +337,10 @@ someone searches for. **Not suitable for regulated or patient-adjacent
 content** for that reason. `--dry-run` says how many thoughts a run would send
 before it sends any; `--limit` lets you look at twenty before committing to
 thousands. Measured on the fork's 441-issue corpus with `qwen2.5:7b` on local
-Ollama: 82 minutes at two workers, 113 at one (two are 37% faster; Ollama
-serves both at once), and eleven of the longest issues exceed a 300 s per-call
-timeout on a 7B model. Two hours for a corpus that size, then per capture.
+Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are worth
+about 5% like for like, since a local Ollama mostly serialises — and eleven to
+twenty-one of the longest issues exceed the per-call timeout on a 7B model,
+varying by pass. Two hours for a corpus that size, then per capture.
 
 **Identity.** The worker authenticates like any client: `OB1_WORKER_KEY` is a
 raw access key whose hash is in `MCP_ACCESS_KEYS`, resolved through

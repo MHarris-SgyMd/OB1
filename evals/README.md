@@ -1089,14 +1089,33 @@ Ollama:
 | ---: | ---: | ---: | ---: | ---: |
 | 2 | 120 s | 4,941 s | 11.2 s | 21 |
 | 1 | 300 s | 6,793 s | 15.4 s | 11 |
+| 2 | 300 s | 6,480 s | 14.7 s | 19 |
 
-Two workers are 37% faster than one, so Ollama serves both calls at once here;
-the timeouts are long documents that genuinely take a 7B model minutes. Budget
-two hours for a corpus this size and a per-capture cost after.
+The third pass (2026-09-06, made after the loader fix described under GraphRAG
+so its dump's fingerprints verify) is the like-for-like comparison the first
+two were not: same 300 s timeout as the one-worker pass, and two workers were
+4.6% faster, not the 37% the first pair suggested. That 37% was mostly the
+timeout budget — the first pass gave up on a long document at 120 s, the
+second waited 300 s — so the claim in FORK.md change 30 that Ollama serves two
+calls at once is withdrawn there too: per completed document the two-worker
+passes spent about twice the worker-seconds of the one-worker pass, which is
+what a serialising server looks like. Two workers remain the default because
+they cost nothing and recover a little; do not expect them to halve the wall
+clock. The timeouts are long documents that genuinely take a 7B model minutes,
+and which ones time out varies between passes (21, 11 and 19). Budget two
+hours for a corpus this size and a per-capture cost after, and expect the
+graph to vary by a couple of percent between passes: the third gave 2,004
+entities, 2,830 mentions and 1,958 edges with 1,739 singletons, against the
+second's figures below.
 
 From the second run — and reproduced exactly by `--corpus --replay` of its
 dumped answers in 0.8 s, which is how a rule change in migration 016 gets
-measured from now on:
+measured from now on. A replay applies the same rules in both harnesses: each
+dump line carries the fingerprint of the text the model saw and, since the
+third pass, the extraction key it ran under; a line whose text has changed, or
+that carries no fingerprint, is refused unless `--allow-stale-dump` is passed,
+and a dump made under a different key is refused outright, since it is another
+model's graph:
 
 | | |
 | --- | ---: |
@@ -1397,6 +1416,218 @@ by 0.003 MRR across every arm, which is chunked documents changing rank around
 them and not a finding. Anyone capturing transcripts or imported documents rather
 than issue threads has a different corpus and should re-run this before trusting
 any row of it.
+
+## GraphRAG, measured against the vector baseline — and not built
+
+`eval-graphrag.ts`, run as `bun run graphrag` (SMD-948). Needs Ollama, the
+441-issue corpus at `/tmp/linear-corpus-full.json`, the answers file that
+`eval-entities.ts --corpus` writes beside it (`/tmp/entity-answers-<model>.jsonl`,
+or `OB1_EVAL_ANSWERS`), and a throwaway Postgres. The entity graph is replayed
+from those answers through `record_thought_entities` — the pass that wrote the
+dump used below gave 2,004 entities, 2,830 mentions and 1,958 edges, and the
+replay reproduces them in about a second — and the document vectors are cached in `/tmp` keyed by model and
+text, so a run is about three minutes, nearly all of it the one extraction
+call per question that finds the question's entities. The three things the
+replay depends on — which documents get a thought, the id each is minted, and
+where the dump lives — are one module, `linear-corpus.ts`, imported by both
+harnesses.
+
+The ticket's first rule was that the question set exists before the graph is
+judged, so `graphrag-questions.json` came first: 27 questions over the corpus
+whose answer needs two or more documents, labelled by hand from the issue
+bodies. Seventeen are **multi-hop** (a backend change and the client change
+that consumed it; a security problem and the two fixes), seven are
+**aggregation** (every Sentry issue of one error class; everything about the
+Siggy Score), three are **corpus-level** (the six `Decision:` records; the
+eight issues that promoted archived pages). Eighty-nine expected documents in
+all, each checked to exist in the load before anything is scored. The metric
+is retrieval — did the expected documents come back in the top K — because
+any answering step works from what was retrieved, and an answer generated over
+the wrong documents is a confident fabrication.
+
+Five arms over the same rows:
+
+- **vector** — `match_thoughts`, as the product ships it.
+- **graph** — "local" GraphRAG, written by hand in SQL rather than through a
+  framework. The question's entities are found three ways, and the seeds
+  column of the report marks which: the question goes through the SMD-947
+  extraction prompt and the names it returns are matched to `ob1_entities` by
+  the product's resolution rule (`normalize_entity_name`, `merged_from`) *and*
+  by trigram similarity ≥ 0.55; then any entity whose normalised name appears
+  as whole words in the normalised question is added (marked †). That is more
+  generous to the graph than the product's rule alone — deliberately, so the
+  graph's loss cannot be blamed on a strict matcher. Seeds are weighted by
+  inverse document frequency; an entity mentioned by more than a tenth of the
+  corpus is dropped as a seed and as a hop target ("backend" and "client"
+  seeded everything on the first attempt, and came back through the hop on
+  the second). Expansion is one hop over `ob1_entity_edges` at 0.3 of the
+  seed's weight; thoughts are ranked by the summed weight of the entities they
+  mention, vector distance breaking ties.
+- **hybrid** — reciprocal-rank fusion (k = 60) of the two lists above, the
+  form most "GraphRAG improves retrieval" claims actually take.
+- **global** — "global" GraphRAG: label propagation over co-mention weights
+  clusters the 265 entities with two or more mentions into communities, each
+  community of three or more entities gets a generated summary (`qwen2.5:7b`,
+  the entity names and up to eight issue titles in a fixed order), the question
+  is matched to the summaries by cosine, and the thoughts of the two best
+  communities are ranked by vector distance.
+- **keyword** — `search_thoughts_keyword` (migration 012) with the needle a
+  person would type: `Decision:`, `[Retro]`, `already been declared`. Only the
+  ten aggregation and corpus questions carry one; "every issue of this kind"
+  is the question a graph is supposed to answer, and the tool already shipped
+  should be beaten before a graph is built for it.
+
+Every model call the graph arms depend on is counted when it fails and the
+count is printed above the table, so an arm that never reached the model
+cannot read as an arm that lost. Every arm returns twenty rows and is scored
+on the first K.
+
+### Results, 2026-09-06, `qwen3-embedding:4b@1024` and `qwen2.5:7b`
+
+Recall@K is the share of the expected documents in the top K, complete@K the
+questions where all of them were, MRR@K the reciprocal rank of the first
+expected document within the top K (zero if none). K = 10, on the dump from
+the 2026-09-06 extraction pass:
+
+| arm | multi-hop R@10 | complete | aggregation R@10 | complete | corpus R@10 | complete | all R@10 | complete | MRR@10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vector | 1.00 | 17/17 | 1.00 | 7/7 | 0.81 | 1/3 | **0.98** | **25/27** | 0.98 |
+| graph | 0.53 | 5/17 | 0.55 | 2/7 | 0.31 | 0/3 | 0.51 | 7/27 | 0.43 |
+| hybrid | 0.97 | 16/17 | 0.87 | 4/7 | 0.76 | 1/3 | 0.92 | 21/27 | 0.78 |
+| global | 0.57 | 8/17 | 0.50 | 3/7 | 0.10 | 0/3 | 0.50 | 11/27 | 0.64 |
+| keyword | — | — | 0.91 | 6/7 | 0.83 | 2/3 | 0.89 | 8/10 | 0.93 |
+
+K = 5, the size a client would more plausibly read:
+
+| arm | multi-hop R@5 | complete | aggregation R@5 | complete | corpus R@5 | complete | all R@5 | complete | MRR@5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| vector | 1.00 | 17/17 | 0.88 | 3/7 | 0.71 | 1/3 | **0.94** | **21/27** | 0.98 |
+| graph | 0.40 | 3/17 | 0.45 | 1/7 | 0.31 | 0/3 | 0.40 | 4/27 | 0.41 |
+| hybrid | 0.73 | 7/17 | 0.70 | 2/7 | 0.58 | 1/3 | 0.70 | 10/27 | 0.77 |
+| global | 0.57 | 8/17 | 0.48 | 2/7 | 0.26 | 0/3 | 0.51 | 10/27 | 0.68 |
+| keyword | — | — | 0.81 | 2/7 | 0.68 | 1/3 | 0.77 | 3/10 | 0.93 |
+
+Five of the aggregation and corpus questions expect six or more documents, so
+no arm can complete them at K = 5; the recall column is the one to read there.
+
+Three expected documents have no entity mentions at all — SMD-738 and SMD-739
+in `corpus-decisions`, SMD-100 in `corpus-retros` — because their extraction
+timed out in the pass that made the dump. The graph and global arms cannot
+return a thought with no mentions, so their ceilings on those two questions
+are 0.67 and 0.75 whatever the ranking; the run prints this above the table.
+It lowers the corpus-level rows for those arms and none of the others, and it
+is itself a cost of the method: a document the extractor gave up on is
+invisible to graph retrieval until someone re-runs it.
+
+**The graph never beats vector.** Local graph retrieval loses to vector on 20
+of 27 questions at K = 10 and wins on none; on the other seven they tie at 1.00.
+Fusing the graph list in — the hybrid arm — is worse than vector alone on five
+questions and better on none: the graph's contribution is noise that displaces
+correct rows, and at K = 5 it displaces them on fourteen. Global mode, the
+expensive one, reaches half the expected documents and completes eleven
+questions; on the corpus-level questions it finds almost nothing. The
+two-hour extraction pass, the summaries and the seed call per question buy a
+retrieval that is at best equal to the baseline the product already has.
+
+**The question set was too easy for vector, and that is the finding.** Vector
+search completes 25 of 27 questions at K = 10, including every multi-hop one.
+Tracker documents about the same feature share vocabulary — a backend issue
+and the client issue consuming it name the same endpoint, the same field, the
+same feature — so the documents a multi-hop question combines are already near
+neighbours of the question, and of each other. GraphRAG's case rests on
+answers whose documents do *not* share vocabulary and are joined only by an
+entity; on this corpus those questions were hard to write, and the seventeen
+written here are the ones a person actually asked. The ticket said a measured
+"not worth it at our scale" would be a successful outcome; this is that.
+
+**Where vector does miss, keyword mostly has it.** Vector's only misses at
+K = 10 are corpus-level: two of the six `Decision:` records and two of the
+eight page promotions. Both series are named by a literal string. The keyword
+tool returns the `Decision:` set complete, and scores 0.50 on the promotions —
+the same standard as every other arm: the other four `Promote …` issues are in
+its twenty rows but rank below other documents containing the word, which is a
+ranking miss like any other. The one aggregation question keyword loses,
+`pnpm` at 0.40, is one where the needle is more common than the answer set.
+So the headroom that exists is partly closed by a tool that ships, and what
+remains is a ranking problem inside that tool, not a case for a graph.
+
+**Why the graph loses, specifically.** Four things, each visible in the
+per-question table the run prints:
+
+- *Extraction is not consistent between the two sides.* The same 7B prompt
+  reads the question and read the documents, but a question says "the Bridge
+  insurance form" and the document said "Bridge" and "InsuranceCard", so the
+  seeds miss the entities the documents carry. The vector arm needs no such
+  agreement. The literal whole-word match (†) exists to paper over this and
+  still leaves `mh-bridge-prefill` at 0.50.
+- *The graph is sparse.* 1,958 edges over 441 documents, 1,739 of 2,004
+  entities mentioned once, so a one-hop expansion from most seeds reaches
+  nothing and a two-hop one would reach everything through "backend".
+- *Common seeds dominate unless removed, and removing them removes the
+  signal.* Weighting every seed 1.0 put "backend", "client" and "Expo" first
+  on most questions; IDF weighting with a document-frequency cap on seeds and
+  hop targets fixed the ranking and left recall within a few points of where
+  it was (0.50 before any of the fairness fixes, 0.51 after all of them).
+- *Communities depend on the node order, and the harness had to learn that
+  twice.* Label propagation over the same graph gave 18, 6 and 17 communities
+  depending only on the order the nodes were visited (entity ids regenerate on
+  every replay); the 6-community run had one community of 201 entities that
+  "matched" 22 of 27 questions by holding nearly everything. Ordering by
+  display name was the first fix and is not enough, because the same name
+  exists under several entity types; the run now orders by the table's unique
+  key and gives the same partition every time for a given graph — 17
+  communities (largest 92, median 7) on the first dump, 18 (largest 80, median
+  6) on the one scored above.
+
+**A claim this write-up used to make, retracted.** An earlier version blamed
+the global arm's run-to-run spread (0.25 to 0.33) on Ollama being
+non-deterministic at temperature 0. Most of that spread was the harness's
+own: the eight titles in each summary prompt were selected with no `ORDER BY`.
+With the prompt pinned (the run prints a hash per prompt and per summary),
+three runs produced byte-identical prompts, and the summaries were identical
+in two of them; the third differed in one summary of seventeen, which moved
+one question between complete and not. So Ollama does vary at temperature 0,
+by about one summary in seventeen, and the global arm's range above is that
+residual. On that first dump the pinned global arm also scored much higher
+than the unpinned one had — 0.57 against 0.25–0.33 — which says the unordered
+titles were not just noisy but worse, and is a reminder that a summary is only
+as good as what it was asked to summarise. On the fresh dump scored above it
+is 0.50: a different extraction gives different communities, and the global
+arm's number moves with them while vector's does not.
+
+**Cost, for the record.** Building the graph is the SMD-947 pass, 82 minutes
+for 441 issues the first time and 108 minutes the third, both at two workers on
+the same machine, then one call per new thought; this harness replays it and does not
+re-measure it. Community summaries were 18 calls, about 20 s of model time
+and 5,300 tokens, and every community whose
+membership changes needs its summary regenerated — on a live corpus that is
+most of them, most days. Each graph query adds one extraction call, 3.0 s on
+average here, on top of the embedding call every arm pays. None of it is
+prohibitive; all of it buys nothing measurable.
+
+**What the harness verifies about the dump.** Each dump line carries the
+fingerprint of the row as the entity eval loaded it, and the replay passes it
+to `record_thought_entities`, which refuses a line whose text has since changed
+as stale and writes nothing — so an extraction of other text cannot be scored
+as if it were of this text; the run stops unless `--allow-stale-dump` says the
+operator knows. For the dump scored above all 422 lines verify. The first dump
+this spike used would not have: it was written before the loader was corrected
+to use `content_fingerprint_of()` (the inline copy of the rule had cooked its
+`\s+` to `s+` inside a template literal), so the corpus was re-extracted
+rather than argue that the mismatch was harmless. The replay also reports
+expected documents with no mentions, above.
+
+**Decision: do not build GraphRAG at this scale.** Not as a retrieval mode, not
+as a fusion step. The entity layer (migration 016) stays, because it answers a
+different question — "what does X connect to", filters by entity, the UI a
+graph makes possible — and because a corpus of a different shape (people and
+projects across many sources, where the documents that share an entity do not
+share words) could make this measurement come out differently. SMD-1039 sets
+that up — PubMed abstracts with BioASQ's questions, so the labels are not ours —
+and `bun run graphrag` against that question set is the test;
+the arms and the scoring are written, and the one-line rule for reading the
+result is the same: the graph has to beat `match_thoughts` on questions
+someone actually asked.
 
 ## Filtered search: what a metadata filter used to cost
 

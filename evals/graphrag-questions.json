@@ -1,0 +1,293 @@
+{
+  "about": "Questions over the 441-issue Linear corpus (build-linear-corpus.ts; the corpus itself stays in /tmp) whose answer needs two or more documents. Labelled by hand from the issue texts on 2026-09-06 by one annotator (the author); each expected set was checked against the issue bodies, not just the titles. Types: multi-hop (the answer combines specific documents), aggregation (every document of one kind), corpus (a question about the shape of the corpus). Scored on retrieval — did the expected documents come back in the top ten — because that is what any answering step would have to work from. Aggregation and corpus questions also carry `keyword`: the needle a person would type into search_thoughts_keyword (SMD-944) for that question, so the keyword tool the product already ships is compared too; multi-hop questions have no single needle and are not scored on that arm.",
+  "questions": [
+    {
+      "id": "mh-bridge-prefill",
+      "type": "multi-hop",
+      "question": "Which backend change exposes the patient details already collected so the Bridge insurance form does not start blank, and which client change consumes them?",
+      "expected": [
+        "SMD-621",
+        "SMD-637"
+      ]
+    },
+    {
+      "id": "mh-siggy-score-calibration",
+      "type": "multi-hop",
+      "question": "What did the backend change in the Siggy Score response for V1 calibration, and what did the Expo client have to update in response?",
+      "expected": [
+        "SMD-257",
+        "SMD-403"
+      ]
+    },
+    {
+      "id": "mh-checkin-datapoints",
+      "type": "multi-hop",
+      "question": "Which datapoints does the structured daily check-in capture for the Siggy Score, how does the Expo client collect them, and how are members reminded to enter them?",
+      "expected": [
+        "SMD-256",
+        "SMD-376",
+        "SMD-398"
+      ]
+    },
+    {
+      "id": "mh-django-admin-auth",
+      "type": "multi-hop",
+      "question": "Django Admin was first exposed with which authorization model, and what replaced its Google Directory dependency?",
+      "expected": [
+        "SMD-541",
+        "SMD-547"
+      ]
+    },
+    {
+      "id": "mh-tailscale-policy-tests",
+      "type": "multi-hop",
+      "question": "Which Tailscale policy test problems were rejecting the Terraform apply of the organization policy?",
+      "expected": [
+        "SMD-647",
+        "SMD-648"
+      ]
+    },
+    {
+      "id": "mh-healthie-clinician-reply",
+      "type": "multi-hop",
+      "question": "When a Healthie clinician replies through the Chat Bridge, what notification does the backend send and how does the patient app route it?",
+      "expected": [
+        "SMD-507",
+        "SMD-506"
+      ]
+    },
+    {
+      "id": "mh-toolchain-pins",
+      "type": "multi-hop",
+      "question": "Where are the pnpm and React Doctor versions pinned now in the client and platform repositories, and how do they get updated without hand edits?",
+      "expected": [
+        "SMD-600",
+        "SMD-602",
+        "SMD-627"
+      ]
+    },
+    {
+      "id": "mh-medication-course-lifecycle",
+      "type": "multi-hop",
+      "question": "How does a Medication Course start from a Healthie prescription, and what check-in schedule follows once the member confirms starting?",
+      "expected": [
+        "SMD-532",
+        "SMD-577"
+      ]
+    },
+    {
+      "id": "mh-mhs-decision",
+      "type": "multi-hop",
+      "question": "Why was the intake summary refined into the Medical History Summary, and what later decision covered whether it is generated before the account exists?",
+      "expected": [
+        "SMD-243",
+        "SMD-734"
+      ]
+    },
+    {
+      "id": "mh-resume-token",
+      "type": "multi-hop",
+      "question": "What was the security problem with anonymous intake resume tokens in the browser, and how do native clients create and resume intake securely?",
+      "expected": [
+        "SMD-409",
+        "SMD-595",
+        "SMD-622"
+      ]
+    },
+    {
+      "id": "mh-bridge-consents",
+      "type": "multi-hop",
+      "question": "What was wrong with Bridge consent document URLs, and how are consent documents served after the switch to immutable static assets?",
+      "expected": [
+        "SMD-590",
+        "SMD-642",
+        "SMD-643"
+      ]
+    },
+    {
+      "id": "mh-legacy-accounts",
+      "type": "multi-hop",
+      "question": "How are legacy member accounts with missing account-creation fields repaired, both in Django Admin and from Auth0?",
+      "expected": [
+        "SMD-548",
+        "SMD-552"
+      ]
+    },
+    {
+      "id": "mh-auth0-custom",
+      "type": "multi-hop",
+      "question": "How is the custom Auth0 configuration managed in infrastructure, and what happened to the legacy mixed SiggyMD Auth0 client?",
+      "expected": [
+        "SMD-474",
+        "SMD-475"
+      ]
+    },
+    {
+      "id": "mh-first-appointment-gate",
+      "type": "multi-hop",
+      "question": "How does the Healthie first appointment gate work on the backend, and what bug appeared once an appointment had already occurred?",
+      "expected": [
+        "SMD-440",
+        "SMD-523"
+      ]
+    },
+    {
+      "id": "mh-care-team-handoff",
+      "type": "multi-hop",
+      "question": "When a member writes in Care Team chat with Healthie enabled, what does the backend do with the message and what does the client show while waiting?",
+      "expected": [
+        "SMD-521",
+        "SMD-522"
+      ]
+    },
+    {
+      "id": "mh-goals-capture",
+      "type": "multi-hop",
+      "question": "How are top-three goals captured during intake on the client, and what backend API and gate cover authenticated goal capture?",
+      "expected": [
+        "SMD-377",
+        "SMD-421",
+        "SMD-557"
+      ]
+    },
+    {
+      "id": "mh-bridge-coverage-authority",
+      "type": "multi-hop",
+      "question": "How did the coverage authority for Bridge payment enrollment change away from a payer allowlist, and what did Medicare Advantage support require?",
+      "expected": [
+        "SMD-606",
+        "SMD-640"
+      ]
+    },
+    {
+      "id": "agg-sentry-identifier",
+      "type": "aggregation",
+      "question": "Which production Sentry issues on the marketing website are the same 'Identifier has already been declared' class of error from third-party scripts?",
+      "expected": [
+        "SMD-343",
+        "SMD-344",
+        "SMD-345",
+        "SMD-346",
+        "SMD-347",
+        "SMD-348"
+      ],
+      "keyword": "already been declared"
+    },
+    {
+      "id": "agg-n-plus-one",
+      "type": "aggregation",
+      "question": "Which Sentry issues report an N+1 query on the conversation stream?",
+      "expected": [
+        "SMD-349",
+        "SMD-356",
+        "SMD-357"
+      ],
+      "keyword": "N+1 Query"
+    },
+    {
+      "id": "agg-strands-turn",
+      "type": "aggregation",
+      "question": "Which production Sentry issues are about the Strands runtime failing to execute a turn?",
+      "expected": [
+        "SMD-355",
+        "SMD-360"
+      ],
+      "keyword": "Strands runtime failed"
+    },
+    {
+      "id": "agg-siggy-score",
+      "type": "aggregation",
+      "question": "Everything about the Siggy Score feature.",
+      "expected": [
+        "SMD-48",
+        "SMD-256",
+        "SMD-257",
+        "SMD-376",
+        "SMD-398",
+        "SMD-403"
+      ],
+      "keyword": "Siggy Score"
+    },
+    {
+      "id": "agg-node-pools",
+      "type": "aggregation",
+      "question": "Which issues set up the two-tier core and application EKS node pools, migrated the Platform API onto them, and retired the private workload pools?",
+      "expected": [
+        "SMD-566",
+        "SMD-567",
+        "SMD-568",
+        "SMD-569",
+        "SMD-570",
+        "SMD-572"
+      ],
+      "keyword": "workloads"
+    },
+    {
+      "id": "agg-app-store-1",
+      "type": "aggregation",
+      "question": "What steps made up the iOS 1.0.0 App Store submission?",
+      "expected": [
+        "SMD-430",
+        "SMD-431",
+        "SMD-432",
+        "SMD-433"
+      ],
+      "keyword": "App Store"
+    },
+    {
+      "id": "agg-devcontainer-pnpm",
+      "type": "aggregation",
+      "question": "Which issues dealt with pnpm and global Node tooling churn in the devcontainer setups?",
+      "expected": [
+        "SMD-278",
+        "SMD-293",
+        "SMD-330",
+        "SMD-600",
+        "SMD-627"
+      ],
+      "keyword": "pnpm"
+    },
+    {
+      "id": "corpus-decisions",
+      "type": "corpus",
+      "question": "What launch decisions were recorded in the 'Decision:' series for the 09-17 go-live?",
+      "expected": [
+        "SMD-734",
+        "SMD-735",
+        "SMD-736",
+        "SMD-737",
+        "SMD-738",
+        "SMD-739"
+      ],
+      "keyword": "Decision:"
+    },
+    {
+      "id": "corpus-retros",
+      "type": "corpus",
+      "question": "What retrospectives were written, and for which engineering cycles?",
+      "expected": [
+        "SMD-99",
+        "SMD-100",
+        "SMD-101",
+        "SMD-108"
+      ],
+      "keyword": "[Retro]"
+    },
+    {
+      "id": "corpus-marketing-promote",
+      "type": "corpus",
+      "question": "Which issues promoted archived marketing-site pages to live routes?",
+      "expected": [
+        "SMD-312",
+        "SMD-313",
+        "SMD-316",
+        "SMD-317",
+        "SMD-321",
+        "SMD-323",
+        "SMD-324",
+        "SMD-325"
+      ],
+      "keyword": "Promote"
+    }
+  ]
+}

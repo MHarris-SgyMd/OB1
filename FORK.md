@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty numbered changes on top of the pin. Seven fix defects found in an
+Thirty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–30 are the numbered `###` sections** further down, which is
+sections. Changes **18–31 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -157,6 +157,9 @@ db/migrations/016_*.sql          # fix 30  (new file — entities, mentions, edg
 db/extract-entities.ts           # fix 30  (new file — the extraction worker)
 server-portable/entities.ts      # fix 30  (new file — the prompt and the parsing rules)
 evals/eval-entities.ts           # fix 30  (new file — labelled precision/recall, and the corpus run)
+evals/eval-graphrag.ts           # fix 31  (new file — graph retrieval against the vector baseline)
+evals/graphrag-questions.json    # fix 31  (new file — the multi-hop question set)
+evals/linear-corpus.ts           # fix 31  (new file — the corpus/dump contract eval-entities and eval-graphrag share)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1760,8 +1763,9 @@ Migration 016, `db/extract-entities.ts` and `server-portable/entities.ts`
 (Linear SMD-947). Every thought was opaque text plus the `metadata` the capture
 model attached; nothing recorded that two thoughts mention the same person or
 that one system depends on another, so "everything touching X, and what X
-connects to" could not be asked. This is the prerequisite for SMD-948
-(GraphRAG), and the second consumer of change 29's lease table.
+connects to" could not be asked. This was built as the prerequisite for SMD-948
+(GraphRAG — measured in change 31 and not built), and is the second consumer of
+change 29's lease table.
 
 **A rewrite, not a port, as the ticket predicted.** `schemas/entity-extraction`
 carries 36 Supabase couplings and an Edge Function worker. What survived is the
@@ -1833,14 +1837,20 @@ Run to run at temperature 0 the score moved by one marginal extra, so these are
 | --- | ---: | ---: | ---: | ---: | ---: |
 | first | 2 | 120 s | 4,941 s (82 min) | 11.2 s | 21 of 441 |
 | second | 1 | 300 s | 6,793 s (113 min) | 15.4 s | 11 of 441 |
+| third | 2 | 300 s | 6,480 s (108 min) | 14.7 s | 19 of 441 |
 
 The first run's 9,870 s of model time inside a 4,941 s wall clock was read as
 two calls queueing behind each other on a one-at-a-time Ollama, and the worker
-briefly defaulted to one worker on that reading. The second run refuted it:
-one worker was 37% slower, so Ollama had been serving both calls at once and
-the second worker was paying for itself. The default is two again, and the
-timeouts are what they look like — long documents whose extraction takes a 7B
-model minutes, eleven of them past five — not queue time. **Roughly two hours
+briefly defaulted to one worker on that reading. The second run appeared to
+refute it — one worker was 37% slower — and this section said so. The third
+run (change 31, made to refresh the extraction dump) is the like-for-like pair
+the first two were not, same timeout and twice the workers, and it is 4.6%
+faster, not 37%: the earlier gap was the timeout budget, 120 s against 300 s
+per stuck document, and the first reading was closer to right. Ollama here
+mostly serialises; two workers stay the default because they cost nothing and
+recover a little. The timeouts are what they look like — long documents whose
+extraction takes a 7B model minutes — not queue time, and which documents time
+out varies between passes. **Roughly two hours
 for 441 issues, and recurring for every capture after.** On a hosted provider
 that is a bill; on this machine it is the fan.
 
@@ -1853,7 +1863,7 @@ of which 1,129 are `uses`. The most-mentioned entities are the ones an engineer
 on this corpus would name: Linear, pnpm, Healthie, Auth0, Sentry, Terraform,
 Slack, PostHog, GitHub. 1,767 of the 2,044 entities are mentioned by exactly
 one thought: the graph is a long tail with a small connected core, which is the
-shape SMD-948 will have to work with.
+shape SMD-948 had to work with — and, change 31 found, one reason it lost.
 
 **What the strict rule leaves, and what it cost to find out.** The first run
 reported 1,853 near-duplicate pairs by a loose metric (same type, trigram
@@ -1936,10 +1946,94 @@ so the re-capture inserted a new row) and the eval scoring a reversed
 directional relation as a hit. Stopped here.
 
 **Not done here.** A read API for the graph — the MCP tools do not expose
-entities yet, and SMD-948 will decide the shape; a `list_thoughts` filter by
+entities yet; SMD-948 was to decide the shape and decided (change 31) that the
+shape is not retrieval, so a read API is an unticketed follow-up; a `list_thoughts` filter by
 entity; injection resistance on a small model; and typed reasoning edges
 between thoughts (`schemas/typed-reasoning-edges`), which the ticket names as a
 later issue.
+
+### 31. GraphRAG, measured — and not built
+
+`evals/eval-graphrag.ts` and `evals/graphrag-questions.json` (Linear SMD-948).
+No migration, no server change, no new tool: this change is a measurement and
+the decision it supports. The ticket asked whether retrieval over change 30's
+entity graph beats the vector search the product ships, warned that GraphRAG's
+published wins are on corpora unlike ours, that community summaries are a
+standing cost, and that a measured "not worth it at our scale" would be a
+successful outcome. It is the outcome.
+
+**The question set came first**, as the ticket required, so the graph was
+judged on questions written without it: 27 over the 441-issue Linear corpus,
+each answered by two or more documents, labelled by hand from the issue bodies
+— seventeen multi-hop, seven aggregation, three about the shape of the corpus,
+89 expected documents. Only the questions are committed; the corpus is internal
+and stays in `/tmp`. The metric is retrieval, did the expected documents come
+back in the top K, because any answer is generated from what came back.
+
+**Five arms, no framework.** Vector (`match_thoughts`); a local graph walk
+written in one SQL statement over `ob1_entities`, `thought_entities` and
+`ob1_entity_edges` — question entities found by the extraction prompt, the
+product's resolution rule, trigram similarity and a whole-word literal match
+(more generous than the product's rule, on purpose), IDF-weighted, one hop at
+0.3 with the same rarity cap on hop targets, thoughts ranked by summed entity
+weight; reciprocal-rank fusion of those two;
+global mode — label-propagation communities over co-mention weights, one
+generated summary each, question matched to summaries, thoughts of the best
+two communities vector-ranked; and `search_thoughts_keyword` (change 26) with
+the needle a person would type, on the ten questions that have one. The graph
+is replayed from a dumped extraction pass, so the eval does not repeat the
+two-hour extraction; the pass scored here was re-run after the review pass
+below so that the dump's fingerprints verify against the loaded text.
+
+**Vector wins every comparison.** Recall@10 0.98 and 25 of 27 questions
+complete, every multi-hop question among them; the local graph 0.51 and 7,
+losing on 20 questions and winning on none; fusion 0.92 and 21 — mixing the
+graph in makes vector worse on five questions and better on none; global 0.50,
+half the baseline and near zero on the corpus-level questions. At K = 5 the
+order is the same and the gaps are wider. The reasons are in
+`evals/README.md`: the question-side and document-side extractions do not
+agree on names; 1,739 of 2,004 entities are mentioned once, so a hop reaches
+nothing; common seeds
+dominate until removed and removing them leaves recall unchanged; communities
+depend on the node visiting order (18, 6 and 17 from the same graph until the
+order was pinned to the table's unique key). A review pass found the first
+version of the harness generous to its own conclusion in small ways — MRR taken
+over the whole returned list, a substring seed match that read "Expo" out of
+"exposes", hubs re-entering through the hop, an unordered title list feeding
+each community summary — and fixing them moved the graph arm by a point or
+two and the global arm from 0.25–0.33 to 0.57 on the first dump (0.50 on the
+re-extracted one). The same pass found the corpus loader hashing the wrong
+text for its fingerprints — `'\s+'` in a Bun `sql` template literal reaches
+Postgres as `'s+'` — in this harness and in the entity eval it was copied
+from; both call `content_fingerprint_of()` now, and the corpus was
+re-extracted so the dump verifies. The decision did not move.
+
+**The set was too easy for vector, and that is the finding, not a flaw in the
+set.** Documents about one feature in a tracker share vocabulary — the backend
+issue and the client issue consuming it name the same endpoint and field — so
+the documents a multi-hop question combines are already near neighbours of the
+question. GraphRAG earns its cost where documents are joined by an entity and
+nothing else; on this corpus those questions were hard to find, which is
+itself the answer to whether the corpus is the kind that needs a graph.
+
+**Where vector misses, keyword mostly has it.** The only misses are two of the
+six `Decision:` records and two of the eight `Promote …` issues, both series
+named by a literal string; `search_thoughts_keyword` returns the first set
+complete and half of the second, scored by the same rule as every arm. The
+headroom that exists is a ranking problem inside a tool that ships, not a case
+for a graph.
+
+**Decision: not built.** No graph retrieval mode, no fusion step, no build
+ticket. The entity layer stays for what it is for — "what does X connect to",
+an entity filter, the UI a graph makes possible — and because a corpus of a
+different shape, people and projects across many sources with little shared
+wording, could measure differently. That is a re-run of `bun run graphrag`
+against that corpus's own question set, and the rule for reading it does not
+change: the graph has to beat `match_thoughts` on questions someone actually
+asked. SMD-1039 asks that question of a literature corpus with a published
+question set, where the failure mode these techniques target does exist; a
+win there is a reason to re-ask the product question on a corpus of the
+product's shape, not a reason to build.
 
 ## Detached from the fork network
 

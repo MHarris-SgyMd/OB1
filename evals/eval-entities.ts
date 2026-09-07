@@ -16,6 +16,7 @@
  *       (unparseable answers, items the rules rejected) beside the scores.
  *
  *   OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-entities.ts --corpus [--workers 2]
+ *   … --corpus --replay [--allow-stale-dump]   re-apply the dumped answers without the model; refuses a dump whose text changed unless told
  *       The real corpus (441 Linear issues, built by build-linear-corpus.ts),
  *       loaded as thoughts and run through db/extract-entities.ts itself, so
  *       the wall clock is the tool's wall clock. The model's answers are dumped
@@ -44,6 +45,7 @@ import { loadEnv } from "./env.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { loadLinearCorpus, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
 
 loadEnv();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -52,8 +54,9 @@ const args = process.argv.slice(2);
 const has = (n: string) => args.includes(`--${n}`);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 && !args[i + 1]?.startsWith("--") ? args[i + 1] : undefined; };
 
-// OB1_EVAL_BASE is what the other harnesses use for the endpoint; honour it.
-if (!process.env.OB1_LLM_BASE_URL && process.env.OB1_EVAL_BASE) process.env.OB1_LLM_BASE_URL = process.env.OB1_EVAL_BASE;
+// OB1_EVAL_BASE (or lib.ts's OLLAMA_BASE fallback) is what the other harnesses use for the endpoint; honour it.
+const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
+if (!process.env.OB1_LLM_BASE_URL && evalBase) process.env.OB1_LLM_BASE_URL = evalBase;
 if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LLM_API_KEY = process.env.OB1_EVAL_KEY;
 
 await resetSchema(URL_, { dim: 8, model: "eval-stub" });
@@ -244,43 +247,50 @@ if (!has("corpus")) {
 
 // ── The corpus ──────────────────────────────────────────────────────────────
 
-const corpusPath = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
-type Doc = { id: string; title: string; text: string };
-const docs = (JSON.parse(readFileSync(corpusPath, "utf8")) as Doc[]).filter((d) => (d.text ?? "").trim().length > 0);
+const { path: corpusPath, docs } = loadLinearCorpus();
 const WORKERS = Number(flag("workers") ?? 2);
 const LIMIT = flag("limit");
 const REPLAY = has("replay");
-const answersPath = process.env.OB1_EVAL_ANSWERS ?? `/tmp/entity-answers-${cfg.metadataModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.jsonl`;
+const answersPath = entityAnswersPath(cfg.metadataModel);
 const chars = docs.reduce((n, d) => n + d.title.length + 2 + d.text.length, 0);
 console.log(`  corpus: ${docs.length} documents, ${chars.toLocaleString()} characters, from ${corpusPath}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, ${WORKERS} worker(s)${LIMIT ? `, first ${LIMIT} only` : ""}${REPLAY ? ` — REPLAY of ${answersPath}, no model calls` : ""}\n`);
 
 await sql`DELETE FROM thoughts`;
-// Fixed ids, so a replay's answers find their thoughts on a fresh database.
-for (const d of docs) {
-  await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
-            VALUES (${Bun.hash.crc32(d.id).toString(16).padStart(8, "0") + "-0000-4000-8000-" + Bun.hash.xxHash64(d.id).toString(16).padStart(16, "0").slice(0, 12)}::uuid,
-                    ${`${d.title}\n\n${d.text}`}, ${{ source: "linear", issue: d.id }}::jsonb,
-                    encode(sha256(convert_to(lower(trim(regexp_replace(${`${d.title}\n\n${d.text}`}, '\s+', ' ', 'g'))), 'UTF8')), 'hex'))
-            ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
-}
+// Fixed ids, so a replay's answers find their thoughts on a fresh database;
+// the row shape and the fingerprint rule live in linear-corpus.ts. An inline
+// copy of the rule used to sit here and cooked its '\s+' to 's+' inside the
+// template literal, so it hashed the text with runs of the letter s replaced
+// by spaces. The worker's stale guard compares the stored column with itself
+// and never noticed; what broke was the dump's fingerprints failing to verify
+// against a corpus loaded afresh by eval-graphrag.ts.
+for (const d of docs) await insertLinearThought(sql, d);
 const [{ n: loaded }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
 console.log(`  loaded ${loaded} thoughts (duplicate texts merged by fingerprint)`);
 
 const key = extractionKey(cfg.metadataModel);
 let wall = 0;
 if (REPLAY) {
-  const lines = readFileSync(answersPath, "utf8").split("\n").filter(Boolean);
+  // The same replay rules as eval-graphrag.ts: a line is refused if its text
+  // has changed since extraction (the fingerprint travels as the fifth
+  // argument), if it carries no fingerprint, or if it was extracted under a
+  // different key — unless --allow-stale-dump says the operator knows.
+  const ALLOW_STALE = has("allow-stale-dump");
+  const { answers, unusable } = readEntityAnswers(answersPath);
+  const wrongKey = answers.filter((a) => a.key && a.key !== key).length;
+  const unkeyed = answers.filter((a) => !a.key).length;
+  if (wrongKey) { console.error(`  ${wrongKey} dump lines were extracted under a different key than ${key}; point OB1_METADATA_MODEL at the model that made ${answersPath}`); process.exit(2); }
   const t0 = Date.now();
-  let written = 0;
-  let missing = 0;
-  for (const line of lines) {
-    const a = JSON.parse(line) as { id: string; entities: unknown[]; relations: unknown[] };
-    const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${key}, ${a.entities}::jsonb, ${a.relations}::jsonb) AS r`;
-    if ((r as { ok: boolean }).ok) written++; else missing++;
+  let written = 0, missing = 0, stale = 0, unfingerprinted = 0;
+  for (const a of answers) {
+    if (!a.fingerprint) unfingerprinted++;
+    const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${key}, ${a.entities}::jsonb, ${a.relations}::jsonb, ${ALLOW_STALE ? null : (a.fingerprint ?? null)}) AS r`;
+    const res = r as { ok: boolean; stale?: boolean };
+    if (res.ok) written++; else if (res.stale) stale++; else missing++;
   }
   wall = (Date.now() - t0) / 1000;
-  console.log(`  replayed ${written} answers in ${wall.toFixed(1)} s${missing ? `; ${missing} named thoughts not in this load` : ""}`);
+  console.log(`  replayed ${written} answers in ${wall.toFixed(1)} s${missing ? `; ${missing} named thoughts not in this load` : ""}${stale ? `; ${stale} STALE (text changed since extraction)` : ""}${unfingerprinted ? `; ${unfingerprinted} carry no fingerprint` : ""}${unusable ? `; ${unusable} lines unusable` : ""}${unkeyed ? `; ${unkeyed} lines carry no extraction key (older dump), attributed to ${key}` : ""}`);
+  if ((stale || unfingerprinted) && !ALLOW_STALE) { console.error(`  the dump cannot be verified against this corpus for ${stale + unfingerprinted} thoughts; re-run --corpus, or pass --allow-stale-dump to replay by id anyway`); process.exit(2); }
 } else {
   const t0 = Date.now();
   writeFileSync(answersPath, "");

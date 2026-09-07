@@ -9,6 +9,7 @@
     "contextual": "bun eval-contextual.ts",
     "filtered": "../db/with-postgres.sh bun eval-filtered.ts",
     "entities": "../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b",
-    "entities:corpus": "../db/with-postgres.sh bun eval-entities.ts --corpus"
+    "entities:corpus": "../db/with-postgres.sh bun eval-entities.ts --corpus",
+    "graphrag": "../db/with-postgres.sh bun eval-graphrag.ts"
   }
 }
