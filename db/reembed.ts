@@ -63,6 +63,22 @@
  * client holding an `if_unchanged_since` from before the pass gets STALE_READ
  * on its next edit, once, and refetches — the behaviour that guard exists for.
  *
+ * ── Duplicates from before the fingerprint ──────────────────────────────────
+ * Migration 003 added content_fingerprint without a backfill, so a brain that
+ * predates it can hold two rows that normalise to the same text, both with
+ * NULL fingerprints; a load that inserted into `thoughts` directly leaves the
+ * same state. Re-embedding the first of such a pair gives it a fingerprint,
+ * and until migration 018 update_thought then refused the second's own text as
+ * DUPLICATE_CONTENT — failed, exit 1, and --retry-failed reproduced it for
+ * ever (SMD-1022). 018 accepts an edit whose text normalises to what the row
+ * holds, leaves that row's fingerprint NULL so the unique index is never
+ * violated, and names the other row in its result. This pass requires 018,
+ * counts those rows as it re-embeds them, and prints every group of thoughts
+ * sharing one normalised text at the end and under --status — one query over
+ * the corpus, so the list is the same whenever it is asked for. Whether a pair
+ * should be one thought is the operator's call; nothing is written to the
+ * claim row about it.
+ *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the
  * pass continues; the run exits 1 if any row is failed, still leased or still
@@ -155,6 +171,22 @@ if (!claims.present) {
   process.exit(2);
 }
 
+// A pass against 013's update_thought fails every legacy twin for ever (see the
+// header): the body that accepts an unchanged edit is recognisable by the
+// field it alone returns.
+const [fn] = await sql`
+  SELECT EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.proname = 'update_thought' AND p.prosrc LIKE '%duplicate_of%') AS present`;
+if (!fn.present) {
+  console.error(
+    "\n  update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
+      "  the fingerprint — would fail this pass on every run. Apply migration 018 first:\n    cd db && bun migrate.ts --url …"
+  );
+  await sql.close();
+  process.exit(2);
+}
+
 const [col] = await sql`
   SELECT atttypmod AS width FROM pg_attribute
   WHERE attrelid = 'thoughts'::regclass AND attname = 'embedding'`;
@@ -223,6 +255,33 @@ function printCounts(c: Counts, label: string): void {
   );
 }
 
+/**
+ * Groups of thoughts that normalise to one text: pairs from before migration
+ * 003's fingerprint, or a load that bypassed upsert_thought. One query over
+ * the corpus — the hash is computed only for rows whose fingerprint column is
+ * NULL — so the list is the same before, during and after a pass. Prints
+ * nothing when there are none.
+ */
+async function printDuplicateGroups(limit = 10): Promise<number> {
+  const rows = (await sql`
+    WITH g AS (
+      SELECT array_agg(id ORDER BY created_at, id)::text[] AS ids, min(created_at) AS first
+      FROM thoughts
+      GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
+      HAVING count(*) > 1)
+    SELECT (SELECT count(*) FROM g)::int AS total, ids FROM g ORDER BY first LIMIT ${limit}`) as { total: number; ids: string[] }[];
+  if (!rows.length) return 0;
+  const total = Number(rows[0].total);
+  console.error(
+    `\n  ${total} group(s) of thoughts share one normalised text — pairs from before migration 003's fingerprint, or a load that\n` +
+      `  bypassed upsert_thought. Every row in a group is re-embedded; only one carries the fingerprint, so a later capture of that\n` +
+      `  text merges into it and not into the others. Whether they should be one thought is the operator's call — delete_thought\n` +
+      `  on the extra keeps its text in the audit row. ${total > limit ? `First ${limit}:` : ""}`
+  );
+  for (const r of rows) console.error(`    ${r.ids.join("  =  ")}`);
+  return total;
+}
+
 async function printFailures(limit = 10): Promise<void> {
   const rows = (await sql`
     SELECT thought_id, attempt_count, worker_id, last_error FROM thought_work_claims
@@ -247,6 +306,7 @@ if (STATUS_ONLY || DRY_RUN) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
     await printFailures();
   }
+  await printDuplicateGroups();
   if (DRY_RUN) {
     console.log(
       `\n  would: ${modelChange ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
@@ -312,6 +372,8 @@ let stopping = false;
 let done = 0;
 let failed = 0;
 let vanished = 0;
+/** Rows whose unchanged text another thought also holds — re-embedded, and named by update_thought (migration 018). */
+let duplicates = 0;
 /** Long thoughts stored with the head window's vector because the whole-content call failed. */
 let headWindow = 0;
 /** Worker ids with leases possibly outstanding, for a forced exit. */
@@ -362,11 +424,18 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
         ${current.updated_at}::timestamptz,
         ${actor}::jsonb
       ) AS r`;
-    const result = r.r as { ok: boolean; error?: string };
+    const result = r.r as { ok: boolean; error?: string; duplicate_of?: string };
     if (result.ok) {
       // The write is done in every case below: whatever was embedded is better
       // than the vector the row had, and under --switch-model the old one is
       // from another model. What differs is whether the claim may go terminal.
+      if (result.duplicate_of) {
+        // The row's own text is also another thought's — a pair from before the
+        // fingerprint. Re-embedded like any other row; the summary lists the
+        // groups. Not an outcome: nothing about this row's vectors is in doubt.
+        duplicates++;
+        console.error(`  ${current.id}: duplicates ${result.duplicate_of} — the same text from before the fingerprint; re-embedded, see the summary`);
+      }
       if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
         // The whole-content call failed for a reason that says nothing about
         // the next attempt — a 429, a 5xx, a dropped connection — so the head
@@ -398,16 +467,10 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
       current = fresh;
       continue;
     }
-    if (result.error === "DUPLICATE_CONTENT") {
-      // The content is unchanged, so this can only be another thought that
-      // normalises to the same text: a duplicate from before migration 003's
-      // fingerprint, or a bulk load that bypassed upsert_thought. Re-embedding
-      // the first of the pair gave it a fingerprint; the second now collides.
-      return {
-        outcome: "failed",
-        error: "update_thought: DUPLICATE_CONTENT — another thought normalises to the same text (a duplicate that predates the fingerprint, or was loaded around upsert_thought); remove one of the pair, then --retry-failed",
-      };
-    }
+    // DUPLICATE_CONTENT cannot reach here: the content passed is always the
+    // row's current text — a STALE_READ re-read guarantees it — and since
+    // migration 018 an unchanged edit is never a duplicate. Anything else is
+    // reported as what it is.
     return { outcome: "failed", error: `update_thought: ${result.error}` };
   }
   return { outcome: "failed", error: "update_thought: STALE_READ three times in a row — the thought is being edited faster than it can be re-embedded" };
@@ -539,6 +602,8 @@ const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass, in ${elapsed}s`);
 printCounts(after, "after");
+if (duplicates > 0) console.error(`  ${duplicates} re-embedded row(s) hold text another thought also holds — the groups are listed below`);
+await printDuplicateGroups();
 if (headWindow > 0) {
   console.error(
     `\n  ${headWindow} long thought(s) stored with the head window's vector: the provider refuses input that long\n` +

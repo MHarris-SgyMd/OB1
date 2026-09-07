@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-two numbered changes on top of the pin. Seven fix defects found in an
+Thirty-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–32 are the numbered `###` sections** further down, which is
+sections. Changes **18–33 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -164,6 +164,7 @@ db/migrations/017_*.sql          # fix 32  (new file — search_thoughts_hybrid 
 db/bench-hybrid.ts               # fix 32  (new file — both indexes reached through the fused function)
 evals/eval-hybrid.ts             # fix 32  (new file — four query sets, the arms and the variants)
 evals/identifiers.ts             # fix 32  (new file — the identifier rule eval-keyword and eval-hybrid share)
+db/migrations/018_*.sql          # fix 33  (new file — update_thought: an unchanged edit is never a duplicate)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1732,7 +1733,8 @@ and terminal — it is a failure now, so `--retry-failed` can revisit it;
 a run parked on a hung provider. `test-thoughts.ts` [7] and `test-live.ts` [9]
 cover each. Three findings went to tickets rather than code: the fallback as a
 per-row outcome (SMD-1021), `update_thought` refusing unchanged content that
-duplicates a pre-fingerprint row (SMD-1022), and lease renewal (SMD-1023).
+duplicates a pre-fingerprint row (SMD-1022 — fixed in change 33), and lease
+renewal (SMD-1023).
 
 **A second pass, and the stopping signal.** Three of its ten findings were in
 code the first pass added, which is the sign the loop is converging rather than
@@ -2266,6 +2268,74 @@ plus two harness controls that could report the wrong thing, the mixed set's
 appended token now checked against the product's rule, and stale numbers in
 this file and `db/README.md`. Nothing in this pass touched the fusion itself,
 which is the signal to stop reviewing and open the PR.
+
+### 33. An unchanged edit is never a duplicate — the re-embed stops failing legacy twins
+
+Migration 018 (Linear SMD-1022, found by the first review pass of change 29).
+`update_thought` ran its duplicate check whenever `p_content` was given: another
+row carrying the same fingerprint meant `DUPLICATE_CONTENT`. The check assumed
+the text was new. `db/reembed.ts` passes each row its own unchanged text,
+because that is the only way to make `update_thought` replace the embedding and
+the chunk rows — and for one class of row the check then refused the row's own
+text. Migration 003 added `content_fingerprint` with a partial unique index and
+no backfill, so a brain from before it can hold two rows that normalise to the
+same text, both with NULL fingerprints; a load that inserted into `thoughts`
+directly leaves the same state. Re-embedding the first of the pair gave it a
+fingerprint as a side effect. Re-embedding the second found the first and was
+refused: failed, exit 1, and `--retry-failed` reproduced it on every run while
+`ob1_config` already recorded the new model. Rows from before 003 are the
+common case for any brain that predates this fork.
+
+**One writer stays one writer.** The alternative was a dedicated
+`reembed_thought` that sets the vector and replaces the chunks without touching
+content or fingerprint. It would have copied the stale-read guard, the actor
+setting and the chunk replacement out of `update_thought` — a value defined
+twice, the defect this fork keeps removing, with every stored vector as the
+value. Instead `update_thought` is redefined with one rule: when the new text
+normalises to what the row already holds, the edit cannot create a duplicate
+that was not already there, so it is not refused. If another row already
+carries that fingerprint, this row's is left as it is — necessarily NULL, since
+two fingerprinted rows cannot collide — so the partial index is never violated,
+and the result names the other row in `duplicate_of`. Otherwise the fingerprint
+is written: the backfill 003 never had, one row at a time, now stated rather
+than incidental. Editing a thought *into* another thought's text is refused
+exactly as before. The hash rule comes from 016's `content_fingerprint_of`
+rather than a third inline copy, and 008's actor, 009's millisecond-truncated
+guard in the UPDATE itself and 013's `context` are carried forward — the trap
+008's header records, checked by name in `pg_proc` by `test-schema.ts` [19].
+
+**The race, closed where it lives.** Two workers reaching the two rows of a
+pair at the same moment both passed the check — the first's fingerprint was
+uncommitted — and the second then blocked on the unique index and raised
+`duplicate key value violates unique constraint "idx_thoughts_fingerprint"`
+when the first committed: measured, with the lock line removed. `update_thought`
+now takes a transaction-scoped advisory lock on the fingerprint before the
+check, for every content write, so writers of one text are serialised and the
+check that follows is authoritative under READ COMMITTED. `test-live.ts` [6b]
+holds the first twin's transaction open on one connection, shows the second
+waiting on the *advisory* lock in `pg_locks` rather than on a transaction id,
+and gets ok with `duplicate_of` once the first commits. The same lock turns
+009's documented race for a genuine edit — two rows edited into the same new
+text at once — into `DUPLICATE_CONTENT` instead of a constraint error. One lock
+per edit; deadlock would need a transaction that calls `update_thought` twice
+with different texts while another does the reverse, which no caller does.
+
+**What the pass does with it.** `reembed.ts` requires 018 (exit 2 naming the
+migration otherwise — a pass against 013's body fails every legacy twin for
+ever), says per row when it found a pair, and prints every group of thoughts
+sharing one normalised text at the end of a run and under `--status`: one query
+over the corpus, hashing only the rows whose fingerprint column is NULL, so the
+list is the same before, during and after a pass. Both rows are re-embedded;
+only one carries the fingerprint, so a later capture of that text merges into
+it and not the other. Whether they should be one thought is the operator's
+call, and nothing is written to the claim row — that per-row-outcome decision
+belongs to SMD-1021. The `update_thought` tool appends the same note to its
+reply, and `normaliseMutation` carries `duplicateOf` for both stores. Stated in
+018's header and not fixed: `upsert_thought` capturing text equal to a legacy
+NULL-fingerprint row still creates a second row, since `ON CONFLICT` cannot see
+a NULL; the pairs query surfaces those too. `test-schema.ts` [19] (24
+assertions, at the default width and at 8), `test-live.ts` [6b] and a legacy
+pair in [9]'s fixture, `test-update-delete.ts` [8b].
 
 ## Detached from the fork network
 

@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `313 assertions: 313 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports seventeen migrations applied, and
+`bun test-schema.ts` prints `337 assertions: 337 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports eighteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -89,6 +89,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
+| `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; writers of one fingerprint are serialised on an advisory lock, which also turns 009's constraint-violation race for a genuine edit into `DUPLICATE_CONTENT`. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
 
 ## What changed relative to the guide
 
@@ -246,6 +247,27 @@ the per-thought record of the pass. SMD-946 expected one audit row per thought;
 `test-live.ts` [9] asserts the count is unchanged, so the expectation is written
 down as corrected rather than quietly unmet. Every re-embedded row's
 `updated_at` does move, because the row was updated.
+
+**Duplicates from before the fingerprint.** Migration 003 added
+`content_fingerprint` without a backfill, so a brain that predates it can hold
+two rows that normalise to the same text, both with NULL fingerprints; a load
+that inserted into `thoughts` directly leaves the same state. A pass writes each
+row's own text back through `update_thought`, which gives the first of such a
+pair the fingerprint it never had — and until migration 018 then refused the
+second's own text as `DUPLICATE_CONTENT`: failed, exit 1, and `--retry-failed`
+reproduced it for ever. 018 accepts an edit whose text normalises to what the
+row holds, leaves that row's fingerprint NULL so the unique index is never
+violated, and names the other row in its result. The pass requires 018 (it
+exits 2 naming the migration otherwise), says per row when it found a pair,
+and prints every group of thoughts sharing one normalised text at the end of a
+run and under `--status` — one query over the corpus, so the list is the same
+whenever it is asked for. Both rows are re-embedded; only one carries the
+fingerprint, so a later capture of that text merges into it and not the other.
+Whether they should be one thought is the operator's call, and nothing is
+written to the claim row about it. Two workers reaching the two rows of a pair
+at the same moment are serialised on an advisory lock inside `update_thought`;
+without it the second would pass the check and raise a unique violation when
+the first committed — `test-live.ts` [6b] shows the wait on the right lock.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
 0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
@@ -545,8 +567,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 313 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 152 assertions, real server, throwaway container
+bun test-schema.ts                    # 337 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 164 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -574,15 +596,25 @@ container.
   "dies" on a 2 s lease and a second worker receives its rows after expiry,
   on their second attempt. PGlite has one connection, so two sequential claims
   there are disjoint whether or not `SKIP LOCKED` does anything.
+- **Two legacy twins fingerprinted at once.** [6b] holds one connection's
+  `update_thought` on the first twin open in a transaction while a second
+  connection re-embeds the other: `pg_locks` shows the second waiting on the
+  *advisory* lock, not on the unique index, and once the first commits it
+  returns ok with `duplicate_of` and a NULL fingerprint. With the lock line
+  removed the same scenario waits on the transaction id and raises `duplicate
+  key value violates unique constraint "idx_thoughts_fingerprint"` — measured,
+  which is why the assertion names the lock type.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
-  thirty-four rows including two chunked ones (one of whose whole-content calls
+  thirty-six rows including two chunked ones (one of whose whole-content calls
   is throttled with a 429, once — the other must still get its whole vector), a
-  poisoned one and one with no vector; asserts every vector, the chunk rows, one
-  audit row rather than thirty-three, `ob1_config`, `--status`, a re-run that
-  processes only a later capture, `--retry-failed` resetting the attempt count
-  and giving the throttled thought its whole-content vector, and exit 1 while
-  another process holds a lease.
+  poisoned one, one with no vector and two legacy twins with NULL fingerprints
+  and the same text but for whitespace; asserts every vector, the chunk rows,
+  one audit row rather than thirty-five, both twins succeeded with exactly one
+  fingerprinted and the pair named in the run and under `--status`,
+  `ob1_config`, a re-run that processes only a later capture, `--retry-failed`
+  resetting the attempt count and giving the throttled thought its
+  whole-content vector, and exit 1 while another process holds a lease.
 - **Entity extraction, end to end.** [10] runs `extract-entities.ts` against a
   stub model that answers from a table, so the expected graph is known exactly:
   seven entities, fourteen mentions, five edges from ten thoughts, one of which
@@ -597,7 +629,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 313 properties, including:
+asserts 337 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -678,6 +710,16 @@ asserts 313 properties, including:
   fingerprint; `merge_entities` refuses across types and keeps the loser as an
   alias; the trigger is silent until the key is set, ignores metadata-only
   edits, and revokes a live lease on a content edit
+- **an unchanged edit is never a duplicate** (migration 018): of two NULL-
+  fingerprint rows with the same normalised text, re-saving the first's own
+  text gives it a fingerprint and re-saving the second's succeeds with
+  `duplicate_of` naming the first and its own fingerprint still NULL; editing a
+  third row *into* that text is still `DUPLICATE_CONTENT`; a whitespace-only
+  edit moves the text and not the fingerprint; a legacy row with no twin is
+  backfilled; a metadata-only edit touches neither; `if_unchanged_since` still
+  refuses a stale write; and `update_thought` is still one function whose body
+  names 008's actor, 009's guard, 013's context, 016's fingerprint function and
+  the advisory lock
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

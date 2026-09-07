@@ -935,10 +935,17 @@ function buildServer(principal: Principal): McpServer {
           // sentence rather than a silent partial rewrite.
           embedded?.contextFailures ? `${embedded.contextFailures} chunks without context` : null,
         ].filter(Boolean).join(", ");
+        // Migration 018: the text was unchanged and another thought holds it
+        // too — a pair from before deduplication existed. Not a refusal (the
+        // edit created nothing new), but the caller should know the pair is
+        // there, since capture would have merged them.
+        const pair = result.duplicateOf
+          ? `\nNote: this thought duplicates ${result.duplicateOf} — both were captured before deduplication existed, so the edit was kept and no fingerprint was written. Delete one of them if they should be one thought.`
+          : "";
         return {
           content: [{
             type: "text" as const,
-            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.`,
+            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${pair}`,
           }],
         };
       } catch (e) {

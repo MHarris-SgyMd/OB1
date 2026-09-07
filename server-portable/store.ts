@@ -155,7 +155,13 @@ export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT";
 export type MutationResult =
   | { ok: true; id: string }
   | { ok: false; error: MutationError; currentUpdatedAt?: string };
-export type UpdateResult = MutationResult & { updatedAt?: string };
+/**
+ * `duplicateOf` (migration 018): the edit's text normalises to what the row
+ * already held AND another thought carries that fingerprint — a pair from
+ * before migration 003's fingerprint. The edit was kept and this row's
+ * fingerprint left NULL; the caller is told so the pair can be resolved.
+ */
+export type UpdateResult = MutationResult & { updatedAt?: string; duplicateOf?: string };
 
 /**
  * Both SQL functions return the same {ok, id|error} envelope; this turns it into
@@ -165,7 +171,12 @@ export type UpdateResult = MutationResult & { updatedAt?: string };
 export function normaliseMutation(r: Record<string, unknown> | undefined): UpdateResult {
   if (!r) return { ok: false, error: "NOT_FOUND" };
   if (r.ok === true) {
-    return { ok: true, id: String(r.id), updatedAt: r.updated_at ? String(r.updated_at) : undefined };
+    return {
+      ok: true,
+      id: String(r.id),
+      updatedAt: r.updated_at ? String(r.updated_at) : undefined,
+      duplicateOf: r.duplicate_of ? String(r.duplicate_of) : undefined,
+    };
   }
   return {
     ok: false,
