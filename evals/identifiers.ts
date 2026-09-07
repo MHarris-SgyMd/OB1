@@ -96,7 +96,9 @@ export type IdentifierQuery = { token: string; shape: Shape; want: string };
  * float rounding differed.
  */
 export function strideSample<T>(xs: T[], max: number): T[] {
-  if (max <= 0 || xs.length <= max) return xs;
+  // `!(max > 0)` rather than `max <= 0`: a NaN cap (a non-numeric env var) is
+  // "no cap", as it was before this helper existed, not an empty set.
+  if (!(max > 0) || xs.length <= max) return xs;
   const step = xs.length / max;
   return Array.from({ length: max }, (_, i) => xs[Math.floor(i * step)]);
 }

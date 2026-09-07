@@ -60,12 +60,12 @@
  */
 
 import { SQL } from "bun";
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
-import { loadLinearCorpus, linearThoughtText, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
+import { loadLinearCorpus, linearThoughtText, insertLinearThought, entityAnswersPath, readEntityAnswers, cachedDocumentVectors, linearVectorCachePath } from "./linear-corpus.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
@@ -100,7 +100,6 @@ const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024); // "" is
 const cfg = resolveEmbedConfig(process.env);
 const { path: corpusPath, docs } = loadLinearCorpus();
 const answersPath = entityAnswersPath(cfg.metadataModel);
-const vectorCache = `/tmp/graphrag-vectors-${EMBED_MODEL.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
 
 type Question = { id: string; type: "multi-hop" | "aggregation" | "corpus"; question: string; expected: string[]; keyword?: string };
 const questions = (JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "graphrag-questions.json"), "utf8")) as { questions: Question[] }).questions;
@@ -118,24 +117,15 @@ console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; extra
 await resetSchema(URL_, { dim: DIM, model: spec.name });
 const sql = new SQL({ url: URL_, max: 4 });
 
-// Cache entry per issue: the text hash it was embedded from, and the vector.
-// A rebuilt corpus with edited text re-embeds those documents; the first
-// version keyed by id alone and would have ranked new text on old vectors.
-type Cached = { h: string; v: number[] };
-let vectors: Record<string, Cached> = {};
-if (existsSync(vectorCache)) {
-  try { vectors = JSON.parse(readFileSync(vectorCache, "utf8")); } catch { console.error(`Unreadable vector cache ${vectorCache}; delete it and re-run.`); process.exit(2); }
-}
-let embedded = 0;
+// Document vectors from the shared cache in linear-corpus.ts: keyed by the
+// text's hash so a rebuilt corpus with edited text re-embeds those documents,
+// written atomically. This harness had its own copy until the hybrid eval
+// needed the same thing; one definition now.
 const t0 = Date.now();
-for (const d of docs) {
-  const text = linearThoughtText(d);
-  const h = Bun.hash.xxHash64(text).toString(16);
-  if (vectors[d.id]?.h !== h) { vectors[d.id] = { h, v: await embed(EMBED_MODEL, text) }; embedded++; }
-  if (vectors[d.id].v.length !== DIM) { console.error(`  ${EMBED_MODEL} returned ${vectors[d.id].v.length}-wide vectors but the column is vector(${DIM}); give the spec an @dims suffix that matches the model.`); process.exit(2); }
-  await insertLinearThought(sql, d, lit(vectors[d.id].v));
-}
-if (embedded) { writeFileSync(`${vectorCache}.tmp`, JSON.stringify(vectors)); renameSync(`${vectorCache}.tmp`, vectorCache); }
+const { vectors, embedded } = await cachedDocumentVectors(docs, {
+  path: linearVectorCachePath(EMBED_MODEL, "thought"), dim: DIM, text: linearThoughtText, embed: (t) => embed(EMBED_MODEL, t),
+});
+for (const d of docs) await insertLinearThought(sql, d, lit(vectors[d.id]));
 const loadedIssues = new Set<string>((await sql`SELECT metadata->>'issue' AS issue FROM thoughts`).map((r: { issue: string }) => r.issue));
 console.log(`  loaded ${loadedIssues.size} thoughts (${embedded} embedded now, ${docs.length - embedded} from cache) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 const dropped = docs.map((d) => d.id).filter((id) => !loadedIssues.has(id));

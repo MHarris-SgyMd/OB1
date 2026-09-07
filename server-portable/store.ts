@@ -69,6 +69,8 @@ export type ThoughtHybridMatch = {
   matchedNeedles: string[];
   /** Every row: the literals the keyword arm was asked for. */
   needles: string[];
+  /** Every row, parallel to `needles`: how many thoughts contain each (0 = none). */
+  needleCounts: number[];
   /** Every row: literals extracted but found in more than 100 thoughts, so not used. */
   commonNeedles: string[];
   /** Every row: the query had nothing to embed, so exact hits were ranked ahead of the vector arm. */
@@ -94,6 +96,12 @@ export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMat
     similarity: r.similarity == null ? null : Number(r.similarity),
     matchedNeedles: strings(r.matched_needles),
     needles: strings(r.needles),
+    // Array-like, not Array: the SQL-backed compat client hands an int[] back
+    // as a typed array, for which Array.isArray is false and a JSON round trip
+    // gives {"0":1}. The PostgREST store's conformance test caught it.
+    needleCounts: r.needle_counts != null && typeof r.needle_counts === "object" && "length" in (r.needle_counts as object)
+      ? Array.from(r.needle_counts as ArrayLike<unknown>, Number)
+      : [],
     commonNeedles: strings(r.common_needles),
     literalOnly: r.literal_only === true,
     score: Number(r.score),

@@ -123,7 +123,7 @@ export class SqlStore implements ThoughtStore {
     // methods above call their functions rather than inlining them.
     const rows = await this.sql`
       SELECT id, content, metadata, created_at, similarity,
-             matched_needles, needles, common_needles, literal_only, score
+             matched_needles, needles, needle_counts, common_needles, literal_only, score
       FROM search_thoughts_hybrid(
         ${toVector(opts.embedding)}::vector,
         ${opts.query}::text,

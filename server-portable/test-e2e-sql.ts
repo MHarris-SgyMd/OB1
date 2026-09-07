@@ -198,6 +198,20 @@ console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
   assert(!/Contains:/.test(miss), "…and no row claims it");
   const missAlone = await call("search_thoughts", { query: "ZZQX_404", limit: 5, threshold: 0.0 });
   assert(/only literals and no thought contains them/.test(missAlone.split("\n")[0]), "a literal-only query with no hits says the results are by similarity alone");
+  // With nothing above the threshold either, the empty answer still says why.
+  // Threshold 1.0: the stub puts every non-alpha/beta/gamma text on one axis,
+  // so the literal's embedding is identical to several thoughts', and only the
+  // strict comparison at 1.0 excludes them all.
+  const nothing = await call("search_thoughts", { query: "ZZQX_404", limit: 5, threshold: 1.0 });
+  assert(/^No thoughts found matching "ZZQX_404"\. No thought contains: ZZQX_404\./.test(nothing), `an empty result still reports the absent literal (${nothing.slice(0, 90)})`);
+  // Truncation is reported as such, not as absence: two literals in two
+  // different rows, room for one row — the losing literal's hit is outside the
+  // page, and the header says so with its count rather than "no thought
+  // contains" (review pass).
+  await call("capture_thought", { content: "zeta thought mentioning PGRST_ZZ once" });
+  const cut = await call("search_thoughts", { query: "PGRST_ZZ PGRST2020", limit: 1, threshold: 0.0 });
+  assert(/Outside the top 1: PGRST(2020|_ZZ) \(in 1 thought\)/.test(cut.split("\n")[0]), `a literal whose hit fell outside the page is reported with its count, not as absent (${cut.split("\n")[0]})`);
+  assert(!/No thought contains/.test(cut.split("\n")[0]), "…and not as absent");
   // The compat pair reaches the same function: an identifier ChatGPT's `search`
   // could never find before 017 is now at the top of its results.
   const compat = JSON.parse(await call("search", { query: "PGRST202" }));

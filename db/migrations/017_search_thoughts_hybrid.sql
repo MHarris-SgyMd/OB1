@@ -104,7 +104,9 @@
 -- RPC:
 --
 --   1. A span in double quotes or backticks is a needle as written. That is the
---      caller saying "this part exactly": "App Store", `upsert_thought`.
+--      caller saying "this part exactly": "App Store", `upsert_thought`. A span
+--      outside 3–64 characters is not a needle, and its words fall through to
+--      rule 2 — a pasted error message in quotes still yields its identifiers.
 --   2. Of the remaining tokens — split on whitespace and the punctuation that
 --      wraps an identifier rather than the punctuation inside one, the same
 --      delimiters evals/eval-keyword.ts uses — keep the identifier-shaped ones,
@@ -279,9 +281,11 @@
 -- and `ThoughtKeywordMatch` (occurrences, totalCount) as distinct because their
 -- numbers are not comparable; a fused row is neither with a field reinterpreted.
 -- `similarity` here is nullable; `matched_needles` is per row; `needles`,
--- `common_needles` and `literal_only` repeat on every row, the way 012 repeats
--- `total_count`, so a caller reading one row knows what the query was taken to
--- mean.
+-- `needle_counts`, `common_needles` and `literal_only` repeat on every row, the
+-- way 012 repeats `total_count`, so a caller reading one row knows what the
+-- query was taken to mean. `needle_counts` exists because the tool used to say
+-- "no thought contains X" when X's only hit had been cut by match_count — the
+-- page cannot tell absence from truncation, the count can (review pass).
 --
 -- No GRANT, no SECURITY DEFINER — 004, 008, 010 and 012 each say why: the
 -- Supabase roles do not exist off Supabase, and this reads exactly what its
@@ -310,10 +314,17 @@ DECLARE
   m       text[];
 BEGIN
   -- 1. Quoted spans, as written. "…" or `…`; a span that is only whitespace,
-  --    or outside 3–64 characters, is ignored rather than searched.
+  --    or outside 3–64 characters, is not a needle — but its TEXT stays in
+  --    play for rule 2, so a pasted error message in quotes still yields the
+  --    identifiers inside it. Only an accepted span is blanked out of the
+  --    remainder, so rule 2 does not re-tokenise it (review pass: the first
+  --    version blanked every span, and a 70-character quoted message
+  --    swallowed its ERR_* code).
+  v_rest := v_q;
   FOR m IN SELECT regexp_matches(v_q, '"([^"]+)"|`([^`]+)`', 'g') LOOP
     v_tok := coalesce(m[1], m[2]);
     CONTINUE WHEN trim(v_tok) = '' OR length(v_tok) < 3 OR length(v_tok) > 64;
+    v_rest := replace(v_rest, CASE WHEN m[1] IS NOT NULL THEN '"' || v_tok || '"' ELSE '`' || v_tok || '`' END, ' ');
     CONTINUE WHEN lower(v_tok) = ANY (v_seen);
     v_out  := v_out  || v_tok;
     v_seen := v_seen || lower(v_tok);
@@ -321,9 +332,10 @@ BEGIN
   END LOOP;
 
   -- 2. Identifier-shaped tokens from what is left. Split on whitespace and the
-  --    punctuation that WRAPS an identifier; strip a leading or trailing dot or
-  --    hyphen (sentence punctuation), keep the interior ones (SMD-944, v0.8.6).
-  v_rest := regexp_replace(v_q, '"[^"]*"|`[^`]*`', ' ', 'g');
+  --    punctuation that WRAPS an identifier (the quote characters among it, so
+  --    a rejected span's words are ordinary tokens here); strip a leading or
+  --    trailing dot or hyphen (sentence punctuation), keep the interior ones
+  --    (SMD-944, v0.8.6).
   FOR v_tok IN SELECT regexp_split_to_table(v_rest, '[\s`"''(){}\[\]<>,;:!?*|]+') LOOP
     EXIT WHEN cardinality(v_out) >= 8;
     v_tok := regexp_replace(v_tok, '^[.\-]+|[.\-]+$', '', 'g');
@@ -360,6 +372,7 @@ RETURNS TABLE (
   similarity       float,     -- NULL for a keyword hit with no vector and no chunks
   matched_needles  text[],    -- the needles this row contains, in query order
   needles          text[],    -- every row: the needles the keyword arm was asked for
+  needle_counts    int[],     -- every row: how many thoughts contain each of `needles` (0 = none), so a hit cut by match_count is not reported as absent
   common_needles   text[],    -- every row: extracted, but its page was not its whole match set (more than 100 thoughts today), so not used
   literal_only     boolean,   -- every row: the query had nothing to embed, so the vector arm's rank was not scored
   score            float
@@ -402,7 +415,8 @@ BEGIN
   FOR v_needle IN SELECT n FROM unnest(v_all) AS n ORDER BY length(n) DESC LOOP
     v_residual := replace(v_residual, lower(v_needle), ' ');
   END LOOP;
-  v_residual     := regexp_replace(v_residual, '["`]', ' ', 'g');
+  -- The quote characters around a span are left in: the parser keeps no lexeme
+  -- for punctuation, so stripping them changed nothing (review pass).
   v_literal_only := cardinality(v_all) > 0 AND length(to_tsvector('english', v_residual)) = 0;
 
   RETURN QUERY
@@ -429,6 +443,7 @@ BEGIN
   ),
   used AS (
     SELECT coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched = kn.total), '{}'::text[]) AS needles,
+           coalesce(array_agg(kn.total::int ORDER BY kn.ord) FILTER (WHERE kn.fetched = kn.total), '{}'::int[])  AS counts,
            coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched < kn.total), '{}'::text[]) AS common
     FROM kw_needles kn
   ),
@@ -483,6 +498,7 @@ BEGIN
     s.sim::float,
     coalesce(s.matched, '{}'::text[]),
     u.needles,
+    u.counts,
     u.common,
     v_literal_only,
     s.fused::float

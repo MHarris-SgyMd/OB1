@@ -1327,6 +1327,8 @@ console.log("\n[17] extract_search_needles picks literals and identifiers, not w
     ["edit db/config.mjs and getUserById", ["db/config.mjs", "getUserById"], "a path and an interior capital"],
     ['"App Store" launch in the UI', ["App Store"], "a double-quoted span, as written, ahead of everything else"],
     ["`upsert_thought` overloads", ["upsert_thought"], "a backticked span"],
+    ['"connection to server failed with ERR_POSTGRES_SERVER_ERROR after 30 seconds of waiting for it" happened again', ["ERR_POSTGRES_SERVER_ERROR"], "a quoted span too long to be a needle still yields the identifiers inside it"],
+    ['"App Store" and "App Store" twice', ["App Store"], "an accepted span is blanked before the identifier pass and de-duplicated"],
     ["released in 2024 for 12 users", [], "bare numbers are not identifiers"],
     ["pgvector 0.8.6 or later", ["0.8.6"], "a dotted version is"],
     ["v2 of the API", [], "two characters cannot reach the trigram index and are not asked for"],
@@ -1355,9 +1357,9 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
   await db.query(`SELECT upsert_thought('near match about timeouts', '{"metadata":{"kind":"a"}}'::jsonb, $1::vector)`, [blend(0, 1, 0.9, 0.44)]);
   await db.query(`SELECT upsert_thought('distant note that names SMD-507 and getUserById', '{"metadata":{"kind":"b"}}'::jsonb, $1::vector)`, [unit(1)]);
   await db.query(`SELECT upsert_thought('unembedded note that names SMD-507 too', '{"metadata":{"kind":"b"}}'::jsonb)`);
-  type Row = { content: string; similarity: number | null; matched_needles: string[]; needles: string[]; common_needles: string[]; literal_only: boolean; score: number };
+  type Row = { content: string; similarity: number | null; matched_needles: string[]; needles: string[]; needle_counts: number[]; common_needles: string[]; literal_only: boolean; score: number };
   const hybrid = async (q: string, threshold = 0.0, n = 10, filter = "{}") =>
-    (await db.query<Row>(`SELECT content, similarity, matched_needles, needles, common_needles, literal_only, score FROM search_thoughts_hybrid($1::vector, $2, $3, $4, $5::jsonb)`, [unit(0), q, threshold, n, filter])).rows;
+    (await db.query<Row>(`SELECT content, similarity, matched_needles, needles, needle_counts, common_needles, literal_only, score FROM search_thoughts_hybrid($1::vector, $2, $3, $4, $5::jsonb)`, [unit(0), q, threshold, n, filter])).rows;
   const contents = (rows: Row[]) => rows.map((r) => r.content);
 
   // No needle: match_thoughts, row for row. This is the guarantee the header
@@ -1389,6 +1391,12 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
   // zero rows — and boosts nothing, so the result is match_thoughts' result.
   const nohit = await hybrid("the scheduler and SMD-999", 0.0);
   assert(nohit.every((r) => r.needles.join() === "SMD-999" && r.common_needles.length === 0 && r.matched_needles.length === 0), "a zero-hit needle is reported as searched for, not as common, and matches no row");
+  assert(nohit.every((r) => r.needle_counts.join() === "0"), "…with a count of 0, which is how the tool tells absent from truncated");
+  assert(alone.every((r) => r.needle_counts.join() === "2"), "a needle in two thoughts reports 2 on every row");
+  // Truncation is not absence: with room for one row, the second exact hit is
+  // cut, and the count is what says it exists.
+  const one = await hybrid("SMD-507", 0.0, 1);
+  assert(one.length === 1 && one[0].matched_needles.join() === "SMD-507" && one[0].needle_counts.join() === "2", `a page of one still reports the needle's count of 2 (${JSON.stringify(one[0]?.needle_counts)})`);
   assert(contents(nohit).join("|") === contents(noNeedle).join("|"), "…and the order is the vector arm's");
   // …and the threshold does not remove an exact hit whatever its similarity.
   const strict = await hybrid("SMD-507", 0.99);

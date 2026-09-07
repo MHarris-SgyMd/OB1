@@ -133,27 +133,32 @@ async function queryVector(q: string): Promise<number[]> {
 
 async function raw(q: string): Promise<Raw> {
   const qv = lit(await queryVector(q));
-  const [{ n: all }] = await sql`SELECT extract_search_needles(${q}) AS n`;
-  const needlesAll = (all ?? []) as string[];
-  // The gate, computed as the migration computes it: needles and quote marks
-  // removed, then whether the English parser keeps any lexeme.
-  let residual = q;
-  for (const nd of needlesAll) residual = residual.replaceAll(nd, " ");
-  residual = residual.replace(/["`]/g, " ");
-  const [{ l }] = await sql`SELECT length(to_tsvector('english', ${residual}))::int AS l`;
-  const literalOnly = needlesAll.length > 0 && Number(l) === 0;
+
+  // The shipped function first, and the query-level facts — which needles were
+  // used, which were common, whether the query was literal-only — come from
+  // its rows rather than from a TypeScript re-implementation of the needle
+  // rule and the gate. Two copies of those drifted once (the gate's case
+  // handling, the common rule's constant) without the control noticing,
+  // because no query in the four sets exercised the difference (review pass).
+  // At threshold −1 the function returns a row whenever the corpus has one.
+  const shipped: Raw["shipped"] = {};
+  let facts: { needles: string[]; common_needles: string[]; literal_only: boolean } | undefined;
+  for (const s of SETTINGS) {
+    const rows = await sql`SELECT id, needles, common_needles, literal_only FROM search_thoughts_hybrid(${qv}::vector, ${q}, ${s.threshold}, ${s.n}, '{}'::jsonb)`;
+    shipped[s.name] = rows.map((r: { id: string }) => idOf.get(r.id)!);
+    if (rows.length && s.threshold < 0) facts = rows[0];
+  }
+  if (!facts) throw new Error(`search_thoughts_hybrid returned no row at threshold −1 for ${JSON.stringify(q)}; is the corpus loaded?`);
+  const needles = facts.needles as string[];
+  const common = facts.common_needles as string[];
+  const literalOnly = facts.literal_only === true;
 
   const hits = new Map<string, string[]>();
   const df = new Map<string, number>();
   const kwOrder: string[][] = [];
-  const needles: string[] = [];
-  const common: string[] = [];
-  for (const nd of needlesAll) {
+  for (const nd of needles) {
     const rows = await sql`SELECT id, total_count FROM search_thoughts_keyword(${nd}, 100, 0, '{}'::jsonb)`;
-    const total = rows.length ? Number(rows[0].total_count) : 0;
-    if (total > 100) { common.push(nd); continue; }
-    needles.push(nd);
-    df.set(nd, total);
+    df.set(nd, rows.length ? Number(rows[0].total_count) : 0);
     const order: string[] = [];
     for (const r of rows as { id: string }[]) {
       const issue = idOf.get(r.id)!;
@@ -176,12 +181,6 @@ async function raw(q: string): Promise<Raw> {
     // array as its bare element, which uuid[] refuses.
     const rows = await sql`SELECT id, 1 - (embedding <=> ${qv}::vector) AS sim FROM thoughts WHERE id = ANY(${`{${missing.join(",")}}`}::uuid[])`;
     for (const r of rows as { id: string; sim: number }[]) sims.set(idOf.get(r.id)!, Number(r.sim));
-  }
-
-  const shipped: Raw["shipped"] = {};
-  for (const s of SETTINGS) {
-    const rows = await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q}, ${s.threshold}, ${s.n}, '{}'::jsonb)`;
-    shipped[s.name] = rows.map((r: { id: string }) => idOf.get(r.id)!);
   }
   return { needles, common, literalOnly, hits, df, kwOrder, sims, vec, shipped };
 }
@@ -336,7 +335,7 @@ function stats(qs: Query[], arm: Arm, s: Setting) {
 }
 
 const sets: [string, Query[]][] = [["identifier", identifier], ["semantic", semantic], ["mixed", mixed], ["decoy", decoy]];
-console.log(`\n  ${results.size} queries in four sets; the control passed on every one (function order = harness order at both settings; every identifier query is hapax to the SQL function).`);
+console.log(`\n  ${results.size} queries in four sets; the control passed on every one (function order = harness order at both settings, with the needles, the common rule and the gate read from the function; every identifier query is hapax to the SQL function).`);
 if (notExtracted.length) console.log(`  ! ${notExtracted.length} identifier queries yield no needle under the product's rule (extract_search_needles) and are scored as the product would serve them: ${notExtracted.slice(0, 6).map((q) => `"${q.q}"`).join(", ")}${notExtracted.length > 6 ? "…" : ""}`);
 const withNeedle = semantic.filter((q) => results.get(q)!.needles.length).length;
 const withCommon = [...results.values()].filter((r) => r.common.length).length;

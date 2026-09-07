@@ -163,6 +163,33 @@ console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
   assert(dropped.length === 0, "…and a non-matching one actually filters");
 }
 
+console.log("\n[3c] hybridThoughts over PostgREST — the path every search takes on the default store");
+{
+  // Argument names bind against the real function here, so a rename in 017 or
+  // in store-postgrest.ts fails this section rather than every search in
+  // production (review pass: the SQL store had [3c], this one did not).
+  // vec(1), orthogonal to the vec(3) query: an axis beyond DIM would be the
+  // zero vector, whose cosine is NaN.
+  await store.captureThought({
+    content: "postgrest hybrid needle SMD-507 in a distant thought",
+    payload: { metadata: { kind: "hy" } },
+    embedding: vec(1),
+  });
+  const rows = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
+  assert(rows.length >= 1 && rows[0].content === "postgrest hybrid needle SMD-507 in a distant thought", `the RPC reaches the function and the exact hit comes first (${rows.map((r) => r.content.slice(0, 30)).join(" | ")})`);
+  assert(rows[0].matchedNeedles.join() === "SMD-507" && rows[0].needles.join() === "SMD-507", "matched_needles and needles arrive as arrays, mapped to the store's names");
+  assert(rows[0].needleCounts.length === 1 && rows[0].needleCounts[0] === 1, `needle_counts is mapped to numbers (${JSON.stringify(rows[0].needleCounts)})`);
+  assert(rows[0].literalOnly === true && rows[0].commonNeedles.length === 0, "literal_only and common_needles are mapped, not left undefined");
+  assert(typeof rows[0].similarity === "number" && Math.abs(rows[0].similarity) < 1e-6, `a keyword hit orthogonal to the query reports similarity 0, not null (${rows[0].similarity})`);
+  assert(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
+
+  const plain = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
+  const vector = await store.matchThoughts({ embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
+  assert(plain.map((r) => r.id).join() === vector.map((r) => r.id).join(), "with no needle the fused order is matchThoughts' order over this store too");
+  const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
+  assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
+}
+
 console.log("\n[4] A thought is deduplicated across its own chunks");
 {
   await store.captureThought({

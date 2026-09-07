@@ -2214,6 +2214,31 @@ re-apply of 014). Declined: rewriting the CTEs as a FULL OUTER JOIN, moving
 `eval-graphrag.ts` onto the shared vector cache in this PR, and de-duplicating
 the standalone benches' helpers. The numbers above did not move.
 
+**A second pass, triaged: ten fixes, none ticketed.** The tool's header
+derived "no thought contains X" from the page it had, so a literal whose only
+hit was cut by `limit` was reported absent — the function now returns
+`needle_counts` beside `needles`, and the tool tells absent from "outside the
+top N" by the count. The tool descriptions promised an exact hit "whatever its
+similarity"; they now state the real contract (rare enough to match, within
+the limit) and no longer hard-code the page size. A quoted span over 64
+characters was rejected as a needle and also blanked before the identifier
+pass, so a pasted error message in quotes lost its `ERR_*` code — only an
+accepted span is blanked now. An empty result said nothing about why; the tool
+makes one more call at no threshold to report an absent or too-common literal.
+An only-common literal-only query printed two contradictory notes. The eval
+harness's copy of the needle rule and the gate had drifted from the SQL
+without the control noticing, because no query exercised the difference — it
+reads `needles`, `common_needles` and `literal_only` from the function now. A
+non-numeric cap emptied the sets instead of meaning no cap. `eval-graphrag.ts`
+moved onto the shared vector cache after all (verified against its dump; same
+numbers). The dead quote-stripping line in the gate is gone. And the PostgREST
+store gained the `hybridThoughts` conformance test it lacked — which
+immediately found that the SQL-backed compat client hands an `int[]` back as a
+typed array, for which `Array.isArray` is false, so `needleCounts` was empty
+on that path until the normaliser accepted array-likes. Declined: `ALTER
+FUNCTION … ROWS` inside 017 (SMD-1041; a re-apply of 014 would reset it),
+and three cosmetic duplications.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
