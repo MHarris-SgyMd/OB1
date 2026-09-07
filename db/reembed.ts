@@ -72,12 +72,15 @@
  * DUPLICATE_CONTENT — failed, exit 1, and --retry-failed reproduced it for
  * ever (SMD-1022). 018 accepts an edit whose text normalises to what the row
  * holds, leaves that row's fingerprint NULL so the unique index is never
- * violated, and names the other row in its result. This pass requires 018,
- * counts those rows as it re-embeds them, and prints every group of thoughts
- * sharing one normalised text at the end and under --status — one query over
- * the corpus, so the list is the same whenever it is asked for. Whether a pair
- * should be one thought is the operator's call; nothing is written to the
- * claim row about it.
+ * violated, and names the other row in its result. A run requires 018 (the
+ * read-only --status and --dry-run do not), says per row when it found a pair,
+ * and prints every group of thoughts sharing one normalised text at the end
+ * and under --status — one query over the corpus, so the list is the same
+ * whenever it is asked for. Whether a pair should be one thought is the
+ * operator's call; nothing is written to the claim row about it. 018's lock
+ * serialises edits only: a capture of the same text committing while a worker
+ * fingerprints a legacy row still raises the unique violation, which lands as
+ * a failed claim naming the constraint, and --retry-failed resolves it.
  *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the
@@ -167,22 +170,6 @@ const sql = new SQL({ url, max: WORKERS + 1 });
 const [claims] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
 if (!claims.present) {
   console.error("\n  thought_work_claims does not exist. Apply migration 015 first:\n    cd db && bun migrate.ts --url …");
-  await sql.close();
-  process.exit(2);
-}
-
-// A pass against 013's update_thought fails every legacy twin for ever (see the
-// header): the body that accepts an unchanged edit is recognisable by the
-// field it alone returns.
-const [fn] = await sql`
-  SELECT EXISTS (
-    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND p.proname = 'update_thought' AND p.prosrc LIKE '%duplicate_of%') AS present`;
-if (!fn.present) {
-  console.error(
-    "\n  update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
-      "  the fingerprint — would fail this pass on every run. Apply migration 018 first:\n    cd db && bun migrate.ts --url …"
-  );
   await sql.close();
   process.exit(2);
 }
@@ -321,6 +308,25 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
+// A pass against 013's update_thought fails every legacy twin for ever (see the
+// header). The body installed is asked for 018's contract sentinel — the 014
+// convention: a marker in pg_proc.prosrc, which every CREATE OR REPLACE
+// rewrites — rather than for a field name a comment could carry. --status and
+// --dry-run never call update_thought and are answered above, whatever the body.
+const [fn] = await sql`
+  SELECT EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.proname = 'update_thought'
+      AND p.prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS present`;
+if (!fn.present) {
+  console.error(
+    "\n  update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
+      "  the fingerprint — would fail this pass on every run. Apply migration 018 first:\n    cd db && bun migrate.ts --url …"
+  );
+  await sql.close();
+  process.exit(2);
+}
+
 // The provider first, so a wrong URL or a wrong width fails before any row is
 // touched — the width check inside getEmbedding names the model and both widths.
 try {
@@ -372,8 +378,6 @@ let stopping = false;
 let done = 0;
 let failed = 0;
 let vanished = 0;
-/** Rows whose unchanged text another thought also holds — re-embedded, and named by update_thought (migration 018). */
-let duplicates = 0;
 /** Long thoughts stored with the head window's vector because the whole-content call failed. */
 let headWindow = 0;
 /** Worker ids with leases possibly outstanding, for a forced exit. */
@@ -432,8 +436,9 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
       if (result.duplicate_of) {
         // The row's own text is also another thought's — a pair from before the
         // fingerprint. Re-embedded like any other row; the summary lists the
-        // groups. Not an outcome: nothing about this row's vectors is in doubt.
-        duplicates++;
+        // groups, from the corpus, so it is the count that is authoritative (a
+        // pair's first row is never reported here — nothing owned its text
+        // yet). Not an outcome: nothing about this row's vectors is in doubt.
         console.error(`  ${current.id}: duplicates ${result.duplicate_of} — the same text from before the fingerprint; re-embedded, see the summary`);
       }
       if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
@@ -469,8 +474,11 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
     }
     // DUPLICATE_CONTENT cannot reach here: the content passed is always the
     // row's current text — a STALE_READ re-read guarantees it — and since
-    // migration 018 an unchanged edit is never a duplicate. Anything else is
-    // reported as what it is.
+    // migration 018 an unchanged edit is never a duplicate. What remains is a
+    // capture of the same text committing while this row is fingerprinted
+    // (018's lock covers edits, not upsert_thought), which raises a unique
+    // violation into the catch in worker(): failed with the constraint named,
+    // and --retry-failed then finds the other row and reports duplicate_of.
     return { outcome: "failed", error: `update_thought: ${result.error}` };
   }
   return { outcome: "failed", error: "update_thought: STALE_READ three times in a row — the thought is being edited faster than it can be re-embedded" };
@@ -602,7 +610,6 @@ const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass, in ${elapsed}s`);
 printCounts(after, "after");
-if (duplicates > 0) console.error(`  ${duplicates} re-embedded row(s) hold text another thought also holds — the groups are listed below`);
 await printDuplicateGroups();
 if (headWindow > 0) {
   console.error(

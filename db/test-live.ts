@@ -318,13 +318,14 @@ console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, th
   let releaseA: () => void = () => {};
   const held = new Promise<void>((resolve) => { releaseA = resolve; });
   let aResult: R | undefined;
+  let aError = "";
   const aDone = connA.begin(async (tx: SQL) => {
     aResult = ((await tx`SELECT update_thought(${a.id}::uuid, 'Legacy Twin', NULL, ${unit(1)}::vector) AS r`) as { r: R }[])[0].r;
     await held;
-  });
+  }).catch((e: Error) => { aError = e.message; releaseA(); });
   // A has taken the lock before B starts: wait for its result, not a sleep.
-  for (let i = 0; i < 250 && aResult === undefined; i++) await Bun.sleep(20);
-  assert(aResult?.ok === true && aResult.duplicate_of === undefined, `A re-embeds the first twin inside an open transaction (${JSON.stringify(aResult)})`);
+  for (let i = 0; i < 250 && aResult === undefined && aError === ""; i++) await Bun.sleep(20);
+  assert(aResult?.ok === true && aResult.duplicate_of === undefined, `A re-embeds the first twin inside an open transaction (${aError || JSON.stringify(aResult)})`);
 
   let bError = "";
   const bDone = connB.begin(async (tx: SQL) => {

@@ -38,37 +38,48 @@
 --      the hash rule has one owner instead of a third inline copy. The edit is
 --      UNCHANGED when it equals content_fingerprint_of(existing content).
 --   2. pg_advisory_xact_lock on the fingerprint, before the check, for every
---      content write. Two transactions fingerprinting the same text are
---      serialised on it, so the EXISTS that follows is authoritative — under
---      READ COMMITTED each statement takes a fresh snapshot, and the second
---      arrives after the first has committed. Without it two legacy twins
---      re-embedded by two workers at the same moment both pass the check and
---      the second hits the unique index with an opaque 23505; the same lock
---      also closes the race 009's header left open for a genuine edit (two
---      rows edited into the same new text at once now get DUPLICATE_CONTENT,
---      not a constraint error). Transaction-scoped, released at commit, one
---      lock per edit. Deadlock is possible only for a transaction that calls
---      update_thought twice with different texts while another does the
---      reverse; no caller here does, and Postgres would report it rather than
---      hang. db/test-live.ts [6b] holds the lock open on one connection and
---      shows the other waiting on the ADVISORY lock in pg_locks, then told,
---      not refused. With the PERFORM below removed, the same scenario waits
---      on the transaction id instead and raises the 23505 once the first
---      commits — measured, which is why the test names the lock type.
---   3. Changed text: the check as before. Another row with this fingerprint →
---      DUPLICATE_CONTENT.
---   4. Unchanged text: no refusal. If another row already carries the
---      fingerprint, this row's fingerprint is LEFT AS IT IS — necessarily NULL,
---      since two fingerprinted rows cannot collide — so the partial index is
---      never violated, and the result carries `duplicate_of` naming the other
---      row. Otherwise the fingerprint is written: the backfill 003 never had,
---      one row at a time, now stated rather than incidental. Embedding and
---      chunks are replaced exactly as before whenever content is given.
+--      content write THROUGH THIS FUNCTION. Two edits fingerprinting the same
+--      text are serialised on it, so the lookup that follows sees the other
+--      edit's committed row. That argument needs READ COMMITTED — each
+--      statement takes a fresh snapshot, so the waiter's lookup runs after the
+--      holder's commit — which is the default and what every caller here runs
+--      at; under REPEATABLE READ or SERIALIZABLE the waiter's snapshot predates
+--      the commit and the unique index, not this function, gives the answer.
+--      Without the lock two legacy twins re-embedded by two workers at the
+--      same moment both pass the check and the second hits the unique index
+--      with an opaque 23505; the same lock turns the race 009's header left
+--      open for a genuine edit (two rows edited into the same new text at
+--      once) into DUPLICATE_CONTENT instead of a constraint error. It covers
+--      edit against edit only: upsert_thought writes fingerprints without it,
+--      so a capture of text X committing while an edit to X is in flight still
+--      ends, as before this migration, in the edit raising 23505. Transaction-
+--      scoped, released at commit, one lock per edit. Deadlock is possible only
+--      for a transaction that calls update_thought twice with different texts
+--      while another does the reverse; no caller here does, and Postgres would
+--      report it rather than hang. db/test-live.ts [6b] holds the lock open on
+--      one connection and shows the other waiting on the ADVISORY lock in
+--      pg_locks, then told, not refused. With the PERFORM below removed, the
+--      same scenario waits on the transaction id instead and raises the 23505
+--      once the first commits — measured, which is why the test names the
+--      lock type.
+--   3. One lookup, after the lock, for the other row carrying this
+--      fingerprint. Changed text and such a row → DUPLICATE_CONTENT, as before.
+--   4. Unchanged text: no refusal. If the lookup found a row, the result
+--      carries `duplicate_of` naming it and this row's fingerprint is set to
+--      NULL — which is what it already was unless a raw UPDATE around
+--      update_thought (upstream's pre-009 path never recomputed it) left a
+--      hash describing text the row no longer holds; either way the column
+--      must not claim the text another row owns, and the partial index is
+--      never violated. Otherwise the fingerprint is written: the backfill 003
+--      never had, one row at a time, now stated rather than incidental — for
+--      the rows a pass visits; a one-shot backfill for the rest is SMD-1042.
+--      Embedding and chunks are replaced exactly as before whenever content is
+--      given.
 --
 -- What the caller sees
 --   {ok:true, id, updated_at} as before, plus `duplicate_of` (uuid) when the
---   unchanged text is also another thought's. db/reembed.ts counts and names
---   the pairs at the end of a pass and under --status; the update_thought tool
+--   unchanged text is also another thought's. db/reembed.ts says so per row and
+--   lists the groups at the end of a pass and under --status; the update_thought tool
 --   appends a note to its reply. Nothing is written to the claim row for it:
 --   the pair is a fact about the corpus, reproducible by one query at any time
 --   (group by COALESCE(content_fingerprint, content_fingerprint_of(content))).
@@ -78,7 +89,17 @@
 --   creates a second row — ON CONFLICT cannot see a NULL — and the row the
 --   pass leaves without a fingerprint stays a target for that. The pairs query
 --   surfaces both kinds. Deleting one of a pair is the operator's call;
---   delete_thought keeps the previous content in the audit row.
+--   delete_thought keeps the previous content in the audit row. The one-shot
+--   backfill that would fingerprint every legacy singleton without a re-embed
+--   pass is SMD-1042 — a data migration with its own questions (a full-table
+--   hash inside one transaction, re-apply), not folded in here.
+--
+--   The body carries `ob1:unchanged-edit-not-duplicate`, a contract sentinel in
+--   the 014 convention: it lives in pg_proc.prosrc, which every CREATE OR
+--   REPLACE rewrites, so db/reembed.ts can ask whether the function installed
+--   is this one rather than whether a field name appears somewhere. A
+--   successor that keeps the behaviour keeps the sentinel; one that drops the
+--   behaviour must drop it, and reembed.ts refuses to run.
 --
 -- The trap
 --   CREATE OR REPLACE takes the whole body. Everything the current body holds
@@ -150,29 +171,25 @@ BEGIN
     v_fingerprint := content_fingerprint_of(p_content);
     v_unchanged   := v_fingerprint = content_fingerprint_of(v_existing.content);
 
-    -- Serialise every writer of this fingerprint until commit, so the checks
-    -- below see the other writer's row rather than racing it to the unique
+    -- Serialise every edit to this fingerprint until commit, so the lookup
+    -- below sees the other edit's row rather than racing it to the unique
     -- index. See "The rule", 2, in the header.
     PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));
 
-    IF NOT v_unchanged THEN
-      -- Editing a thought into an exact duplicate of another one. The partial
-      -- unique index would reject this anyway, but as a constraint violation
-      -- that surfaces at the tool boundary as an opaque 23505.
-      IF EXISTS (
-        SELECT 1 FROM thoughts
-        WHERE content_fingerprint = v_fingerprint AND id <> p_id
-      ) THEN
-        RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_CONTENT');
-      END IF;
-    ELSE
-      -- The text is what the row already holds, so no duplicate is being
-      -- created — but one may already exist, from before 003 or from a load
-      -- that bypassed upsert_thought. Name it, and leave this row's fingerprint
-      -- (necessarily NULL) alone so the partial index is never violated.
-      SELECT id INTO v_duplicate_of FROM thoughts
-      WHERE content_fingerprint = v_fingerprint AND id <> p_id
-      LIMIT 1;
+    -- ob1:unchanged-edit-not-duplicate — a CONTRACT SENTINEL, not prose (the
+    -- 014 convention). The one definition of "another row carrying this text":
+    -- the refusal below and the duplicate_of report both read it.
+    SELECT id INTO v_duplicate_of FROM thoughts
+    WHERE content_fingerprint = v_fingerprint AND id <> p_id
+    LIMIT 1;
+
+    -- Editing a thought INTO another thought's text. The partial unique index
+    -- would reject this anyway, but as a constraint violation that surfaces at
+    -- the tool boundary as an opaque 23505. An edit whose text normalises to
+    -- what the row already holds creates no duplicate that was not already
+    -- there, so it is not refused; the row found is reported instead.
+    IF NOT v_unchanged AND v_duplicate_of IS NOT NULL THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_CONTENT');
     END IF;
   END IF;
 
@@ -185,9 +202,12 @@ BEGIN
    */
   UPDATE thoughts SET
     content             = COALESCE(p_content, content),
+    -- v_duplicate_of is set only when content arrived: another row owns this
+    -- text's fingerprint, so this row must not claim it — NULL, whatever a
+    -- raw update around this function may have left here.
     content_fingerprint = CASE
-                            WHEN p_content IS NULL             THEN content_fingerprint
-                            WHEN v_duplicate_of IS NOT NULL    THEN content_fingerprint
+                            WHEN p_content IS NULL          THEN content_fingerprint
+                            WHEN v_duplicate_of IS NOT NULL THEN NULL
                             ELSE v_fingerprint
                           END,
     metadata            = CASE WHEN p_metadata_patch IS NOT NULL
@@ -228,4 +248,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb) IS
-  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row already carries that fingerprint (a pair from before migration 003). Writers of one fingerprint are serialised on an advisory lock. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT.';
+  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row already carries that fingerprint (a pair from before migration 003), leaving this row''s fingerprint NULL. Edits to one fingerprint are serialised on an advisory lock (READ COMMITTED; captures through upsert_thought are not). Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT.';

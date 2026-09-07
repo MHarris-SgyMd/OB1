@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `337 assertions: 337 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `340 assertions: 340 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports eighteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -89,7 +89,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
-| `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; writers of one fingerprint are serialised on an advisory lock, which also turns 009's constraint-violation race for a genuine edit into `DUPLICATE_CONTENT`. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
+| `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` are not covered. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
 
 ## What changed relative to the guide
 
@@ -268,6 +268,12 @@ written to the claim row about it. Two workers reaching the two rows of a pair
 at the same moment are serialised on an advisory lock inside `update_thought`;
 without it the second would pass the check and raise a unique violation when
 the first committed — `test-live.ts` [6b] shows the wait on the right lock.
+The lock covers edits only: a capture of the same text committing while a
+worker fingerprints a legacy row still raises that violation, which lands as a
+failed claim naming the constraint, and `--retry-failed` resolves it. The
+read-only `--status` and `--dry-run` run against any schema; a pass that would
+write requires 018. A one-shot backfill that fingerprints every legacy
+singleton without a re-embed is SMD-1042.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
 0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
@@ -567,7 +573,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 337 assertions, PGlite, no container
+bun test-schema.ts                    # 340 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 164 assertions, real server, throwaway container
 ```
 
@@ -629,7 +635,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 337 properties, including:
+asserts 340 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

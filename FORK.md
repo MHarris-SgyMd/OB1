@@ -2310,15 +2310,19 @@ uncommitted — and the second then blocked on the unique index and raised
 `duplicate key value violates unique constraint "idx_thoughts_fingerprint"`
 when the first committed: measured, with the lock line removed. `update_thought`
 now takes a transaction-scoped advisory lock on the fingerprint before the
-check, for every content write, so writers of one text are serialised and the
-check that follows is authoritative under READ COMMITTED. `test-live.ts` [6b]
+check, for every content write through it, so two edits to one text are
+serialised and the lookup that follows is authoritative under READ COMMITTED —
+the default, and stated as the precondition it is. `test-live.ts` [6b]
 holds the first twin's transaction open on one connection, shows the second
 waiting on the *advisory* lock in `pg_locks` rather than on a transaction id,
 and gets ok with `duplicate_of` once the first commits. The same lock turns
 009's documented race for a genuine edit — two rows edited into the same new
-text at once — into `DUPLICATE_CONTENT` instead of a constraint error. One lock
-per edit; deadlock would need a transaction that calls `update_thought` twice
-with different texts while another does the reverse, which no caller does.
+text at once — into `DUPLICATE_CONTENT` instead of a constraint error. It
+covers edits only: `upsert_thought` writes fingerprints without it, so a
+capture of text X committing while an edit to X is in flight still ends in the
+edit raising the unique violation, exactly as before this change. One lock per
+edit; deadlock would need a transaction that calls `update_thought` twice with
+different texts while another does the reverse, which no caller does.
 
 **What the pass does with it.** `reembed.ts` requires 018 (exit 2 naming the
 migration otherwise — a pass against 013's body fails every legacy twin for
@@ -2333,9 +2337,33 @@ belongs to SMD-1021. The `update_thought` tool appends the same note to its
 reply, and `normaliseMutation` carries `duplicateOf` for both stores. Stated in
 018's header and not fixed: `upsert_thought` capturing text equal to a legacy
 NULL-fingerprint row still creates a second row, since `ON CONFLICT` cannot see
-a NULL; the pairs query surfaces those too. `test-schema.ts` [19] (24
-assertions, at the default width and at 8), `test-live.ts` [6b] and a legacy
-pair in [9]'s fixture, `test-update-delete.ts` [8b].
+a NULL; the pairs query surfaces those too. `test-schema.ts` [19] (at the
+default width and at 8), `test-live.ts` [6b] and a legacy pair in [9]'s
+fixture, `test-update-delete.ts` [8b].
+
+**A first review pass, triaged: eight fixes, one ticket.** Two were behaviour.
+The migration-018 check in `reembed.ts` sat above the read-only branch, so
+`--status` and `--dry-run` refused to run on a brain at 017 — a report command
+demanding a schema write; it runs only before a pass now. And the CASE that
+kept "the row's fingerprint, necessarily NULL" when a duplicate was found kept
+whatever was there: a raw update around `update_thought` (upstream's pre-009
+path never recomputed the column) leaves a hash describing text the row no
+longer holds, and 013 at least refused that row where 018 accepted it and kept
+the hash. It writes NULL now, which is what the comment claimed, and [19] plants
+the stale case. The rest: the duplicate predicate was written twice behind an
+IF/ELSE — one lookup after the lock, one condition for the refusal; the
+`duplicates` counter disagreed with the group count by construction (a pair's
+first row is never reported) and is gone; `reembed.ts` asked for the field
+name `duplicate_of` in `prosrc` where the repo's convention is a contract
+sentinel, so 018 carries `ob1:unchanged-edit-not-duplicate` and the pass, and
+[19], ask for that; [6b]'s connection A had no `.catch`, so a throw there
+would have ended the suite before the tally; and the claim that "writers of one
+fingerprint are serialised" was scoped to what is true — edits, under READ
+COMMITTED, with `upsert_thought` uncovered — here, in the header, the COMMENT
+and `db/README.md`. To a ticket: the one-shot fingerprint backfill 003 never
+had (SMD-1042), feasible now that `content_fingerprint_of` exists and the
+right fix for every legacy singleton a pass never visits, but a data migration
+with its own questions about a full-table hash inside one transaction.
 
 ## Detached from the fork network
 

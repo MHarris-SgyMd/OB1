@@ -1575,6 +1575,17 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   const r8 = await update(twin1, "Same Text", null, unit(3), "2000-01-01T00:00:00Z");
   assert(r8.ok === false && r8.error === "STALE_READ", `if_unchanged_since still refuses a stale write (${JSON.stringify(r8)})`);
 
+  // A stale fingerprint — a raw UPDATE of content around update_thought, which
+  // upstream's pre-009 path never recomputed — describing text the row no
+  // longer holds, on a row whose text another row owns. The edit is unchanged
+  // and reported as a duplicate; the stale hash must not survive it.
+  const stale = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('same text', content_fingerprint_of('what it used to say'), $1::vector) RETURNING id`,
+    [unit(0)])).rows[0].id;
+  const r9 = await update(stale, "same text", null, unit(5), null);
+  assert(r9.ok === true && r9.duplicate_of === twin1, `a row with a stale fingerprint re-saved as its own text is accepted and named a duplicate (${JSON.stringify(r9)})`);
+  assert((await rowOf(stale)).fp === null, "…and the stale fingerprint is cleared rather than kept under text it does not describe");
+
   // The carry-forward, read out of pg_proc: one function, and every earlier
   // migration's piece still in its body by name.
   const proc = await db.query<{ prosrc: string }>(
@@ -1586,7 +1597,8 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(/date_trunc\('milliseconds'/.test(src) && /p_if_unchanged_since IS NULL\s+OR/.test(src), "…009's millisecond-truncated guard as a predicate in the UPDATE");
   assert(/elem->>'context'/.test(src), "…013's context in the chunk insert");
   assert(/content_fingerprint_of\(/.test(src) && !/regexp_replace/.test(src), "…016's fingerprint function rather than a third inline copy of the rule");
-  assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises writers of one fingerprint (db/test-live.ts [6b] proves it)");
+  assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
+  assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
   await db.exec(`DELETE FROM thoughts`);
 }
 
