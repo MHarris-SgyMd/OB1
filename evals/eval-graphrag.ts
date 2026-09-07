@@ -55,11 +55,14 @@
  *   OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-graphrag.ts
  *   … --no-global        skip the community summaries (the only slow, LLM-heavy arm)
  *   … --k 10             documents retrieved per question (default 10)
+ *   … --allow-stale-dump replay a dump whose fingerprints do not match the loaded text, by id
  *   OB1_EVAL_EMBED=qwen3-embedding:4b@1024   the embedding spec, as the other harnesses take it
  */
 
 import { SQL } from "bun";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
 import { loadLinearCorpus, linearThoughtId, linearThoughtText, entityAnswersPath } from "./linear-corpus.ts";
@@ -72,17 +75,21 @@ const URL_ = requireDatabaseUrl("eval-graphrag.ts");
 const args = process.argv.slice(2);
 const has = (n: string) => args.includes(`--${n}`);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 && !args[i + 1]?.startsWith("--") ? args[i + 1] : undefined; };
-// OB1_EVAL_BASE / OB1_EVAL_KEY are what the other harnesses use; the chat calls
-// go through the server's resolver, which reads the OB1_LLM_* names. Bridge both
-// — the first version bridged only the URL, so a hosted run embedded with a key
-// and extracted without one.
-if (!process.env.OB1_LLM_BASE_URL && process.env.OB1_EVAL_BASE) process.env.OB1_LLM_BASE_URL = process.env.OB1_EVAL_BASE;
+// OB1_EVAL_BASE / OB1_EVAL_KEY (and lib.ts's OLLAMA_BASE fallback) are what the
+// other harnesses use; the chat calls go through the server's resolver, which
+// reads the OB1_LLM_* names. Bridge all three, so embeddings and the extraction
+// and summary calls reach the same host with the same key — the first version
+// bridged only the URL, so a hosted run embedded with a key and extracted
+// without one.
+const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
+if (!process.env.OB1_LLM_BASE_URL && evalBase) process.env.OB1_LLM_BASE_URL = evalBase;
 if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LLM_API_KEY = process.env.OB1_EVAL_KEY;
 
 const K = Number(flag("k") ?? 10);
 if (!Number.isInteger(K) || K < 1) { console.error("--k needs a positive integer."); process.exit(2); }
 const FETCH = Math.max(K, 20); // every arm returns this many; scoring cuts at K
 const GLOBAL = !has("no-global");
+const ALLOW_STALE = has("allow-stale-dump");
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
 const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM ?? 1024);
@@ -92,7 +99,7 @@ const answersPath = entityAnswersPath(cfg.metadataModel);
 const vectorCache = `/tmp/graphrag-vectors-${EMBED_MODEL.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
 
 type Question = { id: string; type: "multi-hop" | "aggregation" | "corpus"; question: string; expected: string[]; keyword?: string };
-const questions = (JSON.parse(readFileSync(new URL("./graphrag-questions.json", import.meta.url).pathname, "utf8")) as { questions: Question[] }).questions;
+const questions = (JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "graphrag-questions.json"), "utf8")) as { questions: Question[] }).questions;
 if (!existsSync(answersPath)) {
   console.error(`No entity answers at ${answersPath}. Run eval-entities.ts --corpus first (about two hours); this spike replays its graph.`);
   process.exit(2);
@@ -100,7 +107,7 @@ if (!existsSync(answersPath)) {
 const lit = (v: number[]) => `[${v.join(",")}]`;
 
 console.log(`  corpus: ${docs.length} documents from ${corpusPath}; ${questions.length} questions; k = ${K}`);
-console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; extraction and summaries by ${cfg.metadataModel} via ${cfg.llmBase}\n`);
+console.log(`  embed:  ${EMBED_MODEL} @ ${DIM}; graph from ${answersPath}; extraction and summaries by ${cfg.metadataModel} at temperature ${cfg.metadataTemperature} via ${cfg.llmBase}\n`);
 
 // ── Load: thoughts with vectors, then the graph ──────────────────────────────
 
@@ -133,27 +140,42 @@ if (dropped.length) console.log(`  ! ${dropped.length} documents collapsed onto 
 const unreachable = questions.flatMap((q) => q.expected.filter((e) => !loadedIssues.has(e)).map((e) => `${q.id}:${e}`));
 if (unreachable.length) { console.error(`  expected documents not in this load — fix the question set or the corpus: ${unreachable.join(", ")}`); process.exit(2); }
 
-// The dump carries the fingerprint of the row as the entity eval loaded it, so
-// an extraction of text that has since changed is detectable. A dump made
-// before that loader used content_fingerprint_of() matches nothing and is
-// replayed by id alone — reported either way, never hidden.
+// Each dump line carries the fingerprint of the row as the entity eval loaded
+// it, and record_thought_entities takes it as its fifth argument: a line whose
+// fingerprint no longer matches the row is refused as stale and writes nothing.
+// A stale dump therefore cannot be scored as if it were of this text — the run
+// stops, unless --allow-stale-dump says the operator knows (a dump written
+// before the loader used content_fingerprint_of() matches nothing).
 const key = extractionKey(cfg.metadataModel);
-let replayed = 0, missing = 0, fpMatched = 0;
+let replayed = 0, missing = 0, stale = 0, unfingerprinted = 0;
 const dumpLines = readFileSync(answersPath, "utf8").split("\n").filter(Boolean);
 for (const line of dumpLines) {
   const a = JSON.parse(line) as { id: string; fingerprint?: string; entities: unknown[]; relations: unknown[] };
-  const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${key}, ${a.entities}::jsonb, ${a.relations}::jsonb) AS r`;
-  if ((r as { ok: boolean }).ok) replayed++; else missing++;
-  if (a.fingerprint) {
-    const [{ same }] = await sql`SELECT EXISTS (SELECT 1 FROM thoughts WHERE id = ${a.id}::uuid AND content_fingerprint = ${a.fingerprint}) AS same`;
-    if (same) fpMatched++;
-  }
+  if (!a.fingerprint) unfingerprinted++;
+  const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${key}, ${a.entities}::jsonb, ${a.relations}::jsonb, ${ALLOW_STALE ? null : (a.fingerprint ?? null)}) AS r`;
+  const res = r as { ok: boolean; stale?: boolean; error?: string };
+  if (res.ok) replayed++; else if (res.stale) stale++; else missing++;
 }
-if (replayed === 0) { console.error(`  no dump line named a loaded thought (${dumpLines.length} lines, ${missing} not found) — the graph is empty; is ${answersPath} from this corpus?`); process.exit(2); }
+console.log(`  graph:  ${replayed} of ${dumpLines.length} dumped extractions replayed${missing ? `; ${missing} named thoughts not in this load` : ""}${stale ? `; ${stale} STALE (text changed since extraction)` : ""}${unfingerprinted ? `; ${unfingerprinted} carry no fingerprint` : ""}`);
+if (stale && !ALLOW_STALE) { console.error(`  the dump was extracted from different text for ${stale} thoughts and cannot be scored as this corpus; re-run eval-entities.ts --corpus, or pass --allow-stale-dump to replay by id anyway`); process.exit(2); }
+if (replayed === 0) { console.error(`  no dump line named a loaded thought — the graph is empty; is ${answersPath} from this corpus?`); process.exit(2); }
+if (ALLOW_STALE) console.log(`          --allow-stale-dump: fingerprints not checked; the extraction's text is taken to be this text`);
 await sql.unsafe("VACUUM ANALYZE thoughts"); await sql.unsafe("ANALYZE ob1_entities"); await sql.unsafe("ANALYZE thought_entities"); await sql.unsafe("ANALYZE ob1_entity_edges");
 const [g] = await sql`SELECT (SELECT count(*)::int FROM ob1_entities) AS entities, (SELECT count(*)::int FROM thought_entities) AS mentions, (SELECT count(*)::int FROM ob1_entity_edges) AS edges`;
-console.log(`  graph:  ${replayed} of ${dumpLines.length} dumped extractions replayed${missing ? ` (${missing} named thoughts not in this load)` : ""} → ${g.entities} entities, ${g.mentions} mentions, ${g.edges} edges`);
-console.log(`          ${fpMatched === dumpLines.length ? "every dump line's fingerprint matches its row: the extraction saw this text" : fpMatched === 0 ? "no dump fingerprint matches its row — the dump predates the fingerprint fix in the loader, or the text changed; replayed by id, text staleness unverified" : `${fpMatched} of ${dumpLines.length} dump fingerprints match their rows; the rest were extracted from different text`}\n`);
+console.log(`          → ${g.entities} entities, ${g.mentions} mentions, ${g.edges} edges`);
+
+// A thought with no mention — its extraction timed out, or found nothing — is
+// unreachable by the graph and global arms whatever the retrieval quality, so
+// an expected document in that state caps the graph arms' recall below 1.0 on
+// its question. Say which, per question, so those rows are read as coverage
+// and not as ranking.
+const mentioned = new Set<string>((await sql`SELECT DISTINCT t.metadata->>'issue' AS issue FROM thought_entities m JOIN thoughts t ON t.id = m.thought_id`).map((r: { issue: string }) => r.issue));
+const uncovered = questions.map((q) => ({ q, ids: q.expected.filter((e) => !mentioned.has(e)) })).filter((x) => x.ids.length);
+if (uncovered.length) {
+  console.log(`  ! ${uncovered.reduce((n, x) => n + x.ids.length, 0)} expected documents have no entity mentions (extraction timed out or found nothing) and cannot be returned by the graph or global arm:`);
+  for (const x of uncovered) console.log(`      ${x.q.id}: ${x.ids.join(", ")} — graph ceiling ${((x.q.expected.length - x.ids.length) / x.q.expected.length).toFixed(2)}`);
+}
+console.log("");
 
 // ── The arms ────────────────────────────────────────────────────────────────
 
@@ -193,11 +215,13 @@ const entityNames = (await sql`SELECT id, name, normalized_name FROM ob1_entitie
  * only — visibly, not silently.
  */
 let seedFailures = 0;
+const words = (t: string) => t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 async function seedEntities(question: string): Promise<{ ids: string[]; names: string[] }> {
   let names: string[] = [];
   try {
     const ex = await extractEntities(question, cfg, AbortSignal.timeout(120_000));
-    if (!ex.malformed) names = ex.entities.map((e) => e.name);
+    if (ex.malformed) { seedFailures++; console.error(`    seed extraction returned a malformed answer for: ${question.slice(0, 60)}…`); }
+    else names = ex.entities.map((e) => e.name);
   } catch (e) {
     seedFailures++;
     console.error(`    seed extraction failed: ${(e as Error).message.slice(0, 160)}`);
@@ -211,9 +235,12 @@ async function seedEntities(question: string): Promise<{ ids: string[]; names: s
       (SELECT id, name FROM ob1_entities WHERE similarity(normalized_name, normalize_entity_name(${n})) >= 0.55 ORDER BY similarity(normalized_name, normalize_entity_name(${n})) DESC LIMIT 2)`) as { id: string; name: string }[];
     for (const r of rows) if (!seen.has(r.id)) seen.set(r.id, r.name);
   }
+  // normalize_entity_name strips punctuation only at the ends of the string and
+  // folds -_/\# inside it, so "Siggy Score, how" keeps its comma; both sides
+  // are reduced to letters, digits and single spaces before the whole-word test.
   const [{ nq }] = await sql`SELECT normalize_entity_name(${question}) AS nq`;
-  const padded = ` ${nq} `;
-  for (const e of entityNames) if (!seen.has(e.id) && padded.includes(` ${e.normalized_name} `)) seen.set(e.id, `${e.name}†`);
+  const padded = ` ${words(nq)} `;
+  for (const e of entityNames) if (!seen.has(e.id) && padded.includes(` ${words(e.normalized_name)} `)) seen.set(e.id, `${e.name}†`);
   return { ids: [...seen.keys()], names: [...seen.values()] };
 }
 
@@ -333,7 +360,8 @@ if (GLOBAL) {
 
   // One summary per community: the entity names and up to eight issue titles,
   // in a fixed order so the prompt is pinned and any run-to-run difference in
-  // the summary is the model's. This is the standing cost — every community
+  // the summary is the model's. Same temperature knob as the extraction call
+  // (OB1_METADATA_TEMPERATURE, default 0), printed in the header. This is the standing cost — every community
   // whose membership changes needs its summary regenerated. A failed call is
   // counted and the community falls back to its name list, visibly.
   const promptHashes: string[] = [];
@@ -345,7 +373,7 @@ if (GLOBAL) {
     try {
       const r = await fetch(`${cfg.llmBase}/chat/completions`, {
         method: "POST", headers: cfg.headers, signal: AbortSignal.timeout(120_000),
-        body: JSON.stringify({ model: cfg.metadataModel, temperature: 0, ...cfg.metadataReasoning, messages: [{ role: "user", content: prompt }] }),
+        body: JSON.stringify({ model: cfg.metadataModel, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: [{ role: "user", content: prompt }] }),
       });
       if (!r.ok) throw new Error(`${r.status} ${(await r.text().catch(() => "")).slice(0, 160)}`);
       const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };

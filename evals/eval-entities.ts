@@ -53,8 +53,9 @@ const args = process.argv.slice(2);
 const has = (n: string) => args.includes(`--${n}`);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 && !args[i + 1]?.startsWith("--") ? args[i + 1] : undefined; };
 
-// OB1_EVAL_BASE is what the other harnesses use for the endpoint; honour it.
-if (!process.env.OB1_LLM_BASE_URL && process.env.OB1_EVAL_BASE) process.env.OB1_LLM_BASE_URL = process.env.OB1_EVAL_BASE;
+// OB1_EVAL_BASE (or lib.ts's OLLAMA_BASE fallback) is what the other harnesses use for the endpoint; honour it.
+const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
+if (!process.env.OB1_LLM_BASE_URL && evalBase) process.env.OB1_LLM_BASE_URL = evalBase;
 if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LLM_API_KEY = process.env.OB1_EVAL_KEY;
 
 await resetSchema(URL_, { dim: 8, model: "eval-stub" });
@@ -258,8 +259,10 @@ await sql`DELETE FROM thoughts`;
 // Fixed ids, so a replay's answers find their thoughts on a fresh database.
 // The fingerprint is the product's own function. An inline copy of the rule
 // used to sit here and cooked its '\s+' to 's+' inside the template literal,
-// so it hashed the text with runs of the letter s replaced by spaces — a
-// different fingerprint from the one the worker's stale-content guard computes.
+// so it hashed the text with runs of the letter s replaced by spaces. The
+// worker's stale guard compares the stored column with itself and never
+// noticed; what broke was the dump's fingerprints failing to verify against a
+// corpus loaded afresh by eval-graphrag.ts, which uses migration 003's rule.
 for (const d of docs) {
   await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
             VALUES (${linearThoughtId(d.id)}::uuid, ${linearThoughtText(d)}, ${{ source: "linear", issue: d.id }}::jsonb, content_fingerprint_of(${linearThoughtText(d)}))

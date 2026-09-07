@@ -1837,14 +1837,20 @@ Run to run at temperature 0 the score moved by one marginal extra, so these are
 | --- | ---: | ---: | ---: | ---: | ---: |
 | first | 2 | 120 s | 4,941 s (82 min) | 11.2 s | 21 of 441 |
 | second | 1 | 300 s | 6,793 s (113 min) | 15.4 s | 11 of 441 |
+| third | 2 | 300 s | 6,480 s (108 min) | 14.7 s | 19 of 441 |
 
 The first run's 9,870 s of model time inside a 4,941 s wall clock was read as
 two calls queueing behind each other on a one-at-a-time Ollama, and the worker
-briefly defaulted to one worker on that reading. The second run refuted it:
-one worker was 37% slower, so Ollama had been serving both calls at once and
-the second worker was paying for itself. The default is two again, and the
-timeouts are what they look like — long documents whose extraction takes a 7B
-model minutes, eleven of them past five — not queue time. **Roughly two hours
+briefly defaulted to one worker on that reading. The second run appeared to
+refute it — one worker was 37% slower — and this section said so. The third
+run (change 31, made to refresh the extraction dump) is the like-for-like pair
+the first two were not, same timeout and twice the workers, and it is 4.6%
+faster, not 37%: the earlier gap was the timeout budget, 120 s against 300 s
+per stuck document, and the first reading was closer to right. Ollama here
+mostly serialises; two workers stay the default because they cost nothing and
+recover a little. The timeouts are what they look like — long documents whose
+extraction takes a 7B model minutes — not queue time, and which documents time
+out varies between passes. **Roughly two hours
 for 441 issues, and recurring for every capture after.** On a hosted provider
 that is a bill; on this machine it is the fan.
 
@@ -1980,8 +1986,8 @@ two-hour extraction; the pass scored here was re-run after the review pass
 below so that the dump's fingerprints verify against the loaded text.
 
 **Vector wins every comparison.** Recall@10 0.98 and 25 of 27 questions
-complete, every multi-hop question among them; the local graph 0.47 and 6,
-losing on 21 questions and winning on none; fusion 0.92 and 21 — mixing the
+complete, every multi-hop question among them; the local graph 0.51 and 7,
+losing on 20 questions and winning on none; fusion 0.92 and 21 — mixing the
 graph in makes vector worse on five questions and better on none; global 0.50,
 half the baseline and near zero on the corpus-level questions. At K = 5 the
 order is the same and the gaps are wider. The reasons are in
@@ -1994,8 +2000,8 @@ order was pinned to the table's unique key). A review pass found the first
 version of the harness generous to its own conclusion in small ways — MRR taken
 over the whole returned list, a substring seed match that read "Expo" out of
 "exposes", hubs re-entering through the hop, an unordered title list feeding
-each community summary — and fixing them moved the graph arm by two points
-and the global arm from 0.25–0.33 to 0.57 on the first dump (0.50 on the
+each community summary — and fixing them moved the graph arm by a point or
+two and the global arm from 0.25–0.33 to 0.57 on the first dump (0.50 on the
 re-extracted one). The same pass found the corpus loader hashing the wrong
 text for its fingerprints — `'\s+'` in a Bun `sql` template literal reaches
 Postgres as `'s+'` — in this harness and in the entity eval it was copied
@@ -2017,14 +2023,17 @@ complete and half of the second, scored by the same rule as every arm. The
 headroom that exists is a ranking problem inside a tool that ships, not a case
 for a graph.
 
-**Decision: not built.** No graph retrieval mode, no fusion step, no follow-up
+**Decision: not built.** No graph retrieval mode, no fusion step, no build
 ticket. The entity layer stays for what it is for — "what does X connect to",
 an entity filter, the UI a graph makes possible — and because a corpus of a
 different shape, people and projects across many sources with little shared
 wording, could measure differently. That is a re-run of `bun run graphrag`
 against that corpus's own question set, and the rule for reading it does not
 change: the graph has to beat `match_thoughts` on questions someone actually
-asked.
+asked. SMD-1039 asks that question of a literature corpus with a published
+question set, where the failure mode these techniques target does exist; a
+win there is a reason to re-ask the product question on a corpus of the
+product's shape, not a reason to build.
 
 ## Detached from the fork network
 

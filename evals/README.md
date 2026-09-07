@@ -1091,16 +1091,22 @@ Ollama:
 | 1 | 300 s | 6,793 s | 15.4 s | 11 |
 | 2 | 300 s | 6,480 s | 14.7 s | 19 |
 
-Two workers are 37% faster than one on the first pair, so Ollama serves both
-calls at once here; the timeouts are long documents that genuinely take a 7B
-model minutes. The third pass (2026-09-06, made after the loader fix described
-under GraphRAG so its dump's fingerprints verify) was a third slower than the
-first at the same worker count and lost eight more thoughts to the 300 s
-timeout — the machine, not the code, was the difference. Budget two hours for
-a corpus this size and a per-capture cost after, and expect the graph to vary
-by a couple of percent between passes: the third gave 2,004 entities, 2,830
-mentions and 1,958 edges with 1,739 singletons, against the second's figures
-below.
+The third pass (2026-09-06, made after the loader fix described under GraphRAG
+so its dump's fingerprints verify) is the like-for-like comparison the first
+two were not: same 300 s timeout as the one-worker pass, and two workers were
+4.6% faster, not the 37% the first pair suggested. That 37% was mostly the
+timeout budget — the first pass gave up on a long document at 120 s, the
+second waited 300 s — so the claim in FORK.md change 30 that Ollama serves two
+calls at once is withdrawn there too: per completed document the two-worker
+passes spent about twice the worker-seconds of the one-worker pass, which is
+what a serialising server looks like. Two workers remain the default because
+they cost nothing and recover a little; do not expect them to halve the wall
+clock. The timeouts are long documents that genuinely take a 7B model minutes,
+and which ones time out varies between passes (21, 11 and 19). Budget two
+hours for a corpus this size and a per-capture cost after, and expect the
+graph to vary by a couple of percent between passes: the third gave 2,004
+entities, 2,830 mentions and 1,958 edges with 1,739 singletons, against the
+second's figures below.
 
 From the second run — and reproduced exactly by `--corpus --replay` of its
 dumped answers in 0.8 s, which is how a rule change in migration 016 gets
@@ -1481,8 +1487,8 @@ the 2026-09-06 extraction pass:
 | arm | multi-hop R@10 | complete | aggregation R@10 | complete | corpus R@10 | complete | all R@10 | complete | MRR@10 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | vector | 1.00 | 17/17 | 1.00 | 7/7 | 0.81 | 1/3 | **0.98** | **25/27** | 0.98 |
-| graph | 0.47 | 4/17 | 0.55 | 2/7 | 0.31 | 0/3 | 0.47 | 6/27 | 0.42 |
-| hybrid | 0.97 | 16/17 | 0.87 | 4/7 | 0.76 | 1/3 | 0.92 | 21/27 | 0.77 |
+| graph | 0.53 | 5/17 | 0.55 | 2/7 | 0.31 | 0/3 | 0.51 | 7/27 | 0.43 |
+| hybrid | 0.97 | 16/17 | 0.87 | 4/7 | 0.76 | 1/3 | 0.92 | 21/27 | 0.78 |
 | global | 0.57 | 8/17 | 0.50 | 3/7 | 0.10 | 0/3 | 0.50 | 11/27 | 0.64 |
 | keyword | — | — | 0.91 | 6/7 | 0.83 | 2/3 | 0.89 | 8/10 | 0.93 |
 
@@ -1491,19 +1497,28 @@ K = 5, the size a client would more plausibly read:
 | arm | multi-hop R@5 | complete | aggregation R@5 | complete | corpus R@5 | complete | all R@5 | complete | MRR@5 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | vector | 1.00 | 17/17 | 0.88 | 3/7 | 0.71 | 1/3 | **0.94** | **21/27** | 0.98 |
-| graph | 0.34 | 2/17 | 0.45 | 1/7 | 0.31 | 0/3 | 0.37 | 3/27 | 0.41 |
-| hybrid | 0.67 | 5/17 | 0.70 | 2/7 | 0.58 | 1/3 | 0.67 | 8/27 | 0.76 |
+| graph | 0.40 | 3/17 | 0.45 | 1/7 | 0.31 | 0/3 | 0.40 | 4/27 | 0.41 |
+| hybrid | 0.73 | 7/17 | 0.70 | 2/7 | 0.58 | 1/3 | 0.70 | 10/27 | 0.77 |
 | global | 0.57 | 8/17 | 0.48 | 2/7 | 0.26 | 0/3 | 0.51 | 10/27 | 0.68 |
 | keyword | — | — | 0.81 | 2/7 | 0.68 | 1/3 | 0.77 | 3/10 | 0.93 |
 
 Five of the aggregation and corpus questions expect six or more documents, so
 no arm can complete them at K = 5; the recall column is the one to read there.
 
-**The graph never beats vector.** Local graph retrieval loses to vector on 21
-of 27 questions at K = 10 and wins on none; on the other six they tie at 1.00.
+Three expected documents have no entity mentions at all — SMD-738 and SMD-739
+in `corpus-decisions`, SMD-100 in `corpus-retros` — because their extraction
+timed out in the pass that made the dump. The graph and global arms cannot
+return a thought with no mentions, so their ceilings on those two questions
+are 0.67 and 0.75 whatever the ranking; the run prints this above the table.
+It lowers the corpus-level rows for those arms and none of the others, and it
+is itself a cost of the method: a document the extractor gave up on is
+invisible to graph retrieval until someone re-runs it.
+
+**The graph never beats vector.** Local graph retrieval loses to vector on 20
+of 27 questions at K = 10 and wins on none; on the other seven they tie at 1.00.
 Fusing the graph list in — the hybrid arm — is worse than vector alone on five
 questions and better on none: the graph's contribution is noise that displaces
-correct rows, and at K = 5 it displaces them on sixteen. Global mode, the
+correct rows, and at K = 5 it displaces them on fourteen. Global mode, the
 expensive one, reaches half the expected documents and completes eleven
 questions; on the corpus-level questions it finds almost nothing. The
 two-hour extraction pass, the summaries and the seed call per question buy a
@@ -1546,7 +1561,8 @@ per-question table the run prints:
 - *Common seeds dominate unless removed, and removing them removes the
   signal.* Weighting every seed 1.0 put "backend", "client" and "Expo" first
   on most questions; IDF weighting with a document-frequency cap on seeds and
-  hop targets fixed the ranking and left recall where it was (0.50 → 0.47).
+  hop targets fixed the ranking and left recall within a few points of where
+  it was (0.50 before any of the fairness fixes, 0.51 after all of them).
 - *Communities depend on the node order, and the harness had to learn that
   twice.* Label propagation over the same graph gave 18, 6 and 17 communities
   depending only on the order the nodes were visited (entity ids regenerate on
@@ -1575,8 +1591,8 @@ is 0.50: a different extraction gives different communities, and the global
 arm's number moves with them while vector's does not.
 
 **Cost, for the record.** Building the graph is the SMD-947 pass, 82 minutes
-for 441 issues at two workers the first time and 108 the second on the same
-machine, then one call per new thought; this harness replays it and does not
+for 441 issues the first time and 108 minutes the third, both at two workers on
+the same machine, then one call per new thought; this harness replays it and does not
 re-measure it. Community summaries were 18 calls, about 20 s of model time
 and 5,300 tokens, and every community whose
 membership changes needs its summary regenerated — on a live corpus that is
@@ -1585,22 +1601,25 @@ average here, on top of the embedding call every arm pays. None of it is
 prohibitive; all of it buys nothing measurable.
 
 **What the harness verifies about the dump.** Each dump line carries the
-fingerprint of the row as the entity eval loaded it, and the harness reports
-whether those match the rows it loaded — so an extraction of text that has
-since changed cannot be scored as if it were of this text. For the dump scored
-above all 422 lines match. The first dump this spike used did not: it was
-written before the loader was corrected to use `content_fingerprint_of()` (the
-inline copy of the rule had cooked its `\s+` to `s+` inside a template
-literal), so the harness said so and replayed by id; the corpus was
-re-extracted rather than argue that the mismatch was harmless.
+fingerprint of the row as the entity eval loaded it, and the replay passes it
+to `record_thought_entities`, which refuses a line whose text has since changed
+as stale and writes nothing — so an extraction of other text cannot be scored
+as if it were of this text; the run stops unless `--allow-stale-dump` says the
+operator knows. For the dump scored above all 422 lines verify. The first dump
+this spike used would not have: it was written before the loader was corrected
+to use `content_fingerprint_of()` (the inline copy of the rule had cooked its
+`\s+` to `s+` inside a template literal), so the corpus was re-extracted
+rather than argue that the mismatch was harmless. The replay also reports
+expected documents with no mentions, above.
 
 **Decision: do not build GraphRAG at this scale.** Not as a retrieval mode, not
 as a fusion step. The entity layer (migration 016) stays, because it answers a
 different question — "what does X connect to", filters by entity, the UI a
 graph makes possible — and because a corpus of a different shape (people and
 projects across many sources, where the documents that share an entity do not
-share words) could make this measurement come out differently. When that
-corpus exists, `bun run graphrag` against its own question set is the test;
+share words) could make this measurement come out differently. SMD-1039 sets
+that up — PubMed abstracts with BioASQ's questions, so the labels are not ours —
+and `bun run graphrag` against that question set is the test;
 the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
