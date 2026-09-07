@@ -293,6 +293,63 @@ if (configFailed) {
       }
     }
 
+    /**
+     * Migration 017 through PostgREST. `search` and `search_thoughts` call
+     * `search_thoughts_hybrid` unconditionally since SMD-958, and PostgREST is
+     * the default store, so a Supabase project whose migrations stop at 016
+     * would pass every check here, advertise both tools, and fail every call to
+     * them. The catalog cannot be read over PostgREST, but the function can be
+     * called: an RPC with an empty query text and a unit vector returns rows or
+     * nothing under 017, and "Could not find the function" without it. The
+     * first version of this check lived only on the SQL branch (review pass).
+     */
+    if (built.kind !== "sql") {
+      const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
+      if (rowCount === null) {
+        add("keyword search", "skip", "not probed — the schema check above failed first");
+        add("hybrid search", "skip", "not probed — the schema check above failed first");
+      } else {
+        // 012 first, because 017 calls it: a missing search_thoughts_keyword
+        // surfaces inside search_thoughts_hybrid with the same "does not
+        // exist" wording, and a check that only probed 017 would send the
+        // operator to re-apply the wrong migration (review pass).
+        let keywordOk = false;
+        try {
+          await built.keywordThoughts({ query: "ob1-preflight-probe-zylotrope", limit: 1, offset: 0, filter: {} });
+          keywordOk = true;
+          add("keyword search", "ok", "search_thoughts_keyword answers over PostgREST");
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (missing(msg)) {
+            add("keyword search", "fail",
+                "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it, and every search through search_thoughts_hybrid, would fail",
+                "Apply db/migrations/012_search_thoughts_keyword.sql against the project's direct connection (server-portable/README.md §4).");
+          } else {
+            add("keyword search", "skip", `could not probe search_thoughts_keyword over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
+        }
+        try {
+          const probe = new Array(embDim).fill(0);
+          probe[0] = 1;
+          await built.hybridThoughts({ query: "", embedding: probe, threshold: -1, limit: 1, filter: {} });
+          add("hybrid search", "ok", "search_thoughts_hybrid answers over PostgREST");
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (missing(msg) && (/search_thoughts_keyword/.test(msg) || !keywordOk)) {
+            add("hybrid search", "fail",
+                "search_thoughts_hybrid cannot run because search_thoughts_keyword is missing — every semantic search would fail",
+                "Apply db/migrations/012_search_thoughts_keyword.sql first; 017 is present or will run once it is.");
+          } else if (missing(msg)) {
+            add("hybrid search", "fail",
+                "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
+                "Apply db/migrations/017_search_thoughts_hybrid.sql against the project's direct connection (server-portable/README.md §4).");
+          } else {
+            add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
+        }
+      }
+    }
+
     // The atomic capture path needs migration 004. Its absence is not fatal — the
     // PostgREST store falls back — but the fallback is the failure mode migration
     // 004 exists to remove, so say so.
@@ -375,6 +432,21 @@ if (configFailed) {
         else add("keyword search", "fail",
                  "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it would fail",
                  "Apply db/migrations/012_search_thoughts_keyword.sql.");
+
+        /**
+         * Migration 017's function. `search` and `search_thoughts` call it
+         * unconditionally since SMD-958, so a database that stops at 016 breaks
+         * the two most-used tools rather than a new one — the same shape of
+         * failure as the 012 check above, on a bigger surface, same severity.
+         */
+        const hybrid = await sql`
+          SELECT count(*)::int AS c FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'`;
+        if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
+        else add("hybrid search", "fail",
+                 "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
+                 "Apply db/migrations/017_search_thoughts_hybrid.sql.");
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,

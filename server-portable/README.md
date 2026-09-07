@@ -145,11 +145,11 @@ rest; `db/README.md` §4 covers both routes.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 41 — transport, auth, tool surface
+bun test-server.ts        # 44 — transport, auth, tool surface
 bun test-auth.ts          # 43 — scoped, hashed, named keys
 bun run test:local        # 22 — fully local provider, no credential
-bun run test:sql          # 37 — store conformance, real Postgres in a container
-bun run test:e2e          # 30 — the whole server over MCP with no Supabase at all
+bun run test:sql          # 53 — store conformance, real Postgres in a container
+bun run test:e2e          # 59 — the whole server over MCP with no Supabase at all
 bun run cf:build          # ~256 KiB gzipped
 ```
 

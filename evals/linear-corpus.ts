@@ -12,7 +12,7 @@
  * definition.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { SQL } from "bun";
 
 export type LinearDoc = { id: string; title: string; text: string; labels?: string[] };
@@ -50,8 +50,7 @@ export function entityAnswersPath(metadataModel: string): string {
  * documents get a thought" is decided here, once. `embedding` is a pgvector
  * literal when the caller has one.
  */
-export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: string): Promise<void> {
-  const text = linearThoughtText(d);
+export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: string, text: string = linearThoughtText(d)): Promise<void> {
   const meta = { source: "linear", issue: d.id };
   if (embedding === undefined) {
     await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
@@ -62,6 +61,51 @@ export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: st
               VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${meta}::jsonb, content_fingerprint_of(${text}), ${embedding}::vector)
               ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
   }
+}
+
+/**
+ * Where a harness caches the corpus's document vectors: per embedding spec and
+ * per text rule (`thought` is linearThoughtText, `body` the issue text alone),
+ * because a vector of one is wrong for the other. `OB1_EVAL_VECTORS` moves the
+ * cache and is a PREFIX, not a file: the variant is always part of the name, so
+ * two harnesses with different text rules cannot be pointed at one file and
+ * re-embed the corpus on every alternation (review pass).
+ */
+export function linearVectorCachePath(embedModel: string, variant: "thought" | "body" = "thought"): string {
+  const prefix = process.env.OB1_EVAL_VECTORS ?? "/tmp/linear-vectors";
+  return `${prefix}-${variant}-${embedModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
+}
+
+/** Cache entry per issue: the hash of the text it was embedded from, and the vector. */
+export type CachedVector = { h: string; v: number[] };
+
+/**
+ * The corpus's document vectors, from the cache where the text is unchanged and
+ * from the provider where it is not. Keyed by the text's hash rather than by
+ * id alone: a rebuilt corpus with edited text re-embeds those documents, where
+ * an id-keyed cache would rank new text on old vectors. Written atomically
+ * (temp file, then rename) so an interrupted run leaves the previous cache
+ * intact. Throws when the provider's width disagrees with `dim`.
+ */
+export async function cachedDocumentVectors(
+  docs: LinearDoc[],
+  opts: { path: string; dim: number; text: (d: LinearDoc) => string; embed: (text: string) => Promise<number[]> },
+): Promise<{ vectors: Record<string, number[]>; embedded: number }> {
+  let cache: Record<string, CachedVector> = {};
+  if (existsSync(opts.path)) {
+    try { cache = JSON.parse(readFileSync(opts.path, "utf8")); } catch { throw new Error(`Unreadable vector cache ${opts.path}; delete it and re-run.`); }
+  }
+  let embedded = 0;
+  const vectors: Record<string, number[]> = {};
+  for (const d of docs) {
+    const text = opts.text(d);
+    const h = Bun.hash.xxHash64(text).toString(16);
+    if (cache[d.id]?.h !== h) { cache[d.id] = { h, v: await opts.embed(text) }; embedded++; }
+    if (cache[d.id].v.length !== opts.dim) throw new Error(`the provider returned ${cache[d.id].v.length}-wide vectors but the column is vector(${opts.dim}); give the spec an @dims suffix that matches the model.`);
+    vectors[d.id] = cache[d.id].v;
+  }
+  if (embedded) { writeFileSync(`${opts.path}.tmp`, JSON.stringify(cache)); renameSync(`${opts.path}.tmp`, opts.path); }
+  return { vectors, embedded };
 }
 
 /**

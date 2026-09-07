@@ -47,6 +47,67 @@ export type ThoughtKeywordMatch = {
   totalCount: number;
 };
 
+/**
+ * One row from `search_thoughts_hybrid` (migration 017).
+ *
+ * A third shape, not one of the two above with a field reinterpreted: the fused
+ * score is neither a similarity nor a count, `similarity` here is nullable (a
+ * keyword hit with no vector and no chunks is still an exact hit), and the
+ * three query-level arrays repeat on every row the way 012 repeats
+ * `totalCount`, so a caller reading one row knows what the query was taken to
+ * mean. There is no total and no offset — the function does not page, and the
+ * migration header says why.
+ */
+export type ThoughtHybridMatch = {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  /** Best of the thought's vector and its chunks; null when it has neither. */
+  similarity: number | null;
+  /** The needles this row contains, in query order. Empty for a vector-only row. */
+  matchedNeedles: string[];
+  /** Every row: the literals the keyword arm was asked for. */
+  needles: string[];
+  /** Every row, parallel to `needles`: how many thoughts contain each (0 = none). */
+  needleCounts: number[];
+  /** Every row: literals extracted but found in more than 100 thoughts, so not used. */
+  commonNeedles: string[];
+  /** Every row: the query had nothing to embed, so exact hits were ranked ahead of the vector arm. */
+  literalOnly: boolean;
+  /** The fused score; monotone in the rank the function returned. Not for display. */
+  score: number;
+};
+
+/**
+ * A `search_thoughts_hybrid` row as either backend hands it back — snake_case
+ * column names, `similarity` possibly NULL, text[] as arrays — into the store's
+ * shape. Shared so the two stores cannot drift on the nullable field:
+ * `Number(null)` is 0, which would turn "this row has no vector" into "this row
+ * is orthogonal to the query" on whichever store forgot.
+ */
+export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMatch {
+  const strings = (x: unknown) => (Array.isArray(x) ? x.map(String) : []);
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: new Date(r.created_at as string).toISOString(),
+    similarity: r.similarity == null ? null : Number(r.similarity),
+    matchedNeedles: strings(r.matched_needles),
+    needles: strings(r.needles),
+    // Array-like, not Array: the SQL-backed compat client hands an int[] back
+    // as a typed array, for which Array.isArray is false and a JSON round trip
+    // gives {"0":1}. The PostgREST store's conformance test caught it.
+    needleCounts: r.needle_counts != null && typeof r.needle_counts === "object" && "length" in (r.needle_counts as object)
+      ? Array.from(r.needle_counts as ArrayLike<unknown>, Number)
+      : [],
+    commonNeedles: strings(r.common_needles),
+    literalOnly: r.literal_only === true,
+    score: Number(r.score),
+  };
+}
+
 export type ThoughtRecord = {
   id: string;
   content: string;
@@ -227,6 +288,20 @@ export interface ThoughtStore {
     offset: number;
     filter: Record<string, unknown>;
   }): Promise<ThoughtKeywordMatch[]>;
+
+  /**
+   * The two above fused (migration 017): rank on the vector arm, presence per
+   * needle on the keyword arm. `query` is the text the needles are extracted
+   * from, in SQL, so both backends extract identically; `embedding` is of that
+   * same text. Fixed top-`limit`, no paging.
+   */
+  hybridThoughts(opts: {
+    query: string;
+    embedding: number[];
+    threshold: number;
+    limit: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtHybridMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
 

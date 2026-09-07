@@ -1308,4 +1308,182 @@ console.log("\n[16] entities, mentions and edges: the rule, the write, the merge
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// ── 17. Migration 017 — the needle rule, then the fusion ─────────────────────
+//
+// Two functions. `extract_search_needles` decides what the keyword arm is asked
+// for; `search_thoughts_hybrid` fuses that arm with match_thoughts. The header
+// makes claims about both that a query can check, and this section checks them
+// with rows whose vectors are at known angles, as [8] does.
+
+console.log("\n[17] extract_search_needles picks literals and identifiers, not words");
+{
+  const needles = async (q: string) =>
+    (await db.query<{ n: string[] }>(`SELECT extract_search_needles($1) AS n`, [q])).rows[0].n;
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const cases: [string, string[], string][] = [
+    ["the scheduler timeout around ERR_POSTGRES_SERVER_ERROR", ["ERR_POSTGRES_SERVER_ERROR"], "an underscored identifier inside a sentence"],
+    ["what did we decide about SMD-944?", ["SMD-944"], "a ticket key with its sentence punctuation stripped"],
+    ["SMD-944.", ["SMD-944"], "a trailing full stop is not part of the needle"],
+    ["edit db/config.mjs and getUserById", ["db/config.mjs", "getUserById"], "a path and an interior capital"],
+    ['"App Store" launch in the UI', ["App Store"], "a double-quoted span, as written, ahead of everything else"],
+    ["`upsert_thought` overloads", ["upsert_thought"], "a backticked span"],
+    ['"connection to server failed with ERR_POSTGRES_SERVER_ERROR after 30 seconds of waiting for it" happened again', ["ERR_POSTGRES_SERVER_ERROR"], "a quoted span too long to be a needle still yields the identifiers inside it"],
+    ['"App Store" and "App Store" twice', ["App Store"], "an accepted span is blanked before the identifier pass and de-duplicated"],
+    ["released in 2024 for 12 users", [], "bare numbers are not identifiers"],
+    ["pgvector 0.8.6 or later", ["0.8.6"], "a dotted version is"],
+    ["v2 of the API", [], "two characters cannot reach the trigram index and are not asked for"],
+    ["e.g. the scheduler timeout, i.e. the U.S. one at 3 p.m.", [], "abbreviations are not identifiers: a dotted token needs two characters together somewhere"],
+    ["read a.b.cd and x/yz", ["a.b.cd", "x/yz"], "…and one with a two-character run is"],
+    ["the 1st meeting at 3pm took 24h and was 10x slower than the 2nd", [], "ordinals and units are words, not identifiers"],
+    ['what is "the" plan for Q3 and "and so"', [], "a quoted span of stopwords only is not a needle"],
+    ['"the plan" for Q3', ["the plan"], "…while a quoted span with a content word is"],
+    ["plain english words only here", [], "ordinary words are left to the vector arm"],
+    ["SMD-944 and smd-944 again SMD-944", ["SMD-944"], "de-duplicated case-insensitively, first spelling kept"],
+    ["a1x b2x c3x d4x e5x f6x g7x h8x i9x j0x", ["a1x", "b2x", "c3x", "d4x", "e5x", "f6x", "g7x", "h8x"], "capped at eight, in order"],
+    ["", [], "an empty query yields nothing"],
+  ];
+  for (const [q, want, why] of cases) {
+    const got = await needles(q);
+    assert(same(got, want), `${why}: ${JSON.stringify(q)} → ${JSON.stringify(got)}${same(got, want) ? "" : `, wanted ${JSON.stringify(want)}`}`);
+  }
+  const nul = await db.query<{ n: string[] }>(`SELECT extract_search_needles(NULL) AS n`);
+  assert(Array.isArray(nul.rows[0].n) && nul.rows[0].n.length === 0, "a NULL query yields an empty array, not NULL");
+}
+
+console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the gate between them");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  // Vectors at known angles to the query unit(0). The literal SMD-507 sits in
+  // the two rows the embedding ranks LAST — the situation 012 measured — and
+  // one of those has no vector at all.
+  await db.query(`SELECT upsert_thought('exact match about the scheduler', '{"metadata":{"kind":"a"}}'::jsonb, $1::vector)`, [unit(0)]);
+  await db.query(`SELECT upsert_thought('near match about timeouts', '{"metadata":{"kind":"a"}}'::jsonb, $1::vector)`, [blend(0, 1, 0.9, 0.44)]);
+  await db.query(`SELECT upsert_thought('distant note that names SMD-507 and getUserById', '{"metadata":{"kind":"b"}}'::jsonb, $1::vector)`, [unit(1)]);
+  await db.query(`SELECT upsert_thought('unembedded note that names SMD-507 too', '{"metadata":{"kind":"b"}}'::jsonb)`);
+  type Row = { content: string; similarity: number | null; matched_needles: string[]; needles: string[]; needle_counts: number[]; common_needles: string[]; literal_only: boolean; score: number };
+  const hybrid = async (q: string, threshold = 0.0, n = 10, filter = "{}") =>
+    (await db.query<Row>(`SELECT content, similarity, matched_needles, needles, needle_counts, common_needles, literal_only, score FROM search_thoughts_hybrid($1::vector, $2, $3, $4, $5::jsonb)`, [unit(0), q, threshold, n, filter])).rows;
+  const contents = (rows: Row[]) => rows.map((r) => r.content);
+
+  // No needle: match_thoughts, row for row. This is the guarantee the header
+  // makes for every query without an identifier, at the threshold too.
+  for (const th of [0.0, 0.5, -1.0]) {
+    const mt = (await db.query<{ content: string; similarity: number }>(`SELECT content, similarity FROM match_thoughts($1::vector, $2, 10, '{}'::jsonb)`, [unit(0), th])).rows;
+    const hy = await hybrid("what happened with the scheduler", th);
+    assert(contents(hy).join("|") === mt.map((r) => r.content).join("|"),
+           `with no needle the fused result is match_thoughts' result at threshold ${th} (${contents(hy).join(", ")})`);
+    assert(hy.every((r, i) => Math.abs((r.similarity ?? -9) - mt[i].similarity) < 1e-9), "…with the same similarities");
+    assert(hy.every((r) => r.needles.length === 0 && r.matched_needles.length === 0 && r.literal_only === false), "…and no needles reported");
+  }
+  const noNeedle = await hybrid("what happened with the scheduler", 0.0);
+  assert(noNeedle.length >= 2 && noNeedle[0].score > noNeedle[1].score, "the score is strictly monotone in the vector rank");
+
+  // An identifier alone: the gate. The exact hits come first — the one with a
+  // vector before the one without — then the vector arm's rows by similarity.
+  const alone = await hybrid("SMD-507", 0.0);
+  assert(alone.every((r) => r.literal_only === true), "an identifier alone is literal-only");
+  assert(contents(alone).join("|") === "distant note that names SMD-507 and getUserById|unembedded note that names SMD-507 too|exact match about the scheduler|near match about timeouts",
+         `exact hits first, the unembedded one second, then the vector arm (${contents(alone).join(" | ")})`);
+  assert(alone[0].matched_needles.join() === "SMD-507" && alone[1].similarity === null && alone[2].matched_needles.length === 0, "…each row says why it is there");
+  assert(Math.abs(alone[0].score - 1 / 61) < 1e-9 && alone[2].score === 0, "…exact presence is worth a rank-1 hit; the vector arm's rank is not scored");
+  // The gate survives a second spelling and a needle that prefixes another:
+  // both used to leave fragments in the residual that the parser kept.
+  assert((await hybrid("SMD-507 smd-507", 0.0)).every((r) => r.literal_only === true), "a second spelling of the same literal leaves nothing to embed");
+  assert((await hybrid("SMD-507 SMD-5070", 0.0)).every((r) => r.literal_only === true), "a literal that is a prefix of another leaves nothing to embed");
+  // A needle no thought contains is still a needle — asked for, complete with
+  // zero rows — and boosts nothing, so the result is match_thoughts' result.
+  const nohit = await hybrid("the scheduler and SMD-999", 0.0);
+  assert(nohit.every((r) => r.needles.join() === "SMD-999" && r.common_needles.length === 0 && r.matched_needles.length === 0), "a zero-hit needle is reported as searched for, not as common, and matches no row");
+  assert(nohit.every((r) => r.needle_counts.join() === "0"), "…with a count of 0, which is how the tool tells absent from truncated");
+  assert(alone.every((r) => r.needle_counts.join() === "2"), "a needle in two thoughts reports 2 on every row");
+  // Truncation is not absence: with room for one row, the second exact hit is
+  // cut, and the count is what says it exists.
+  const one = await hybrid("SMD-507", 0.0, 1);
+  assert(one.length === 1 && one[0].matched_needles.join() === "SMD-507" && one[0].needle_counts.join() === "2", `a page of one still reports the needle's count of 2 (${JSON.stringify(one[0]?.needle_counts)})`);
+  assert(contents(nohit).join("|") === contents(noNeedle).join("|"), "…and the order is the vector arm's");
+  // …and the threshold does not remove an exact hit whatever its similarity.
+  const strict = await hybrid("SMD-507", 0.99);
+  assert(contents(strict).join("|") === "distant note that names SMD-507 and getUserById|unembedded note that names SMD-507 too|exact match about the scheduler",
+         `at threshold 0.99 the two exact hits stay and only the 1.0 vector row joins them (${contents(strict).join(" | ")})`);
+
+  // A mixed query: the row both arms return outranks any row only one returns.
+  const mixed = await hybrid("the scheduler problem in SMD-507", 0.0);
+  assert(mixed.every((r) => r.literal_only === false), "a query with a content word left is not literal-only");
+  assert(mixed[0].content === "distant note that names SMD-507 and getUserById", `the row in both arms comes first (${contents(mixed).join(" | ")})`);
+  assert(Math.abs(mixed[0].score - (1 / 61 + 1 / 63)) < 1e-9, "…scored as presence plus its vector rank of 3");
+  assert(mixed[1].content === "exact match about the scheduler", "the vector arm's top row is next…");
+  assert(mixed[2].content === "unembedded note that names SMD-507 too", "…tied on score with the unembedded exact hit, which its similarity places after it");
+
+  // Two needles beat one.
+  const two = await hybrid("the scheduler problem in SMD-507 with getUserById", 0.0);
+  assert(two[0].matched_needles.join() === "SMD-507,getUserById" && Math.abs(two[0].score - (2 / 61 + 1 / 63)) < 1e-9, "a row containing both literals scores both");
+
+  // A needle in more than 100 thoughts is a word, and is reported, not used.
+  for (let i = 0; i < 101; i++) {
+    await db.query(`SELECT upsert_thought($1, '{"metadata":{"kind":"c"}}'::jsonb, $2::vector)`, [`filler ${i} mentions TOKEN_99 in passing`, unit(2)]);
+  }
+  const common = await hybrid("the scheduler and TOKEN_99", 0.0);
+  assert(common.every((r) => r.common_needles.join() === "TOKEN_99" && r.needles.length === 0), `TOKEN_99 is reported as common on every row (${JSON.stringify(common[0]?.common_needles)})`);
+  assert(common.every((r) => r.matched_needles.length === 0), "…and boosts nothing");
+  assert(common[0].content === "exact match about the scheduler", "…so the vector arm's order stands");
+  // The gate counts an extracted-but-common needle as a literal: with nothing
+  // else in the query there is still nothing to embed.
+  const onlyCommon = await hybrid("TOKEN_99", 0.0);
+  assert(onlyCommon.every((r) => r.literal_only === true) && onlyCommon[0].content === "exact match about the scheduler",
+         "a query that is only a common literal is literal-only, and falls back to similarity order");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE 'filler %'`);
+
+  // The probe that decides "common" before paging escapes its pattern as 012
+  // does: 101 rows carry TOKEN-77, which only an unescaped '%TOKEN_77%' would
+  // match, and one row carries TOKEN_77 itself. The needle must be used, with a
+  // count of one, not dropped as common.
+  for (let i = 0; i < 101; i++) {
+    await db.query(`SELECT upsert_thought($1, '{"metadata":{"kind":"c"}}'::jsonb, $2::vector)`, [`decoy ${i} mentions TOKEN-77 in passing`, unit(2)]);
+  }
+  await db.query(`SELECT upsert_thought('the real TOKEN_77 row', '{"metadata":{"kind":"c"}}'::jsonb, $1::vector)`, [unit(2)]);
+  const escaped = await hybrid("the scheduler and TOKEN_77", 0.0);
+  assert(escaped.every((r) => r.needles.join() === "TOKEN_77" && r.needle_counts.join() === "1" && r.common_needles.length === 0),
+         `the probe's escaped pattern ignores 101 decoys and finds the one real row (${JSON.stringify(escaped[0]?.needles)} ${JSON.stringify(escaped[0]?.needle_counts)} ${JSON.stringify(escaped[0]?.common_needles)})`);
+  // Its own vector is orthogonal and 101 decoys tie it there, so it is outside
+  // the vector window: keyword-only, tied with the vector's top row on score,
+  // second on the similarity tiebreak — present, and the only row matched.
+  assert(escaped.filter((r) => r.matched_needles.length).map((r) => r.content).join() === "the real TOKEN_77 row" && escaped.slice(0, 2).some((r) => r.content === "the real TOKEN_77 row"),
+         `…and that row is the one exact hit, within the first two (${contents(escaped).slice(0, 3).join(" | ")})`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE 'decoy %' OR content = 'the real TOKEN_77 row'`);
+
+  // The filter reaches both arms.
+  const filtered = await hybrid("SMD-507", 0.0, 10, '{"kind":"a"}');
+  assert(contents(filtered).join("|") === "exact match about the scheduler|near match about timeouts", `a filter excluding the exact hits removes them from the keyword arm too (${contents(filtered).join(" | ")})`);
+  const filteredB = await hybrid("the scheduler problem in SMD-507", 0.0, 10, '{"kind":"b"}');
+  assert(contents(filteredB).join("|") === "distant note that names SMD-507 and getUserById|unembedded note that names SMD-507 too", `…and one keeping them removes the vector-only rows (${contents(filteredB).join(" | ")})`);
+
+  // The clamps: match_count 0 and 1000 land inside 1–100; NULL text is no needle.
+  assert((await hybrid("SMD-507", 0.0, 0)).length === 1, "match_count 0 is clamped to 1");
+  assert((await hybrid("SMD-507", 0.0, 1000)).length === 4, "match_count 1000 is clamped to 100, which here is every row");
+  const nulText = await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, NULL, 0.0, 10, '{}'::jsonb)`, [unit(0)]);
+  assert(nulText.rows.length === 2 && nulText.rows[0].content === "exact match about the scheduler", "a NULL query text is match_thoughts' answer");
+  const nulThreshold = await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, 'the scheduler', NULL, 10, '{}'::jsonb)`, [unit(0)]);
+  assert(nulThreshold.rows.map((r) => r.content).join("|") === contents(await hybrid("the scheduler", 0.7)).join("|"), "a NULL threshold is the default 0.7, not a filter that drops every vector row");
+
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[18] Migration 017 left upsert_thought, match_thoughts and search_thoughts_keyword alone");
+{
+  const count = async (name: string) =>
+    (await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+  assert((await count("upsert_thought")) === 3, "all three upsert_thought overloads survive");
+  assert((await count("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
+  assert((await count("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
+  assert((await count("search_thoughts_hybrid")) === 1 && (await count("extract_search_needles")) === 1, "017 adds exactly its two functions");
+  const vol = await db.query<{ p: string; v: string }>(
+    `SELECT p.proname AS p, p.provolatile AS v FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.proname IN ('search_thoughts_hybrid', 'extract_search_needles') AND n.nspname = 'public'`);
+  const byName = Object.fromEntries(vol.rows.map((r) => [r.p, r.v]));
+  assert(byName.search_thoughts_hybrid === "s", "search_thoughts_hybrid is STABLE, so PostgREST's read-only RPC transaction may run it");
+  assert(byName.extract_search_needles === "i", "extract_search_needles is IMMUTABLE");
+}
+
 report();

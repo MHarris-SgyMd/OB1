@@ -75,6 +75,8 @@ const FUNCTIONS = [
   "prune_orphan_entities()",
   "requeue_thought_work(text, uuid)",
   "thoughts_enqueue_entity_extraction()",
+  "search_thoughts_hybrid(vector, text, float, int, jsonb)",
+  "extract_search_needles(text)",
 ];
 
 export type SchemaOptions = {

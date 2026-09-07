@@ -161,6 +161,44 @@ console.log("\n[3b] keywordThoughts is exact where matchThoughts is approximate"
   }
 }
 
+console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape");
+{
+  // Four scoreable rows at DISTINCT angles to the query — exact 1.0, near 0.9,
+  // the literal's row 0.2, distant 0 — and a fifth, also carrying the literal,
+  // with no vector at all. Distinct on purpose: match_thoughts breaks a
+  // similarity tie in whatever order the plan produced, the fused function
+  // breaks it by id, and a test with two orthogonal rows compared the two
+  // conventions instead of the ranking.
+  const faint = new Array(EMBEDDING_DIM).fill(0); faint[0] = 0.2; faint[1] = 0.98;
+  await store.captureThought({ content: "ticket SMD-507 came up in the distant note", payload: { metadata: { kind: "b" } }, embedding: faint });
+  const bare = new SQL({ url: URL_, max: 1 });
+  await bare`SELECT upsert_thought(${"ticket SMD-507 with no vector yet"}, ${{ metadata: { kind: "b" } }}::jsonb)`;
+  await bare.close();
+
+  // No needle: the same rows in the same order as matchThoughts, similarity intact.
+  const plain = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {} });
+  const vector = await store.matchThoughts({ embedding: unit(0), threshold: -1, limit: 10, filter: {} });
+  assert(plain.map((r) => r.id).join() === vector.map((r) => r.id).join(), `with no needle the fused order is matchThoughts' order (${plain.map((r) => r.content).join(" | ")})`);
+  assert(plain.every((r) => Array.isArray(r.needles) && r.needles.length === 0 && Array.isArray(r.matchedNeedles) && r.literalOnly === false), "arrays come back as arrays, empty, and literalOnly false");
+
+  // An identifier: exact hits first, the unembedded one with a null similarity.
+  const hits = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: 0.5, limit: 10, filter: {} });
+  assert(hits[0].content === "ticket SMD-507 came up in the distant note" && hits[0].matchedNeedles.join() === "SMD-507",
+         `the exact hit comes first with its needle (${hits.map((h) => h.content).join(" | ")})`);
+  assert(hits[1].content === "ticket SMD-507 with no vector yet" && hits[1].similarity === null,
+         `a hit with no vector reports similarity null, not 0 (${JSON.stringify(hits[1]?.similarity)})`);
+  assert(hits.every((h) => h.literalOnly === true && h.needles.join() === "SMD-507"), "every row carries the query-level fields");
+  assert(typeof hits[0].score === "number" && hits[0].score > hits[2].score, "the score is a number and orders the rows");
+  assert(typeof hits[0].created_at === "string" && hits[0].created_at.endsWith("Z"), "created_at is normalised to an ISO string, as every other store method does");
+
+  const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: -1, limit: 10, filter: { kind: "a" } });
+  assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter reaches the keyword arm");
+
+  for (const c of ["ticket SMD-507 came up in the distant note", "ticket SMD-507 with no vector yet"]) {
+    await store.deleteThought({ id: (await store.keywordThoughts({ query: c, limit: 1, offset: 0, filter: {} }))[0].id });
+  }
+}
+
 console.log("\n[4] listThoughts reproduces the PostgREST filters");
 {
   const all = await store.listThoughts({ limit: 10 });

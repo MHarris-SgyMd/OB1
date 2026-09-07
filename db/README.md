@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `244 assertions: 244 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports sixteen migrations applied, and
+`bun test-schema.ts` prints `313 assertions: 313 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports seventeen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -88,6 +88,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
 | `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
+| `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
 
 ## What changed relative to the guide
 
@@ -544,8 +545,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 244 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 145 assertions, real server, throwaway container
+bun test-schema.ts                    # 313 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 152 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -596,7 +597,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 244 properties, including:
+asserts 313 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -655,6 +656,19 @@ asserts 244 properties, including:
   attempt, an expired lease is handed out again with the attempt counted and
   is marked failed after three, a deleted thought takes its claims with it,
   and the `CHECK` refuses a claimed row without a lease
+- `extract_search_needles` (migration 017) takes quoted and backticked spans as
+  written and identifier-shaped tokens — `SMD-944`, `upsert_thought`,
+  `db/config.mjs`, `getUserById`, `0.8.6` — and not bare numbers, two-character
+  strings or ordinary words; de-duplicates case-insensitively; stops at eight
+- `search_thoughts_hybrid` returns **exactly `match_thoughts`' rows in
+  `match_thoughts`' order for a query with no needle**, at three thresholds; puts
+  the exact hits first for an identifier alone (the gate), the one with a vector
+  before the one without, then the vector arm's rows; scores a row both arms
+  return as presence plus its vector rank, so it outranks any row in one arm;
+  keeps an exact hit whatever the threshold; reports a needle in more than 100
+  thoughts as common and boosts nothing with it; passes the filter to both arms;
+  clamps `match_count` to 1–100; and left `upsert_thought`, `match_thoughts` and
+  `search_thoughts_keyword` alone
 - the entity layer: the resolution rule case by case (a ligature normalises,
   an accent does not; "Postgres" and "PostgreSQL" stay apart), the `CHECK`
   vocabularies match the lists `server-portable/entities.ts` parses against,

@@ -172,6 +172,51 @@ console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
   await call("capture_thought", { content: "delta thought mentioning PGRST202 exactly once" });
   await call("capture_thought", { content: "epsilon thought mentioning PGRST2020 twice: PGRST2020" });
 
+  // The same query through search_thoughts, which is hybrid since 017. The stub
+  // embeds "PGRST202" on the same axis as everything that is not alpha/beta/
+  // gamma, so the vector arm cannot tell delta from epsilon, or either from the
+  // other axis-3 thoughts — and both rows containing the literal come first,
+  // each saying why. Both, not one: the needle rule takes the token, so the
+  // trailing space that makes search_thoughts_keyword exclude PGRST2020 is not
+  // available here. That boundary case is what the exact tool is still for,
+  // and its description says so.
+  const fused = await call("search_thoughts", { query: "PGRST202 ", limit: 5, threshold: 0.5 });
+  assert(/Searched exactly for: PGRST202/.test(fused.split("\n")[0]), `search_thoughts names the literal it searched for (${fused.split("\n")[0]})`);
+  assert(!/No thought contains/.test(fused.split("\n")[0]), "…and does not report it absent, since two rows contain it");
+  assert(/only literals/.test(fused.split("\n")[0]), "…and says the query was only a literal");
+  const blocks = fused.split("--- Result ").slice(1);
+  assert(blocks.length >= 2 && blocks.slice(0, 2).every((b) => /\nContains: PGRST202\n/.test(b)), "results 1 and 2 are the two rows containing the literal, each with a Contains line");
+  assert(blocks.slice(0, 2).some((b) => /delta thought/.test(b)) && blocks.slice(0, 2).some((b) => /epsilon thought/.test(b)), "…delta and epsilon, in either order");
+  assert(!blocks.slice(2).some((b) => /Contains:/.test(b)), "…and nothing after them claims a match");
+  // …and the mixed form, where the vector arm has a vote too.
+  const mixed = await call("search_thoughts", { query: "the alpha migration and PGRST202", limit: 5, threshold: 0.0 });
+  assert(!/only literals/.test(mixed.split("\n")[0]) && /Searched exactly for: PGRST202/.test(mixed.split("\n")[0]), "a query with words left is not literal-only");
+  // A literal no thought contains is reported as searched for and absent —
+  // not as matched, which the first version's header implied.
+  const miss = await call("search_thoughts", { query: "the alpha migration and ZZQX_404", limit: 5, threshold: 0.0 });
+  assert(/Searched exactly for: ZZQX_404\. No thought contains: ZZQX_404\./.test(miss.split("\n")[0]), `a zero-hit literal is reported as absent (${miss.split("\n")[0]})`);
+  assert(!/Contains:/.test(miss), "…and no row claims it");
+  const missAlone = await call("search_thoughts", { query: "ZZQX_404", limit: 5, threshold: 0.0 });
+  assert(/only literals and no thought contains them/.test(missAlone.split("\n")[0]), "a literal-only query with no hits says the results are by similarity alone");
+  // With nothing above the threshold either, the empty answer still says why.
+  // Threshold 1.0: the stub puts every non-alpha/beta/gamma text on one axis,
+  // so the literal's embedding is identical to several thoughts', and only the
+  // strict comparison at 1.0 excludes them all.
+  const nothing = await call("search_thoughts", { query: "ZZQX_404", limit: 5, threshold: 1.0 });
+  assert(/^No thoughts found matching "ZZQX_404"\. No thought contains: ZZQX_404\./.test(nothing), `an empty result still reports the absent literal (${nothing.slice(0, 90)})`);
+  // Truncation is reported as such, not as absence: two literals in two
+  // different rows, room for one row — the losing literal's hit is outside the
+  // page, and the header says so with its count rather than "no thought
+  // contains" (review pass).
+  await call("capture_thought", { content: "zeta thought mentioning PGRST_ZZ once" });
+  const cut = await call("search_thoughts", { query: "PGRST_ZZ PGRST2020", limit: 1, threshold: 0.0 });
+  assert(/Outside the top 1: PGRST(2020|_ZZ) \(in 1 thought\)/.test(cut.split("\n")[0]), `a literal whose hit fell outside the page is reported with its count, not as absent (${cut.split("\n")[0]})`);
+  assert(!/No thought contains/.test(cut.split("\n")[0]), "…and not as absent");
+  // The compat pair reaches the same function: an identifier ChatGPT's `search`
+  // could never find before 017 is now at the top of its results.
+  const compat = JSON.parse(await call("search", { query: "PGRST202" }));
+  assert(compat.results.length >= 2 && compat.results.slice(0, 2).every((r: { title: string }) => /PGRST202/.test(r.title)), `search (compat) returns the exact hits first (${compat.results.map((r: { title: string }) => r.title.slice(11, 40)).join(" | ")})`);
+
   const out = await call("search_thoughts_keyword", { query: "PGRST202 " });
   assert(/Showing 1-1 of 1/.test(out), `the header states the whole match set (${out.split("\n")[0]})`);
   assert(/delta thought mentioning PGRST202/.test(out), "the exact row is returned");

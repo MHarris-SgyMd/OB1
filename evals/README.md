@@ -1629,6 +1629,112 @@ the arms and the scoring are written, and the one-line rule for reading the
 result is the same: the graph has to beat `match_thoughts` on questions
 someone actually asked.
 
+## Hybrid ranking, measured on four query sets
+
+`eval-hybrid.ts`, run as `bun run hybrid` (SMD-958, migration 017). Needs
+Ollama, the 441-issue corpus at `/tmp/linear-corpus-full.json`, and a throwaway
+Postgres. Bodies are loaded as thoughts with real vectors (cached in `/tmp` by
+text hash, so the first run embeds for about 80 s and the rest take a second);
+599 query embeddings follow, about three minutes in all.
+
+**Why the existing eval could not judge this.** `eval-keyword.ts` selects tokens
+unique to one document, so any fusion that contains the keyword arm scores
+~100% on it, good blend or bad. The ticket's first rule was that an eval able to
+tell them apart exists before the ranker is tuned. Four sets, each built
+mechanically from the corpus and each stated:
+
+- **identifier** — eval-keyword's 60 substring-hapax identifier tokens, the
+  token alone as the query (`evals/identifiers.ts` is now the one definition
+  both harnesses use). Keyword scores 1.0 here by construction; the bar is to
+  match it.
+- **semantic** — eval-real's task, the 441 titles against bodies. Vector's MRR
+  here is the published 0.903, re-measured on this load (0.899 at 100 results
+  through `match_thoughts` in Postgres; the 0.903 was exact cosine in
+  JavaScript). The bar is not to fall below it. 93 of the 441 titles carry an
+  identifier under the product's needle rule, so this set also shows what the
+  rule does to ordinary queries.
+- **mixed** — 38 queries where each arm alone is wrong: titles the vector arm
+  misses at rank 1, plus an identifier from the body found in 2–30 documents and
+  absent from the document vector wrongly ranked first. Query = title + token.
+- **decoy** — 60 queries that punish trusting a literal: titles the vector arm
+  gets right at rank 1, plus a token unique to a *different* document. Keyword
+  alone is wrong by construction.
+
+Every arm and six variants answer the same 599 queries at two settings. **Two
+controls** gate the tables: the shipped function's order must equal the
+harness's TypeScript fusion under the shipped rule on every query at both
+settings, and every identifier query must be hapax to the SQL function. Either
+failing prints no table.
+
+### Results, 2026-09-07, `qwen3-embedding:4b@1024`
+
+At the tools' own setting — ten results, threshold 0.5:
+
+| set | n | arm | R@1 | R@5 | not in top-10 | MRR |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| identifier | 60 | vector | 10% | 15% | 51 | 0.116 |
+| | | keyword | 100% | 100% | 0 | 1.000 |
+| | | **hybrid** | **100%** | **100%** | **0** | **1.000** |
+| semantic | 441 | vector | 83% | 97% | 8 | 0.894 |
+| | | keyword | 10% | 13% | 376 | 0.111 |
+| | | **hybrid** | **83%** | **97%** | **9** | **0.895** |
+| mixed | 38 | vector | 47% | 89% | 1 | 0.656 |
+| | | keyword | 26% | 84% | 0 | 0.503 |
+| | | **hybrid** | **95%** | **100%** | **0** | **0.974** |
+| decoy | 60 | vector | 88% | 98% | 0 | 0.930 |
+| | | keyword | 7% | 7% | 56 | 0.067 |
+| | | **hybrid** | **75%** | **98%** | **0** | **0.850** |
+
+Hybrid equals keyword on identifiers, equals vector on the semantic set (one
+more miss in 441 — `Apply for PostHog for Startups program`, whose body does not
+contain "PostHog" while thirty others do, and `Auth0` likewise), and on the
+mixed set takes R@1 from 47% to 95%: above both arms on twelve queries and below
+neither on any. At 100 results and no threshold — comparable to the published
+baselines — vector is 0.899 on the semantic set and hybrid 0.897; identifier and
+mixed are unchanged.
+
+**The decoy set is the cost.** A strong semantic match with a wrong identifier
+appended loses first place 15 times in 60, to the document that contains the
+identifier *and* is among the ten nearest by meaning. R@5 does not move. That is
+"a row both arms return outranks a row one returns", as designed; the function
+cannot know which half the person meant, and says which literals each row
+matched so the caller can. At 100 results the decoy set falls to 0.713, because
+"among the hundred nearest" is most documents; the tools send ten.
+
+### The variants, and what they decided
+
+| variant | where it differs from the shipped rule |
+| --- | --- |
+| no gate | identifier MRR 0.925 (0.850 at 100 results): the exact hit ties the vector's meaningless top row and loses on similarity |
+| needles-first tiebreak | decoy MRR 0.513: the wrong identifier's document goes first every time |
+| plain RRF over both lists | semantic 0.869, mixed 0.947, identifier 0.925: the keyword list's occurrence order read as relevance |
+| wide window (F = 4N, at least 40) | decoy 0.816, one more semantic miss: "both arms" meant "among the 9% nearest" |
+| rarity-weighted presence | one semantic miss fewer, nothing else; not shipped |
+
+The wide window was the first draft — the usual RRF over-fetch — and the eval
+removed it: the vector arm is now exactly `match_thoughts(query, −1, N)`, so
+"both arms agree" means the semantic tool would itself have returned the row.
+The gate (a query with no content word left after its needles are removed gives
+the vector arm no vote) is what lets one function satisfy the identifier set and
+the decoy set at once; the two tiebreak variants each satisfy one and fail the
+other.
+
+### What the bench found that the eval could not
+
+`db/bench-hybrid.ts` (10,000 rows) confirms both indexes are read through the
+fused function — `idx_scan` advances by thirteen for the HNSW and the trigram
+index over thirteen calls — and its first run showed the fused call at 15 ms
+where its arms cost 1.3 ms together. The planner estimates 1,000 rows from each
+plpgsql function scan; the draft's closing join to `thoughts` was planned as a
+hash of the whole table over ~6,000 candidates, the estimate crossed
+`jit_above_cost`, and PostgreSQL JIT-compiled 112 expressions on every call.
+`auto_explain` with nested statements showed it; nothing at the SQL level did.
+The function no longer joins `thoughts` (both arms already return the row) and
+runs with `jit = off`. After: 1.08 ms fused against 0.47 + 0.28 for the arms;
+a query with no needle 0.75 ms against 0.41 for `match_thoughts` alone; a
+needle in a tenth of the rows probed as common in 1.11 ms rather than paid for
+as the 5.12 ms keyword page it no longer fetches.
+
 ## Filtered search: what a metadata filter used to cost
 
 `eval-filtered.ts`, run as `bun run filtered`. Needs Ollama, the rebuilt corpus
