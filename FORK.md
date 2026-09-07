@@ -2175,14 +2175,44 @@ for the needle rule, the stopword test and the wrapper.
 **What changed for callers.** `search` and `search_thoughts` are hybrid; their
 descriptions say what is matched literally. `search_thoughts` renders
 `Contains: …` on a matched row, reports `exact match, no vector` for a keyword
-hit that has no embedding yet, and leads with the literals it matched, the ones
-too common to use, and whether the query was literal-only. A third store type,
+hit that has no embedding yet, and leads with the literals it searched for
+exactly, the ones no thought contains, the ones too common to use, and whether
+the query was literal-only. A third store type,
 `ThoughtHybridMatch`, with `similarity` nullable — a shared normaliser keeps
 both stores from turning "no vector" into "orthogonal" (`Number(null)` is 0).
 `preflight.ts` fails on a database that stops at 016, because the two most-used
 tools now need 017. SMD-945 (recency) has not landed; when it does it belongs
 in `match_thoughts`, and this function inherits it through the vector arm's
 rank — the keyword arm is boolean here, so age is never counted twice.
+
+**One review pass, triaged.** Ten confirmed findings; eleven fixes, two tickets,
+three declined. The one that mattered most was not in the new code: four
+comment lines added to migration 012's header changed its hash, and
+`migrate.ts` reports an applied migration whose file changed as drift and exits
+1 — every deployed database would have failed its next migrator run while fresh
+CI containers passed. 012 is byte-identical to `main` again. The rest: the
+hybrid presence check lived only on the SQL branch of preflight while
+PostgREST is the default store, so it now probes the function over PostgREST
+with an RPC; the literal-only gate stripped needles case-sensitively and
+shortest-first, so `SMD-944 smd-944` or `ERR_TIMEOUT ERR_TIMEOUT_LONG` left
+lexemes behind and opened the gate — needles are now removed longest-first on
+lower-cased text; `e.g.` and `i.e.` passed the identifier test after their
+trailing dot was stripped — a dotted or slashed token now needs two characters
+together somewhere; the tool header said "Matched exactly on" for a literal no
+thought contained — it says "Searched exactly for" and names the absent ones;
+`test-support.ts`'s drop list lacked the two new functions; the `threshold`
+parameter's narrowed meaning is described; a NULL threshold is coalesced like
+the other parameters; the common-needle rule is written as the completeness
+test (rows fetched = `total_count`) rather than the constant 100; the eval's
+decoy builder guards an empty identifier set; the vector-cache override is a
+prefix so two text rules cannot share one file; and the stride sampler has one
+definition. Tickets: SMD-1040 (`PostgrestStore.matchThoughts` is still a bare
+cast, so `created_at` differs in format between stores on the vector path) and
+SMD-1041 (declare `ROWS` on `match_thoughts` and `search_thoughts_keyword` in
+their own migrations — a hint set from 017 would be reset by the next
+re-apply of 014). Declined: rewriting the CTEs as a FULL OUTER JOIN, moving
+`eval-graphrag.ts` onto the shared vector cache in this PR, and de-duplicating
+the standalone benches' helpers. The numbers above did not move.
 
 ## Detached from the fork network
 

@@ -1330,6 +1330,8 @@ console.log("\n[17] extract_search_needles picks literals and identifiers, not w
     ["released in 2024 for 12 users", [], "bare numbers are not identifiers"],
     ["pgvector 0.8.6 or later", ["0.8.6"], "a dotted version is"],
     ["v2 of the API", [], "two characters cannot reach the trigram index and are not asked for"],
+    ["e.g. the scheduler timeout, i.e. the U.S. one at 3 p.m.", [], "abbreviations are not identifiers: a dotted token needs two characters together somewhere"],
+    ["read a.b.cd and x/yz", ["a.b.cd", "x/yz"], "…and one with a two-character run is"],
     ["plain english words only here", [], "ordinary words are left to the vector arm"],
     ["SMD-944 and smd-944 again SMD-944", ["SMD-944"], "de-duplicated case-insensitively, first spelling kept"],
     ["a1x b2x c3x d4x e5x f6x g7x h8x i9x j0x", ["a1x", "b2x", "c3x", "d4x", "e5x", "f6x", "g7x", "h8x"], "capped at eight, in order"],
@@ -1379,6 +1381,15 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
          `exact hits first, the unembedded one second, then the vector arm (${contents(alone).join(" | ")})`);
   assert(alone[0].matched_needles.join() === "SMD-507" && alone[1].similarity === null && alone[2].matched_needles.length === 0, "…each row says why it is there");
   assert(Math.abs(alone[0].score - 1 / 61) < 1e-9 && alone[2].score === 0, "…exact presence is worth a rank-1 hit; the vector arm's rank is not scored");
+  // The gate survives a second spelling and a needle that prefixes another:
+  // both used to leave fragments in the residual that the parser kept.
+  assert((await hybrid("SMD-507 smd-507", 0.0)).every((r) => r.literal_only === true), "a second spelling of the same literal leaves nothing to embed");
+  assert((await hybrid("SMD-507 SMD-5070", 0.0)).every((r) => r.literal_only === true), "a literal that is a prefix of another leaves nothing to embed");
+  // A needle no thought contains is still a needle — asked for, complete with
+  // zero rows — and boosts nothing, so the result is match_thoughts' result.
+  const nohit = await hybrid("the scheduler and SMD-999", 0.0);
+  assert(nohit.every((r) => r.needles.join() === "SMD-999" && r.common_needles.length === 0 && r.matched_needles.length === 0), "a zero-hit needle is reported as searched for, not as common, and matches no row");
+  assert(contents(nohit).join("|") === contents(noNeedle).join("|"), "…and the order is the vector arm's");
   // …and the threshold does not remove an exact hit whatever its similarity.
   const strict = await hybrid("SMD-507", 0.99);
   assert(contents(strict).join("|") === "distant note that names SMD-507 and getUserById|unembedded note that names SMD-507 too|exact match about the scheduler",
@@ -1422,6 +1433,8 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
   assert((await hybrid("SMD-507", 0.0, 1000)).length === 4, "match_count 1000 is clamped to 100, which here is every row");
   const nulText = await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, NULL, 0.0, 10, '{}'::jsonb)`, [unit(0)]);
   assert(nulText.rows.length === 2 && nulText.rows[0].content === "exact match about the scheduler", "a NULL query text is match_thoughts' answer");
+  const nulThreshold = await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, 'the scheduler', NULL, 10, '{}'::jsonb)`, [unit(0)]);
+  assert(nulThreshold.rows.map((r) => r.content).join("|") === contents(await hybrid("the scheduler", 0.7)).join("|"), "a NULL threshold is the default 0.7, not a filter that drops every vector row");
 
   await db.exec(`DELETE FROM thoughts`);
 }

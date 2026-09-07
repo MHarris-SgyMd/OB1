@@ -181,7 +181,8 @@ console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
   // available here. That boundary case is what the exact tool is still for,
   // and its description says so.
   const fused = await call("search_thoughts", { query: "PGRST202 ", limit: 5, threshold: 0.5 });
-  assert(/Matched exactly on: PGRST202/.test(fused.split("\n")[0]), `search_thoughts names the literal it matched (${fused.split("\n")[0]})`);
+  assert(/Searched exactly for: PGRST202/.test(fused.split("\n")[0]), `search_thoughts names the literal it searched for (${fused.split("\n")[0]})`);
+  assert(!/No thought contains/.test(fused.split("\n")[0]), "…and does not report it absent, since two rows contain it");
   assert(/only literals/.test(fused.split("\n")[0]), "…and says the query was only a literal");
   const blocks = fused.split("--- Result ").slice(1);
   assert(blocks.length >= 2 && blocks.slice(0, 2).every((b) => /\nContains: PGRST202\n/.test(b)), "results 1 and 2 are the two rows containing the literal, each with a Contains line");
@@ -189,7 +190,14 @@ console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
   assert(!blocks.slice(2).some((b) => /Contains:/.test(b)), "…and nothing after them claims a match");
   // …and the mixed form, where the vector arm has a vote too.
   const mixed = await call("search_thoughts", { query: "the alpha migration and PGRST202", limit: 5, threshold: 0.0 });
-  assert(!/only literals/.test(mixed.split("\n")[0]) && /Matched exactly on: PGRST202/.test(mixed.split("\n")[0]), "a query with words left is not literal-only");
+  assert(!/only literals/.test(mixed.split("\n")[0]) && /Searched exactly for: PGRST202/.test(mixed.split("\n")[0]), "a query with words left is not literal-only");
+  // A literal no thought contains is reported as searched for and absent —
+  // not as matched, which the first version's header implied.
+  const miss = await call("search_thoughts", { query: "the alpha migration and ZZQX_404", limit: 5, threshold: 0.0 });
+  assert(/Searched exactly for: ZZQX_404\. No thought contains: ZZQX_404\./.test(miss.split("\n")[0]), `a zero-hit literal is reported as absent (${miss.split("\n")[0]})`);
+  assert(!/Contains:/.test(miss), "…and no row claims it");
+  const missAlone = await call("search_thoughts", { query: "ZZQX_404", limit: 5, threshold: 0.0 });
+  assert(/only literals and no thought contains them/.test(missAlone.split("\n")[0]), "a literal-only query with no hits says the results are by similarity alone");
   // The compat pair reaches the same function: an identifier ChatGPT's `search`
   // could never find before 017 is now at the top of its results.
   const compat = JSON.parse(await call("search", { query: "PGRST202" }));

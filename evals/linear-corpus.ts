@@ -66,10 +66,14 @@ export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: st
 /**
  * Where a harness caches the corpus's document vectors: per embedding spec and
  * per text rule (`thought` is linearThoughtText, `body` the issue text alone),
- * because a vector of one is wrong for the other.
+ * because a vector of one is wrong for the other. `OB1_EVAL_VECTORS` moves the
+ * cache and is a PREFIX, not a file: the variant is always part of the name, so
+ * two harnesses with different text rules cannot be pointed at one file and
+ * re-embed the corpus on every alternation (review pass).
  */
 export function linearVectorCachePath(embedModel: string, variant: "thought" | "body" = "thought"): string {
-  return process.env.OB1_EVAL_VECTORS ?? `/tmp/linear-vectors-${variant}-${embedModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
+  const prefix = process.env.OB1_EVAL_VECTORS ?? "/tmp/linear-vectors";
+  return `${prefix}-${variant}-${embedModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
 }
 
 /** Cache entry per issue: the hash of the text it was embedded from, and the vector. */

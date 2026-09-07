@@ -293,6 +293,38 @@ if (configFailed) {
       }
     }
 
+    /**
+     * Migration 017 through PostgREST. `search` and `search_thoughts` call
+     * `search_thoughts_hybrid` unconditionally since SMD-958, and PostgREST is
+     * the default store, so a Supabase project whose migrations stop at 016
+     * would pass every check here, advertise both tools, and fail every call to
+     * them. The catalog cannot be read over PostgREST, but the function can be
+     * called: an RPC with an empty query text and a unit vector returns rows or
+     * nothing under 017, and "Could not find the function" without it. The
+     * first version of this check lived only on the SQL branch (review pass).
+     */
+    if (built.kind !== "sql") {
+      if (rowCount === null) {
+        add("hybrid search", "skip", "not probed — the schema check above failed first");
+      } else {
+        try {
+          const probe = new Array(embDim).fill(0);
+          probe[0] = 1;
+          await built.hybridThoughts({ query: "", embedding: probe, threshold: -1, limit: 1, filter: {} });
+          add("hybrid search", "ok", "search_thoughts_hybrid answers over PostgREST");
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (/could not find the function|does not exist/i.test(msg)) {
+            add("hybrid search", "fail",
+                "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
+                "Apply db/migrations/017_search_thoughts_hybrid.sql against the project's direct connection (server-portable/README.md §4).");
+          } else {
+            add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
+          }
+        }
+      }
+    }
+
     // The atomic capture path needs migration 004. Its absence is not fatal — the
     // PostgREST store falls back — but the fallback is the failure mode migration
     // 004 exists to remove, so say so.

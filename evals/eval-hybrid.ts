@@ -62,7 +62,7 @@ import { SQL } from "bun";
 import { loadEnv } from "./env.ts";
 import { embed, parseSpec } from "./lib.ts";
 import { loadLinearCorpus, insertLinearThought, linearThoughtId, linearVectorCachePath, cachedDocumentVectors, type LinearDoc } from "./linear-corpus.ts";
-import { selectIdentifierQueries, documentFrequency, substringContainers, shapeOf } from "./identifiers.ts";
+import { selectIdentifierQueries, documentFrequency, substringContainers, shapeOf, strideSample } from "./identifiers.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 
 loadEnv();
@@ -245,7 +245,7 @@ const keywordArm = (r: Raw, s: Setting) => { const seen = new Set<string>(); con
 // ── The four sets ───────────────────────────────────────────────────────────
 
 type Query = { set: string; q: string; want: string; note?: string };
-const cap = <T,>(xs: T[], max: number) => (max > 0 && xs.length > max ? Array.from({ length: max }, (_, i) => xs[Math.floor((i * xs.length) / max)]) : xs);
+const cap = strideSample;
 
 const bodies = docs.filter((d) => loaded.has(d.id)).map((d) => ({ id: d.id, text: body(d) }));
 const identifierQueries = selectIdentifierQueries(bodies, { max: MAX_ID });
@@ -278,7 +278,9 @@ for (const q of semantic) {
   mixed.push({ set: "mixed", q: `${q.q} ${candidates[0]}`, want: q.want, note: `${candidates[0]} in ${containers(candidates[0]).length} docs; vector's top-1 was ${wrong}` });
 }
 const decoy: Query[] = [];
-{
+// A corpus with no identifier-shaped hapax has nothing to append; eval-keyword
+// exits in that case, and this set is simply empty (the report says so).
+if (identifierQueries.length) {
   const right = semantic.filter((q) => vectorRank1(results.get(q)!, q.want));
   const sample = cap(right, identifierQueries.length || 60);
   sample.forEach((q, i) => {

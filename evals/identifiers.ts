@@ -89,6 +89,19 @@ export function substringContainers(docs: Doc[]): (needle: string) => string[] {
 export type IdentifierQuery = { token: string; shape: Shape; want: string };
 
 /**
+ * Every `step`-th element, `max` of them, so a capped set is spread over the
+ * whole list rather than being its first `max` entries. One definition:
+ * eval-hybrid.ts caps its sets with the same stride, and a second copy with
+ * the multiplication in a different order picked a different index once the
+ * float rounding differed.
+ */
+export function strideSample<T>(xs: T[], max: number): T[] {
+  if (max <= 0 || xs.length <= max) return xs;
+  const step = xs.length / max;
+  return Array.from({ length: max }, (_, i) => xs[Math.floor(i * step)]);
+}
+
+/**
  * Tokens that appear in exactly one document BY SUBSTRING and are
  * identifier-shaped; the answer is that document.
  *
@@ -106,7 +119,7 @@ export type IdentifierQuery = { token: string; shape: Shape; want: string };
 export function selectIdentifierQueries(docs: Doc[], opts: { allHapax?: boolean; max?: number } = {}): IdentifierQuery[] {
   const df = documentFrequency(docs);
   const containers = substringContainers(docs);
-  let out = [...df.entries()]
+  const out = [...df.entries()]
     .filter(([, ids]) => ids.size === 1)
     .map(([token]) => ({ token, shape: shapeOf(token) }))
     .filter((c) => opts.allHapax || c.shape !== "word")
@@ -114,10 +127,5 @@ export function selectIdentifierQueries(docs: Doc[], opts: { allHapax?: boolean;
     .filter((c) => c.holders.length === 1)
     .map((c) => ({ token: c.token, shape: c.shape, want: c.holders[0] }));
   out.sort((a, b) => (a.token < b.token ? -1 : 1));
-  const max = opts.max ?? 0;
-  if (max > 0 && out.length > max) {
-    const step = out.length / max;
-    out = Array.from({ length: max }, (_, i) => out[Math.floor(i * step)]);
-  }
-  return out;
+  return strideSample(out, opts.max ?? 0);
 }

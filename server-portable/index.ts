@@ -375,6 +375,7 @@ function buildServer(principal: Principal): McpServer {
       description:
         "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
         "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
+        "A thought containing one of those literals is returned whatever its similarity; the threshold applies to results found by meaning. " +
         "Returns a fixed top-N; to page through every thought containing an exact string, use search_thoughts_keyword.",
       annotations: {
         readOnlyHint: true,
@@ -388,7 +389,10 @@ function buildServer(principal: Principal): McpServer {
         // ever reaching the function's int parameter.
         limit: z.number().optional().default(10).describe("Results to return, clamped to 1-100.")
           .transform((n) => Math.min(Math.max(Math.trunc(n), 1), 100)),
-        threshold: z.number().optional().default(0.5),
+        // Described, because 017 narrowed what it means: match_thoughts
+        // guaranteed every row cleared it, the fused function exempts exact hits.
+        threshold: z.number().optional().default(0.5)
+          .describe("Minimum similarity, 0-1, for results found by meaning. A thought containing an identifier or quoted span from the query is returned regardless."),
       },
     },
     async ({ query, limit, threshold }) => {
@@ -432,13 +436,23 @@ function buildServer(principal: Principal): McpServer {
         );
 
         // What the query was taken to mean, from the first row (every row
-        // carries the same three): which literals were matched exactly, which
-        // were too common to use, and whether there was anything to embed.
+        // carries the same three): which literals were searched for exactly —
+        // and, separately, which of those no thought contains, because
+        // `needles` lists every literal that was asked for and a literal with
+        // zero hits is asked for too (review pass) — which were too common to
+        // use, and whether there was anything to embed.
         const head = data[0];
+        const matchedAny = new Set(data.flatMap((t) => t.matchedNeedles));
+        const unmatched = head.needles.filter((n) => !matchedAny.has(n));
         const notes: string[] = [];
-        if (head.needles.length) notes.push(`Matched exactly on: ${head.needles.join(", ")}.`);
+        if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
+        if (unmatched.length) notes.push(`No thought contains: ${unmatched.join(", ")}.`);
         if (head.commonNeedles.length) notes.push(`Too common to match exactly (in more than 100 thoughts): ${head.commonNeedles.join(", ")}.`);
-        if (head.literalOnly) notes.push("The query is only literals, so exact matches are ranked first and the rest by similarity.");
+        if (head.literalOnly) {
+          notes.push(matchedAny.size
+            ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
+            : "The query is only literals and no thought contains them, so these results are by similarity alone.");
+        }
 
         return {
           content: [

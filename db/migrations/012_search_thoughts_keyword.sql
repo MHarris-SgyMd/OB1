@@ -255,10 +255,6 @@
 -- would fail the migration for exactly the operators most likely to want this.
 -- Hybrid ranking — fusing this with `match_thoughts` — is deliberately not here.
 -- Get exact match right first; blending is a follow-up with its own evaluation.
--- (That follow-up is migration 017, `search_thoughts_hybrid`, which calls this
--- function unchanged and whose header carries the evaluation. This function
--- remains the exact tool: paging, `total_count`, and a needle matched as
--- written, whitespace included.)
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- No GRANT, no SECURITY DEFINER — and upstream has both

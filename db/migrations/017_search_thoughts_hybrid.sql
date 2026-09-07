@@ -115,13 +115,18 @@
 --      embedding, "PGRST202" does not.
 --   3. Case-insensitive de-duplication, first eight.
 --
--- A needle found in MORE THAN 100 THOUGHTS is not used. 100 is the keyword
--- function's page cap, so a needle within it comes back complete and the
--- presence boost lands on every row that contains it; one above it would boost
--- an arbitrary 100 of its rows — the first page of an ordering that is not a
--- relevance order — and leave the rest. A literal in that many thoughts is a
--- word, and the vector arm already handles words. Such needles are returned in
--- `common_needles` so the tool can say so.
+-- A needle whose page is NOT ITS WHOLE MATCH SET is not used: `total_count`
+-- larger than the rows the keyword function returned, which with 012's page
+-- cap of 100 means a literal in more than 100 thoughts. Within the page the
+-- presence boost lands on every row that contains the literal; beyond it it
+-- would land on an arbitrary hundred — the first page of an ordering that is
+-- not a relevance order — and leave the rest. A literal in that many thoughts
+-- is a word, and the vector arm already handles words. Such needles are
+-- returned in `common_needles` so the tool can say so. The rule is written as
+-- the completeness test (rows fetched = total) rather than as the constant, so
+-- a change to 012's clamp cannot move it silently. A needle that matches
+-- nothing is complete too — it stays in `needles`, and the tool reports it as
+-- searched for and absent rather than as matched.
 --
 -- ═══════════════════════════════════════════════════════════════════════════
 -- The window, paging, threshold — decided once, and SMD-945 inherits them
@@ -324,7 +329,10 @@ BEGIN
     v_tok := regexp_replace(v_tok, '^[.\-]+|[.\-]+$', '', 'g');
     CONTINUE WHEN length(v_tok) < 3 OR length(v_tok) > 64;
     CONTINUE WHEN v_tok ~ '^[0-9]+$';                                   -- a bare number is not an identifier
-    CONTINUE WHEN NOT (v_tok ~ '[0-9_]' OR v_tok ~ '[./]' OR v_tok ~ '[a-z][A-Z]');
+    -- A dotted or slashed token needs a run of two or more characters somewhere
+    -- between its punctuation: "e.g." and "i.e." lose their trailing dot above
+    -- and would otherwise pass as three-character identifiers (review pass).
+    CONTINUE WHEN NOT (v_tok ~ '[0-9_]' OR (v_tok ~ '[./]' AND v_tok ~ '[^./]{2}') OR v_tok ~ '[a-z][A-Z]');
     CONTINUE WHEN lower(v_tok) = ANY (v_seen);
     v_out  := v_out  || v_tok;
     v_seen := v_seen || lower(v_tok);
@@ -352,7 +360,7 @@ RETURNS TABLE (
   similarity       float,     -- NULL for a keyword hit with no vector and no chunks
   matched_needles  text[],    -- the needles this row contains, in query order
   needles          text[],    -- every row: the needles the keyword arm was asked for
-  common_needles   text[],    -- every row: extracted, but in more than 100 thoughts, so not used
+  common_needles   text[],    -- every row: extracted, but its page was not its whole match set (more than 100 thoughts today), so not used
   literal_only     boolean,   -- every row: the query had nothing to embed, so the vector arm's rank was not scored
   score            float
 )
@@ -371,6 +379,9 @@ DECLARE
   -- vector arm's window: the rows match_thoughts would return for this call are
   -- the rows whose rank counts (see the header for the measurement behind that).
   v_count        int    := least(greatest(coalesce(match_count, 10), 1), 100);
+  -- Coalesced like the other two: an explicit NULL from a hand-written RPC
+  -- would otherwise make `sim > NULL` unknown and drop every vector-only row.
+  v_threshold    float  := coalesce(match_threshold, 0.7);
   v_filter       jsonb  := coalesce(filter, '{}'::jsonb);
   v_all          text[] := extract_search_needles(query_text);
   v_residual     text   := coalesce(query_text, '');
@@ -380,8 +391,16 @@ BEGIN
   -- The gate. Remove every extracted needle (and the quotes that marked one)
   -- from the query; if the English parser keeps no lexeme of what is left,
   -- there was nothing to embed and the vector arm's rank is not scored.
-  FOREACH v_needle IN ARRAY v_all LOOP
-    v_residual := replace(v_residual, v_needle, ' ');
+  -- Longest needle first, and lower-cased on both sides. The needles were
+  -- de-duplicated case-insensitively keeping the first spelling, so a second
+  -- spelling ("smd-944" after "SMD-944") or a needle that is a prefix of
+  -- another ("ERR_TIMEOUT" removed before "ERR_TIMEOUT_LONG") would otherwise
+  -- leave fragments the parser keeps as lexemes, and the gate would open for a
+  -- query that is nothing but literals (review pass). The parser is
+  -- case-insensitive, so lowering the residual changes nothing else.
+  v_residual := lower(v_residual);
+  FOR v_needle IN SELECT n FROM unnest(v_all) AS n ORDER BY length(n) DESC LOOP
+    v_residual := replace(v_residual, lower(v_needle), ' ');
   END LOOP;
   v_residual     := regexp_replace(v_residual, '["`]', ' ', 'g');
   v_literal_only := cardinality(v_all) > 0 AND length(to_tsvector('english', v_residual)) = 0;
@@ -398,15 +417,19 @@ BEGIN
     FROM unnest(v_all) WITH ORDINALITY AS n(needle, ord)
     CROSS JOIN LATERAL search_thoughts_keyword(n.needle, 100, 0, v_filter) AS h
   ),
+  -- A needle is USED when its page is its whole match set — the rows that came
+  -- back equal total_count — and COMMON when total_count says there were more.
+  -- The test is the completeness itself rather than the page constant, so a
+  -- change to 012's clamp cannot move this rule without anyone noticing.
   kw_needles AS (
-    SELECT n.needle, n.ord, coalesce(max(k2.total_count), 0) AS total
+    SELECT n.needle, n.ord, coalesce(max(k2.total_count), 0) AS total, count(k2.hit_id) AS fetched
     FROM unnest(v_all) WITH ORDINALITY AS n(needle, ord)
     LEFT JOIN kw k2 ON k2.needle = n.needle
     GROUP BY n.needle, n.ord
   ),
   used AS (
-    SELECT coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.total <= 100), '{}'::text[]) AS needles,
-           coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.total  > 100), '{}'::text[]) AS common
+    SELECT coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched = kn.total), '{}'::text[]) AS needles,
+           coalesce(array_agg(kn.needle ORDER BY kn.ord) FILTER (WHERE kn.fetched < kn.total), '{}'::text[]) AS common
     FROM kw_needles kn
   ),
   hits AS (
@@ -416,7 +439,7 @@ BEGIN
            (array_agg(k3.hit_metadata))[1] AS hit_metadata,
            min(k3.hit_created_at)          AS hit_created_at
     FROM kw k3
-    WHERE k3.total_count <= 100
+    JOIN kw_needles kn ON kn.needle = k3.needle AND kn.fetched = kn.total
     GROUP BY k3.hit_id
   ),
   -- Vector arm: ranks over the N rows match_thoughts would return, whatever
@@ -465,7 +488,7 @@ BEGIN
     s.fused::float
   FROM scored s
   CROSS JOIN used u
-  WHERE s.matched IS NOT NULL OR s.sim > match_threshold
+  WHERE s.matched IS NOT NULL OR s.sim > v_threshold
   ORDER BY s.fused DESC, s.sim DESC NULLS LAST, s.created_at DESC, s.cid
   LIMIT v_count;
 END;
