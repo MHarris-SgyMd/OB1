@@ -264,12 +264,20 @@ function buildServer(principal: Principal): McpServer {
 
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
   // research look for exact read-only `search` and `fetch` tool shapes.
+  //
+  // Hybrid (migration 017, SMD-958), not vector-only: this tool cannot grow a
+  // `mode` parameter without breaking the shape ChatGPT matches on, so it is the
+  // one surface that could never reach search_thoughts_keyword. For an
+  // identifier it got what 012 measured — the containing thought outside the
+  // top ten 37 times in 60. The fused function returns exactly what
+  // match_thoughts returned for any query without an identifier in it.
   server.registerTool(
     "search",
     {
       title: "Search Open Brain",
       description:
-        "Search Open Brain memories by meaning. Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts.",
+        "Search Open Brain memories by meaning and by exact text — identifier-shaped tokens and \"quoted\" spans in the query are also matched literally. " +
+        "Use this read-only compatibility tool when ChatGPT needs search/fetch-style access to stored thoughts.",
       annotations: {
         readOnlyHint: true,
       },
@@ -280,7 +288,8 @@ function buildServer(principal: Principal): McpServer {
     async ({ query }) => {
       try {
         const qEmb = await getEmbedding(query, "query");
-        const data = await (await db()).matchThoughts({
+        const data = await (await db()).hybridThoughts({
+          query,
           embedding: qEmb,
           threshold: 0.5,
           limit: 10,
@@ -352,13 +361,21 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
-  // Tool 1: Semantic Search
+  // Tool 1: Search — semantic, with the identifiers in the query matched exactly.
+  //
+  // Hybrid since migration 017 (SMD-958). The description says what is matched
+  // literally, because that is the part the model reads before deciding whether
+  // it still needs search_thoughts_keyword: it does, for paging through every
+  // thought containing a string, and for a needle the extraction rule would not
+  // pick out of a sentence on its own.
   server.registerTool(
     "search_thoughts",
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured.",
+        "Search captured thoughts by meaning, with exact matching for identifier-shaped tokens in the query (SMD-944, upsert_thought, db/config.mjs, getUserById) and for \"quoted\" spans. " +
+        "Use this when the user asks about a topic, person, or idea they've previously captured, including one named by an error code or a ticket key. " +
+        "Returns a fixed top-N; to page through every thought containing an exact string, use search_thoughts_keyword.",
       annotations: {
         readOnlyHint: true,
       },
@@ -377,7 +394,8 @@ function buildServer(principal: Principal): McpServer {
     async ({ query, limit, threshold }) => {
       try {
         const qEmb = await getEmbedding(query, "query");
-        const data = await (await db()).matchThoughts({
+        const data = await (await db()).hybridThoughts({
+          query,
           embedding: qEmb,
           threshold,
           limit,
@@ -393,11 +411,15 @@ function buildServer(principal: Principal): McpServer {
         const results = data.map(
           (t, i) => {
             const m = t.metadata || {};
+            // A keyword hit with no vector has no similarity to report; it is
+            // here because it contains the literal, and the header says which.
+            const match = t.similarity == null ? "exact match, no vector" : `${(t.similarity * 100).toFixed(1)}% match`;
             const parts = [
-              `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+              `--- Result ${i + 1} (${match}) ---`,
               `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
               `Type: ${m.type || "unknown"}`,
             ];
+            if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
             if (Array.isArray(m.topics) && m.topics.length)
               parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
             if (Array.isArray(m.people) && m.people.length)
@@ -409,11 +431,20 @@ function buildServer(principal: Principal): McpServer {
           }
         );
 
+        // What the query was taken to mean, from the first row (every row
+        // carries the same three): which literals were matched exactly, which
+        // were too common to use, and whether there was anything to embed.
+        const head = data[0];
+        const notes: string[] = [];
+        if (head.needles.length) notes.push(`Matched exactly on: ${head.needles.join(", ")}.`);
+        if (head.commonNeedles.length) notes.push(`Too common to match exactly (in more than 100 thoughts): ${head.commonNeedles.join(", ")}.`);
+        if (head.literalOnly) notes.push("The query is only literals, so exact matches are ranked first and the rest by similarity.");
+
         return {
           content: [
             {
               type: "text" as const,
-              text: `Found ${data.length} thought(s):\n\n${results.join("\n\n")}`,
+              text: `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}\n\n${results.join("\n\n")}`,
             },
           ],
         };

@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-one numbered changes on top of the pin. Seven fix defects found in an
+Thirty-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–31 are the numbered `###` sections** further down, which is
+sections. Changes **18–32 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -160,6 +160,10 @@ evals/eval-entities.ts           # fix 30  (new file — labelled precision/reca
 evals/eval-graphrag.ts           # fix 31  (new file — graph retrieval against the vector baseline)
 evals/graphrag-questions.json    # fix 31  (new file — the multi-hop question set)
 evals/linear-corpus.ts           # fix 31  (new file — the corpus/dump contract eval-entities and eval-graphrag share)
+db/migrations/017_*.sql          # fix 32  (new file — search_thoughts_hybrid and extract_search_needles)
+db/bench-hybrid.ts               # fix 32  (new file — both indexes reached through the fused function)
+evals/eval-hybrid.ts             # fix 32  (new file — four query sets, the arms and the variants)
+evals/identifiers.ts             # fix 32  (new file — the identifier rule eval-keyword and eval-hybrid share)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -2034,6 +2038,151 @@ asked. SMD-1039 asks that question of a literature corpus with a published
 question set, where the failure mode these techniques target does exist; a
 win there is a reason to re-ask the product question on a corpus of the
 product's shape, not a reason to build.
+
+### 32. Hybrid ranking — one fused search behind `search` and `search_thoughts`
+
+Migration 017 (Linear SMD-958). Since change 26, retrieval was two disjoint
+tools: `search_thoughts` and the ChatGPT-compat `search` called `match_thoughts`,
+and `search_thoughts_keyword` was exact substring. 012 chose that deliberately
+and left two things open. A query that is partly a literal and partly a
+description — "the scheduler timeout around `ERR_POSTGRES_SERVER_ERROR`" — was
+served badly by both, and nothing routed. And the compat `search` could never
+reach keyword search at all: ChatGPT matches on the exact `search`/`fetch`
+shapes, so that tool cannot grow a `mode` parameter, and for an identifier it
+got what 012 measured — 37 of 60 not in the top ten. A third tool fixes
+neither; fusing behind the tools that exist does. `search_thoughts_hybrid` is
+what both now call; `search_thoughts_keyword` stays as the exact tool with its
+paging and its true `total_count`.
+
+**The fusion is asymmetric, and each half has a reason.** Reciprocal rank
+fusion on the vector arm — `1/(60 + rank)`, the conventional constant — because
+a cosine similarity and an occurrence count are not commensurable and score
+blending would need a normalisation nobody can justify. But not RRF on the
+keyword arm: `search_thoughts_keyword` orders by occurrences then recency, which
+is a stable page order and not a relevance order, and RRF would read its rank
+positions as evidence. So the keyword arm contributes *presence*: each literal
+a row contains is worth exactly a rank-1 hit, `1/61`, and two literals beat one.
+Among rows the keyword arm found, the order is the vector's judgement — each
+hit's own cosine similarity, computed directly (a primary-key probe, best of
+the thought's vector and its chunks, the rule `match_thoughts` uses), as the
+tiebreak. A row both arms return therefore outranks any row only one returns,
+and **a query with no identifier in it returns exactly what `match_thoughts`
+returns, row for row** — asserted in `db/test-schema.ts` at three thresholds.
+
+**The needles come from one rule, in SQL.** `extract_search_needles` takes
+quoted or backticked spans as written, then identifier-shaped tokens — a digit
+or underscore but not a bare number, an interior slash or dot, an interior
+capital — three to 64 characters, de-duplicated, at most eight. Ordinary words
+are left to the vector arm: `harpsichord` has an embedding, `PGRST202` does
+not. A needle found in more than 100 thoughts is reported as common and not
+used: 100 is the keyword page cap, so within it the presence boost lands on
+every row containing the literal, and above it on an arbitrary hundred.
+
+**The gate.** Embedding `SMD-506` alone is noise — 012 measured the containing
+thought at rank 150. When the query minus its needles has nothing the English
+text-search parser keeps as a lexeme, the vector arm's rank term is dropped;
+exact hits come first and the rest follow by similarity. With a content word
+left, the arms are peers. Without the gate an identifier query ties its exact
+hit against the vector's meaningless top row and the similarity tiebreak hands
+first place to the noise: measured, MRR 0.958 at ten results and 0.850 at a
+hundred, against 1.000 with it.
+
+**The eval came before the ranker, because the existing one could not judge
+it.** `evals/eval-keyword.ts` selects tokens unique to one document, so any
+fusion containing the keyword arm scores ~100% there, good blend or bad.
+`evals/eval-hybrid.ts` builds four sets from the 441-issue corpus, each
+mechanically and each stated: **identifier** (eval-keyword's 60, the token
+alone), **semantic** (eval-real's 441, title → body), **mixed** (38: documents
+vector misses at rank 1 on their title, plus an identifier from the body found
+in 2–30 documents and absent from the document vector wrongly ranked first),
+**decoy** (60: documents vector gets right at rank 1, plus a token unique to a
+*different* document). Every arm and six variants answer the same 599 queries;
+a control asserts the shipped function's order equals the harness's fusion on
+every one, and that every identifier query is hapax to the SQL function. At
+the tools' own setting — ten results, threshold 0.5:
+
+| set | n | arm | R@1 | R@5 | not in top-10 | MRR |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| identifier | 60 | vector | 10% | 15% | 51 | 0.116 |
+| | | keyword | 100% | 100% | 0 | 1.000 |
+| | | **hybrid** | **100%** | **100%** | **0** | **1.000** |
+| semantic | 441 | vector | 83% | 97% | 8 | 0.894 |
+| | | keyword | 10% | 13% | 376 | 0.111 |
+| | | **hybrid** | **83%** | **97%** | **9** | **0.895** |
+| mixed | 38 | vector | 47% | 89% | 1 | 0.656 |
+| | | keyword | 26% | 84% | 0 | 0.503 |
+| | | **hybrid** | **95%** | **100%** | **0** | **0.974** |
+| decoy | 60 | vector | 88% | 98% | 0 | 0.930 |
+| | | keyword | 7% | 7% | 56 | 0.067 |
+| | | **hybrid** | **75%** | **98%** | **0** | **0.850** |
+
+Hybrid matches keyword on the identifier set, matches vector on the semantic
+set (one more miss in 441 at ten results, one more at a hundred), and on the
+mixed set — the case the ticket was about — takes R@1 from 47% to 95%, above
+either arm on twelve queries and below neither on any.
+
+**The decoy set is the cost, and it is stated rather than tuned away.** A
+strong semantic match with a wrong identifier appended loses first place 15
+times in 60, to the document that contains the identifier *and* is among the
+ten nearest by meaning — "both arms" beating "one" as designed. R@5 does not
+move. Whether that is wrong depends on which half the person meant, and the
+function cannot know; what it can do is say so, and every row carries the
+needles it matched.
+
+**The window is N, and the eval chose it.** The first draft over-fetched the
+vector arm to `least(100, greatest(4N, 40))`, the usual RRF precaution against
+cutting a winner before fusion. The precaution does not apply here — keyword
+hits carry their own similarity, so nothing outside the window is lost — and it
+had a cost: "both arms" at F = 40 meant "contains the literal and is among the
+9% nearest", which promoted the decoy 19 times in 60 and put one more semantic
+query out of the top ten. At F = N it means "contains the literal and the
+semantic tool would have returned it". Every other set was unchanged or better.
+Plain RRF over both lists, the fusion the ticket named as the one not to
+inherit, was measured beside it: 0.867 on semantic against 0.894, 0.947 on
+mixed against 0.974, 0.925 on identifier against 1.000. Rarity-weighted
+presence (`ln(T/df)/ln(T)`) was measured too: one semantic miss fewer in 441
+and nothing else. It is not shipped.
+
+**No paging, on purpose.** 012's `total_count` is exact and cheap because its
+ordering already materialises the whole match set; a fused result's total is
+the size of a union neither arm knows without running unbounded. Rather than
+report a number that is not a count, the shape has no total and no offset; the
+tool description says so and points at the exact tool for paging. Fixed top-N,
+N clamped to 1–100.
+
+**Both indexes are reached through the wrapper, and the bench found the one
+thing reading could not.** `db/bench-hybrid.ts`, 10,000 rows, reads
+`pg_stat_user_indexes.idx_scan` for the HNSW and trigram indexes before and
+after thirteen calls (the generic-plan probe from change 26): both counters
+advance by thirteen. A control plants a decoy only an unescaped pattern would
+match and refuses to time a wrong result. Its first run then showed the fused
+call at **15 ms where its two arms cost 1.3 ms together.** Neither arm was
+slow. The planner cannot see into a plpgsql function and estimates 1,000 rows
+from each function scan; the first draft joined `thoughts` at the end for the
+row's columns, so the estimate was a ~6,000-row hash join over the whole table,
+and its cost — 216,000 against a real few hundred — crossed `jit_above_cost`.
+PostgreSQL JIT-compiled 112 expressions on every call; `auto_explain` with
+nested statements showed "Functions: 112", and nothing at the SQL level did.
+Two changes, both kept: the function no longer joins `thoughts` (both arms
+already return the row, so only a keyword hit outside the vector window touches
+the table, by primary key), and it runs with `jit = off`, scoped to the call
+like 014's hnsw setting — nothing in it has enough rows for compilation to pay.
+After: fused with one needle 0.90 ms against 0.43 + 0.23 for the arms
+separately; a query with no needle 0.75 ms against 0.40 for `match_thoughts`
+alone, so every ordinary semantic search pays about a third of a millisecond
+for the needle rule, the stopword test and the wrapper.
+
+**What changed for callers.** `search` and `search_thoughts` are hybrid; their
+descriptions say what is matched literally. `search_thoughts` renders
+`Contains: …` on a matched row, reports `exact match, no vector` for a keyword
+hit that has no embedding yet, and leads with the literals it matched, the ones
+too common to use, and whether the query was literal-only. A third store type,
+`ThoughtHybridMatch`, with `similarity` nullable — a shared normaliser keeps
+both stores from turning "no vector" into "orthogonal" (`Number(null)` is 0).
+`preflight.ts` fails on a database that stops at 016, because the two most-used
+tools now need 017. SMD-945 (recency) has not landed; when it does it belongs
+in `match_thoughts`, and this function inherits it through the vector arm's
+rank — the keyword arm is boolean here, so age is never counted twice.
 
 ## Detached from the fork network
 

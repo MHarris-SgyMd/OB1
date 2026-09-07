@@ -172,6 +172,29 @@ console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");
   await call("capture_thought", { content: "delta thought mentioning PGRST202 exactly once" });
   await call("capture_thought", { content: "epsilon thought mentioning PGRST2020 twice: PGRST2020" });
 
+  // The same query through search_thoughts, which is hybrid since 017. The stub
+  // embeds "PGRST202" on the same axis as everything that is not alpha/beta/
+  // gamma, so the vector arm cannot tell delta from epsilon, or either from the
+  // other axis-3 thoughts — and both rows containing the literal come first,
+  // each saying why. Both, not one: the needle rule takes the token, so the
+  // trailing space that makes search_thoughts_keyword exclude PGRST2020 is not
+  // available here. That boundary case is what the exact tool is still for,
+  // and its description says so.
+  const fused = await call("search_thoughts", { query: "PGRST202 ", limit: 5, threshold: 0.5 });
+  assert(/Matched exactly on: PGRST202/.test(fused.split("\n")[0]), `search_thoughts names the literal it matched (${fused.split("\n")[0]})`);
+  assert(/only literals/.test(fused.split("\n")[0]), "…and says the query was only a literal");
+  const blocks = fused.split("--- Result ").slice(1);
+  assert(blocks.length >= 2 && blocks.slice(0, 2).every((b) => /\nContains: PGRST202\n/.test(b)), "results 1 and 2 are the two rows containing the literal, each with a Contains line");
+  assert(blocks.slice(0, 2).some((b) => /delta thought/.test(b)) && blocks.slice(0, 2).some((b) => /epsilon thought/.test(b)), "…delta and epsilon, in either order");
+  assert(!blocks.slice(2).some((b) => /Contains:/.test(b)), "…and nothing after them claims a match");
+  // …and the mixed form, where the vector arm has a vote too.
+  const mixed = await call("search_thoughts", { query: "the alpha migration and PGRST202", limit: 5, threshold: 0.0 });
+  assert(!/only literals/.test(mixed.split("\n")[0]) && /Matched exactly on: PGRST202/.test(mixed.split("\n")[0]), "a query with words left is not literal-only");
+  // The compat pair reaches the same function: an identifier ChatGPT's `search`
+  // could never find before 017 is now at the top of its results.
+  const compat = JSON.parse(await call("search", { query: "PGRST202" }));
+  assert(compat.results.length >= 2 && compat.results.slice(0, 2).every((r: { title: string }) => /PGRST202/.test(r.title)), `search (compat) returns the exact hits first (${compat.results.map((r: { title: string }) => r.title.slice(11, 40)).join(" | ")})`);
+
   const out = await call("search_thoughts_keyword", { query: "PGRST202 " });
   assert(/Showing 1-1 of 1/.test(out), `the header states the whole match set (${out.split("\n")[0]})`);
   assert(/delta thought mentioning PGRST202/.test(out), "the exact row is returned");

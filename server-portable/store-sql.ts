@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, normaliseAgentResolution, normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -31,6 +31,7 @@ import type {
   ListFilters,
   MutationError,
   MutationResult,
+  ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
   ThoughtMatch,
@@ -108,6 +109,29 @@ export class SqlStore implements ThoughtStore {
       // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
       totalCount: Number(r.total_count ?? 0),
     }));
+  }
+
+  async hybridThoughts(opts: {
+    query: string;
+    embedding: number[];
+    threshold: number;
+    limit: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtHybridMatch[]> {
+    // The function extracts the needles and does the fusion, so neither store
+    // has a copy of either rule to get out of step — the same reason the two
+    // methods above call their functions rather than inlining them.
+    const rows = await this.sql`
+      SELECT id, content, metadata, created_at, similarity,
+             matched_needles, needles, common_needles, literal_only, score
+      FROM search_thoughts_hybrid(
+        ${toVector(opts.embedding)}::vector,
+        ${opts.query}::text,
+        ${opts.threshold}::float,
+        ${opts.limit}::int,
+        ${opts.filter}::jsonb
+      )`;
+    return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
   async getThought(id: string): Promise<ThoughtRecord | null> {

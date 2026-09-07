@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, normaliseAgentResolution, normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -19,6 +19,7 @@ import type {
   ListFilters,
   MutationError,
   MutationResult,
+  ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
   ThoughtMatch,
@@ -91,6 +92,26 @@ export class PostgrestStore implements ThoughtStore {
       occurrences: Number(r.occurrences),
       totalCount: Number(r.total_count ?? 0),
     }));
+  }
+
+  async hybridThoughts(opts: {
+    query: string;
+    embedding: number[];
+    threshold: number;
+    limit: number;
+    filter: Record<string, unknown>;
+  }): Promise<ThoughtHybridMatch[]> {
+    const { data, error } = await this.client.rpc("search_thoughts_hybrid", {
+      query_embedding: opts.embedding,
+      query_text: opts.query,
+      match_threshold: opts.threshold,
+      match_count: opts.limit,
+      filter: opts.filter,
+    });
+    if (error) throw new Error(error.message);
+    // Mapped through the shared normaliser, not cast: PostgREST returns the
+    // function's snake_case columns and a JSON null for a NULL similarity.
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseHybridRow);
   }
 
   async getThought(id: string): Promise<ThoughtRecord | null> {

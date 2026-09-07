@@ -377,6 +377,21 @@ if (configFailed) {
                  "Apply db/migrations/012_search_thoughts_keyword.sql.");
 
         /**
+         * Migration 017's function. `search` and `search_thoughts` call it
+         * unconditionally since SMD-958, so a database that stops at 016 breaks
+         * the two most-used tools rather than a new one — the same shape of
+         * failure as the 012 check above, on a bigger surface, same severity.
+         */
+        const hybrid = await sql`
+          SELECT count(*)::int AS c FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'`;
+        if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
+        else add("hybrid search", "fail",
+                 "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
+                 "Apply db/migrations/017_search_thoughts_hybrid.sql.");
+
+        /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,
          * which is correct only when the scan is iterative — hnsw.iterative_scan
          * in force for the call, normally as the function's own SET clause,

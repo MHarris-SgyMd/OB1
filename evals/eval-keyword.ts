@@ -47,6 +47,7 @@
 import { SQL } from "bun";
 import { embed, cosine } from "./lib.ts";
 import { assertThrowawayDatabase, resetSchema } from "../db/test-support.ts";
+import { selectIdentifierQueries, type Shape } from "./identifiers.ts";
 
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
 const MODEL = process.argv.slice(2).find((a) => !a.startsWith("--")) ?? "qwen3-embedding:4b";
@@ -73,104 +74,21 @@ if (ITEMS.length === 0) {
 }
 
 // ── Query selection ──────────────────────────────────────────────────────────
+//
+// The tokenizer, the shape rule and the substring-hapax selection live in
+// identifiers.ts, shared with eval-hybrid.ts (SMD-958), which scores this same
+// set as one of its four. The reasoning for each — why identifier-shaped and
+// not any rare word, why hapax means substring and not token, why a
+// deterministic sample rather than the first N — is there.
 
-/**
- * Tokens, split on whitespace and on the punctuation that surrounds identifiers
- * rather than the punctuation inside them. `SMD-944`, `upsert_thought`,
- * `db/config.mjs` and `PGRST202` survive as single tokens; `(foo)` and `bar,`
- * lose their wrappers.
- */
-function tokenize(text: string): string[] {
-  return text
-    .split(/[\s`"'(){}\[\]<>,;:!?*|]+/)
-    .map((t) => t.replace(/^[.\-]+|[.\-]+$/g, ""))
-    .filter((t) => t.length >= 4 && t.length <= 40);
-}
-
-/**
- * What kind of string this is, which is reported separately because the three
- * kinds are not equally interesting and an average over them can mislead.
- *
- * `code`  — has a digit or an underscore: SMD-506, temporal_activity, PGRST202.
- *           The case the issue is actually about.
- * `path`  — a slash or a dot joining words: db/config.mjs, but also UI/API and
- *           disabled/replaced, which are two ordinary English words with
- *           punctuation between them. An embedding failing on those is much less
- *           surprising, and they were the deepest-ranked queries in the first run
- *           — so lumping them in would have let the weakest cases carry the
- *           headline.
- * `camel` — interior capitals: getUserById.
- * `word`  — none of the above: an ordinary rare word. Excluded from the default
- *           query set, and only reachable under `--all-hapax`. It has its own
- *           label rather than being folded into one of the others: an earlier
- *           version coerced these to `code`, so `--all-hapax` would have
- *           reported plain English words in the row labelled "digit or
- *           underscore" and produced a table that was wrong rather than noisy.
- */
-type Shape = "code" | "path" | "camel" | "word";
-function shapeOf(t: string): Shape {
-  if (/^\d+$/.test(t)) return "word";                // a bare number is not an identifier
-  if (/\d/.test(t) || /_/.test(t)) return "code";
-  if (/[/.]/.test(t)) return "path";
-  if (/[a-z][A-Z]/.test(t)) return "camel";
-  return "word";
-}
-
-const df = new Map<string, Set<string>>();
-for (const it of ITEMS) {
-  for (const t of new Set(tokenize(it.text))) {
-    if (!df.has(t)) df.set(t, new Set());
-    df.get(t)!.add(it.id);
-  }
-}
-
-/**
- * Hapax by SUBSTRING, not by token.
- *
- * The first version of this selected tokens appearing in exactly one document
- * and stopped there, and the control below rejected the run: "SMD-50" is a token
- * in one document and a substring of three, because SMD-500 and SMD-501 exist.
- * So does "risk_level", inside "risk_levels". Token-uniqueness is not
- * substring-uniqueness, and a query set built on the first would have made the
- * keyword column's 100% an artefact of a definition rather than a property of the
- * function.
- *
- * Token frequency is still the cheap first pass — it removes almost everything
- * for the cost of one map — and substring uniqueness is then checked against the
- * whole corpus. The check duplicates the function's semantics in JavaScript,
- * which is acceptable HERE and only here: its job is to choose queries, and the
- * control still asks the real function whether the choice was right.
- */
-const lowered = ITEMS.map((it) => ({ id: it.id, text: it.text.toLowerCase() }));
-const substringHapax = (token: string): string | null => {
-  const needle = token.toLowerCase();
-  let found: string | null = null;
-  for (const d of lowered) {
-    if (!d.text.includes(needle)) continue;
-    if (found !== null) return null;
-    found = d.id;
-  }
-  return found;
-};
-
-let candidates = [...df.entries()]
-  .filter(([, docs]) => docs.size === 1)
-  .map(([token]) => ({ token, shape: shapeOf(token) }))
-  .filter((c) => ALL_HAPAX || c.shape !== "word")
-  .map((c) => ({ ...c, want: substringHapax(c.token) }))
-  .filter((c): c is { token: string; shape: Shape; want: string } => c.want !== null);
+const candidates = selectIdentifierQueries(
+  ITEMS.map((it) => ({ id: it.id, text: it.text })),
+  { allHapax: ALL_HAPAX, max: MAX_QUERIES }
+);
 
 if (candidates.length === 0) {
   console.error("No hapax tokens matched the filter — nothing to measure. Refusing to print a result.");
   process.exit(2);
-}
-
-// Deterministic sample rather than the first N, which would be the first N
-// documents' vocabulary and nothing else.
-candidates.sort((a, b) => (a.token < b.token ? -1 : 1));
-if (MAX_QUERIES > 0 && candidates.length > MAX_QUERIES) {
-  const step = candidates.length / MAX_QUERIES;
-  candidates = Array.from({ length: MAX_QUERIES }, (_, i) => candidates[Math.floor(i * step)]);
 }
 
 // ── Load the corpus into Postgres ────────────────────────────────────────────
