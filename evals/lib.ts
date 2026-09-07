@@ -32,10 +32,14 @@ import { loadEnv } from "./env.ts";
  */
 loadEnv();
 
+// The eval names first, then the server's own (OB1_LLM_BASE_URL / OB1_LLM_API_KEY,
+// the names deploy/.env documents), so a harness that also makes chat calls
+// through server-portable/embed.ts's resolver reaches one host with one key
+// whichever set the operator configured.
 export const EVAL_BASE =
-  process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? "http://127.0.0.1:11434/v1";
+  process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE ?? process.env.OB1_LLM_BASE_URL ?? "http://127.0.0.1:11434/v1";
 
-const KEY = process.env.OB1_EVAL_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
+const KEY = process.env.OB1_EVAL_KEY ?? process.env.OB1_LLM_API_KEY ?? process.env.OPENROUTER_API_KEY ?? "";
 export const EVAL_HEADERS: Record<string, string> = {
   "Content-Type": "application/json",
   ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),

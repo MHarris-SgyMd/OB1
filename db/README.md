@@ -337,9 +337,10 @@ someone searches for. **Not suitable for regulated or patient-adjacent
 content** for that reason. `--dry-run` says how many thoughts a run would send
 before it sends any; `--limit` lets you look at twenty before committing to
 thousands. Measured on the fork's 441-issue corpus with `qwen2.5:7b` on local
-Ollama: 82 minutes at two workers, 113 at one (two are 37% faster; Ollama
-serves both at once), and eleven of the longest issues exceed a 300 s per-call
-timeout on a 7B model. Two hours for a corpus that size, then per capture.
+Ollama: 82 to 108 minutes at two workers, 113 at one — two workers are worth
+about 5% like for like, since a local Ollama mostly serialises — and eleven to
+twenty-one of the longest issues exceed the per-call timeout on a 7B model,
+varying by pass. Two hours for a corpus that size, then per capture.
 
 **Identity.** The worker authenticates like any client: `OB1_WORKER_KEY` is a
 raw access key whose hash is in `MCP_ACCESS_KEYS`, resolved through

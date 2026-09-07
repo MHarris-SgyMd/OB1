@@ -29,17 +29,19 @@
  * provider rather than only the ones someone searches for. FORK.md change 30
  * has the measured wall clock for a full pass.
  *
- * Two workers by default, and the number was measured twice because the first
- * reading of it was wrong. The 441-issue corpus at two workers: 4,941 s wall
- * clock with 9,870 s of model calls inside it, and 21 thoughts failed a 120 s
- * per-call timeout — read at the time as two calls queueing behind each other
- * on a one-at-a-time Ollama. At one worker with a 300 s timeout: 6,793 s, and
- * 11 thoughts still timed out. So Ollama was serving both calls at once (its
- * default parallelism is above one on a machine with the memory for it), the
- * second worker bought 27% of the wall clock, and the timeouts are long
- * documents whose extraction genuinely takes minutes on a 7B model, not queue
- * time. Raise --timeout for those, or accept the failures and --retry-failed
- * later; --workers beyond two is for a hosted provider.
+ * Two workers by default, and the number was measured three times because the
+ * first two readings disagreed and both were partly wrong. The 441-issue corpus
+ * at two workers and a 120 s per-call timeout: 4,941 s. One worker at 300 s:
+ * 6,793 s — read at the time as the second worker buying a third of the wall
+ * clock. Two workers at 300 s, the like-for-like pair: 6,480 s, 4.6% faster
+ * than one. The earlier gap was the timeout budget, not concurrency; per
+ * completed document the two-worker passes spent about twice the worker-seconds,
+ * which is what a serialising local Ollama looks like. Two stays the default
+ * because it costs nothing and recovers a little; do not expect more. The
+ * timeouts (21, 11, 19 across the three passes) are long documents whose
+ * extraction genuinely takes minutes on a 7B model. Raise --timeout for those,
+ * or accept the failures and --retry-failed later; --workers beyond two is for
+ * a hosted provider that really does serve calls in parallel.
  *
  * Nothing spends it until this runs. The first run writes the extraction key
  * to `ob1_config.entity_extraction_key`; from then on migration 016's trigger
@@ -369,7 +371,7 @@ async function processRow(row: Row): Promise<Outcome> {
   if (DUMP) {
     // The model's answer as parsed, before the database applies the rule —
     // what a replay needs to re-score a rule change without the model.
-    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, entities: extraction.entities, relations: extraction.relations }) + "\n");
+    appendFileSync(DUMP, JSON.stringify({ id: row.id, fingerprint: row.fingerprint, key: JOB, entities: extraction.entities, relations: extraction.relations }) + "\n");
   }
   const [r] = await sql`
     SELECT record_thought_entities(

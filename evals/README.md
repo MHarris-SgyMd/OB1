@@ -1110,7 +1110,12 @@ second's figures below.
 
 From the second run — and reproduced exactly by `--corpus --replay` of its
 dumped answers in 0.8 s, which is how a rule change in migration 016 gets
-measured from now on:
+measured from now on. A replay applies the same rules in both harnesses: each
+dump line carries the fingerprint of the text the model saw and, since the
+third pass, the extraction key it ran under; a line whose text has changed, or
+that carries no fingerprint, is refused unless `--allow-stale-dump` is passed,
+and a dump made under a different key is refused outright, since it is another
+model's graph:
 
 | | |
 | --- | ---: |

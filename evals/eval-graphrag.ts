@@ -65,7 +65,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "./env.ts";
 import { embed, cosine, parseSpec } from "./lib.ts";
-import { loadLinearCorpus, linearThoughtId, linearThoughtText, entityAnswersPath } from "./linear-corpus.ts";
+import { loadLinearCorpus, linearThoughtText, insertLinearThought, entityAnswersPath, readEntityAnswers } from "./linear-corpus.ts";
 import { resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey } from "../server-portable/entities.ts";
 import { requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
@@ -77,22 +77,26 @@ const has = (n: string) => args.includes(`--${n}`);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 && !args[i + 1]?.startsWith("--") ? args[i + 1] : undefined; };
 // OB1_EVAL_BASE / OB1_EVAL_KEY (and lib.ts's OLLAMA_BASE fallback) are what the
 // other harnesses use; the chat calls go through the server's resolver, which
-// reads the OB1_LLM_* names. Bridge all three, so embeddings and the extraction
-// and summary calls reach the same host with the same key — the first version
-// bridged only the URL, so a hosted run embedded with a key and extracted
-// without one.
+// reads the OB1_LLM_* names. Bridge all three here, and lib.ts falls back to
+// the OB1_LLM_* names in turn, so embeddings and the extraction and summary
+// calls reach the same host with the same key whichever set was configured —
+// the first version bridged only the URL, so a hosted run embedded with a key
+// and extracted without one.
 const evalBase = process.env.OB1_EVAL_BASE ?? process.env.OLLAMA_BASE;
 if (!process.env.OB1_LLM_BASE_URL && evalBase) process.env.OB1_LLM_BASE_URL = evalBase;
 if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LLM_API_KEY = process.env.OB1_EVAL_KEY;
 
 const K = Number(flag("k") ?? 10);
 if (!Number.isInteger(K) || K < 1) { console.error("--k needs a positive integer."); process.exit(2); }
+// search_thoughts_keyword clamps its page at 100 (migration 012); above that the
+// keyword arm would be scored over a shorter window than the others.
+if (K > 100) { console.error("--k above 100 cannot be scored fairly: search_thoughts_keyword returns at most 100 rows."); process.exit(2); }
 const FETCH = Math.max(K, 20); // every arm returns this many; scoring cuts at K
 const GLOBAL = !has("no-global");
 const ALLOW_STALE = has("allow-stale-dump");
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
 const spec = parseSpec(EMBED_MODEL);
-const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM ?? 1024);
+const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024); // "" is unset, not zero; the first vector is checked against this below
 const cfg = resolveEmbedConfig(process.env);
 const { path: corpusPath, docs } = loadLinearCorpus();
 const answersPath = entityAnswersPath(cfg.metadataModel);
@@ -128,9 +132,8 @@ for (const d of docs) {
   const text = linearThoughtText(d);
   const h = Bun.hash.xxHash64(text).toString(16);
   if (vectors[d.id]?.h !== h) { vectors[d.id] = { h, v: await embed(EMBED_MODEL, text) }; embedded++; }
-  await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, embedding)
-            VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${{ source: "linear", issue: d.id }}::jsonb, content_fingerprint_of(${text}), ${lit(vectors[d.id].v)}::vector)
-            ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
+  if (vectors[d.id].v.length !== DIM) { console.error(`  ${EMBED_MODEL} returned ${vectors[d.id].v.length}-wide vectors but the column is vector(${DIM}); give the spec an @dims suffix that matches the model.`); process.exit(2); }
+  await insertLinearThought(sql, d, lit(vectors[d.id].v));
 }
 if (embedded) { writeFileSync(`${vectorCache}.tmp`, JSON.stringify(vectors)); renameSync(`${vectorCache}.tmp`, vectorCache); }
 const loadedIssues = new Set<string>((await sql`SELECT metadata->>'issue' AS issue FROM thoughts`).map((r: { issue: string }) => r.issue));
@@ -148,16 +151,21 @@ if (unreachable.length) { console.error(`  expected documents not in this load �
 // before the loader used content_fingerprint_of() matches nothing).
 const key = extractionKey(cfg.metadataModel);
 let replayed = 0, missing = 0, stale = 0, unfingerprinted = 0;
-const dumpLines = readFileSync(answersPath, "utf8").split("\n").filter(Boolean);
-for (const line of dumpLines) {
-  const a = JSON.parse(line) as { id: string; fingerprint?: string; entities: unknown[]; relations: unknown[] };
+const { answers: dumpLines, unusable } = readEntityAnswers(answersPath);
+// A dump extracted under another key is another model's graph; the header
+// would attribute it to this one and the question-side extraction would come
+// from a different model than the document side. Refuse, no override.
+const wrongKey = dumpLines.filter((a) => a.key && a.key !== key).length;
+const unkeyed = dumpLines.filter((a) => !a.key).length;
+if (wrongKey) { console.error(`  ${wrongKey} dump lines were extracted under a different key than ${key}; point OB1_METADATA_MODEL at the model that made ${answersPath}`); process.exit(2); }
+for (const a of dumpLines) {
   if (!a.fingerprint) unfingerprinted++;
   const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${key}, ${a.entities}::jsonb, ${a.relations}::jsonb, ${ALLOW_STALE ? null : (a.fingerprint ?? null)}) AS r`;
   const res = r as { ok: boolean; stale?: boolean; error?: string };
   if (res.ok) replayed++; else if (res.stale) stale++; else missing++;
 }
-console.log(`  graph:  ${replayed} of ${dumpLines.length} dumped extractions replayed${missing ? `; ${missing} named thoughts not in this load` : ""}${stale ? `; ${stale} STALE (text changed since extraction)` : ""}${unfingerprinted ? `; ${unfingerprinted} carry no fingerprint` : ""}`);
-if (stale && !ALLOW_STALE) { console.error(`  the dump was extracted from different text for ${stale} thoughts and cannot be scored as this corpus; re-run eval-entities.ts --corpus, or pass --allow-stale-dump to replay by id anyway`); process.exit(2); }
+console.log(`  graph:  ${replayed} of ${dumpLines.length} dumped extractions replayed${missing ? `; ${missing} named thoughts not in this load` : ""}${stale ? `; ${stale} STALE (text changed since extraction)` : ""}${unfingerprinted ? `; ${unfingerprinted} carry no fingerprint` : ""}${unusable ? `; ${unusable} lines unusable` : ""}${unkeyed ? `; ${unkeyed} lines carry no extraction key (older dump), attributed to ${key}` : ""}`);
+if ((stale || unfingerprinted) && !ALLOW_STALE) { console.error(`  the dump cannot be verified against this corpus for ${stale + unfingerprinted} thoughts and must not be scored as it; re-run eval-entities.ts --corpus, or pass --allow-stale-dump to replay by id anyway`); process.exit(2); }
 if (replayed === 0) { console.error(`  no dump line named a loaded thought — the graph is empty; is ${answersPath} from this corpus?`); process.exit(2); }
 if (ALLOW_STALE) console.log(`          --allow-stale-dump: fingerprints not checked; the extraction's text is taken to be this text`);
 await sql.unsafe("VACUUM ANALYZE thoughts"); await sql.unsafe("ANALYZE ob1_entities"); await sql.unsafe("ANALYZE thought_entities"); await sql.unsafe("ANALYZE ob1_entity_edges");
@@ -419,9 +427,9 @@ function score(ranked: Ranked, expected: string[]): Score {
   return { recall: 1 - missed.length / expected.length, complete: missed.length === 0, mrr: first >= 0 ? 1 / (first + 1) : 0, missed };
 }
 
-const arms = ["vector", "graph", "hybrid", ...(GLOBAL ? ["global"] : []), "keyword"] as const;
-type Arm = (typeof arms)[number];
 type Result = { q: Question; seeds: string[]; scores: { vector: Score; graph: Score; hybrid: Score; global?: Score; keyword?: Score } };
+type Arm = keyof Result["scores"];
+const arms: Arm[] = ["vector", "graph", "hybrid", ...(GLOBAL ? (["global"] as Arm[]) : []), "keyword"];
 const results: Result[] = [];
 let seedMs = 0;
 for (const q of questions) {
