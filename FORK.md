@@ -2868,7 +2868,8 @@ stays, since its own argument still holds.
 **Wired into CI at the smallest scale that reproduces the decision.**
 `test-live.ts` [5c], over [5b]'s 2,000 rows and 400 chunk rows at the
 configured width: the control first — the same statement without 019's setting
-seq-scans at least one side, asserted so the section cannot pass vacuously —
+leaves at least one candidate CTE off its HNSW index, so the section is not
+passing vacuously, skipped with the reason where a planner takes both unaided —
 then the statement under the function's own SET clauses is an `Index Scan
 using thoughts_embedding_idx` and an `Index Scan using
 thought_chunks_embedding_idx` at match_count 10 and 50 under both plan modes.
@@ -2913,6 +2914,31 @@ last defines it, read from the files. The header called `typstorage` `e`
 "extended" — it is EXTERNAL, what pgvector declares — and now weighs `SET
 STORAGE MAIN`, which would make the estimate right by making the heap fifty
 times larger for every scan that never reads the vector. README counts.
+
+**A second pass, and the stop.** Its top finding was in the first pass's own
+change: with 019 in `eval-filtered.ts`'s after arm, the unfiltered path is an
+HNSW walk where 007's function seq-scanned exactly at that corpus size, so the
+control that required byte-identical rows would have failed and blamed 014 —
+it reports overlap now and stops only below 80%. The rest: the bench explained
+the exact branch on a 1% tier without checking the count the function routes
+on (gated, as the walk was); [5c]'s "out of line" label counted every index as
+TOAST; `bench-hnsw.ts` said its command reproduces the published tables while
+its after arm now carries 019's clause (the caveat is in its header; 014's
+header cannot change); the README's schema count was one short and both docs
+said the control was asserted where it can skip; `lastDefinerOf` matched a
+statement anywhere in a file, now only at the start of a line, and [20]'s pin
+on 019 is stated as deliberate; preflight never read
+`search_thoughts_keyword`'s estimate and read `pg_proc` and the ledger twice —
+one read feeds both checks, the settings are parsed with `parseSetConfig`
+rather than split on commas (in `test-schema.ts` too), and the remedy is one
+`ALTER FUNCTION` per function that needs it, after any body re-apply. The four
+explainers share `explainPrepared` in `db/test-support.ts`, and the bench reads
+each filtered statement from the catalog once per arm instead of once per
+query. Declined: a table-driven single check for every clause `match_thoughts`
+must carry (two checks warn about different consequences with different
+remedies, and SMD-945 adds no clause) and unifying the three plan-node
+classifiers (they answer different questions). Suites after: schema 367,
+live 222, preflight 92.
 
 **Not done here.** The recency half of #469 (SMD-945); the walk's generic plan
 on a broad filter at 100,000 rows, measured in change 28 and again here, which

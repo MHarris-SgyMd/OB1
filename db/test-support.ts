@@ -400,6 +400,27 @@ export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transactio
 }
 
 /**
+ * PREPARE a statement extracted by `extractBody`, optionally run it once to
+ * warm the buffers, EXPLAIN (ANALYZE, BUFFERS) the EXECUTE, DEALLOCATE. The
+ * caller has applied the settings it wants on `tx` (applyFunctionSettings, or
+ * SET LOCAL for an arm the function does not have) and chooses the plan mode.
+ * One body for the four explainers (second review pass), so a change to the
+ * EXPLAIN form or the parameter list has one place to land.
+ */
+export async function explainPrepared(
+  tx: SQL,
+  opts: { body: string; dim: number; args: string; mode: "force_custom_plan" | "force_generic_plan"; warm?: boolean }
+): Promise<{ text: string; ms: number; buffers: number }> {
+  await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
+  await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb) AS ${opts.body}`);
+  if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
+  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE ob1_explain(${opts.args})`);
+  await tx.unsafe(`DEALLOCATE ob1_explain`);
+  const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+  return { text, ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN), buffers: buffersOf(text) };
+}
+
+/**
  * Shared buffers the whole statement touched, from EXPLAIN (ANALYZE, BUFFERS)
  * text: the TOP node's `Buffers:` line, hits AND reads. A regex for `hit=`
  * alone under-counts whenever part of the I/O missed shared_buffers — the

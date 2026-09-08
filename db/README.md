@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `365 assertions: 365 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `366 assertions: 366 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports nineteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -716,7 +716,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 365 assertions, PGlite, no container
+bun test-schema.ts                    # 366 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 222 assertions, real server, throwaway container
 ```
 
@@ -739,8 +739,11 @@ container.
   branch's own statement, read from the catalog and run under the function's
   SET clauses at the configured width over [5b]'s 2,000 rows and 400 chunk
   rows, is an `Index Scan` on both HNSW indexes at match_count 10 and 50 under
-  both plan modes — and, asserted first, the same statement without 019's
-  setting seq-scans at that scale, so the section cannot pass vacuously.
+  both plan modes — and, checked first, the same statement without 019's
+  setting leaves at least one CTE off its index at that scale, so the section
+  is not passing vacuously; where a planner takes both unaided (a narrower
+  width, a tuned server) that control is skipped with the reason and the count
+  reads 220 with 2 skipped.
 - **Filtered recall at scale.** [5b] loads 2,000 random rows through a real HNSW
   index, tags 1% of them, and asserts a filtered `match_thoughts` returns exactly
   what a full scan returns. Under 007 that filter returned almost nothing.
@@ -798,7 +801,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 365 properties, including:
+asserts 366 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

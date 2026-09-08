@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, buffersOf, createAssert, dropSchema, extractBody, neverAnswers, runScript, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, neverAnswers, runScript, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -312,14 +312,8 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
     sql.begin(async (tx: SQL) => {
       if (withSettings) await applyFunctionSettings(tx);
       else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`); // 014's one setting: the function before 019
-      await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
-      await tx.unsafe(`PREPARE live_mt(vector(${EMBEDDING_DIM}), float, int, jsonb) AS ${body}`);
-      await tx.unsafe(`EXECUTE live_mt('${qv}'::vector, -1.0, ${count}, '{}'::jsonb)`); // warm the buffers
-      const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE live_mt('${qv}'::vector, -1.0, ${count}, '{}'::jsonb)`);
-      await tx.unsafe(`DEALLOCATE live_mt`);
-      return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+      return explainPrepared(tx, { body, dim: EMBEDDING_DIM, args: `'${qv}'::vector, -1.0, ${count}, '{}'::jsonb`, mode, warm: true });
     });
-  const buffers = buffersOf;
   const onIndex = (plan: string) => ({
     thoughts: /Index Scan using thoughts_embedding_idx on thoughts/.test(plan),
     chunks: /Index Scan using thought_chunks_embedding_idx on thought_chunks/.test(plan),
@@ -330,18 +324,20 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
   const seqOn = (plan: string) => [...new Set([...plan.matchAll(/Seq Scan on (thoughts|thought_chunks) (\w+)/g)].map((m) => `${m[1]} ${m[2]}`))];
 
   const [{ storage }] = await sql`SELECT typstorage AS storage FROM pg_type WHERE typname = 'vector'`;
-  const [{ toast }] = await sql`SELECT pg_size_pretty(pg_total_relation_size('thoughts') - pg_relation_size('thoughts')) AS toast`;
+  // The TOAST relation alone: total less the heap less every index (the HNSW
+  // index is of the same order as the TOAST here, and is not out-of-line data).
+  const [{ toast }] = await sql`SELECT pg_size_pretty(pg_total_relation_size('thoughts') - pg_relation_size('thoughts') - pg_indexes_size('thoughts')) AS toast`;
   for (const count of [10, 50]) {
     const control = await explain(count, "force_custom_plan", false);
-    const off = onIndex(control);
-    const label = `count ${count}: without 019's setting the planner leaves ${[!off.thoughts && "the thoughts CTE", !off.chunks && "the chunk CTE"].filter(Boolean).join(" and ") || "neither CTE"} off its HNSW index at ${EMBEDDING_DIM} dimensions (seq scans: ${seqOn(control).join(", ") || "none"}; ${buffers(control)} buffers; vector storage '${storage}', ${toast} out of line)`;
+    const off = onIndex(control.text);
+    const label = `count ${count}: without 019's setting the planner leaves ${[!off.thoughts && "the thoughts CTE", !off.chunks && "the chunk CTE"].filter(Boolean).join(" and ") || "neither CTE"} off its HNSW index at ${EMBEDDING_DIM} dimensions (seq scans: ${seqOn(control.text).join(", ") || "none"}; ${control.buffers} buffers; vector storage '${storage}', ${toast} of TOAST)`;
     if (!off.thoughts || !off.chunks) assert(true, `${label} — the scale reproduces the decision`);
     else skip(label, "the planner already takes both indexes unaided here, so this scale and width do not reproduce the decision; the assertions below still hold what 019 must deliver");
     for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
-      const plan = await explain(count, mode, true);
+      const { text: plan, buffers } = await explain(count, mode, true);
       const on = onIndex(plan);
       assert(on.thoughts,
-        `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan: the thoughts CTE is an Index Scan using thoughts_embedding_idx (${buffers(plan)} buffers)`);
+        `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan: the thoughts CTE is an Index Scan using thoughts_embedding_idx (${buffers} buffers)`);
       assert(on.chunks, `…and the chunk CTE an Index Scan using thought_chunks_embedding_idx`);
       assert(seqOn(plan).length === 0, `…and nothing in the statement seq-scans (${seqOn(plan).join(", ") || "none"})`);
     }

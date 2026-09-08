@@ -79,7 +79,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
@@ -89,7 +89,14 @@ const PRINT_PLANS = process.argv.includes("--plans");
 const DIM = 64;
 const OPTS = { dim: DIM, model: "stub-embed" };
 // The defaults are the run every published table came from, so the documented
-// command reproduces the documented numbers.
+// command reproduces the documented numbers — with one caveat since 019: the
+// after arm applies every migration from 014 on, so the function it times and
+// explains carries `enable_seqscan = off` as well. The recall tables in 014's
+// header and FORK.md change 28 were measured under 014 alone; at K = 10 the
+// index was the plan either way, so they reproduce, while the asked-500
+// latencies in section A and the chunk side of section C's plans (where the
+// planner's own choice at 64 dimensions was a seq scan above 200 candidates)
+// are now the deployed function's and may differ from the published lines.
 const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
   .split(",")
   .map((s) => Number(s.trim()))
@@ -343,21 +350,13 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
   const body = await extractBody(sql, branch, DIM);
   const out: Record<string, PlanShape> = {};
   for (const mode of ["force_custom_plan", "force_generic_plan"]) {
-    const rows = await sql.begin(async (tx: SQL) => {
+    const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets —
       // all but a plan mode, since this section exists to show both plans.
       await applyFunctionSettings(tx);
-      await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
-      await tx.unsafe(`PREPARE bench_mt(vector(${DIM}), float, int, jsonb) AS ${body}`);
-      const r = await tx.unsafe(
-        `EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_mt('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`
-      );
-      await tx.unsafe(`DEALLOCATE bench_mt`);
-      return r;
+      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb`, mode: mode as "force_custom_plan" | "force_generic_plan" });
     });
-    const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
-    const ms = Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN);
     out[mode === "force_custom_plan" ? "custom" : "generic"] = shapeOf(text, ms);
   }
   return out as { custom: PlanShape; generic: PlanShape };

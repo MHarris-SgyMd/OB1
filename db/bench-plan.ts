@@ -56,7 +56,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, buffersOf, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -164,23 +164,18 @@ async function explain(sql: SQL, body: string, q: number[], count: number, arm: 
       if (arm === "seqscan off") await tx.unsafe(`SET LOCAL enable_seqscan = off`);
       if (arm === "rpc 1.1") await tx.unsafe(`SET LOCAL random_page_cost = 1.1`);
     }
-    await tx.unsafe(`SET LOCAL plan_cache_mode = ${arm === "after (019) generic" ? "force_generic_plan" : "force_custom_plan"}`);
-    await tx.unsafe(`PREPARE bench_plan(vector(${DIM}), float, int, jsonb) AS ${body}`);
-    await tx.unsafe(`EXECUTE bench_plan('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`); // warm the buffers
-    const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_plan('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`);
-    await tx.unsafe(`DEALLOCATE bench_plan`);
-    return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb`, mode: arm === "after (019) generic" ? "force_generic_plan" : "force_custom_plan", warm: true });
   });
   return {
     scale: 0,
     count,
     arm,
-    thoughts: nodeFor(text, "thoughts"),
-    chunks: nodeFor(text, "thought_chunks"),
-    buffers: buffersOf(text),
-    ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN),
-    rows: Number(/^\s*Limit .*rows=(\d+)/m.exec(text)?.[1] ?? 0),
-    text,
+    thoughts: nodeFor(text.text, "thoughts"),
+    chunks: nodeFor(text.text, "thought_chunks"),
+    buffers: text.buffers,
+    ms: text.ms,
+    rows: Number(/^\s*Limit .*rows=(\d+)/m.exec(text.text)?.[1] ?? 0),
+    text: text.text,
   };
 }
 
@@ -208,19 +203,13 @@ function scansOf(plan: string): string {
   return [...seen].map((x) => x.replace("Index Scan using ", "").replace("Index Only Scan using ", "only ").replace("Bitmap Index Scan on ", "bitmap ").replace("Bitmap Heap Scan on", "bitmap heap").replace("Seq Scan on", "SEQ")).join("; ");
 }
 
-async function explainFiltered(sql: SQL, branch: Branch, filter: string, matches: number, q: number[], arm: FilteredCell["arm"], mode: FilteredCell["mode"], scale: number): Promise<FilteredCell> {
-  const body = await extractBody(sql, branch, DIM);
-  const text = await sql.begin(async (tx: SQL) => {
+async function explainFiltered(sql: SQL, body: string, branch: Branch, filter: string, matches: number, q: number[], arm: FilteredCell["arm"], mode: FilteredCell["mode"], scale: number): Promise<FilteredCell> {
+  const r = await sql.begin(async (tx: SQL) => {
     if (arm === "after (019)") await applyFunctionSettings(tx);
     else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
-    await tx.unsafe(`SET LOCAL plan_cache_mode = force_${mode}_plan`);
-    await tx.unsafe(`PREPARE bench_f(vector(${DIM}), float, int, jsonb) AS ${body}`);
-    await tx.unsafe(`EXECUTE bench_f('${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb)`);
-    const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_f('${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb)`);
-    await tx.unsafe(`DEALLOCATE bench_f`);
-    return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb`, mode: `force_${mode}_plan`, warm: true });
   });
-  return { scale, branch, filter, matches, arm, mode, scans: scansOf(text), buffers: buffersOf(text), ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN) };
+  return { scale, branch, filter, matches, arm, mode, scans: scansOf(r.text), buffers: r.buffers, ms: r.ms };
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────
@@ -259,23 +248,29 @@ for (const n of SCALES) {
 
   // The filtered statements, on the filters the function routes to each:
   // the routing statement on the broadest filter and on one matching nothing,
-  // the exact branch on 1% (under the 1,000-row threshold at every scale here),
-  // the walk on 50% where 50% exceeds the threshold. Under 014's settings now,
-  // under 019's after it is applied.
+  // the exact branch on 1% where that is under the 1,000-row threshold, the
+  // walk on 50% where that exceeds it — each gated on the count the function
+  // itself would route on, so a scale where 1% is 1,100 rows does not explain
+  // a branch the function never takes for that filter (second review pass).
+  // Under 014's settings now, under 019's after it is applied.
   const V_EXACT = 1000; // 014's GREATEST(v_fetch * 4, 1000) at the default count
   const [{ m50, m1 }] = await sql.unsafe(`SELECT count(*) FILTER (WHERE metadata @> '{"tiers": ["t50"]}')::int AS m50, count(*) FILTER (WHERE metadata @> '{"tiers": ["t1"]}')::int AS m1 FROM thoughts`);
   const filteredCases: { branch: Branch; filter: string; matches: number }[] = [
     { branch: "route", filter: '{"tiers": ["t50"]}', matches: Number(m50) },
     { branch: "route", filter: '{"tiers": ["none"]}', matches: 0 },
-    { branch: "exact", filter: '{"tiers": ["t1"]}', matches: Number(m1) },
+    ...(Number(m1) <= V_EXACT ? [{ branch: "exact" as Branch, filter: '{"tiers": ["t1"]}', matches: Number(m1) }] : []),
     ...(Number(m50) > V_EXACT ? [{ branch: "walk" as Branch, filter: '{"tiers": ["t50"]}', matches: Number(m50) }] : []),
   ];
   const runFiltered = async (arm: FilteredCell["arm"]) => {
     process.stdout.write(`  filtered, ${arm.padEnd(12)}`);
+    // The statements change only when the function does — once, between the
+    // arms — so each branch is read from the catalog once per arm.
+    const bodies = new Map<Branch, string>();
+    for (const c of filteredCases) if (!bodies.has(c.branch)) bodies.set(c.branch, await extractBody(sql, c.branch, DIM));
     for (const c of filteredCases) {
       for (const mode of ["custom", "generic"] as const) {
         const cells: FilteredCell[] = [];
-        for (const q of queries) cells.push(await explainFiltered(sql, c.branch, c.filter, c.matches, q, arm, mode, n));
+        for (const q of queries) cells.push(await explainFiltered(sql, bodies.get(c.branch)!, c.branch, c.filter, c.matches, q, arm, mode, n));
         const last = cells[cells.length - 1];
         const scans = cells.every((x) => x.scans === last.scans) ? last.scans : cells.map((x) => x.scans).join(" | ");
         filteredResults.push({ ...last, scans, ms: median(cells.map((x) => x.ms)), buffers: Math.round(median(cells.map((x) => x.buffers))) });

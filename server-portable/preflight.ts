@@ -477,16 +477,44 @@ if (configFailed) {
          * A WARNING throughout: without the setting the tool still answers,
          * with the recall it had before 014.
          */
+        /**
+         * The catalog rows both function checks read — match_thoughts' definition
+         * (the one signature the servers call, resolved as the call would
+         * resolve it; to_regprocedure is NULL rather than an error when it is
+         * not defined, so "not defined" stays a verdict and not a throw; by
+         * name and arity, an earlier draft read the first of however many
+         * 4-argument overloads existed), search_thoughts_keyword's row
+         * estimate, and which of 014 and 019 the ledger records — read ONCE,
+         * so the two checks judge the same definition (second review pass).
+         * A failed read is re-thrown inside each check, whose catch words it.
+         */
+        let catalog: { mt: { cfg: string; settings: Record<string, string>; src: string; rows: number }[]; kwRows: number | null; ledger: Set<string> } | Error;
+        try {
+          const { parseSetConfig } = await import("../db/config.mjs");
+          const mtRows = await sql`
+            SELECT p.proconfig AS cfg, p.prosrc AS src, p.prorows AS rows FROM pg_proc p
+            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
+          const kw = await sql`SELECT p.prorows AS rows FROM pg_proc p WHERE p.oid = to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)')`;
+          let ledger = new Set<string>();
+          try {
+            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%'`;
+            ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
+          } catch {
+            /* no ledger */
+          }
+          catalog = {
+            mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0) })),
+            kwRows: kw.length ? Number(kw[0].rows) : null,
+            ledger,
+          };
+        } catch (e) {
+          catalog = e as Error;
+        }
+
         try {
           const { versionAtLeast, HNSW_BOUNDS, HNSW_SEEDS, HNSW_SEED_MAX_SCAN_TUPLES, HNSW_SEED_SCAN_MEM_MULTIPLIER, BOUNDS_IN_FORCE_SQL } = await import("../db/config.mjs");
-          // The one signature the servers call, resolved as the call would
-          // resolve it; to_regprocedure is NULL rather than an error when it
-          // is not defined, so "not defined" stays a verdict and not a throw.
-          // (By name and arity, an earlier draft read the first of however
-          // many 4-argument overloads existed.)
-          const mt = await sql`
-            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src, p.prorows AS rows FROM pg_proc p
-            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
+          if (catalog instanceof Error) throw catalog;
+          const mt = catalog.mt;
           // The body's semantics are declared by a sentinel comment in the body
           // itself, `ob1:filter-inside-scan`, which 014 carries and any successor
           // that keeps the in-scan filter must carry forward. In prosrc, not in
@@ -532,13 +560,7 @@ if (configFailed) {
           const available = pgv.length && pgv[0].default_version != null ? String(pgv[0].default_version) : null;
           const installedOld = installed !== null && !versionAtLeast(installed, 0, 8);
           const libraryNew = available !== null && versionAtLeast(available, 0, 8);
-          let ledgerHas014 = false;
-          try {
-            const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '014\\_%'`;
-            ledgerHas014 = Number(led[0]?.c ?? 0) > 0;
-          } catch {
-            /* no ledger */
-          }
+          const ledgerHas014 = catalog.ledger.has("014");
           const bounds = Object.fromEntries(
             (await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value])
           ) as Record<string, string | null>;
@@ -632,36 +654,41 @@ if (configFailed) {
          * table). The clause lives on the function and CREATE OR REPLACE drops
          * it silently, exactly as 014's does, so it is checked the same way and
          * by the same rule: the catalog says what the deployed function carries
-         * (CI proves the plan; db/test-live.ts [5c]). The row estimate 019
-         * declares is read beside it, since the same redefinition resets both.
+         * (CI proves the plan; db/test-live.ts [5c]). The two row estimates 019
+         * declares — match_thoughts ROWS 10, search_thoughts_keyword ROWS 25 —
+         * are read beside it, since the same kind of redefinition resets each.
          * A WARNING: every search still answers, at the seq scan's cost.
          */
         try {
-          const mt = await sql`
-            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prorows AS rows FROM pg_proc p
-            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
+          if (catalog instanceof Error) throw catalog;
+          const { mt, kwRows, ledger } = catalog;
           if (mt.length) {
-            const cfgText = String(mt[0]?.cfg ?? "");
-            const seqOff = /(^|,)enable_seqscan=off(,|$)/.test(cfgText);
-            const rows = Number(mt[0]?.rows ?? 0);
-            let ledgerHas019 = false;
-            try {
-              const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '019\\_%'`;
-              ledgerHas019 = Number(led[0]?.c ?? 0) > 0;
-            } catch {
-              /* no ledger */
-            }
-            const alter = "SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET enable_seqscan = off ROWS 10;  and carry both into the migration that redefined it.";
-            if (seqOff && rows === 10) {
-              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10 (019), so the candidate scan takes the HNSW indexes at the shipped width and callers plan against its real row count");
+            const seqOff = mt[0].settings["enable_seqscan"] === "off";
+            const rows = mt[0].rows;
+            const kwOff = kwRows !== null && kwRows !== 25;
+            const ledgerHas019 = ledger.has("019");
+            // One statement per function that needs it, in the order to run them.
+            const alters = [
+              ...(!seqOff || rows !== 10 ? [`ALTER FUNCTION match_thoughts(vector, float, int, jsonb)${seqOff ? "" : " SET enable_seqscan = off"}${rows !== 10 ? " ROWS 10" : ""};`] : []),
+              ...(kwOff ? ["ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;"] : []),
+            ];
+            const remedy = ledgerHas019
+              ? `Put it back — after any re-apply of a migration body, since CREATE OR REPLACE resets these: SELECT '[1]'::vector; ${alters.join(" ")}  and carry them into the migration that redefined the function.`
+              : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.";
+            const estimates = [
+              ...(rows !== 10 ? [`match_thoughts' row estimate is ${rows} rather than 10`] : []),
+              ...(kwOff ? [`search_thoughts_keyword's row estimate is ${kwRows} rather than 25`] : []),
+            ];
+            if (seqOff && rows === 10 && !kwOff) {
+              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 (019): the candidate scan takes the HNSW indexes at the shipped width and callers plan against real row counts");
             } else if (!seqOff) {
               add("candidate scan", "warn",
-                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${rows !== 10 ? `, and its row estimate is ${rows} rather than 10` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)`,
-                  ledgerHas019 ? `Put it back: ${alter}` : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.");
+                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${estimates.length ? `, and ${estimates.join(", and ")}` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)`,
+                  remedy);
             } else {
               add("candidate scan", "warn",
-                  `match_thoughts carries enable_seqscan = off but its row estimate is ${rows} rather than the ROWS 10 019 declares — every query composing it is planned against that count (017's header records what a 1,000-row estimate cost)`,
-                  ledgerHas019 ? `Put it back: ${alter}` : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.");
+                  `match_thoughts carries enable_seqscan = off but ${estimates.join(", and ")}${ledgerHas019 ? " — a redefinition reset what 019 declared" : " — migration 019 is not applied"}; every query composing the function is planned against that count (017's header records what a 1,000-row estimate cost)`,
+                  remedy);
             }
           }
           // Not defined: the check above already said so.
