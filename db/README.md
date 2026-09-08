@@ -283,11 +283,13 @@ when the whole-content call fails, the head window's vector stands in for it
 (`server-portable/embed.ts`, change 27). The server accepts that silently by
 design. The pass does not: a *transient* failure — 429, 5xx, a lost connection,
 the timeout — stores the head window and marks the claim failed, so
-`--retry-failed` tries the whole content again; a *refusal* — 400 or 413, a
-hosted API that will not take input that long — stores the head window and
-marks the claim succeeded, because that vector is the provider's final answer
-and is what a capture would have stored, **with the refusal written on the
-claim row**. The rule is general: a succeeded row's `last_error`, when set, is
+`--retry-failed` tries the whole content again; a *refusal* — a 413, or a 400
+whose own words name the length: a hosted API that will not take input that
+long — stores the head window and marks the claim succeeded, because that
+vector is the provider's final answer and is what a capture would have stored,
+**with the refusal written on the claim row**. A 400 that says nothing about
+length is not known to be about this input and is treated as transient; the
+row says what it got. The rule is general: a succeeded row's `last_error`, when set, is
 what the worker could not do — the write stands, and this is what it fell short
 of. `--status` and the end of a run count them ("35 succeeded (1 with the head
 window)") and list them; `--retry-fallbacks` returns them to the pool for the
@@ -297,9 +299,10 @@ refusal the way the server's does (one probe per process on the interactive
 path), because a 413 is about *that* input's length and a shorter long thought
 may well be accepted — remembering would give every later long row a head
 window it was never asked about, under a reason that was another row's. Every
-provider call is bounded by `OB1_LLM_TIMEOUT` (120 s by default; the server
-reads it too, for its metadata call as well; every provider call goes through
-one function in `embed.ts`): a call that never returns — before the headers or
+provider call the server and this pass make is bounded by `OB1_LLM_TIMEOUT`
+(120 s by default; the server reads it too, for its metadata call as well; those
+calls go through one function in `embed.ts` — `extract-entities.ts` keeps its
+own `--timeout` per model call): a call that never returns — before the headers or
 during the body — fails the row with the timeout named instead of parking the
 worker until the second Ctrl-C, and a blurb that times out under
 `OB1_CHUNK_CONTEXT=on` puts that reason on the row rather than "fix the metadata
@@ -310,8 +313,11 @@ context on), plus one row's worth of slack for a re-read, when that exceeds
 `--ttl` below the product is refused with the arithmetic shown (`--status`
 answers regardless, since it never claims). A row with two things wrong records
 both: a refusal is appended to a blurb failure rather than lost behind it. What
-counts as a refusal is a 413, or a 400 whose message names the length — the
-same rule `extract-entities.ts` applies, from one function. Until SMD-1021 a
+counts as a refusal is a 413, or a 400 whose own words name the length — read
+from the provider's body, its error code first, never from a message that also
+carries the base URL — the same rule `extract-entities.ts` applies to its 400s,
+from one function. `--status` counts and lists succeeded rows with *a caveat*,
+in the rule's words rather than one caveat's, and each row's text says which. Until SMD-1021 a
 refused row was indistinguishable from any other succeeded row, one summary line
 was the only trace, and a terminal claim meant no re-run would look at it again.
 The rule is stated only here and in the tool; putting it on the column itself is

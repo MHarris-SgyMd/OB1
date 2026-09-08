@@ -2441,9 +2441,10 @@ back was written and released `succeeded`, the claim row is terminal, and the
 backfill the tool promises — a long thought captured before change 27 gets its
 whole-content vector — was defeated for every affected row with one line on
 stderr. Change 29's second pass had already made the *transient* case a failure
-(`--retry-failed` revisits it); what remained was the *refusal* — 400 or 413, a
-hosted API that will not take input that long — which is the provider's final
-answer and was recorded as an unqualified success.
+(`--retry-failed` revisits it); what remained was the *refusal* — a 413, or a
+400 whose own words name the length: a hosted API that will not take input that
+long — which is the provider's final answer and was recorded as an unqualified
+success.
 
 **The decision: a caveat on a succeeded row, not a new status.** `release_thought`
 already stores `p_error` whatever the status, so the rule costs no migration:
@@ -2562,6 +2563,41 @@ outcome, while `extract-entities.ts` already read the message; one
 are complete" could follow a note saying their context was missing; it says
 every chunk has its vector. `PROVIDER_ERROR_CHARS` reached the two literals it
 had missed. Suites after: live 184, chunking 27.
+
+**A third pass, and the stop.** Its top finding was in the second pass's
+`providerCall`, which is the signal: the loop is polishing its own additions,
+not finding new ground in the rule. Applied, all small. The body read sat in
+the same try as the fetch and a non-timeout failure there was rethrown raw, so
+a connection reset while a 413's body streamed lost the status — a refusal
+became a transient, and in the metadata call the raw error skipped the
+fallback and failed the capture that fallback exists to save; the status is
+kept from the moment the headers arrive, and a body that fails to arrive is
+empty. `refusesLength` read the whole message, which carries the base URL, so
+a host named "tokens" would have made every 400 permanent; it reads the
+provider's body, its error code first (`context_length_exceeded`), then its
+words, and `ProviderError` carries that body apart from the message. Sharing
+that rule with `extract-entities.ts` had silently moved a 413 there from "stop
+every worker" to "fail this thought"; restored — an extraction request is the
+same shape for every thought. The header and README still said "400 or 413"
+where the code had come to mean "413, or a 400 that says so", and the
+transient message now says the 400 it got was not a stated refusal of the
+length, so an operator whose provider answers every long input with a bare 400
+can read why `--retry-failed` reproduces it. The derived lease has no upper
+bound and a slow local model at `OB1_LLM_TIMEOUT=600` with context on derives
+three hours, which is how long a dead worker's batch waits — said at startup
+whenever the derivation lengthened it, with `--batch` as the knob; the
+refusal's wording no longer calls the floor the worst case, since a re-read
+after a concurrent edit is a row's worth more. Blurb-rejection reasons carried
+per-window lengths, so the deduplication did nothing and a forty-window row
+wrote forty copies; the lengths go to the log and the row carries at most
+three distinct reasons. The caveat count and list were worded as the head
+window's when the rule is general — "with a caveat", "carry a caveat", and
+each row's text says which — so a later caveat of another kind is counted
+truthfully. Three operator-facing descriptions of `OB1_LLM_TIMEOUT` omitted
+the metadata call; the claim that every provider call goes through
+`providerCall` was narrowed to the server's and this pass's — `extract-entities.ts`
+keeps its own per-call `--timeout` and preflight its one-shot probes. Nothing
+here touched the caveat rule, the pass's per-row decision or the timeout.
 
 **Not done here.** A bounded in-call retry of a transient whole-content failure
 (a 429 wants a backoff a single retry does not give; the failed-row path is

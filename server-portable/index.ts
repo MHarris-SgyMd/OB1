@@ -59,7 +59,7 @@ type Env = {
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
   OB1_LLM_API_KEY?: string;
-  /** Seconds a single embedding or blurb call may take. Default 120 — see embed.ts. */
+  /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
   OB1_LLM_TIMEOUT?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
   /**

@@ -89,7 +89,12 @@ export const PROVIDER_ERROR_CHARS = 500;
  * own error and is rethrown as it came.
  */
 export class ProviderError extends Error {
-  constructor(message: string, readonly kind: "timeout" | "http" | "body", readonly status?: number) {
+  /**
+   * @param body The provider's own words, capped — what refusesLength reads,
+   *   kept apart from the message so the base URL in the message cannot be
+   *   mistaken for them.
+   */
+  constructor(message: string, readonly kind: "timeout" | "http" | "body", readonly status?: number, readonly body = "") {
     super(message);
     this.name = "ProviderError";
   }
@@ -104,12 +109,17 @@ export class ProviderError extends Error {
  * Before this the timeout rewrap was hand-written three times with three try
  * scopes, and the one that closed after fetch() let a deadline passing during
  * the body read escape as the bare "The operation timed out" (second review
- * of SMD-1021). The whole exchange, headers and body, is inside one try here.
+ * of SMD-1021). The whole exchange, headers and body, is bounded here.
+ *
+ * Not every call in the repository: db/extract-entities.ts's model call has
+ * its own bound (--timeout, per model call) and preflight's probes are one
+ * interactive shot; both keep their own fetch.
  */
 export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
+  const timedOut = () =>
+    new ProviderError(`${what} request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
   let r: Response;
-  let text: string;
   try {
     r = await fetch(`${cfg.llmBase}${path}`, {
       method: "POST",
@@ -117,39 +127,62 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(cfg.timeoutMs),
     });
-    text = await r.text();
   } catch (e) {
     // Named as what it is, with the knob, and WITHOUT a status: nothing about
     // the next attempt is known, so embedCapture treats it as transient.
-    if ((e as Error).name === "TimeoutError") {
-      throw new ProviderError(`${what} request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
-    }
+    if ((e as Error).name === "TimeoutError") throw timedOut();
     throw e;
   }
+  // The status is known from here on and must not be lost: a body that fails
+  // to arrive after a 413 is still a 413 (the third review found a reset
+  // mid-body turning a refusal into a transient, and failing a capture that
+  // the metadata fallback exists to save). The deadline passing during the
+  // body is the timeout; anything else leaves the body empty.
+  let text = "";
+  try {
+    text = await r.text();
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw timedOut();
+  }
+  const capped = text.slice(0, PROVIDER_ERROR_CHARS);
   if (!r.ok) {
     // The status is a field rather than parsed back out of the message:
     // embedCapture has to distinguish "this input is too large for this model",
     // which is a stable property, from a transient outage, which is not.
-    throw new ProviderError(`${what} request to ${cfg.llmBase} failed: ${r.status} ${text.slice(0, PROVIDER_ERROR_CHARS)}`, "http", r.status);
+    throw new ProviderError(`${what} request to ${cfg.llmBase} failed: ${r.status} ${capped}`, "http", r.status, capped);
   }
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new ProviderError(`${cfg.llmBase} answered ${r.status} with a body that is not JSON`, "body", r.status);
+    throw new ProviderError(`${cfg.llmBase} answered ${r.status} with a body that is not JSON`, "body", r.status, capped);
   }
 }
 
 /**
  * Whether a provider's error refuses the INPUT'S LENGTH — a 413, or a 400
- * whose message says so — as against any other client error. This is the
+ * whose own words say so — as against any other client error. This is the
  * fact worth acting on: a length refusal is the provider's final answer for
- * that input, where a 400 for any other reason is not. Shared with
- * db/extract-entities.ts so the two tools cannot disagree about what a 400
- * means (the second review of SMD-1021 found any 400 recorded as a length
- * refusal here while that tool already read the message).
+ * that input, where a 400 for any other reason is not. Read from the
+ * provider's body, never from a message that also carries the base URL (a
+ * host named "tokens" would otherwise make every 400 permanent): the error
+ * object's code and type first, where an OpenAI-shaped provider puts
+ * `context_length_exceeded`, then its message. Shared with
+ * db/extract-entities.ts, which passes what its own error carries, so the two
+ * tools read a 400 by one rule (the second review of SMD-1021 found any 400
+ * recorded as a length refusal here while that tool already read the message).
  */
-export function refusesLength(status: number | undefined, message: string): boolean {
-  return status === 413 || (status === 400 && /context|length|too long|tokens|too large/i.test(message));
+export function refusesLength(status: number | undefined, body: string): boolean {
+  if (status === 413) return true;
+  if (status !== 400) return false;
+  let words = body;
+  try {
+    const err = (JSON.parse(body) as { error?: { code?: unknown; type?: unknown; message?: unknown } | string })?.error;
+    if (err && typeof err === "object") words = [err.code, err.type, err.message].filter((x) => typeof x === "string").join(" ");
+    else if (typeof err === "string") words = err;
+  } catch {
+    // Prose, or not JSON at all — read it as it came.
+  }
+  return /context|length|too long|too_long|tokens|too large/i.test(words);
 }
 
 export type EmbedConfig = {
@@ -445,7 +478,10 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       // blurb this file accepted and the harness rejected would mean every
       // measured number described text the server does not embed.
       if (!usableChunkContext(out, chunk)) {
-        return bare(out ? `rejected a ${out.length}-char blurb for a ${chunk.length}-char window` : "the model returned an empty blurb");
+        // The lengths go to the log, not the reason: the reasons are deduplicated
+        // per capture, and a bulk pass writes them on the claim row.
+        if (out) console.error(`contextualiseChunk: a ${out.length}-char blurb for a ${chunk.length}-char window`);
+        return bare(out ? "the model returned a blurb longer than a blurb should be" : "the model returned an empty blurb");
       }
       return { text: out };
     } catch (e) {
@@ -527,7 +563,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
         ? Promise.resolve(null)
-        : getEmbedding(content).catch((e: Error & { status?: number }) => {
+        : getEmbedding(content).catch((e: Error & { status?: number; body?: string }) => {
             // A 413, or a 400 that names the length, means the provider REFUSED
             // the input rather than truncating it, which is a fact about the
             // model and this input and will be just as true next time.
@@ -540,7 +576,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             // pass downgraded every later long thought to its head window while
             // recording success (first review of SMD-946).
             wholeContentError = e.message;
-            if (refusesLength(e.status, e.message)) {
+            if (refusesLength(e.status, e.body ?? "")) {
               refusedHere = true;
               if (rememberRefusal) wholeContentRefused = true;
               console.error(
@@ -549,6 +585,8 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
                   (rememberRefusal ? ` here and skipping the attempt for the rest of this process.` : `.`)
               );
             } else {
+              // Including a 400 whose words do not name the length: not known
+              // to be about this input, so not remembered and not final.
               console.error(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
             }
             return null;

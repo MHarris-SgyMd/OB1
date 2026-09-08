@@ -104,8 +104,10 @@
  * failed under OB1_CHUNK_CONTEXT=on is stored bare and the claim marked failed.
  *
  * ── The head window, recorded ───────────────────────────────────────────────
- * A long thought the provider REFUSED to embed whole (400 or 413 — hosted APIs
- * refuse over-length input where Ollama truncates it) has the head window's
+ * A long thought the provider REFUSED to embed whole (a 413, or a 400 whose own
+ * words name the length — hosted APIs refuse over-length input where Ollama
+ * truncates it; a 400 that says nothing about length is not known to be about
+ * this input and is treated as transient) has the head window's
  * vector stored, as a capture would have stored it, and its claim is succeeded:
  * the write happened and that vector is the provider's final answer. It is not
  * silent. The claim row's last_error carries the caveat, and the rule is
@@ -208,13 +210,23 @@ const PHASES = embedConfig.chunkContext ? 2 : 1;
 const PER_ROW_S = PHASES * (embedConfig.timeoutMs / 1000);
 const LEASE_FLOOR = Math.ceil(BATCH * PER_ROW_S);
 const TTL = flag("ttl") === undefined ? Math.max(900, Math.ceil(LEASE_FLOOR + PER_ROW_S)) : numberFlag("ttl", 900, 1);
+if (flag("ttl") === undefined && TTL > 900) {
+  // The other side of a long lease: a worker that dies without reaching its
+  // finally holds its batch until the lease expires. Said when the derivation
+  // made it long, since nothing else would.
+  console.error(
+    `  ⚠  lease: ${TTL} s, derived from --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s (OB1_LLM_TIMEOUT) plus one row.\n` +
+      `     A worker that dies holds its rows for that long before they return to the pool; lower --batch to shorten it.`
+  );
+}
 // Read-only modes never claim, so they answer whatever the lease; --dry-run
 // reports the refusal a run would make, alongside the 018 check below.
 const refusalTtl: string | null = TTL >= LEASE_FLOOR
   ? null
   : ` --ttl ${TTL} s cannot cover --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s per call (${LEASE_FLOOR} s), which is what a batch\n` +
-    `  takes when every call runs to OB1_LLM_TIMEOUT. A batch that outlives its lease is reaped mid-way and repeated by another\n` +
-    `  worker, and three expiries mark a row failed although every write succeeded. Raise --ttl or lower --batch.`;
+    `  takes when every call runs to OB1_LLM_TIMEOUT once per row — a re-read after a concurrent edit costs a row's worth more. A batch\n` +
+    `  that outlives its lease is reaped mid-way and repeated by another worker, and three expiries mark a row failed although every\n` +
+    `  write succeeded. Raise --ttl or lower --batch.`;
 
 console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}, ${embedConfig.timeoutMs / 1000} s per call`);
@@ -330,16 +342,17 @@ async function counts(): Promise<Counts> {
 
 function printCounts(c: Counts, label: string): void {
   console.log(
-    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with the head window)` : ""}, ${c.failed} failed, ` +
+    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with a caveat)` : ""}, ${c.failed} failed, ` +
       `${c.claimed} in flight, ${c.pending} pending, ${c.unpooled} not yet in the pool`
   );
 }
 
 /**
- * The succeeded rows that carry a caveat: long thoughts stored with the head
- * window's vector because the provider refused the whole content. Listed from
- * the record, not from a counter, so --status and the end of a run agree
- * whichever process did the work.
+ * The succeeded rows that carry a caveat. Listed from the record, not from a
+ * counter, so --status and the end of a run agree whichever process did the
+ * work. The wording is the rule's, not one caveat's: the only caveat written
+ * today is the head window, but the count and the list are true of any
+ * caveat a later worker records, and each row's text says which it is.
  */
 async function printFallbacks(total: number, limit = 10): Promise<void> {
   const rows = (await sql`
@@ -347,9 +360,10 @@ async function printFallbacks(total: number, limit = 10): Promise<void> {
     WHERE work_type = ${JOB} AND ${withCaveat()}
     ORDER BY finished_at DESC LIMIT ${limit}`) as { thought_id: string; last_error: string }[];
   console.error(
-    `\n  ${total} long thought(s) stored with the head window's vector (${Math.min(total, limit)} of ${total} listed): the provider refused\n` +
-      `  to embed them whole, so this is the vector a capture would have stored too. They are succeeded, with the refusal on the\n` +
-      `  claim row. --retry-fallbacks returns them to the pool once the provider, or its input limit, has changed.`
+    `\n  ${total} succeeded row(s) carry a caveat (${Math.min(total, limit)} of ${total} listed): the write stands, and the caveat is what the\n` +
+      `  worker could not do — today, a long thought the provider refused to embed whole, stored with its head window's vector as a\n` +
+      `  capture would have stored it. --retry-fallbacks returns them to the pool once the cause — the provider, or its input limit —\n` +
+      `  has changed.`
   );
   for (const r of rows) console.error(`    ${r.thought_id}  ${r.last_error}`);
 }
@@ -429,7 +443,7 @@ if (STATUS_ONLY || DRY_RUN) {
     console.log(
       `\n  would: ${modelChange ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
         `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `${RETRY_FALLBACKS ? `return ${c.fellBack} rows stored with the head window to the pool; ` : ""}` +
+        `${RETRY_FALLBACKS ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; run ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ` +
         `over ${c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0) + (RETRY_FALLBACKS ? c.fellBack : 0)} rows. Nothing was written.`
     );
@@ -480,7 +494,7 @@ async function requeue(where: ReturnType<typeof withCaveat>, label: string, what
   console.log(`  --${label}: ${n} ${what} returned to the pool`);
 }
 if (RETRY_FAILED) await requeue(sql`status = 'failed'`, "retry-failed", "failed row(s)");
-if (RETRY_FALLBACKS) await requeue(withCaveat(), "retry-fallbacks", "row(s) stored with the head window");
+if (RETRY_FALLBACKS) await requeue(withCaveat(), "retry-fallbacks", "row(s) succeeded with a caveat");
 
 const [{ added }] = await sql`SELECT enqueue_thoughts(${JOB}) AS added`;
 const before = await counts();
@@ -595,7 +609,11 @@ async function processRow(row: Row): Promise<Outcome> {
         // the next attempt — a 429, a 5xx, a dropped connection, the timeout —
         // so the head window is in the row and the claim is retryable rather
         // than final.
-        failures.push(`whole-content embedding failed transiently (${embedded.wholeContentError ?? "no detail"}) and the head window's vector was stored — --retry-failed will try the whole content again`);
+        // "Transiently" covers a 400 whose words do not name the length: not
+        // known to be about this input, so retryable rather than final. A
+        // provider that answers that 400 for every long input will fail these
+        // rows on every --retry-failed; the row says what it got.
+        failures.push(`whole-content embedding failed transiently (${embedded.wholeContentError ?? "no detail"}) and the head window's vector was stored — not a stated refusal of the length, so --retry-failed will try the whole content again`);
       }
       // The server stores a bare window and tells the caller; here there is no
       // caller, and a terminal claim cannot be re-run. So the new vectors are
@@ -604,7 +622,8 @@ async function processRow(row: Row): Promise<Outcome> {
       if (embedConfig.chunkContext && embedded.contextFailures > 0) {
         // With the reasons, distinct: a metadata model slower than
         // OB1_LLM_TIMEOUT is told apart from one that answers badly.
-        failures.push(`${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context (${embedded.contextErrors.join("; ") || "no detail"}); the bare vectors are stored; fix the cause, then --retry-failed`);
+        const reasons = embedded.contextErrors.slice(0, 3).join("; ") + (embedded.contextErrors.length > 3 ? `; and ${embedded.contextErrors.length - 3} more` : "");
+        failures.push(`${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context (${reasons || "no detail"}); the bare vectors are stored; fix the cause, then --retry-failed`);
       }
       if (failures.length) return { outcome: "failed", error: [...failures, ...(refused ? [refused] : [])].join("; also: ") };
       return refused ? { outcome: "succeeded", caveat: refused } : { outcome: "succeeded" };

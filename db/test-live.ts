@@ -716,9 +716,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the poisoned row");
   assert(/whole-content embedding failed transiently \(.*429 .*stub: rate limited/.test(first.out), "…and, for the throttled long thought, that its head window stands in until a retry, with the 429 named");
   assert(/timed out after 2 s \(OB1_LLM_TIMEOUT\)/.test(first.out), "…and, for the tarpit, that its call timed out, naming the setting");
-  assert(/1 long thought\(s\) stored with the head window's vector/.test(first.out) && /413 .*stub: input too long/.test(first.out),
+  assert(/1 succeeded row\(s\) carry a caveat/.test(first.out) && /413 .*stub: input too long/.test(first.out),
     "…and lists the one long thought the provider refused whole, with the 413");
-  assert(/35 succeeded \(1 with the head window\)/.test(first.out), "…which the counts show as succeeded with a caveat, not as failed");
+  assert(/35 succeeded \(1 with a caveat\)/.test(first.out), "…which the counts show as succeeded with a caveat, not as failed");
   const [{ model: nowRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(nowRecorded === "stub-embed", `ob1_config now records the new model (${nowRecorded})`);
   assert(modelsSeen.has("stub-embed"), "the provider was asked for the configured model");
@@ -794,11 +794,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…for the row that gained a vector, attributed to the tool and the job (${JSON.stringify(auditRow)})`);
 
   const status = await reembed("--status");
-  assert(status.code === 0 && /35 succeeded \(1 with the head window\), 3 failed/.test(status.out), "--status reports the pass, caveat included");
-  assert(/1 long thought\(s\) stored with the head window's vector/.test(status.out) && /--retry-fallbacks/.test(status.out), "…lists the refused long thought and names the flag that revisits it");
+  assert(status.code === 0 && /35 succeeded \(1 with a caveat\), 3 failed/.test(status.out), "--status reports the pass, caveat included");
+  assert(/1 succeeded row\(s\) carry a caveat/.test(status.out) && /--retry-fallbacks/.test(status.out), "…lists the refused long thought and names the flag that revisits it");
   assert(/1 group\(s\) of thoughts share one normalised text/.test(status.out) && /delete_thought/.test(status.out), "…and lists the legacy pair as a dedup task, with what to do about it");
   const dryFallbacks = await reembed("--dry-run", "--retry-fallbacks");
-  assert(dryFallbacks.code === 0 && /return 1 rows stored with the head window to the pool/.test(dryFallbacks.out) && /over 1 rows/.test(dryFallbacks.out),
+  assert(dryFallbacks.code === 0 && /return 1 rows succeeded with a caveat to the pool/.test(dryFallbacks.out) && /over 1 rows/.test(dryFallbacks.out),
     `--dry-run --retry-fallbacks says what it would return, and writes nothing (exit ${dryFallbacks.code})`);
   assert((await claimCounts()).succeeded === 35, "…and the claim row is untouched");
 
@@ -819,7 +819,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(axisOf(throttledVec) === axisFor(throttledDoc), "…and the throttled long thought now carries its whole-content vector");
   const [{ e: tarpitVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${tarpitText}`;
   assert(axisOf(tarpitVec) === axisFor(tarpitText), "…as does the tarpit, answered this time");
-  assert(/1 long thought\(s\) stored with the head window's vector/.test(retried.out), "…while the refused one is still listed — --retry-failed does not touch a succeeded row");
+  assert(/1 succeeded row\(s\) carry a caveat/.test(retried.out), "…while the refused one is still listed — --retry-failed does not touch a succeeded row");
   const [{ e: poisonVec, attempts: poisonAttempts }] = await sql`
     SELECT t.embedding::text AS e, c.attempt_count AS attempts FROM thoughts t
     JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${poisonText}`;
@@ -840,7 +840,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${long3}`;
   assert(axisOf(long3Vec) === axisFor(long3), "…it now carries its whole-content vector");
   assert(long3Status === "succeeded" && long3Err === null, `…succeeded with no caveat left (${long3Status}, ${long3Err})`);
-  assert(!/stored with the head window's vector/.test(fallbacks.out) && /39 succeeded, 0 failed/.test(fallbacks.out), "…and nothing is listed as a fallback any more");
+  assert(!/carry a caveat/.test(fallbacks.out) && /39 succeeded, 0 failed/.test(fallbacks.out), "…and nothing is listed as a fallback any more");
 
   // A lease held by some other process: this run must not report the pass done.
   const held = "held by another process";
