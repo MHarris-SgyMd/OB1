@@ -1702,7 +1702,8 @@ trigger diffs the embedding's *presence*, not its value: a vector replaced by a
 vector is `{}`, and `{}` was ruled not-an-event when 008 stopped a repeated
 import from writing ten thousand empty rows. So a full re-embed writes no audit
 rows for rows that had a vector, and exactly one for a row that had none.
-`test-live.ts` [9] asserts one row for thirty-four thoughts. Nothing was
+`test-live.ts` [9] asserts one row for thirty-six thoughts (thirty-four when
+this was written; change 33 added two). Nothing was
 suppressed; the trigger never recorded this, and the claim row — job key,
 worker, attempts, error, times — is the per-thought record of the pass. Making
 the trigger record vector changes would be a new migration and would reintroduce
@@ -2312,9 +2313,10 @@ uncommitted — and the second then blocked on the unique index and raised
 `duplicate key value violates unique constraint "idx_thoughts_fingerprint"`
 when the first committed: measured, with the lock line removed. `update_thought`
 now takes a transaction-scoped advisory lock on the fingerprint before the
-check, for every content write through it, so two edits to one text are
-serialised and the lookup that follows is authoritative under READ COMMITTED —
-the default, and stated as the precondition it is. `test-live.ts` [6b]
+check, for every content write through it that would take a key the row does
+not already own, so two edits to one text are serialised and the lookup that
+follows is authoritative under READ COMMITTED — the default, and stated as the
+precondition it is. `test-live.ts` [6b]
 holds the first twin's transaction open on one connection, shows the second
 waiting on the *advisory* lock in `pg_locks` rather than on a transaction id,
 and gets ok with `duplicate_of` once the first commits. The same lock turns
@@ -2394,6 +2396,31 @@ not writing the fingerprint on an unchanged edit at all — it would leave every
 legacy singleton unfingerprinted until SMD-1042 ships, and a recapture would
 create a second row where 013 already merged; the header now states that
 arrival order is the ownership rule until SMD-1042 replaces it.
+
+**A third pass, triaged: ten fixes, and the stop.** Nothing in the rule
+itself. Two were in the pass: "DUPLICATE_CONTENT cannot reach here" was false
+— `updated_at` is the editing transaction's start time at millisecond
+precision, so an edit that began before the worker's read and committed after
+it passes the guard, and the worker's text is then a change into another row's
+— so the pass treats it as it treats STALE_READ, re-read and retry; and the
+pairs report, made to hash every row's text in the second pass, ran on every
+`--status`, which is asked repeatedly during a pass, so on a large brain a
+cheap probe appeared to hang — it hashes only the rows without a fingerprint
+again, and the stale key it would have caught is reported by the pass itself
+through `fingerprint_held_by`. The probe for 018 matches the exact signature
+the pass calls rather than the name, consults the ledger so a brain adopted
+with `--baseline` is told to re-run the body rather than told to apply a
+migration the migrator will skip, and `--dry-run` reports the refusal a run
+would make instead of a worker plan. Two claims made true: a transaction
+holding locks from an earlier call can still deadlock against one ordinary
+edit — lock order is per call — and a refused call now returns with the row
+locked until the caller's transaction ends, where 013 held nothing. The
+`duplicate_of` note no longer asserts that both rows predate deduplication,
+since a fresh capture merged around a legacy row produces the same result; it
+says what is known and asks the reader to read both before deleting. A
+vacuous assertion in `test-update-delete.ts` [8b] and two stale numbers in
+this file. Nothing here touched `update_thought`'s rule, which is the signal
+to stop reviewing and open the PR.
 
 ## Detached from the fork network
 

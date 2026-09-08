@@ -58,11 +58,16 @@
 --      edit against edit only: upsert_thought writes fingerprints without it,
 --      so a capture of text X committing while an edit to X is in flight still
 --      ends, as before this migration, in the edit raising 23505 (SMD-1043
---      would take the same lock there). Both locks are transaction-scoped and
---      always taken in the same order, row then key, so a transaction holding
---      a row cannot deadlock against one ordinary concurrent edit; what remains
---      is the deadlock any two multi-statement transactions editing two rows in
---      opposite orders always had, which Postgres reports rather than hangs on.
+--      would take the same lock there). Both locks are transaction-scoped,
+--      taken in the same order within one call, row then key, and HELD UNTIL
+--      THE CALLER'S TRANSACTION ENDS — a refused call (STALE_READ,
+--      DUPLICATE_CONTENT) included, where 013 held nothing. Every caller here
+--      runs one call per transaction, so both locks are gone when the call
+--      returns. A caller that wraps several calls in one transaction keeps
+--      every row and key its earlier calls touched, and can deadlock against
+--      one ordinary concurrent edit (T1 holds row1 and key X; T2 holds row2
+--      and waits for X; T1 then asks for row2); Postgres reports that after
+--      deadlock_timeout rather than hanging, and one of the two retries.
 --      db/test-live.ts [6b] holds the lock open on one connection and shows
 --      the other waiting on the ADVISORY lock in pg_locks, then told, not
 --      refused. With the PERFORM below removed, the same scenario waits on the
@@ -95,8 +100,12 @@
 --   per row and lists the groups at the end of a pass and under --status; the
 --   update_thought tool appends a note to its reply. Nothing is written to the
 --   claim row for it: the pair is a fact about the corpus, reproducible by one
---   query at any time (group by content_fingerprint_of(content) — the text,
---   not the column, so a stale key is grouped by what the row says).
+--   query at any time (group by COALESCE(content_fingerprint,
+--   content_fingerprint_of(content)) — hashing only the rows without one, so
+--   the probe that is asked repeatedly during a pass stays cheap; a stale key
+--   is reported by this function when it blocks a row, not by that query).
+--   Neither field says which row is older or which came first: a capture
+--   merged around a legacy row produces the same pair as two legacy rows do.
 --
 -- Not fixed here, and stated
 --   upsert_thought capturing text equal to a legacy NULL-fingerprint row still
@@ -299,4 +308,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb) IS
-  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. The row is locked FOR UPDATE; edits that would take a key the row does not own are serialised on an advisory lock (READ COMMITTED; captures through upsert_thought are not). Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT.';
+  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. The row is locked FOR UPDATE and edits that would take a key the row does not own are serialised on an advisory lock (READ COMMITTED; captures through upsert_thought are not); both locks are held until the caller''s transaction ends, refusals included. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT.';

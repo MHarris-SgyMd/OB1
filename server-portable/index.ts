@@ -940,7 +940,7 @@ function buildServer(principal: Principal): McpServer {
         // edit created nothing new), but the caller should know the pair is
         // there, since capture would have merged them.
         const pair = result.duplicateOf
-          ? `\nNote: this thought duplicates ${result.duplicateOf} — both were captured before deduplication existed, so the edit was kept and no fingerprint was written. Delete one of them if they should be one thought.`
+          ? `\nNote: this thought holds the same text as ${result.duplicateOf}. Deduplication could not see this one because it had no fingerprint, so the edit was kept and no fingerprint was written. Read both before deciding whether they should be one thought; delete_thought keeps the removed text in the audit trail.`
           : result.fingerprintHeldBy
             ? `\nNote: ${result.fingerprintHeldBy} carries a stale fingerprint for this text under different content, so this thought could not take its own. Re-saving that thought's text corrects it.`
             : "";

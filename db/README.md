@@ -271,8 +271,10 @@ the first committed — `test-live.ts` [6b] shows the wait on the right lock.
 The lock covers edits only: a capture of the same text committing while a
 worker fingerprints a legacy row still raises that violation, which lands as a
 failed claim naming the constraint, and `--retry-failed` resolves it. The
-read-only `--status` and `--dry-run` run against any schema; a pass that would
-write requires 018. A one-shot backfill that fingerprints every legacy
+read-only `--status` runs against any schema; a pass that would write requires
+018, `--dry-run` reports that refusal in place of the worker plan, and a brain
+adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
+the file's body rather than to apply a migration the migrator will skip. A one-shot backfill that fingerprints every legacy
 singleton without a re-embed is SMD-1042.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —

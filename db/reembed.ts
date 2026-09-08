@@ -75,9 +75,10 @@
  * violated, and names the other row in its result. A run requires 018 (the
  * read-only --status and --dry-run do not), says per row when it found a pair,
  * and prints every group of thoughts sharing one normalised text at the end
- * and under --status — one query over the corpus hashing every row's text, so
- * the list is the same whenever it is asked for (it needs 016's function and
- * says so on an older schema). Whether a pair should be one thought is the
+ * and under --status — one query over the corpus hashing only the rows without
+ * a fingerprint, so it stays cheap for a probe that is asked repeatedly (it
+ * needs 016's function and says so on an older schema). --dry-run reports the
+ * 018 refusal a run would make instead of the worker plan. Whether a pair should be one thought is the
  * operator's call; nothing is written to the claim row about it. 018's lock
  * serialises edits only: a capture of the same text committing while a worker
  * fingerprints a legacy row still raises the unique violation, which lands as
@@ -214,6 +215,30 @@ if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN) {
   process.exit(2);
 }
 
+// A pass against 013's update_thought fails every legacy twin for ever (see the
+// header). The body the pass will CALL — the exact 7-argument signature, as
+// preflight resolves match_thoughts, not any function of that name — is asked
+// for 018's contract sentinel: a marker in pg_proc.prosrc, which every CREATE
+// OR REPLACE rewrites, rather than a field name a comment could carry. The
+// ledger decides the remedy: a brain adopted with --baseline records 018 as
+// applied while the body is 013's, and "apply 018" would be a no-op there.
+// Read here so --dry-run can report the refusal a run would make; --status is
+// answered whatever the body, since it never calls update_thought.
+const [fn] = await sql`
+  SELECT
+    EXISTS (SELECT 1 FROM pg_proc
+            WHERE oid = to_regprocedure('public.update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)')
+              AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS present,
+    (to_regclass('schema_migrations') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE '018%')) AS ledgered`;
+const refusal018: string | null = fn.present
+  ? null
+  : " update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
+    "  the fingerprint — would fail this pass on every run. " +
+    (fn.ledgered
+      ? "schema_migrations records 018 as applied (--baseline?) but the body\n  installed is older: re-run the body of db/migrations/018_update_thought_unchanged_content.sql (the migrator will\n  skip it as applied), substituting {{EMBEDDING_DIM}}."
+      : "Apply migration 018 first:\n    cd db && bun migrate.ts --url …");
+
 // ── Where the pass stands ───────────────────────────────────────────────────
 
 type Counts = { pending: number; claimed: number; succeeded: number; failed: number; unpooled: number; thoughts: number };
@@ -246,10 +271,16 @@ function printCounts(c: Counts, label: string): void {
 /**
  * Groups of thoughts that normalise to one text: pairs from before migration
  * 003's fingerprint, or a load that bypassed upsert_thought. One query over
- * the corpus, hashing every row's TEXT rather than trusting the column (a raw
- * update around update_thought leaves a stale key), so the list is the same
- * before, during and after a pass. Prints nothing when there are none. Needs
- * 016's content_fingerprint_of; on an older schema it says so and returns.
+ * the corpus that hashes only the rows whose fingerprint column is NULL and
+ * groups them with the fingerprinted rows through the column — so it finds
+ * NULL/NULL pairs before a pass and NULL/fingerprinted pairs after, and costs
+ * little once a pass has fingerprinted the corpus. It runs under --status,
+ * which is asked repeatedly during a pass, so it must stay cheap: hashing
+ * every row's text would catch a row whose column carries a STALE key as well,
+ * but that row is reported by the pass itself (fingerprint_held_by) when it
+ * blocks another row, and nothing here needs to find it twice. Prints nothing
+ * when there are none. Needs 016's content_fingerprint_of; on an older schema
+ * it says so and returns.
  */
 async function printDuplicateGroups(limit = 10): Promise<number> {
   const [{ present }] = await sql`SELECT to_regprocedure('content_fingerprint_of(text)') IS NOT NULL AS present`;
@@ -261,7 +292,7 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
     WITH g AS (
       SELECT array_agg(id ORDER BY created_at, id)::text[] AS ids, min(created_at) AS first
       FROM thoughts
-      GROUP BY content_fingerprint_of(content)
+      GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
       HAVING count(*) > 1)
     SELECT (SELECT count(*) FROM g)::int AS total, ids FROM g ORDER BY first LIMIT ${limit}`) as { total: number; ids: string[] }[];
   if (!rows.length) return 0;
@@ -302,6 +333,11 @@ if (STATUS_ONLY || DRY_RUN) {
   }
   await printDuplicateGroups();
   if (DRY_RUN) {
+    if (refusal018) {
+      console.error(`\n  would: refuse.${refusal018}`);
+      await sql.close();
+      process.exit(2);
+    }
     console.log(
       `\n  would: ${modelChange ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
         `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
@@ -315,21 +351,8 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
-// A pass against 013's update_thought fails every legacy twin for ever (see the
-// header). The body installed is asked for 018's contract sentinel — the 014
-// convention: a marker in pg_proc.prosrc, which every CREATE OR REPLACE
-// rewrites — rather than for a field name a comment could carry. --status and
-// --dry-run never call update_thought and are answered above, whatever the body.
-const [fn] = await sql`
-  SELECT EXISTS (
-    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND p.proname = 'update_thought'
-      AND p.prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS present`;
-if (!fn.present) {
-  console.error(
-    "\n  update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
-      "  the fingerprint — would fail this pass on every run. Apply migration 018 first:\n    cd db && bun migrate.ts --url …"
-  );
+if (refusal018) {
+  console.error(`\n ${refusal018}`);
   await sql.close();
   process.exit(2);
 }
@@ -453,7 +476,7 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
         // groups, from the corpus, so it is the count that is authoritative (a
         // pair's first row is never reported here — nothing owned its text
         // yet). Not an outcome: nothing about this row's vectors is in doubt.
-        console.error(`  ${current.id}: duplicates ${result.duplicate_of} — the same text from before the fingerprint; re-embedded, see the summary`);
+        console.error(`  ${current.id}: duplicates ${result.duplicate_of} — the same text, which deduplication could not see because this row had no fingerprint; re-embedded, see the summary`);
       }
       if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
         // The whole-content call failed for a reason that says nothing about
@@ -478,24 +501,28 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
       return { outcome: "succeeded" };
     }
     if (result.error === "NOT_FOUND") return { outcome: "vanished" };
-    if (result.error === "STALE_READ") {
+    if (result.error === "STALE_READ" || result.error === "DUPLICATE_CONTENT") {
       // Edited between the claim and the write. Re-read and embed what is there
-      // now; the guard exists so the stale vector never wins.
+      // now; the guard exists so the stale vector never wins. DUPLICATE_CONTENT
+      // is the same event seen through a gap in the guard: updated_at is the
+      // editing transaction's start time at millisecond precision, so an edit
+      // that began before this worker's read and committed after it passes
+      // if_unchanged_since — and the text this worker holds is then no longer
+      // the row's, so 018 judges it as a change into another row's text. The
+      // re-read carries the current text and the next call is unchanged.
       const [fresh] = (await sql`SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ${current.id}::uuid`) as Row[];
       if (!fresh) return { outcome: "vanished" };
       current = fresh;
       continue;
     }
-    // DUPLICATE_CONTENT cannot reach here: the content passed is always the
-    // row's current text — a STALE_READ re-read guarantees it — and since
-    // migration 018 an unchanged edit is never a duplicate. What remains is a
+    // Anything else is reported as what it is. Not an error code at all: a
     // capture of the same text committing while this row is fingerprinted
-    // (018's lock covers edits, not upsert_thought), which raises a unique
+    // (018's lock covers edits, not upsert_thought — SMD-1043) raises a unique
     // violation into the catch in worker(): failed with the constraint named,
     // and --retry-failed then finds the other row and reports duplicate_of.
     return { outcome: "failed", error: `update_thought: ${result.error}` };
   }
-  return { outcome: "failed", error: "update_thought: STALE_READ three times in a row — the thought is being edited faster than it can be re-embedded" };
+  return { outcome: "failed", error: "update_thought: STALE_READ or DUPLICATE_CONTENT three times in a row — the thought is being edited faster than it can be re-embedded; --retry-failed once it settles" };
 }
 
 async function worker(n: number): Promise<void> {
