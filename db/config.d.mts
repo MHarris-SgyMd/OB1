@@ -141,6 +141,10 @@ export type PassCounts = { thoughts: number; succeeded: number; fellBack: number
 export function formatPassCounts(c: PassCounts): string;
 /** The shared rule for "this pass has not finished": a row is pending, leased or failed. */
 export function passUnfinished(c: Pick<PassCounts, "pending" | "claimed" | "failed">): boolean;
+/** How preflight attributes a claim-table key to reembed.ts. */
+export const REEMBED_KEY_PREFIX: "reembed:";
+/** `reembed:<model>@<dim>` — the default key of a pass to a model at a width. */
+export function reembedKey(model: string, dim: number): string;
 /** `reembed:<model>@<dim>[:suffix]` → the model and width it names; null for any other shape. */
 export function parseReembedKey(key: string): { model: string; dim: number } | null;
 

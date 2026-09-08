@@ -668,19 +668,34 @@ export function passUnfinished(c) {
 }
 
 /**
- * The model and width a re-embed job key names — `reembed:<model>@<dim>`,
- * optionally `:<suffix>` for a backfill — or null for a key of another shape.
- * The model part may itself contain ":" (qwen3-embedding:4b), so the width is
- * read from the LAST "@". reembed.ts refuses a --job whose named model or
- * width is not the configured one (the run would write one model's vectors
- * under another's key); preflight tells a pass to a model that is no longer
- * the recorded one from a backfill under the recorded one (SMD-1024).
- *
+ * The shape of a re-embed job key, built and read here and nowhere else:
+ * `reembed:<model>@<dim>`, optionally `:<suffix>` for a backfill under the
+ * same model. The prefix is how preflight attributes a claim-table key to
+ * reembed.ts; the model part may itself contain ":" (qwen3-embedding:4b), so
+ * the width is read from the LAST "@", and a suffix may not contain "@" — a
+ * key that does is of another shape and names no model. reembed.ts refuses a
+ * --job whose named model or width is not the configured one (the run would
+ * write one model's vectors under another's key); preflight tells a pass to a
+ * model that is no longer the recorded one from a backfill (SMD-1024).
+ */
+export const REEMBED_KEY_PREFIX = "reembed:";
+
+/**
+ * @param {string} model
+ * @param {number} dim
+ * @returns {string}
+ */
+export function reembedKey(model, dim) {
+  return `${REEMBED_KEY_PREFIX}${model}@${dim}`;
+}
+
+/**
  * @param {string} key
  * @returns {{model: string, dim: number} | null}
  */
 export function parseReembedKey(key) {
-  const m = /^reembed:(.+)@(\d+)(?::[^@]*)?$/.exec(key);
+  if (!key.startsWith(REEMBED_KEY_PREFIX)) return null;
+  const m = /^(.+)@(\d+)(?::[^@]*)?$/.exec(key.slice(REEMBED_KEY_PREFIX.length));
   return m ? { model: m[1], dim: Number(m[2]) } : null;
 }
 

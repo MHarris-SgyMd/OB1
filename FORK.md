@@ -2704,11 +2704,10 @@ skipped a lease that had expired with no live holder: switching back with a
 `--job` backfill key moved the record and left the default key's terminal rows
 to report "Nothing to do", and a row a dead worker of the earlier pass had used
 its attempts on was reaped as failed for that pass's reason. It now returns
-every terminal row and every expired lease under this job and under every key
-of the configured model (a backfill's rows are as stale as the default key's;
-the run does not process the other keys and preflight then reports them,
-correctly), and also when `ob1_config` records no model at all; a record moved
-by hand is stated as not a change the tool can see. A `--dry-run` without
+every terminal row and every expired lease under this job, and also when
+`ob1_config` records no model at all; a record moved by hand is stated as not a
+change the tool can see. (This pass also extended the restart to every key of
+the configured model; the second pass took that back — below.) A `--dry-run` without
 `--switch-model` printed the restart as its plan when the run would have
 refused; it says "would: refuse without --switch-model; with it: …". The
 retry flags under a model change printed a count that was zero by
@@ -2723,6 +2722,39 @@ carries no model. In the tests, the killed run's probe had pre-satisfied "the
 provider was asked for the configured model"; the set is cleared. Suites after:
 live 204, preflight 79.
 
+**A second pass, and the stop.** Its top finding was in the first pass's own
+code — the `--switch-model` term for an unfinished key that names no model was
+an expression that could never be true, so a key like `reembed:nightly` under a
+record that disagreed with the configuration got a command the tool refused —
+which is the signal the loop is polishing its additions rather than finding new
+ground. Applied, all small, and one taken back. The first pass's restart
+returned the rows of every key of the configured model, and a `--switch-model`
+run under a backfill key then re-embedded the corpus and left the default key's
+whole pool pending for preflight to demand a second pass over vectors already
+at the model; the restart is this job's rows again, and the header says why the
+other keys are left: once the pass has finished the corpus is at the model,
+which is what their finished rows say. Returning expired leases put the start
+in the path of a concurrent worker's reaper, which takes the same rows, and a
+deadlock the server resolves against this side ended the tool with an uncaught
+rejection; the transaction is caught, rolled back whole, and says so with
+"run again". A missing `embedding_dim` row made every backfill of the
+configured model "a switch that was abandoned" (`dim !== Number(undefined)`);
+only a present width is compared. A key at another width of the same model was
+offered "finish that switch", which the column-width check refuses
+deterministically; it is described as one no run can finish, with retiring the
+record as its only remedy. The "preflight will warn" line printed for a key
+without the prefix, which the tool had just said preflight cannot see; it says
+that instead. The `--job` refusal ran before `--status` and `--dry-run` could
+be exempted, so the very key preflight reported could not be inspected without
+changing the shell; it joins the other refusals, where `--status` answers and
+`--dry-run` reports it. The key's shape — prefix, builder, parser — is defined
+once in `db/config.mjs` and both files use it. Kept, with the reason: the
+restart resets `attempt_count` on an expired lease as on any row it returns,
+because a model change is a new pass, not the reaper continuing the old one.
+Ticket: a vector carries no model, so the claim table is a proxy that vanishes
+when rows are cleared — SMD-1068 weighs a per-row `embedding_model` column.
+Suites after: live 207, preflight 83.
+
 **Not done here.** The PostgREST branch cannot read the claim table, as it
 cannot read anything else the schema checks read; per-row lease renewal
 (SMD-1023); extraction passes; an acknowledgement path for a row the provider
@@ -2731,7 +2763,8 @@ refuses permanently, which otherwise keeps the warning alive on every start
 superseded key); a thought captured by a not-yet-switched server after the
 record moved, which has the old model's vector and no claim row, and is
 indistinguishable from a new-model capture once the pass is finished — the run
-says so at its end, and the operator's step is to switch the server first.
+says so at its end, and the operator's step is to switch the server first;
+recording the model per row, which would make the check exact (SMD-1068).
 
 ## Detached from the fork network
 

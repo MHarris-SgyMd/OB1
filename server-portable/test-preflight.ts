@@ -427,8 +427,47 @@ else {
          "with the record on another model and the configured model's pass unfinished, both lines warn");
   assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model;/.test(reverted.out),
          "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse");
+  /**
+   * The same disagreement, with an unfinished key preflight cannot read a
+   * model from: the command still needs --switch-model, since the shell it
+   * runs in is the configured one (second review pass — the first pass's
+   * expression for this could never be true).
+   */
+  await claims.unsafe(`SELECT enqueue_thoughts('reembed:nightly', ARRAY['${ids[0]}']::uuid[])`);
+  const nightly = await run(SQL_ENV);
+  assert(/reembed:nightly: 6 thoughts — .* — a pass under this key stopped before it finished/.test(nightly.out) && /bun reembed\.ts --url \$DATABASE_URL --job reembed:nightly --switch-model/.test(nightly.out),
+         "an unfinished key naming no model, while the record disagrees with the configuration, gets --switch-model too");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = 'reembed:nightly'`;
   await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND status = 'pending'`;
+
+  /**
+   * A hand-applied schema can carry the model row without the width row. The
+   * width then says nothing, and the configured model's own backfill must be
+   * a resumable pass, not "a switch that was abandoned" with a DELETE as its
+   * remedy (second review pass: `dim !== Number(undefined)` is always true).
+   */
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_dim'`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${CTX}', ARRAY['${ids[0]}']::uuid[])`);
+  const noDim = await run(SQL_ENV);
+  assert(noDim.out.includes(`--job ${CTX}`) && !/abandoned or reverted/.test(noDim.out),
+         "with no width recorded, the configured model's backfill is still a pass to resume, not an abandoned switch");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM)})`;
+
+  /**
+   * The same model at another width. Migration 006 keeps the recorded width
+   * equal to the column's and reembed.ts refuses any other, so "finish that
+   * switch" can never run; the only remedy is to retire the record.
+   */
+  const WIDE = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM + 1}`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${WIDE}', ARRAY['${ids[0]}']::uuid[])`);
+  const wide = await run(SQL_ENV);
+  assert(new RegExp(`${WIDE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
+         "a key at another width is described as one no run can finish");
+  assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
+         "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
 
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);

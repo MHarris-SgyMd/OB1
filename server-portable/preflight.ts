@@ -766,7 +766,7 @@ if (configFailed) {
          * ranks across the old and the new vectors until the pass is finished.
          */
         try {
-          const { formatPassCounts, parseReembedKey, passUnfinished } = await import("../db/config.mjs");
+          const { formatPassCounts, parseReembedKey, passUnfinished, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
           const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
@@ -775,7 +775,7 @@ if (configFailed) {
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
-              FROM thought_work_claims WHERE work_type LIKE 'reembed:%' GROUP BY work_type, status`) as
+              FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; noted: number; thoughts: number }[];
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
@@ -788,11 +788,13 @@ if (configFailed) {
               c.unpooled -= n;
               byKey.set(r.work_type, c);
             }
-            const configuredKey = `reembed:${embModel}@${embDim}`;
+            const configuredKey = reembedKey(embModel, embDim);
             // The command has to be one reembed.ts will run: --switch-model when
-            // the record disagrees with the configuration (it refuses without),
-            // and the model the key names in the environment when that is not
-            // this shell's (it refuses a --job naming another model).
+            // the record disagrees with the configuration (it refuses without) —
+            // unless the command sets the recorded model in its environment,
+            // where there is no disagreement; and the model the key names in the
+            // environment when that is not this shell's (it refuses a --job
+            // naming another model).
             const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
             const cmd = (envPrefix: string, flags: string) => `${envPrefix}bun reembed.ts --url $DATABASE_URL${flags}`;
             const finishIt = (envPrefix: string, jobFlag: string, c: PassCounts, needsSwitch: boolean) =>
@@ -804,25 +806,39 @@ if (configFailed) {
               if (!passUnfinished(c)) continue;
               unfinished++;
               const named = parseReembedKey(key);
-              const superseded = named !== null && recorded.embedding_model !== undefined &&
-                (named.model !== recorded.embedding_model || named.dim !== Number(recorded.embedding_dim));
+              // Superseded: the key names a model or width that is not the
+              // recorded one. A missing embedding_dim row (a hand-applied
+              // schema) is no evidence about the width — the contract check
+              // above guards the same absence — so only a present one is
+              // compared (second review pass).
+              const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
+              const otherWidth = named !== null && recorded.embedding_dim !== undefined && named.dim !== Number(recorded.embedding_dim);
+              const retire = `retire its record: DELETE FROM thought_work_claims WHERE work_type = '${key}';`;
               if (key === configuredKey) {
                 add("re-embed pass", "warn",
                     `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
                     finishIt("", "", c, recordDiffers));
-              } else if (superseded) {
+              } else if (otherModel) {
                 // A switch that was abandoned or reverted: the recorded model
                 // has moved on, so finishing this pass under the current shell
                 // would write the wrong model's vectors — reembed.ts refuses
                 // it. Either that switch is completed, or its record retired.
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim}); its rows describe a switch that was abandoned or reverted`,
-                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, retire its record: DELETE FROM thought_work_claims WHERE work_type = '${key}';`);
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? "?"}); its rows describe a switch that was abandoned or reverted`,
+                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
+              } else if (otherWidth) {
+                // The same model at another width. Migration 006 keeps the
+                // recorded width equal to the column's, so no run can finish
+                // this: a width change is a schema migration that does not
+                // exist, and reembed.ts refuses one. Only the record can go.
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${recorded.embedding_dim}; a width change is a schema migration that does not exist yet, so no run can finish this`,
+                    `Nothing can complete it (reembed.ts refuses a width other than the column's); ${retire}`);
               } else {
                 const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";
                 add("re-embed pass", "warn",
                     `${key}: ${formatPassCounts(c)} — a pass under this key stopped before it finished`,
-                    finishIt(envPrefix, ` --job ${key}`, c, named !== null && recordDiffers && named.model === embModel));
+                    finishIt(envPrefix, ` --job ${key}`, c, recordDiffers && envPrefix === ""));
               }
             }
             if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");
