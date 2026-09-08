@@ -51,7 +51,12 @@ durable part and the tags are re-derivable.
 `preflight.ts --deep` exercises both against the live endpoint, checks the
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to
-`uncategorized` without ever failing.
+`uncategorized` without ever failing. With or without `--deep`, over a direct
+connection it also reads the claim table: a re-embed pass that has not finished —
+rows pending, leased or failed under a `reembed:` key — is a warning with the
+counts and the command that finishes it, because `ob1_config` records the new
+model from the pass's first moment while the rows say how far it got
+(`db/README.md`, "What preflight sees").
 
 ## Choosing a data layer
 

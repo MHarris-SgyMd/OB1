@@ -215,7 +215,7 @@ fresh pool rather than a no-op against the first one's terminal rows.
 OB1_EMBEDDING_MODEL=bge-m3 bun reembed.ts --url postgres://… --switch-model
 bun reembed.ts --url … --status              # where the pass stands
 bun reembed.ts --url … --dry-run             # what a run would do; writes nothing
-bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model
+bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model (keep the reembed: prefix — preflight reports by it)
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
 #   --workers N (2)   --batch N (8)   --ttl SECONDS (900, or --batch × OB1_LLM_TIMEOUT when that is longer)
@@ -237,7 +237,40 @@ differs from the one `ob1_config` records, the run needs `--switch-model`, and
 the first thing it does is record the new model — from that moment a server
 configured for it passes preflight and should be switched. Until the pass
 finishes, searches mix vectors from two models; `--status` says how far along
-it is, and a re-run adds anything captured meanwhile.
+it is, and a re-run adds anything captured meanwhile. The record and the pool
+are one transaction — the `ob1_config` row, the rows the retry flags return,
+`enqueue_thoughts` — so a run that dies between them leaves both or neither,
+never a record naming the new model with no pool behind it. And a model change
+starts this pass over — every terminal row, and every lease expired with no
+live holder, under the job's key returns to the pool: switching back to a
+model used before otherwise found every thought's terminal row under the key
+and reported nothing to do while every vector was the other model's. Other
+keys of the same model are left as they are; once the pass has finished the
+corpus is at the model again, which is what their finished rows say. A `--job`
+that names a model (`reembed:<model>@<dim>[:suffix]`) must name the configured
+one; a run under another model's key would write this model's vectors and
+record them as the other's, and is refused (`--status` still answers for it,
+so a key preflight reports can be inspected from any shell). Thoughts captured while the pass
+ran by a server not yet switched carry the previous model's vectors and no
+claim row, and nothing can tell them from new-model captures afterwards — the
+run says so at its end; switch the server first, and re-run once.
+
+**What preflight sees.** A pass is *unfinished* while any row under its key is
+pending, leased or failed — `passUnfinished` in `config.mjs`, one rule for this
+tool and for `server-portable/preflight.ts`, which reads the claim table on
+every start and warns, in the counts `--status` prints, for every unfinished
+key that starts with `reembed:` (the configured model's key, or a backfill's;
+extraction keys are left out because 016's trigger keeps that pool fed). No
+marker to clear: the claim table is the record of the pass and nothing else.
+Succeeded rows with a caveat are finished; thoughts not yet in the pool are
+detail while a pass is unfinished, and no signal on their own — after a switch
+every new capture is one. `--status` and the end of a run print `preflight will
+warn until this finishes:` with the same counts, so the two never disagree. A
+`--job` key without the prefix is accepted and noted: preflight will not report
+it. A key whose model is no longer the recorded one — a switch abandoned or
+reverted — is reported as such, with its two remedies: finish that switch in
+its own environment, or retire its record (a flag for that, and for accepting a
+row the provider refuses permanently, is SMD-1067).
 
 **What the audit log records: almost nothing, on purpose.** Migration 008's
 trigger diffs the embedding's *presence*, not its value, so a vector replaced
@@ -623,7 +656,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 184 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 207 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -676,7 +709,14 @@ container.
   later capture, `--retry-failed` resetting the attempt count and giving the
   throttled thought its whole-content vector, `--retry-fallbacks` giving the
   refused one its whole-content vector once the stub relents and clearing the
-  caveat, and exit 1 while another process holds a lease.
+  caveat, and exit 1 while another process holds a lease. Preflight runs as a
+  subprocess at four points — after a run killed just after it recorded the
+  new model (the stub freezes every request but the probe, so the whole pool
+  and nothing else is left for it to report), after the first run, while the
+  ghost lease is held, and once every row is terminal — and each time prints
+  the counts the tool printed; last, the recorded model is switched back and
+  `--switch-model` to it again starts the pool over and re-embeds every row
+  rather than finding nothing to do.
 - **Entity extraction, end to end.** [10] runs `extract-entities.ts` against a
   stub model that answers from a table, so the expected graph is known exactly:
   seven entities, fourteen mentions, five edges from ten thoughts, one of which

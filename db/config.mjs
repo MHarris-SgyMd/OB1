@@ -638,6 +638,68 @@ export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_M
 }
 
 /**
+ * A bulk pass's counts, in one phrase — the one db/reembed.ts prints under
+ * --status and at the end of a run, and the one server-portable/preflight.ts
+ * embeds when it reports a re-embed pass unfinished. Defined once so the two
+ * cannot describe the same claim rows in two vocabularies (SMD-1024).
+ *
+ * @param {{thoughts:number, succeeded:number, fellBack:number, failed:number, claimed:number, pending:number, unpooled:number}} c
+ * @returns {string}
+ */
+export function formatPassCounts(c) {
+  return (
+    `${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with a caveat)` : ""}, ${c.failed} failed, ` +
+    `${c.claimed} in flight, ${c.pending} pending, ${c.unpooled} not yet in the pool`
+  );
+}
+
+/**
+ * The rule preflight and reembed.ts share for "this pass has not finished": a
+ * row under the key is still pending, still leased, or failed. Succeeded rows
+ * that carry a caveat are finished (SMD-1021); thoughts with no row under the
+ * key are not a signal by themselves — after a completed model switch every
+ * new capture is one — and are reported as detail while a pass is unfinished.
+ *
+ * @param {{pending:number, claimed:number, failed:number}} c
+ * @returns {boolean}
+ */
+export function passUnfinished(c) {
+  return c.pending + c.claimed + c.failed > 0;
+}
+
+/**
+ * The shape of a re-embed job key, built and read here and nowhere else:
+ * `reembed:<model>@<dim>`, optionally `:<suffix>` for a backfill under the
+ * same model. The prefix is how preflight attributes a claim-table key to
+ * reembed.ts; the model part may itself contain ":" (qwen3-embedding:4b), so
+ * the width is read from the LAST "@", and a suffix may not contain "@" — a
+ * key that does is of another shape and names no model. reembed.ts refuses a
+ * --job whose named model or width is not the configured one (the run would
+ * write one model's vectors under another's key); preflight tells a pass to a
+ * model that is no longer the recorded one from a backfill (SMD-1024).
+ */
+export const REEMBED_KEY_PREFIX = "reembed:";
+
+/**
+ * @param {string} model
+ * @param {number} dim
+ * @returns {string}
+ */
+export function reembedKey(model, dim) {
+  return `${REEMBED_KEY_PREFIX}${model}@${dim}`;
+}
+
+/**
+ * @param {string} key
+ * @returns {{model: string, dim: number} | null}
+ */
+export function parseReembedKey(key) {
+  if (!key.startsWith(REEMBED_KEY_PREFIX)) return null;
+  const m = /^(.+)@(\d+)(?::[^@]*)?$/.exec(key.slice(REEMBED_KEY_PREFIX.length));
+  return m ? { model: m[1], dim: Number(m[2]) } : null;
+}
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot

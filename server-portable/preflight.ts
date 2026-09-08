@@ -25,6 +25,7 @@
 
 import { createStore, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
+import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -740,6 +741,115 @@ if (configFailed) {
               "Same width, different family: existing vectors are not comparable to new ones. Re-embed.");
         } else if (recorded.embedding_dim) {
           add("embedding contract", "ok", `${recorded.embedding_model} @ ${recorded.embedding_dim} dimensions, matching`);
+        }
+
+        /**
+         * An unfinished re-embed pass (SMD-1024). `db/reembed.ts --switch-model`
+         * records the new model in ob1_config before any row is re-embedded —
+         * deliberately: that is what lets a server configured for the new model
+         * pass the check above and be switched while the pass runs. So the line
+         * above says "matching" for a pass that died at 5%, or was never re-run
+         * after --retry-failed, while most vectors are another model's and every
+         * search ranks across the two. The claim table is the record of the
+         * pass (migration 015's fourth principle) and reembed.ts writes the
+         * record and the pool in one transaction, so its counts are the whole
+         * signal: a pass is unfinished while any row under its key is pending,
+         * leased or failed — passUnfinished() in db/config.mjs, the rule
+         * reembed.ts prints by, in the phrase formatPassCounts() gives both. No
+         * marker row: a second record could disagree with the first and would
+         * need clearing across processes. Every key with the tool's prefix is
+         * read, so a backfill under --job is reported too; extraction keys are
+         * not — 016's trigger keeps that pool fed between worker runs. Thoughts
+         * with no row under a key are detail, not a signal: after a finished
+         * switch every new capture is one.
+         *
+         * A warning, as the model mismatch above is: the server answers, and
+         * ranks across the old and the new vectors until the pass is finished.
+         */
+        try {
+          const { formatPassCounts, parseReembedKey, passUnfinished, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
+          const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
+          if (!present) {
+            add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
+          } else {
+            // A prefix LIKE cannot use the key's btree index under a non-C
+            // collation, so this reads the claim table once per start; it is
+            // one row per (thought, pass), grouped, and the corpus count is
+            // evaluated only when there are groups.
+            const rows = (await sql`
+              SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
+                     (SELECT count(*)::int FROM thoughts) AS thoughts
+              FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
+              { work_type: string; status: string; c: number; noted: number; thoughts: number }[];
+            const byKey = new Map<string, PassCounts>();
+            for (const r of rows) {
+              const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
+              const n = Number(r.c);
+              if (r.status === "succeeded") { c.succeeded = n; c.fellBack = Number(r.noted); }
+              else if (r.status === "failed") c.failed = n;
+              else if (r.status === "claimed") c.claimed = n;
+              else if (r.status === "pending") c.pending = n;
+              c.unpooled -= n;
+              byKey.set(r.work_type, c);
+            }
+            const configuredKey = reembedKey(embModel, embDim);
+            // The command has to be one reembed.ts will run: --switch-model when
+            // the record disagrees with the configuration (it refuses without) —
+            // unless the command sets the recorded model in its environment,
+            // where there is no disagreement; and the model the key names in the
+            // environment when that is not this shell's (it refuses a --job
+            // naming another model).
+            const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
+            const cmd = (envPrefix: string, flags: string) => `${envPrefix}bun reembed.ts --url $DATABASE_URL${flags}`;
+            const finishIt = (envPrefix: string, jobFlag: string, c: PassCounts, needsSwitch: boolean) =>
+              `Finish it: cd db && ${cmd(envPrefix, `${jobFlag}${needsSwitch ? " --switch-model" : ""}`)}` +
+              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ` +
+              `${cmd(envPrefix, `${jobFlag} --status`)} shows where it stands.`;
+            let unfinished = 0;
+            for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
+              if (!passUnfinished(c)) continue;
+              unfinished++;
+              const named = parseReembedKey(key);
+              // Superseded: the key names a model or width that is not the
+              // recorded one. A missing embedding_dim row (a hand-applied
+              // schema) is no evidence about the width — the contract check
+              // above guards the same absence — so only a present one is
+              // compared (second review pass).
+              const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
+              const otherWidth = named !== null && recorded.embedding_dim !== undefined && named.dim !== Number(recorded.embedding_dim);
+              const retire = `retire its record: DELETE FROM thought_work_claims WHERE work_type = '${key}';`;
+              if (key === configuredKey) {
+                add("re-embed pass", "warn",
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
+                    finishIt("", "", c, recordDiffers));
+              } else if (otherModel) {
+                // A switch that was abandoned or reverted: the recorded model
+                // has moved on, so finishing this pass under the current shell
+                // would write the wrong model's vectors — reembed.ts refuses
+                // it. Either that switch is completed, or its record retired.
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? "?"}); its rows describe a switch that was abandoned or reverted`,
+                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
+              } else if (otherWidth) {
+                // The same model at another width. Migration 006 keeps the
+                // recorded width equal to the column's, so no run can finish
+                // this: a width change is a schema migration that does not
+                // exist, and reembed.ts refuses one. Only the record can go.
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${recorded.embedding_dim}; a width change is a schema migration that does not exist yet, so no run can finish this`,
+                    `Nothing can complete it (reembed.ts refuses a width other than the column's); ${retire}`);
+              } else {
+                const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass under this key stopped before it finished`,
+                    finishIt(envPrefix, ` --job ${key}`, c, recordDiffers && envPrefix === ""));
+              }
+            }
+            if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");
+          }
+        } catch (e) {
+          add("re-embed pass", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads thought_work_claims and counts thoughts.");
         }
 
         if (Number(applied[0].c) === 0)

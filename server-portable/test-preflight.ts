@@ -13,7 +13,7 @@
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema } from "../db/test-support.ts";
+import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -41,11 +41,7 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
     if (v !== undefined) clean[k] = String(v);
   }
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete clean[k];
-  const p = Bun.spawn(["bun", join(HERE, "preflight.ts"), ...args], {
-    env: clean, stdout: "pipe", stderr: "pipe", cwd: HERE,
-  });
-  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-  return { code: await p.exited, out };
+  return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
 
 const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined };
@@ -323,6 +319,160 @@ else {
 
   await ctx.unsafe("DELETE FROM thoughts");
   await ctx.close();
+
+  /**
+   * An unfinished re-embed pass (SMD-1024). `reembed.ts --switch-model` records
+   * the new model in ob1_config before the first row is re-embedded — on
+   * purpose, so a server configured for it can be switched while the pass runs
+   * — and the embedding-contract check then says "matching" for a pass that
+   * died at 5%. The claim table is the record of the pass, so the states are
+   * written to it directly, as the tool would leave them: mid-pass (pending,
+   * failed and succeeded rows, one with a caveat) warns with the counts in the
+   * tool's own words; a capture during the pass is counted as not yet pooled;
+   * a finished pass with such a capture is finished — after a switch every new
+   * capture is one; a row another process holds is unfinished work; a backfill
+   * under another key is reported by its key; a fresh install and a schema
+   * before 015 are not warnings.
+   */
+  const SQL_ENV = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE };
+  const KEY = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
+  const claims = new SQL({ url: LIVE, max: 1 });
+
+  const fresh = await run(SQL_ENV);
+  assert(/embedding contract.*matching/s.test(fresh.out) && /re-embed pass\s+none unfinished/.test(fresh.out),
+         "a fresh install — no claim rows — reports no unfinished pass beside a matching contract");
+
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const [r] = await claims.unsafe(`SELECT upsert_thought('pass thought ${i}', '{"metadata":{}}'::jsonb, NULL::vector) AS r`);
+    ids.push((r.r as { id: string }).id);
+  }
+  await claims`SELECT enqueue_thoughts(${KEY})`;
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${ids[0]}::uuid`;
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = 'whole-content embedding refused by the provider (413 stub)' WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${KEY} AND thought_id = ${ids[2]}::uuid`;
+
+  const mid = await run(SQL_ENV);
+  assert(mid.code === 0, "a database mid-pass still starts — a warning, as the model mismatch beside it is");
+  assert(/re-embed pass\s+the pass to .* has not finished: 5 thoughts — 2 succeeded \(1 with a caveat\), 1 failed, 0 in flight, 2 pending, 0 not yet in the pool/.test(mid.out),
+         "…and warns with the counts, in the words reembed.ts prints under --status");
+  assert(/--retry-failed for the 1 failed row/.test(mid.out) && /--status shows where it stands/.test(mid.out),
+         "…with the run that finishes it, --retry-failed while a row is failed, and --status as the remedy");
+  assert(/embedding contract.*matching/s.test(mid.out), "…beside a contract line that still says matching, which is true of the record");
+  const midJson = await run(SQL_ENV, "--json");
+  const midParsed = JSON.parse(midJson.out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(midParsed.ok === true && midParsed.checks.some((c) => c.name === "re-embed pass" && c.status === "warn"),
+         "--json carries the warning for a pipeline, under ok:true");
+
+  await claims.unsafe(`SELECT upsert_thought('captured during the pass', '{"metadata":{}}'::jsonb, NULL::vector)`);
+  const during = await run(SQL_ENV);
+  assert(/6 thoughts — 2 succeeded \(1 with a caveat\), 1 failed, 0 in flight, 2 pending, 1 not yet in the pool/.test(during.out),
+         "a thought captured during the pass is counted as not yet in the pool");
+
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${KEY} AND status IN ('pending', 'failed')`;
+  const finished = await run(SQL_ENV);
+  assert(/re-embed pass\s+none unfinished/.test(finished.out) && !/not yet in the pool/.test(finished.out),
+         "a finished pass with a thought captured since is finished — after a switch every new capture is such a thought");
+
+  await claims`SELECT enqueue_thoughts(${KEY})`;
+  const [{ thought_id: leasedId }] = await claims`SELECT thought_id FROM claim_thoughts(${KEY}, 'preflight-test', 1)`;
+  const leased = await run(SQL_ENV);
+  assert(/6 thoughts — 5 succeeded \(1 with a caveat\), 0 failed, 1 in flight, 0 pending, 0 not yet in the pool/.test(leased.out),
+         "a row another process holds is unfinished work, counted in flight");
+  await claims`SELECT release_thought(${leasedId}::uuid, ${KEY}, 'preflight-test', 'succeeded')`;
+
+  const CTX = `${KEY}:ctx`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${CTX}', ARRAY['${ids[0]}']::uuid[])`);
+  const other = await run(SQL_ENV);
+  assert(other.code === 0 && new RegExp(`re-embed pass\\s+${CTX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 5 not yet in the pool — a pass under this key stopped before it finished`).test(other.out),
+         "a backfill under --job that stopped is reported by its key, with its counts");
+  assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
+  assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
+  assert(!/--switch-model/.test(other.out), "…and, with the record and the configuration agreeing, no --switch-model in the remedy");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
+
+  /**
+   * A switch that was abandoned or reverted. The corpus was moving to "other",
+   * the operator went back, and other's key keeps its pending rows for ever.
+   * Finishing "that pass" under this shell would write this model's vectors
+   * under other's key — reembed.ts refuses the --job — so the remedy is to
+   * complete that switch in other's environment or retire its record, never
+   * `--job` under the current model (first review pass).
+   */
+  const OTHER = `reembed:other-model@${EMBEDDING_DIM}`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${OTHER}', ARRAY['${ids[0]}']::uuid[])`);
+  const superseded = await run(SQL_ENV);
+  assert(superseded.code === 0 && new RegExp(`${OTHER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
+         "a pass to a model that is no longer the recorded one is described as an abandoned switch");
+  assert(/OB1_EMBEDDING_MODEL=other-model OB1_EMBEDDING_DIM=\d+ bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(superseded.out) && superseded.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${OTHER}';`),
+         "…with the two remedies: finish that switch in its own environment, or retire its record");
+  assert(!superseded.out.includes(`--job ${OTHER}`), "…and never --job under the current model, which reembed.ts would refuse");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${OTHER}`;
+
+  /**
+   * The record disagrees with the configuration — a revert the server has not
+   * followed, or a switch the server is ahead of — and the configured model's
+   * pass is unfinished: the command preflight prints has to carry
+   * --switch-model, or reembed.ts exits 2 on it (first review pass).
+   */
+  await claims.unsafe(`SELECT enqueue_thoughts('${KEY}', ARRAY['${ids[1]}']::uuid[])`);
+  await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
+  await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
+  const reverted = await run(SQL_ENV);
+  assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /the pass to .* has not finished/.test(reverted.out),
+         "with the record on another model and the configured model's pass unfinished, both lines warn");
+  assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model;/.test(reverted.out),
+         "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse");
+  /**
+   * The same disagreement, with an unfinished key preflight cannot read a
+   * model from: the command still needs --switch-model, since the shell it
+   * runs in is the configured one (second review pass — the first pass's
+   * expression for this could never be true).
+   */
+  await claims.unsafe(`SELECT enqueue_thoughts('reembed:nightly', ARRAY['${ids[0]}']::uuid[])`);
+  const nightly = await run(SQL_ENV);
+  assert(/reembed:nightly: 6 thoughts — .* — a pass under this key stopped before it finished/.test(nightly.out) && /bun reembed\.ts --url \$DATABASE_URL --job reembed:nightly --switch-model/.test(nightly.out),
+         "an unfinished key naming no model, while the record disagrees with the configuration, gets --switch-model too");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = 'reembed:nightly'`;
+  await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND status = 'pending'`;
+
+  /**
+   * A hand-applied schema can carry the model row without the width row. The
+   * width then says nothing, and the configured model's own backfill must be
+   * a resumable pass, not "a switch that was abandoned" with a DELETE as its
+   * remedy (second review pass: `dim !== Number(undefined)` is always true).
+   */
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_dim'`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${CTX}', ARRAY['${ids[0]}']::uuid[])`);
+  const noDim = await run(SQL_ENV);
+  assert(noDim.out.includes(`--job ${CTX}`) && !/abandoned or reverted/.test(noDim.out),
+         "with no width recorded, the configured model's backfill is still a pass to resume, not an abandoned switch");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM)})`;
+
+  /**
+   * The same model at another width. Migration 006 keeps the recorded width
+   * equal to the column's and reembed.ts refuses any other, so "finish that
+   * switch" can never run; the only remedy is to retire the record.
+   */
+  const WIDE = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM + 1}`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${WIDE}', ARRAY['${ids[0]}']::uuid[])`);
+  const wide = await run(SQL_ENV);
+  assert(new RegExp(`${WIDE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
+         "a key at another width is described as one no run can finish");
+  assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
+         "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
+
+  await claims.unsafe("DROP TABLE thought_work_claims");
+  const pre015 = await run(SQL_ENV);
+  assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
+         "before migration 015 there is nothing to read, and the check says so rather than warning");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+
+  await claims.unsafe("DELETE FROM thoughts");
+  await claims.close();
 
   const j = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE }, "--json");
   const parsed = JSON.parse(j.out);

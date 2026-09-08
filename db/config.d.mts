@@ -136,6 +136,18 @@ export function embeddingConfigWarnings(
   truncate?: boolean
 ): string[];
 
+/** A bulk pass's counts in one phrase — printed by db/reembed.ts, embedded by preflight (SMD-1024). */
+export type PassCounts = { thoughts: number; succeeded: number; fellBack: number; failed: number; claimed: number; pending: number; unpooled: number };
+export function formatPassCounts(c: PassCounts): string;
+/** The shared rule for "this pass has not finished": a row is pending, leased or failed. */
+export function passUnfinished(c: Pick<PassCounts, "pending" | "claimed" | "failed">): boolean;
+/** How preflight attributes a claim-table key to reembed.ts. */
+export const REEMBED_KEY_PREFIX: "reembed:";
+/** `reembed:<model>@<dim>` — the default key of a pass to a model at a width. */
+export function reembedKey(model: string, dim: number): string;
+/** `reembed:<model>@<dim>[:suffix]` → the model and width it names; null for any other shape. */
+export function parseReembedKey(key: string): { model: string; dim: number } | null;
+
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;
 
