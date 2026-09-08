@@ -198,6 +198,7 @@ import {
   embeddingConfigWarnings,
   formatPassCounts,
   parseReembedKey,
+  type PassCounts,
   passUnfinished,
   REEMBED_KEY_PREFIX,
   reembedKey,
@@ -336,6 +337,9 @@ const recorded = Object.fromEntries(
 const modelChange = recorded.embedding_model !== undefined && recorded.embedding_model !== embedConfig.embeddingModel;
 /** The run records the model — a change, or no record to compare with — and starts every pass to it over. */
 const recordModel = modelChange || recorded.embedding_model === undefined;
+// The retry flags select subsets of the rows recording the model returns anyway.
+const retryFailed = RETRY_FAILED && !recordModel;
+const retryFallbacks = RETRY_FALLBACKS && !recordModel;
 if (recorded.embedding_model === undefined) {
   console.log(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
 } else if (modelChange) {
@@ -421,8 +425,7 @@ async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<n
   return Number(n);
 }
 
-type Counts = { pending: number; claimed: number; succeeded: number; fellBack: number; failed: number; unpooled: number; thoughts: number };
-async function counts(): Promise<Counts> {
+async function counts(): Promise<PassCounts> {
   // One statement, so the caveat count is a subset of the succeeded count it
   // qualifies — --status is asked while workers release rows.
   const rows = (await sql`
@@ -446,7 +449,7 @@ async function counts(): Promise<Counts> {
   };
 }
 
-function printCounts(c: Counts, label: string): void {
+function printCounts(c: PassCounts, label: string): void {
   console.log(`  ${label}: ${formatPassCounts(c)}`);
 }
 
@@ -456,7 +459,7 @@ function printCounts(c: Counts, label: string): void {
  * one account. Printed under --status and at the end of a run; a --dry-run
  * describes a run, not the state, and says nothing here.
  */
-function printPreflightNote(c: Counts): void {
+function printPreflightNote(c: PassCounts): void {
   if (!passUnfinished(c)) return;
   if (PREFLIGHT_SEES) console.error(`  preflight will warn until this finishes: ${JOB} — ${formatPassCounts(c)}`);
   else console.error(`  unfinished, and preflight cannot see this key: ${JOB} — ${formatPassCounts(c)}`);
@@ -567,10 +570,10 @@ if (STATUS_ONLY || DRY_RUN) {
       `\n  would: ${modelChange && !SWITCH_MODEL ? "refuse without --switch-model; with it: " : ""}` +
         `${recordModel ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
         `${restart ? `start this pass over (${restart} row(s) from before the change return to the pool); ` : ""}` +
-        `${RETRY_FAILED && !recordModel ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `${RETRY_FALLBACKS && !recordModel ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
+        `${retryFailed ? `return ${c.failed} failed rows to the pool; ` : ""}` +
+        `${retryFallbacks ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; run ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ` +
-        `over ${c.pending + c.unpooled + restart + (RETRY_FAILED && !recordModel ? c.failed : 0) + (RETRY_FALLBACKS && !recordModel ? c.fellBack : 0)} rows. Nothing was written.`
+        `over ${c.pending + c.unpooled + restart + (retryFailed ? c.failed : 0) + (retryFallbacks ? c.fellBack : 0)} rows. Nothing was written.`
     );
   }
   await sql.close();
@@ -614,8 +617,8 @@ try {
     // under the key recorded. The retry flags are subsumed — they select
     // subsets of the same rows.
     const restarted = recordModel ? await requeue(tx, staleUnderThisJob()) : 0;
-    const retriedFailed = RETRY_FAILED && !recordModel ? await requeue(tx, sql`status = 'failed'`) : 0;
-    const retriedFallbacks = RETRY_FALLBACKS && !recordModel ? await requeue(tx, withCaveat()) : 0;
+    const retriedFailed = retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
+    const retriedFallbacks = retryFallbacks ? await requeue(tx, withCaveat()) : 0;
     const [{ added }] = await tx`SELECT enqueue_thoughts(${JOB}) AS added`;
     // enqueue_thoughts analyses only when it added rows; a requeue moves as
     // many into the pending index and would otherwise leave the statistics

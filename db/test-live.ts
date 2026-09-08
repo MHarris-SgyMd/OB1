@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, dropSchema, neverAnswers, seededRandom } from "./test-support.ts";
+import { createAssert, dropSchema, neverAnswers, runScript, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -51,14 +51,8 @@ if (!URL_) {
 const { assert, skip, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
-async function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn(["bun", join(HERE, "migrate.ts"), "--url", URL_!, ...extra], {
-    stdout: "pipe",
-    stderr: "pipe",
-    cwd: HERE,
-  });
-  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-  return { code: await p.exited, out };
+function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
+  return runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_!, ...extra], { cwd: HERE });
 }
 
 const unit = (i: number) => {
@@ -688,14 +682,10 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   delete env.OB1_EMBEDDING_DIMENSIONS;
   delete env.OB1_CHUNK_CONTEXT;
   delete env.OB1_LLM_API_KEY;
-  const reembedIn = async (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string }> => {
+  const reembedIn = (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string }> => {
     // The suite's key unless the call names its own (flag() reads the first --job).
     const job = extra.includes("--job") ? [] : ["--job", REEMBED_JOB];
-    const p = Bun.spawn(["bun", join(HERE, "reembed.ts"), "--url", URL_!, ...job, ...extra], {
-      env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe", cwd: HERE,
-    });
-    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-    return { code: await p.exited, out };
+    return runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, ...job, ...extra], { env: { ...env, ...extraEnv } as Record<string, string>, cwd: HERE });
   };
   const reembed = (...extra: string[]) => reembedIn({}, ...extra);
   const claimCounts = async () =>
@@ -706,13 +696,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // server-portable/preflight.ts against the same database, configured as the
   // run is (the stub is a loopback endpoint, so no credential is needed).
-  const preflight = async (): Promise<{ code: number; out: string }> => {
+  const preflight = (): Promise<{ code: number; out: string }> => {
     const penv: Record<string, string | undefined> = { ...env, OB1_STORE: "sql", MCP_ACCESS_KEY: "x".repeat(64) };
     for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY"]) delete penv[k];
     const dir = join(HERE, "..", "server-portable");
-    const p = Bun.spawn(["bun", join(dir, "preflight.ts")], { env: penv, stdout: "pipe", stderr: "pipe", cwd: dir });
-    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-    return { code: await p.exited, out };
+    return runScript(["bun", join(dir, "preflight.ts")], { env: penv as Record<string, string>, cwd: dir });
   };
   const PASS_LINE = /re-embed pass\s+reembed:test: (\d+ thoughts — [^\n]*not yet in the pool) — a pass under this key stopped before it finished/;
 
@@ -1099,11 +1087,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
     OB1_WORKER_KEY: rawKey,
     MCP_ACCESS_KEYS: `entity-worker:write:${hashKey(rawKey)}`,
   };
-  const extract = async (...extra: string[]): Promise<{ code: number; out: string }> => {
-    const p = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
-    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-    return { code: await p.exited, out };
-  };
+  const extract = (...extra: string[]): Promise<{ code: number; out: string }> =>
+    runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
   const graph = async () => (await sql`
     SELECT (SELECT count(*)::int FROM ob1_entities) AS entities,
            (SELECT count(*)::int FROM thought_entities) AS mentions,

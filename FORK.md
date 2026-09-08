@@ -2753,7 +2753,13 @@ restart resets `attempt_count` on an expired lease as on any row it returns,
 because a model change is a new pass, not the reaper continuing the old one.
 Ticket: a vector carries no model, so the claim table is a proxy that vanishes
 when rows are cleared — SMD-1068 weighs a per-row `embedding_model` column.
-Suites after: live 207, preflight 83.
+Suites after: live 207, preflight 83. Then the tidy-ups the passes had cut for
+space, while the files were open: the counts type was declared three times
+(`reembed.ts`, `preflight.ts`, `config.d.mts`) and is imported from the one
+declaration; the two retry flags were qualified by `!recordModel` five times
+and are decided once; the spawn-and-collect body five suites had written is
+`runScript` in `db/test-support.ts`; and the prefix scan in preflight says why
+it is a scan.
 
 **Not done here.** The PostgREST branch cannot read the claim table, as it
 cannot read anything else the schema checks read; per-row lease renewal

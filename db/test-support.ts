@@ -273,6 +273,20 @@ export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+/**
+ * Run a script as a subprocess and collect its exit code with everything it
+ * printed, stdout then stderr — so a suite observes the real exit code, and an
+ * assertion can read a message whichever stream it went to. Five suites had
+ * written this body (SMD-1024's second review pass counted). `env` replaces
+ * the inherited environment when given; a caller that wants the parent's plus
+ * a few builds that object itself.
+ */
+export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string }> {
+  const p = Bun.spawn(cmd, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
+  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+  return { code: await p.exited, out };
+}
+
 export function requireDatabaseUrl(script: string): string {
   const url = process.env.DATABASE_URL;
   if (!url) {

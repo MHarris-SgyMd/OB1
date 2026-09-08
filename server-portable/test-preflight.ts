@@ -13,7 +13,7 @@
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema } from "../db/test-support.ts";
+import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -41,11 +41,7 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
     if (v !== undefined) clean[k] = String(v);
   }
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete clean[k];
-  const p = Bun.spawn(["bun", join(HERE, "preflight.ts"), ...args], {
-    env: clean, stdout: "pipe", stderr: "pipe", cwd: HERE,
-  });
-  const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
-  return { code: await p.exited, out };
+  return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
 
 const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined };

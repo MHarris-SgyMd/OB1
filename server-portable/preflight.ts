@@ -25,6 +25,7 @@
 
 import { createStore, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
+import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
 type Check = { name: string; status: Status; detail: string; fix?: string };
@@ -771,7 +772,10 @@ if (configFailed) {
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
           } else {
-            type PassCounts = { thoughts: number; succeeded: number; fellBack: number; failed: number; claimed: number; pending: number; unpooled: number };
+            // A prefix LIKE cannot use the key's btree index under a non-C
+            // collation, so this reads the claim table once per start; it is
+            // one row per (thought, pass), grouped, and the corpus count is
+            // evaluated only when there are groups.
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
