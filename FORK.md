@@ -2597,7 +2597,18 @@ truthfully. Three operator-facing descriptions of `OB1_LLM_TIMEOUT` omitted
 the metadata call; the claim that every provider call goes through
 `providerCall` was narrowed to the server's and this pass's — `extract-entities.ts`
 keeps its own per-call `--timeout` and preflight its one-shot probes. Nothing
-here touched the caveat rule, the pass's per-row decision or the timeout.
+here touched the caveat rule, the pass's per-row decision or the timeout. Then
+the tidy-ups the passes had cut for space, while the files were open: the four
+hand-rolled "empty, non-numeric or out of range means the default" tests in
+`resolveEmbedConfig` are one `numberOr`; `embedCapture` reports one refusal
+variable rather than a second flag OR-ed with the first, and carries the error
+as a plain field; the two stubs that never answer share `neverAnswers` in
+`db/test-support.ts`, which is where the two things a test has to know about
+such a stub are written down; and the two functions in `index.ts` that built
+the provider URL and headers, dead once the metadata call went through
+`providerCall`, are gone. The 300-character caps in `entities.ts` and on
+`extract-entities.ts`'s configuration error stay: they bound a stderr line,
+not a stored value.
 
 **Not done here.** A bounded in-call retry of a transient whole-content failure
 (a 429 wants a backoff a single retry does not give; the failed-row path is

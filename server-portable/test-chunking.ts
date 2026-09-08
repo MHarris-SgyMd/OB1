@@ -22,7 +22,7 @@
 import { SQL } from "bun";
 import { estimateTokens } from "./chunk.ts";
 import { createEmbedder, resolveEmbedConfig } from "./embed.ts";
-import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { createAssert, neverAnswers, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
 
 const URL_ = requireDatabaseUrl("test-chunking.ts");
@@ -60,7 +60,7 @@ const provider = Bun.serve({
       // content carrying it — never a window, which is under the batch, so a
       // long capture's windows still embed while its whole-content call hangs.
       if (input.includes("tarpit") && (input === "tarpit" || estimateTokens(input) > BATCH)) {
-        await new Promise(() => {});
+        await neverAnswers();
       }
       // Headers, then a body that never ends — the other way a call can fail to
       // return, and the one a timeout attached to fetch() alone does not name.
@@ -90,7 +90,7 @@ const provider = Bun.serve({
       return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
     }
     if (asked.includes("blurbtarpit")) {
-      await new Promise(() => {});
+      await neverAnswers();
     }
     return Response.json({
       choices: [{ message: { content: JSON.stringify({ topics: ["long"], type: "reference", people: [] }) } }],

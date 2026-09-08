@@ -112,12 +112,6 @@ function agents(): AgentResolver {
 function embedConfig(): EmbedConfig {
   return resolveEmbedConfig(env());
 }
-function llmBase(): string {
-  return embedConfig().llmBase;
-}
-function llmHeaders(): Record<string, string> {
-  return embedConfig().headers;
-}
 function metadataModel(): string {
   return embedConfig().metadataModel;
 }

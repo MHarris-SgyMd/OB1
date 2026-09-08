@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, dropSchema, seededRandom } from "./test-support.ts";
+import { createAssert, dropSchema, neverAnswers, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -628,7 +628,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       }
       if (tarpitOpen && input === tarpitText) {
         tarpitOpen = false;
-        await new Promise(() => {});
+        await neverAnswers();
       }
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);

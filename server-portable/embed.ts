@@ -221,14 +221,6 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
   // logs, so the header is omitted entirely when there is no key.
   const key = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
-  // Number("") is 0, which passes the overlap's `>= 0` below and windowed long
-  // captures with NO overlap — and deploy/compose.yaml forwards every optional
-  // variable as `${VAR:-}`, so a composed server saw "" wherever the operator
-  // set nothing. Empty means unset, as db/config.mjs's ENV proxy already says;
-  // the first review of SMD-946 found the server and reembed.ts chunking
-  // differently over the same corpus for exactly this reason.
-  const chunkTokens = env.OB1_CHUNK_TOKENS ? Number(env.OB1_CHUNK_TOKENS) : NaN;
-  const chunkOverlap = env.OB1_CHUNK_OVERLAP ? Number(env.OB1_CHUNK_OVERLAP) : NaN;
   return {
     llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
     headers: key
@@ -251,31 +243,33 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     // than close to it: the token count is an estimate, and a chunk that
     // overshoots is silently truncated, which is the failure being fixed rather
     // than a degradation of it.
-    chunkTokens: Number.isFinite(chunkTokens) && chunkTokens > 0 ? chunkTokens : DEFAULT_MAX_TOKENS,
-    chunkOverlap: Number.isFinite(chunkOverlap) && chunkOverlap >= 0 ? chunkOverlap : DEFAULT_OVERLAP_TOKENS,
+    chunkTokens: numberOr(env.OB1_CHUNK_TOKENS, DEFAULT_MAX_TOKENS, "positive"),
+    chunkOverlap: numberOr(env.OB1_CHUNK_OVERLAP, DEFAULT_OVERLAP_TOKENS, "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
     metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
-    metadataTemperature: metadataTemperature(env.OB1_METADATA_TEMPERATURE),
+    // Deterministic by default; overridable for anyone who wants variety.
+    metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
-    timeoutMs: llmTimeoutMs(env.OB1_LLM_TIMEOUT),
+    // Seconds, as --ttl and --timeout are elsewhere in this fork; a timeout of
+    // zero would fail every call, so zero means the default too.
+    timeoutMs: numberOr(env.OB1_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT_S, "positive") * 1000,
   };
 }
 
-/** Deterministic by default; overridable for anyone who wants variety. */
-function metadataTemperature(raw: string | undefined): number {
-  if (raw === undefined || raw === "") return 0;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
 /**
- * Seconds, as --ttl and --timeout are elsewhere in this fork. Empty, non-numeric
- * and non-positive all mean the default — a timeout of zero would fail every
- * call, and "" is what compose forwards for an unset variable.
+ * One rule for every numeric variable this file reads: empty, non-numeric and
+ * out-of-range all mean the default. Number("") is 0, which passed the
+ * overlap's `>= 0` and windowed long captures with NO overlap — and
+ * deploy/compose.yaml forwards every optional variable as `${VAR:-}`, so a
+ * composed server saw "" wherever the operator set nothing. Empty means
+ * unset, as db/config.mjs's ENV proxy already says; the first review of
+ * SMD-946 found the server and reembed.ts chunking differently over the same
+ * corpus for exactly this reason, and this was four hand-rolled copies of the
+ * same test until the boyscout pass of SMD-1021.
  */
-function llmTimeoutMs(raw: string | undefined): number {
+function numberOr(raw: string | undefined, fallback: number, range: "positive" | "non-negative"): number {
   const n = raw ? Number(raw) : NaN;
-  return (Number.isFinite(n) && n > 0 ? n : DEFAULT_LLM_TIMEOUT_S) * 1000;
+  return Number.isFinite(n) && (range === "positive" ? n > 0 : n >= 0) ? n : fallback;
 }
 
 /**
@@ -556,9 +550,9 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       : windows.map((): { text: string; error?: string } => ({ text: "" }));
     const contexts = blurbs.map((b) => b.text);
 
-    // This call's own refusal, distinct from the remembered one: with
-    // rememberRefusal off it is the only record there is.
-    let refusedHere = false;
+    // What this result reports: the remembered refusal, or this call's own —
+    // with rememberRefusal off the latter is the only record there is.
+    let refused = wholeContentRefused;
     let wholeContentError: string | undefined;
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
@@ -577,7 +571,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             // recording success (first review of SMD-946).
             wholeContentError = e.message;
             if (refusesLength(e.status, e.body ?? "")) {
-              refusedHere = true;
+              refused = true;
               if (rememberRefusal) wholeContentRefused = true;
               console.error(
                 `embedCapture: ${cfg.embeddingModel} refused the whole content (${e.status}); ` +
@@ -604,8 +598,8 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
       contextErrors: [...new Set(blurbs.flatMap((b) => (b.error ? [b.error] : [])))],
       wholeContentFellBack: whole === null,
-      wholeContentRefused: wholeContentRefused || refusedHere,
-      ...(wholeContentError !== undefined ? { wholeContentError } : {}),
+      wholeContentRefused: refused,
+      wholeContentError,
     };
   }
 
