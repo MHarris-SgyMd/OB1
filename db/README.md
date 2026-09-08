@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `347 assertions: 347 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighteen migrations applied, and
+`bun test-schema.ts` prints `366 assertions: 366 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports nineteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -90,6 +90,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
 | `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` are not covered. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
+| `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
 
 ## What changed relative to the guide
 
@@ -552,7 +553,9 @@ the header of `migrations/011_text_search_trgm.sql`.
 What a filtered `match_thoughts` returns against an exact scan of the same rows,
 and whether the candidate LIMIT above the default count is honoured. Random
 64-dimensional vectors with filter tiers planted at 50%, 10%, 1% and 0.1%; the
-function as shipped by 001–013, then 014 applied onto the same rows.
+function as shipped by 001–013, then 014 and every later migration applied onto
+the same rows — the plans are read from the catalog, so the after arm holds the
+function a deployment actually has.
 
 ```bash
 ./with-postgres.sh bun bench-hnsw.ts
@@ -578,6 +581,64 @@ generic plan, to show what the seeded scan bounds do when the walk is reached
 on a table large enough to reach it. The headline table is in the header of
 `migrations/014_filtered_match_thoughts.sql`; the real-corpus version is
 `evals/eval-filtered.ts`.
+
+### bench-plan.ts
+
+Whether the *unfiltered* `match_thoughts` reaches the HNSW index, at the width
+this fork ships (upstream #469, SMD-969). `bench-hnsw.ts` explains only the
+filtered branches, at 64 dimensions; this one explains the unfiltered branch's
+own statement — read from the catalog, as section C above does — at
+`EMBEDDING_DIM`, under `EXPLAIN (ANALYZE, BUFFERS)`, at match_count 10, 50 and
+500, in four arms: the function as 014 plans it, the same with `enable_seqscan
+= off`, the same with `random_page_cost = 1.1` (the cost-model remedy the
+ticket asked to weigh), and 019's function under its own SET clauses.
+
+```bash
+./with-postgres.sh bun bench-plan.ts                     # 1,000 / 10,000 / 100,000 rows at EMBEDDING_DIM
+OB1_BENCH_SCALES=1000,10000 ./with-postgres.sh bun bench-plan.ts
+OB1_BENCH_DIM=64 ./with-postgres.sh bun bench-plan.ts   # bench-hnsw's width, for contrast
+./with-postgres.sh bun bench-plan.ts --plans             # print the full plans
+```
+
+The headline, 1,024 dimensions, one thought in five with a chunk row, the node
+that produced each candidate CTE's rows and the shared buffers the whole
+statement read:
+
+| rows | heap / TOAST | count | as 014 plans it | buffers | `enable_seqscan = off` | buffers | `random_page_cost = 1.1` |
+| ---: | --- | ---: | --- | ---: | --- | ---: | --- |
+| 1,000 | 120 kB / 5.4 MB | 10 | seq / seq, 2.7 ms | 8,032 | index / index, 0.8 ms | 1,887 | index / seq |
+| 1,000 | | 50 | seq / seq, 2.9 ms | 8,032 | index / index, 2.1 ms | 5,675 | seq / seq |
+| 10,000 | 1.2 MB / 53 MB | 10 | index / **seq**, 5.3 ms | 15,412 | index / index, 1.8 ms | 3,404 | index / index |
+| 10,000 | | 50 | seq / seq, 28.8 ms | 80,317 | index / index, 6.5 ms | 11,143 | index / seq |
+| 10,000 | | 500 | seq / seq, 30.8 ms | 80,317 | index / index, 32.4 ms | 57,406 | seq / seq |
+| 100,000 | 12 MB / 527 MB | 10 | index / index, 2.7 ms | 4,449 | the same plan | | index / index |
+| 100,000 | | 50 | index / index, 12.1 ms | 17,391 | the same plan | | index / index |
+| 100,000 | | 500 | seq / seq, 275 ms | 1,016,132 | index / index, 170–290 ms | 115,370 | index / seq |
+
+Buffers are shared hits *and* reads — the default 128 MB of `shared_buffers`
+cannot hold a 527 MB TOAST relation, so the large seq scans land mostly in
+reads. The second table the bench prints is the filtered statements under
+both settings, since the clause is function-wide: the routing statement takes
+the GIN bitmap either way, the exact branch is unchanged, and the walk's plan
+is the same or better (its chunk side moves from a seq scan to its HNSW index
+at 10,000 rows).
+
+The mechanism is in the heap / TOAST column: at 1,024 dimensions a vector is
+~4 KB, past the TOAST threshold, so at 10,000 rows the heap is 912 kB and the
+TOAST relation 53 MB. The planner prices a sequential scan by heap pages and
+never counts the detoast reads — it estimated 114 pages, the scan read 66,780
+buffers — so the estimate is wrong in kind, not by a factor, and a lower
+`random_page_cost` moves the boundary without removing it. The sequential scan
+is chosen wherever the heap is small: at the shipped width that is every brain
+up to some tens of thousands of thoughts — the chunk table first, since it is
+"small" in heap pages while every one of its rows is a vector — and the
+ceiling at every size. At 100,000 rows the heap alone is 1,225 pages and the
+estimate turns for the counts callers send, so the setting changes nothing
+there but the ceiling, where the index touches a ninth of the buffers. At 64 dimensions the
+vectors are inline and the planner is right, which is why the 64-dimensional
+bench could not see this. The full table is in the header of
+`migrations/019_match_thoughts_plan_and_rows.sql`; `test-live.ts` [5c] holds
+the decision in CI at 2,000 rows.
 
 ### bench-keyword.ts
 
@@ -655,8 +716,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 207 assertions, real server, throwaway container
+bun test-schema.ts                    # 366 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 222 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -674,7 +735,16 @@ container.
   a test that writes SQL literals. It only appears when a client binds a JS value
   to a `jsonb` parameter.
 - **The planner.** Whether HNSW is actually chosen, rather than merely present.
-- **Filtered recall at scale.** [5b] loads 1,000 random rows through a real HNSW
+  [5] shows the index is reachable; [5c] shows it is chosen: the unfiltered
+  branch's own statement, read from the catalog and run under the function's
+  SET clauses at the configured width over [5b]'s 2,000 rows and 400 chunk
+  rows, is an `Index Scan` on both HNSW indexes at match_count 10 and 50 under
+  both plan modes — and, checked first, the same statement without 019's
+  setting leaves at least one CTE off its index at that scale, so the section
+  is not passing vacuously; where a planner takes both unaided (a narrower
+  width, a tuned server) that control is skipped with the reason and the count
+  reads 220 with 2 skipped.
+- **Filtered recall at scale.** [5b] loads 2,000 random rows through a real HNSW
   index, tags 1% of them, and asserts a filtered `match_thoughts` returns exactly
   what a full scan returns. Under 007 that filter returned almost nothing.
 - **Concurrent claims.** [8] holds ten leases open in one transaction while
@@ -731,7 +801,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 347 properties, including:
+asserts 366 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -822,6 +892,13 @@ asserts 347 properties, including:
   refuses a stale write; and `update_thought` is still one function whose body
   names 008's actor, 009's guard, 013's context, 016's fingerprint function and
   the advisory lock
+- **the plan setting and the row estimates** (migration 019): `match_thoughts`
+  carries exactly `hnsw.iterative_scan=relaxed_order` and `enable_seqscan=off`
+  and declares `ROWS 10`, `search_thoughts_keyword` declares `ROWS 25`, a
+  composing `EXPLAIN` estimates 10 and 25 rows, both bodies are 014's and 012's
+  byte for byte (re-applied and compared), and re-applying 014 or 012 alone
+  resets the estimate to 1,000 and drops the setting — the trap that put both
+  in the defining statements
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

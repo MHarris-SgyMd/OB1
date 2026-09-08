@@ -297,6 +297,156 @@ export function requireDatabaseUrl(script: string): string {
 }
 
 /**
+ * match_thoughts' own statements, as parameterised SQL. Read from the catalog so
+ * it is the DEPLOYED text — EXPLAIN cannot see inside a plpgsql function, and
+ * a copy of the body kept here would be the body as someone remembered it. The
+ * rewrite is deliberately narrow — the four parameters and the DECLAREd locals
+ * — and refuses anything it does not recognise rather than explaining a
+ * statement that is not the function's.
+ *
+ * Shared by db/bench-hnsw.ts (the filtered branches), db/bench-plan.ts and
+ * db/test-live.ts [5c] (the unfiltered one), so the three explain the same
+ * text under the same rewrite.
+ *
+ * `route` is the statement that decides between the filtered branches: the
+ * capped collection of matching ids that runs on EVERY filtered call. It is a
+ * plpgsql SELECT INTO rather than a RETURN QUERY, so it is extracted on its own.
+ */
+export type Branch = "unfiltered" | "walk" | "exact" | "route";
+
+export async function extractBody(sql: SQL, branch: Branch, dim: number): Promise<string> {
+  const [{ def }] = await sql.unsafe(
+    `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
+  );
+  let block: string | undefined;
+  if (branch === "route") {
+    // `SELECT array_agg(s.id) INTO v_ids FROM (...) s;` — minus the INTO.
+    const m = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
+    if (!m) throw new Error("match_thoughts has no `SELECT array_agg(s.id) INTO v_ids` routing statement; the bench's rewrite does not apply");
+    block = `SELECT array_agg(s.id) ${m[1]}`;
+  } else {
+    // Three RETURN QUERY branches: unfiltered, the exact answer for a thin
+    // filter, and the HNSW walk for a broad one. Only the walk tests
+    // `metadata @> filter` and LIMITs its candidate CTEs; the exact branch
+    // reads the ids the routing statement collected; the unfiltered one does
+    // neither.
+    const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|ELSIF|END IF;|END;)/g)].map((x) => x[1]);
+    block =
+      branch === "walk"
+        ? blocks.find((b) => /@>\s*filter/.test(b) && /LIMIT\s+v_fetch/.test(b))
+        : branch === "exact"
+          ? blocks.find((b) => /ANY \(v_ids\)/.test(b))
+          : blocks.find((b) => !/@>\s*filter/.test(b) && !/ANY \(v_ids\)/.test(b));
+    if (!block) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s) and no ${branch} branch; the bench's rewrite does not apply`);
+  }
+  let body = block;
+  // The exact branch reads `v_ids`, which the routing statement fills; splice
+  // that statement in as a scalar subquery so the explained text stands alone —
+  // before the locals are substituted, since that statement uses v_exact.
+  const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
+  if (route) body = body.replace(/\bv_ids\b/g, () => `((SELECT array_agg(s.id) ${route[1]})::uuid[])`);
+  const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
+  const locals: [string, string][] = [];
+  for (const line of declared.split("\n")) {
+    // `name  type words  := expr;` — the type may be several words
+    // (`double precision`, `timestamp with time zone`).
+    const d = /^\s*(\w+)\s+[\w ]+?\s*:=\s*(.+);\s*$/.exec(line);
+    if (d) locals.push([d[1], d[2]]);
+  }
+  // Replacer FUNCTIONS throughout: a replacement string would interpret `$1`,
+  // `$&` or `$$` inside an expression as a pattern, and 014's SQL is one `$$`
+  // away from that. Locals may reference earlier locals (v_fetch is built from
+  // v_count), so substitute until none remain rather than in one pass.
+  for (let pass = 0; pass < locals.length + 1; pass++) {
+    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${expr})`);
+  }
+  body = body
+    .replace(/\bquery_embedding\b/g, () => `$1::vector(${dim})`)
+    .replace(/\bmatch_threshold\b/g, () => "$2::float")
+    .replace(/\bmatch_count\b/g, () => "$3::int")
+    .replace(/\bfilter\b/g, () => "$4::jsonb");
+  const leftover = /\b(v_\w+)\b/.exec(body);
+  if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
+  return body;
+}
+
+
+/**
+ * Apply match_thoughts' function-level SET clauses to the current transaction,
+ * so a statement extracted from its body is planned as the function plans it.
+ * proconfig is read as an array and applied through set_config with bound
+ * parameters: a joined string split on commas would break the first time a
+ * list-valued setting such as `search_path = public, extensions` is added to
+ * the function. A plan mode is skipped: the callers exist to show both plans,
+ * and a successor that forced one would otherwise hide the other.
+ */
+export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transaction" | "session" } = {}): Promise<string[]> {
+  const entries = await tx.unsafe(
+    `SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
+  );
+  const applied: string[] = [];
+  for (const { kv } of entries as { kv: string }[]) {
+    const eq = kv.indexOf("=");
+    if (eq < 0) throw new Error(`unexpected proconfig entry ${JSON.stringify(kv)}`);
+    if (kv.slice(0, eq) === "plan_cache_mode") continue;
+    // Transaction scope (set_config's is_local) is the default and matches
+    // SET LOCAL; a caller that PREPAREs once and EXECUTEs many statements
+    // outside a transaction asks for session scope and RESETs the names
+    // returned here when it is done (bench-hnsw.ts section D).
+    await tx.unsafe(`SELECT set_config($1, $2, $3)`, [kv.slice(0, eq), kv.slice(eq + 1), opts.scope !== "session"]);
+    applied.push(kv.slice(0, eq));
+  }
+  return applied;
+}
+
+/**
+ * PREPARE a statement extracted by `extractBody`, optionally run it once to
+ * warm the buffers, EXPLAIN (ANALYZE, BUFFERS) the EXECUTE, DEALLOCATE. The
+ * caller has applied the settings it wants on `tx` (applyFunctionSettings, or
+ * SET LOCAL for an arm the function does not have) and chooses the plan mode.
+ * One body for the four explainers (second review pass), so a change to the
+ * EXPLAIN form or the parameter list has one place to land.
+ */
+export async function explainPrepared(
+  tx: SQL,
+  opts: { body: string; dim: number; args: string; mode: "force_custom_plan" | "force_generic_plan"; warm?: boolean }
+): Promise<{ text: string; ms: number; buffers: number }> {
+  await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
+  await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb) AS ${opts.body}`);
+  if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
+  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE ob1_explain(${opts.args})`);
+  await tx.unsafe(`DEALLOCATE ob1_explain`);
+  const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+  return { text, ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN), buffers: buffersOf(text) };
+}
+
+/**
+ * Give every `every`-th synthetic thought (content `row N`) one chunk row
+ * carrying the parent's own vector, so the chunk CTE has an index to reach and
+ * a table to scan. The parent's vector on purpose: the point is rows in the
+ * chunk table, not a chunk that out-scores its parent, so a MAX over parent
+ * and chunk is the parent's score and every exactness assertion is unaffected.
+ * db/bench-plan.ts and db/test-live.ts [5b] both load this shape.
+ */
+export async function loadChunkRows(sql: SQL, every: number): Promise<void> {
+  await sql.unsafe(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
+                    SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % ${Math.max(1, Math.floor(every))} = 0`);
+}
+
+/**
+ * Shared buffers the whole statement touched, from EXPLAIN (ANALYZE, BUFFERS)
+ * text: the TOP node's `Buffers:` line, hits AND reads. A regex for `hit=`
+ * alone under-counts whenever part of the I/O missed shared_buffers — the
+ * default 128 MB container cannot hold a 527 MB TOAST relation, so a seq scan
+ * there lands mostly in `read=` — and under-counts in the direction that
+ * flatters the plan that read less (first review pass).
+ */
+export function buffersOf(plan: string): number {
+  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(plan);
+  return m ? Number(m[1] ?? 0) + Number(m[2] ?? 0) : 0;
+}
+
+/**
  * A seeded PRNG for suites that need reproducible random vectors, so the same
  * seed produces the same rows on every machine and in CI. bench-hnsw.ts,
  * test-live.ts and evals/eval-filtered.ts each carried a copy; this is the one.

@@ -15,8 +15,8 @@
  * plan is measured, not inferred (SMD-925 learned this the hard way: a
  * statistics counter read too early said "index not used" while the timing
  * column said otherwise). So this loads a synthetic corpus, asks the function
- * as shipped by migrations 001–013, applies 014 on top of the SAME rows, and
- * asks again.
+ * as shipped by migrations 001–013, applies 014 and every later migration on
+ * top of the SAME rows, and asks again.
  *
  * ── What is measured ─────────────────────────────────────────────────────────
  *
@@ -79,7 +79,8 @@
  */
 
 import { SQL } from "bun";
-import { applyMigrations, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
@@ -88,7 +89,14 @@ const PRINT_PLANS = process.argv.includes("--plans");
 const DIM = 64;
 const OPTS = { dim: DIM, model: "stub-embed" };
 // The defaults are the run every published table came from, so the documented
-// command reproduces the documented numbers.
+// command reproduces the documented numbers — with one caveat since 019: the
+// after arm applies every migration from 014 on, so the function it times and
+// explains carries `enable_seqscan = off` as well. The recall tables in 014's
+// header and FORK.md change 28 were measured under 014 alone; at K = 10 the
+// index was the plan either way, so they reproduce, while the asked-500
+// latencies in section A and the chunk side of section C's plans (where the
+// planner's own choice at 64 dimensions was a seq scan above 200 candidates)
+// are now the deployed function's and may differ from the published lines.
 const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
   .split(",")
   .map((s) => Number(s.trim()))
@@ -294,72 +302,6 @@ async function filtered(
   };
 }
 
-/**
- * The function's own RETURN QUERY, as a parameterised statement. Read from the
- * catalog so it is the deployed text. The rewrite is deliberately narrow — the
- * four parameters and the two DECLAREd locals — and refuses anything it does
- * not recognise rather than explaining a statement that is not the function's.
- */
-/**
- * `route` is the statement that decides between the other two: the capped
- * collection of matching ids that runs on EVERY filtered call. It is a plpgsql
- * SELECT INTO rather than a RETURN QUERY, so it is extracted on its own.
- */
-type Branch = "walk" | "exact" | "route";
-
-async function extractBody(sql: SQL, branch: Branch): Promise<string> {
-  const [{ def }] = await sql.unsafe(
-    `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
-  );
-  let block: string | undefined;
-  if (branch === "route") {
-    // `SELECT array_agg(s.id) INTO v_ids FROM (...) s;` — minus the INTO.
-    const m = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
-    if (!m) throw new Error("match_thoughts has no `SELECT array_agg(s.id) INTO v_ids` routing statement; the bench's rewrite does not apply");
-    block = `SELECT array_agg(s.id) ${m[1]}`;
-  } else {
-    // Three RETURN QUERY branches: unfiltered, the exact answer for a thin
-    // filter, and the HNSW walk for a broad one. Only the walk tests
-    // `metadata @> filter` and LIMITs its candidate CTEs; the exact branch
-    // reads the ids the routing statement collected.
-    const blocks = [...def.matchAll(/RETURN QUERY\s+([\s\S]*?);\s*(?=ELSE|ELSIF|END IF;|END;)/g)].map((x) => x[1]);
-    block =
-      branch === "walk"
-        ? blocks.find((b) => /@>\s*filter/.test(b) && /LIMIT\s+v_fetch/.test(b))
-        : blocks.find((b) => /ANY \(v_ids\)/.test(b));
-    if (!block) throw new Error(`match_thoughts has ${blocks.length} RETURN QUERY block(s) and no ${branch} branch; the bench's rewrite does not apply`);
-  }
-  let body = block;
-  // The exact branch reads `v_ids`, which the routing statement fills; splice
-  // that statement in as a scalar subquery so the explained text stands alone —
-  // before the locals are substituted, since that statement uses v_exact.
-  const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
-  if (route) body = body.replace(/\bv_ids\b/g, () => `((SELECT array_agg(s.id) ${route[1]})::uuid[])`);
-  const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
-  const locals: [string, string][] = [];
-  for (const line of declared.split("\n")) {
-    // `name  type words  := expr;` — the type may be several words
-    // (`double precision`, `timestamp with time zone`).
-    const d = /^\s*(\w+)\s+[\w ]+?\s*:=\s*(.+);\s*$/.exec(line);
-    if (d) locals.push([d[1], d[2]]);
-  }
-  // Replacer FUNCTIONS throughout: a replacement string would interpret `$1`,
-  // `$&` or `$$` inside an expression as a pattern, and 014's SQL is one `$$`
-  // away from that. Locals may reference earlier locals (v_fetch is built from
-  // v_count), so substitute until none remain rather than in one pass.
-  for (let pass = 0; pass < locals.length + 1; pass++) {
-    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${expr})`);
-  }
-  body = body
-    .replace(/\bquery_embedding\b/g, () => `$1::vector(${DIM})`)
-    .replace(/\bmatch_threshold\b/g, () => "$2::float")
-    .replace(/\bmatch_count\b/g, () => "$3::int")
-    .replace(/\bfilter\b/g, () => "$4::jsonb");
-  const leftover = /\b(v_\w+)\b/.exec(body);
-  if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
-  return body;
-}
-
 type PlanShape = { thoughts: string; chunks: string; ms: number; text: string };
 
 /**
@@ -405,38 +347,16 @@ function shapeOf(plan: string, ms: number): PlanShape {
 }
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<{ custom: PlanShape; generic: PlanShape }> {
-  const body = await extractBody(sql, branch);
+  const body = await extractBody(sql, branch, DIM);
   const out: Record<string, PlanShape> = {};
   for (const mode of ["force_custom_plan", "force_generic_plan"]) {
-    const rows = await sql.begin(async (tx: SQL) => {
+    const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
-      // same settings the function declares so the plan is the one it gets.
-      // proconfig is read as an array and applied through set_config with bound
-      // parameters: a joined string split on commas would break the first time
-      // a list-valued setting such as `search_path = public, extensions` is
-      // added to the function, and it would break after the full load.
-      const entries = await tx.unsafe(
-        `SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
-      );
-      for (const { kv } of entries as { kv: string }[]) {
-        const eq = kv.indexOf("=");
-        if (eq < 0) throw new Error(`unexpected proconfig entry ${JSON.stringify(kv)}`);
-        // 014 declares no plan mode; should a successor add one, it is the one
-        // setting this section must NOT inherit, since it exists to show both
-        // plans.
-        if (kv.slice(0, eq) === "plan_cache_mode") continue;
-        await tx.unsafe(`SELECT set_config($1, $2, true)`, [kv.slice(0, eq), kv.slice(eq + 1)]);
-      }
-      await tx.unsafe(`SET LOCAL plan_cache_mode = ${mode}`);
-      await tx.unsafe(`PREPARE bench_mt(vector(${DIM}), float, int, jsonb) AS ${body}`);
-      const r = await tx.unsafe(
-        `EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_mt('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`
-      );
-      await tx.unsafe(`DEALLOCATE bench_mt`);
-      return r;
+      // same settings the function declares so the plan is the one it gets —
+      // all but a plan mode, since this section exists to show both plans.
+      await applyFunctionSettings(tx);
+      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb`, mode: mode as "force_custom_plan" | "force_generic_plan" });
     });
-    const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
-    const ms = Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN);
     out[mode === "force_custom_plan" ? "custom" : "generic"] = shapeOf(text, ms);
   }
   return out as { custom: PlanShape; generic: PlanShape };
@@ -457,7 +377,7 @@ async function reconnect(): Promise<void> {
   sql = new SQL({ url: URL_, max: 1 });
 }
 
-type Arm = "before (001–013)" | "after (014)";
+type Arm = "before (001–013)" | "after (014 on)";
 type Cell = FilteredResult & { key: string; share: number; matches: number };
 type Result = {
   scale: number;
@@ -515,9 +435,12 @@ for (const n of SCALES) {
   }
   console.log(" done");
 
-  for (const arm of ["before (001–013)", "after (014)"] as Arm[]) {
-    if (arm === "after (014)") {
-      await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("014") });
+  for (const arm of ["before (001–013)", "after (014 on)"] as Arm[]) {
+    if (arm === "after (014 on)") {
+      // 014 and everything after it: 019 redefines match_thoughts, and the
+      // plans below are read from the catalog, so the arm holds the function
+      // a deployment actually has rather than a superseded one.
+      await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
       await reconnect(); // the database-level bounds 014 just seeded are read at connect
       const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
       const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
@@ -551,7 +474,7 @@ for (const n of SCALES) {
     const exactTier = [...withRows].reverse().find((t) => t.matches <= V_EXACT);
     const broadest = withRows[withRows.length - 1];
     const pct = (t: { share: number }) => `${t.share * 100}%`;
-    const plan: Result["plan"] = arm === "after (014)" ? {} : undefined;
+    const plan: Result["plan"] = arm === "after (014 on)" ? {} : undefined;
     if (plan) {
       if (walkTier) plan.walk = { branch: "walk", tier: pct(walkTier), matches: walkTier.matches, ...(await plans(sql, queries[0], tierFilter(walkTier.key), "walk")) };
       else console.log(`\n  (no tier above the exact threshold of ${V_EXACT} rows at this scale; the walk branch is not explained)`);
@@ -575,8 +498,11 @@ for (const n of SCALES) {
   // last for its scale — the next scale resets the schema — so nothing needs
   // restoring.
   process.stdout.write("  the walk, forced  ");
-  const walkBody = await extractBody(sql, "walk");
-  await sql.unsafe(`SET hnsw.iterative_scan = relaxed_order`);
+  const walkBody = await extractBody(sql, "walk", DIM);
+  // The function's own SET clauses, session-scoped since the EXECUTEs below run
+  // outside a transaction — under 019 that is the scan mode AND enable_seqscan,
+  // and a plan the deployed function cannot produce is not worth timing.
+  const applied = await applyFunctionSettings(sql, { scope: "session" });
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb) AS ${walkBody}`);
   const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`;
@@ -588,7 +514,7 @@ for (const n of SCALES) {
   }
   await sql.unsafe(`DEALLOCATE bench_walk`);
   await sql.unsafe(`RESET plan_cache_mode`);
-  await sql.unsafe(`RESET hnsw.iterative_scan`);
+  for (const name of applied) await sql.unsafe(`RESET ${name}`);
   console.log(" done");
 }
 

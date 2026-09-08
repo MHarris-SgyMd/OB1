@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, dropSchema, neverAnswers, runScript, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, runScript, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -178,14 +178,22 @@ console.log("\n[4] Capture and search through Bun.sql and real pgvector");
   assert(merged.has === true, "a NULL embedding did not blank the stored vector");
 }
 
-console.log("\n[5] The planner uses the HNSW index");
+console.log("\n[5] The planner can reach the HNSW index");
 {
-  await sql`SET enable_seqscan = off`;
-  const plan = (await sql`EXPLAIN SELECT id FROM thoughts ORDER BY embedding <=> ${unit(0)}::vector LIMIT 1`)
-    .map((r: Record<string, string>) => Object.values(r)[0])
-    .join(" ");
+  // Reachable, not chosen: with sequential scans disabled the index is the
+  // plan, which proves it exists and fits the operator class. Whether the
+  // planner CHOOSES it on the function's own statements, at a size where it
+  // has a real alternative, is [5c].
+  // SET LOCAL inside one transaction, not a session SET on this max-4 pool: the
+  // pool does not promise the EXPLAIN the connection that received the SET,
+  // and a connection left with seq scans off would reach later sections.
+  const plan = await sql.begin(async (tx: SQL) => {
+    await tx`SET LOCAL enable_seqscan = off`;
+    return (await tx`EXPLAIN SELECT id FROM thoughts ORDER BY embedding <=> ${unit(0)}::vector LIMIT 1`)
+      .map((r: Record<string, string>) => Object.values(r)[0])
+      .join(" ");
+  });
   assert(/thoughts_embedding_idx/.test(plan), "thoughts_embedding_idx appears in the plan");
-  await sql`SET enable_seqscan = on`;
 }
 
 console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
@@ -225,7 +233,12 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
     }).join(",");
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
   }
+  // Chunk rows for one thought in five, carrying the parent's own vector, so
+  // the chunk CTE has an index to reach and a table to scan in [5c] (the
+  // assertions below are unaffected — the helper says why).
+  await loadChunkRows(sql, 5);
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
+  await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
 
   const exactTop = (qv: string, filter: string) =>
     sql.begin(async (tx: SQL) => {
@@ -266,6 +279,73 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   // the second review pass reproduced — and this section just proved it works.
   const [{ library }] = await sql`SELECT default_version AS library FROM pg_available_extensions WHERE name = 'vector'`;
   assert(versionAtLeast(String(library), 0, 8), `the server's pgvector library (${library}) supports the iterative scan 014 declares`);
+}
+
+console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at the configured width (migration 019)");
+{
+  // SMD-969 (upstream #469). At the shipped width a vector is TOASTed, and the
+  // planner's sequential-scan estimate counts heap pages and never the detoast
+  // reads — so on 014's function it chose a seq scan of the chunk table at
+  // every count and of `thoughts` above the default one, reading ten times the
+  // buffers the index reads. 019 puts `SET enable_seqscan = off` on the
+  // function. This section is the CI form of db/bench-plan.ts, at the smallest
+  // scale that reproduces the decision: [5b]'s 2,000 rows and 400 chunk rows
+  // at the configured width. The statement is the function's own unfiltered
+  // RETURN QUERY, read from the catalog (EXPLAIN cannot see into plpgsql), run
+  // under the function's own SET clauses so the plan is the one a call gets —
+  // under both plan modes, since plpgsql may use either after five calls.
+  //
+  // The control comes first and is asserted too: the same statement WITHOUT
+  // 019's setting must leave at least one candidate CTE off its HNSW index at
+  // this scale — judged by the two index names, not by any `Seq Scan` in the
+  // plan, since the outer merge's join seq-scans the heap on a small table
+  // whether or not the CTEs did (first review pass). Where the planner already
+  // takes both indexes unaided — a narrower width whose vectors are inline, a
+  // server tuned differently — the scale does not reproduce the decision, and
+  // the control is SKIPPED with the reason rather than failing a correct 019;
+  // the assertions after it still hold what the setting must deliver.
+  const body = await extractBody(sql, "unfiltered", EMBEDDING_DIM);
+  const qv = `[${seededRandom(969).unitVector(EMBEDDING_DIM).join(",")}]`;
+  const explain = async (count: number, mode: "force_custom_plan" | "force_generic_plan", withSettings: boolean) =>
+    sql.begin(async (tx: SQL) => {
+      if (withSettings) await applyFunctionSettings(tx);
+      else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`); // 014's one setting: the function before 019
+      return explainPrepared(tx, { body, dim: EMBEDDING_DIM, args: `'${qv}'::vector, -1.0, ${count}, '{}'::jsonb`, mode, warm: true });
+    });
+  const onIndex = (plan: string) => ({
+    thoughts: /Index Scan using thoughts_embedding_idx on thoughts/.test(plan),
+    chunks: /Index Scan using thought_chunks_embedding_idx on thought_chunks/.test(plan),
+  });
+  // Named by table and alias, for the message: the direct CTE reads `thoughts
+  // t` (renamed `t_1` when the outer merge also reads `thoughts t`), the chunk
+  // CTE `thought_chunks c`; the merge's own join is listed when it seq-scans.
+  const seqOn = (plan: string) => [...new Set([...plan.matchAll(/Seq Scan on (thoughts|thought_chunks) (\w+)/g)].map((m) => `${m[1]} ${m[2]}`))];
+
+  const [{ storage }] = await sql`SELECT typstorage AS storage FROM pg_type WHERE typname = 'vector'`;
+  // The TOAST relation alone: total less the heap less every index (the HNSW
+  // index is of the same order as the TOAST here, and is not out-of-line data).
+  const [{ toast }] = await sql`SELECT pg_size_pretty(pg_total_relation_size('thoughts') - pg_relation_size('thoughts') - pg_indexes_size('thoughts')) AS toast`;
+  for (const count of [10, 50]) {
+    const control = await explain(count, "force_custom_plan", false);
+    const off = onIndex(control.text);
+    const label = `count ${count}: without 019's setting the planner leaves ${[!off.thoughts && "the thoughts CTE", !off.chunks && "the chunk CTE"].filter(Boolean).join(" and ") || "neither CTE"} off its HNSW index at ${EMBEDDING_DIM} dimensions (seq scans: ${seqOn(control.text).join(", ") || "none"}; ${control.buffers} buffers; vector storage '${storage}', ${toast} of TOAST)`;
+    if (!off.thoughts || !off.chunks) assert(true, `${label} — the scale reproduces the decision`);
+    else skip(label, "the planner already takes both indexes unaided here, so this scale and width do not reproduce the decision; the assertions below still hold what 019 must deliver");
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const { text: plan, buffers } = await explain(count, mode, true);
+      const on = onIndex(plan);
+      assert(on.thoughts,
+        `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan: the thoughts CTE is an Index Scan using thoughts_embedding_idx (${buffers} buffers)`);
+      assert(on.chunks, `…and the chunk CTE an Index Scan using thought_chunks_embedding_idx`);
+      assert(seqOn(plan).length === 0, `…and nothing in the statement seq-scans (${seqOn(plan).join(", ") || "none"})`);
+    }
+  }
+
+  // The estimates, on a real server (db/test-schema.ts [20] holds them under PGlite).
+  const [{ mt, kw }] = await sql`
+    SELECT (SELECT prorows FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure) AS mt,
+           (SELECT prorows FROM pg_proc WHERE oid = 'search_thoughts_keyword(text, int, int, jsonb)'::regprocedure) AS kw`;
+  assert(Number(mt) === 10 && Number(kw) === 25, `match_thoughts declares ROWS 10 and search_thoughts_keyword ROWS 25 on a real server (${mt}, ${kw})`);
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");
