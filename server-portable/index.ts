@@ -256,6 +256,23 @@ function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: str
   }
 }
 
+/**
+ * The two things migration 018 reports on a successful edit that the caller
+ * should hear about: the edit's unchanged text is also another thought's, or
+ * another thought's stale fingerprint blocks this one's. Neither says which
+ * row is older — a capture merged around a legacy row produces the same pair —
+ * so neither tells the caller which to delete.
+ */
+function explainPair(r: { duplicateOf?: string; fingerprintHeldBy?: string }): string {
+  if (r.duplicateOf) {
+    return `\nNote: this thought holds the same text as ${r.duplicateOf}. Deduplication could not see this one because it had no fingerprint, so the edit was kept and no fingerprint was written. Read both before deciding whether they should be one thought; delete_thought keeps the removed text in the audit trail.`;
+  }
+  if (r.fingerprintHeldBy) {
+    return `\nNote: ${r.fingerprintHeldBy} carries a stale fingerprint for this text under different content, so this thought could not take its own. Re-saving that thought's text corrects it.`;
+  }
+  return "";
+}
+
 function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: "open-brain",
@@ -938,7 +955,7 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.`,
+            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}`,
           }],
         };
       } catch (e) {

@@ -253,6 +253,29 @@ console.log("\n[8] Editing into an exact duplicate is refused");
   assert(/delete the other/i.test(msg), "…and suggests what to do about it");
 }
 
+console.log("\n[8b] Re-saving a legacy twin's own text is accepted, and the reply names the pair (migration 018)");
+{
+  // Two rows from before migration 003: NULL fingerprints, the same text but
+  // for whitespace. 013's update_thought refused the second's own text once
+  // the first had a fingerprint; the tool now keeps the edit and says so.
+  const [a] = await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES ('Legacy Twin Note', NULL) RETURNING id`;
+  const [b] = await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES ('legacy   twin note', NULL) RETURNING id`;
+  const first = await writer.call("update_thought", { id: a.id, content: "Legacy Twin Note" });
+  assert(/^Updated /.test(first) && !/Note: this thought holds the same text/.test(first), "the first twin is updated with no pair named — it simply gains its fingerprint");
+  const second = await writer.call("update_thought", { id: b.id, content: "legacy   twin note" });
+  assert(/^Updated /.test(second), `the second twin's own text is accepted rather than refused (${second.slice(0, 40)})`);
+  assert(new RegExp(`Note: this thought holds the same text as ${a.id}`).test(second), "…and the reply names the thought it duplicates");
+  assert(/Read both before deciding/.test(second), "…and says what to do about it without asserting which is older");
+  const rows = (await sql`SELECT id, content_fingerprint AS fp FROM thoughts WHERE id IN (${a.id}::uuid, ${b.id}::uuid)`) as { id: string; fp: string | null }[];
+  const fa = rows.find((r) => r.id === a.id), fb = rows.find((r) => r.id === b.id);
+  assert(rows.length === 2 && fa?.fp != null && fb !== undefined && fb.fp === null, `the first carries the fingerprint, the second stays NULL (${JSON.stringify(rows.map((r) => r.fp !== null))})`);
+  // The refusal in [8] is for a genuine edit, and still stands.
+  let msg = "";
+  try { await writer.call("update_thought", { id: b.id, content: "the corrected text" }); }
+  catch (e) { msg = (e as Error).message; }
+  assert(/already exists/i.test(msg), "editing the twin INTO another thought's text is still refused");
+}
+
 await sql.close();
 server.stop();
 provider.stop();

@@ -292,6 +292,73 @@ console.log("\n[6] The unique partial index is enforced by the server");
   assert(true, "multiple NULL fingerprints coexist");
 }
 
+// ── 6b. Migration 018 — two legacy twins fingerprinted at the same moment ────
+//
+// db/test-schema.ts [19] holds the sequential half: the second twin is accepted
+// and told, not refused. This is the concurrent half, which PGlite's single
+// session cannot run. Connection A re-embeds the first twin and holds its
+// transaction open; connection B re-embeds the second. Without 018's advisory
+// lock B would pass the duplicate check (A's fingerprint is uncommitted), then
+// block on the unique index and raise 23505 when A commits. With it B waits on
+// the ADVISORY lock — pg_locks says which — and, once A commits, sees A's row
+// and returns ok with duplicate_of. A statement_timeout bounds the wait, so a
+// lock that never released fails the test rather than hanging it.
+
+console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, then is told, not refused (migration 018)");
+{
+  await sql`DELETE FROM thoughts`;
+  const [a] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('Legacy Twin', NULL, ${unit(0)}::vector) RETURNING id`;
+  const [b] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('legacy   twin', NULL, ${unit(0)}::vector) RETURNING id`;
+  type R = { ok: boolean; error?: string; duplicate_of?: string };
+  // One connection each, as [8] does: a transaction held open on a shared pool
+  // queues the pool's other work behind it.
+  const connA = new SQL({ url: URL_, max: 1 });
+  const connB = new SQL({ url: URL_, max: 1 });
+
+  let releaseA: () => void = () => {};
+  const held = new Promise<void>((resolve) => { releaseA = resolve; });
+  let aResult: R | undefined;
+  let aError = "";
+  const aDone = connA.begin(async (tx: SQL) => {
+    aResult = ((await tx`SELECT update_thought(${a.id}::uuid, 'Legacy Twin', NULL, ${unit(1)}::vector) AS r`) as { r: R }[])[0].r;
+    await held;
+  }).catch((e: Error) => { aError = e.message; releaseA(); });
+  // A has taken the lock before B starts: wait for its result, not a sleep.
+  for (let i = 0; i < 250 && aResult === undefined && aError === ""; i++) await Bun.sleep(20);
+  assert(aResult?.ok === true && aResult.duplicate_of === undefined, `A re-embeds the first twin inside an open transaction (${aError || JSON.stringify(aResult)})`);
+
+  let bError = "";
+  let bPid = -1;
+  const bDone = connB.begin(async (tx: SQL) => {
+    await tx`SET LOCAL statement_timeout = '5s'`;
+    bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT update_thought(${b.id}::uuid, 'legacy   twin', NULL, ${unit(2)}::vector) AS r`) as { r: R }[])[0].r;
+  }).catch((e: Error) => { bError = e.message; return undefined; });
+
+  // B's own backend, not "any advisory waiter on the server": the suite
+  // accepts any DATABASE_URL, and a shared server may have others.
+  let waitingOnAdvisory = 0;
+  for (let i = 0; i < 250 && waitingOnAdvisory === 0; i++) {
+    await Bun.sleep(20);
+    if (bPid < 0) continue;
+    waitingOnAdvisory = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${bPid}`)[0].n);
+  }
+  assert(waitingOnAdvisory === 1, `B's backend waits on the advisory lock, not on the unique index (${waitingOnAdvisory} advisory waiter for pid ${bPid})`);
+
+  releaseA();
+  await aDone;
+  const bResult = await bDone;
+  assert(bResult !== undefined, `B's call returned rather than raising (${bError.slice(0, 80)})`);
+  assert(bResult?.ok === true && bResult.duplicate_of === a.id, `…accepted once A committed, and told which row it duplicates (${JSON.stringify(bResult)})`);
+  const fps = (await sql`SELECT id, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis FROM thoughts WHERE id IN (${a.id}::uuid, ${b.id}::uuid)`) as { id: string; fp: string | null; axis: number }[];
+  const fa = fps.find((r) => r.id === a.id)!, fb = fps.find((r) => r.id === b.id)!;
+  assert(fa.fp !== null && fb.fp === null, "the first twin carries the fingerprint, the second stays NULL — the partial index was never violated");
+  assert(fa.axis === 1 && fb.axis === 2, `…and both carry their new vectors (${fa.axis}, ${fb.axis})`);
+  await connA.close();
+  await connB.close();
+  await sql`DELETE FROM thoughts`;
+}
+
 console.log("\n[7] Chunk context survives capture, edit and a payload without it");
 {
   await sql`DELETE FROM thoughts`;
@@ -509,8 +576,13 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 // whole content's vector (a latch on any 4xx, which the first review found,
 // would give both the head window), and the throttled one must carry its head
 // window AND be recorded failed rather than succeeded, so --retry-failed can
-// give it the whole content once the provider is willing (second review). Ten
-// milliseconds per embedding so two workers really overlap.
+// give it the whole content once the provider is willing (second review). Two
+// rows are legacy twins — NULL fingerprints, the same text but for whitespace,
+// inserted around upsert_thought as a brain from before migration 003 holds
+// them — and both must end succeeded, one fingerprinted and one not, with the
+// pair named in the summary and under --status (SMD-1022; 013's update_thought
+// refused the second for ever). Ten milliseconds per embedding so two workers
+// really overlap.
 
 console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
 {
@@ -561,6 +633,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`SELECT upsert_thought(${poisonText}, ${{ metadata: {} }}::jsonb, ${unit(0)}::vector)`;
   const bare = "captured through the two-argument fallback";
   await sql`SELECT upsert_thought(${bare}, ${{ metadata: {} }}::jsonb)`;
+  const twins = ["Legacy Twin Note", "legacy   twin note"];
+  for (const t of twins) await sql`INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES (${t}, NULL, ${unit(0)}::vector)`;
   const [{ auditBefore }] = await sql`SELECT count(*)::int AS "auditBefore" FROM thought_audit`;
   const updatedBefore = new Map(
     (await sql`SELECT content, updated_at::text AS u FROM thoughts`).map((r: { content: string; u: string }) => [r.content, r.u])
@@ -602,7 +676,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
-  assert(/32 re-embedded, 2 failed/.test(first.out), `…and says so: 32 re-embedded, 2 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(/34 re-embedded, 2 failed/.test(first.out), `…and says so: 34 re-embedded, 2 failed (${first.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(/stub: refused this text/.test(first.out), "…naming the provider's error for the poisoned row");
   assert(/whole-content embedding failed transiently/.test(first.out), "…and, for the throttled long thought, that its head window stands in until a retry");
   assert(!/stored with the head window's vector/.test(first.out), "…which is not counted as a permanent head-window outcome, since the provider did not refuse the length");
@@ -633,8 +707,21 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(shorts.every((s) => byContent.get(s)!.u > updatedBefore.get(s)!), "updated_at moved on every re-embedded row");
   assert(byContent.get(poisonText)!.u === updatedBefore.get(poisonText), "…and not on the one that failed");
 
+  // The legacy twins: both re-embedded, whichever worker reached which first;
+  // one gained the fingerprint 003 never backfilled and the other was told
+  // rather than refused, so it stays NULL and the partial index holds.
+  const twinRows = (await sql`
+    SELECT t.content, t.content_fingerprint AS fp, t.embedding::text AS e, c.status FROM thoughts t
+    JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB}
+    WHERE t.content = ANY(${sql.array(twins, "TEXT")})`) as { content: string; fp: string | null; e: string; status: string }[];
+  assert(twinRows.length === 2 && twinRows.every((r) => r.status === "succeeded"), `both legacy twins are succeeded, not one failed with DUPLICATE_CONTENT (${twinRows.map((r) => r.status).join(", ")})`);
+  assert(twinRows.every((r) => axisOf(r.e) === axisFor(r.content)), "…both carry the stub's vector for their own text");
+  assert(twinRows.filter((r) => r.fp !== null).length === 1, `…exactly one of them carries a fingerprint (${twinRows.filter((r) => r.fp !== null).length})`);
+  assert(/duplicates [0-9a-f-]{36} — the same text/.test(first.out), "…the run named the pair as it found it");
+  assert(/1 group\(s\) of thoughts share one normalised text/.test(first.out), "…and the summary counts the group");
+
   const after1 = await claimCounts();
-  assert(after1.succeeded === 32 && after1.failed === 2 && !after1.pending && !after1.claimed, `the claims record 32 succeeded and 2 failed (${JSON.stringify(after1)})`);
+  assert(after1.succeeded === 34 && after1.failed === 2 && !after1.pending && !after1.claimed, `the claims record 34 succeeded and 2 failed (${JSON.stringify(after1)})`);
   const errs = (await sql`
     SELECT t.content, c.last_error AS err FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id
     WHERE c.work_type = ${REEMBED_JOB} AND c.status = 'failed'`) as { content: string; err: string }[];
@@ -646,7 +733,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // The audit log: nothing for a vector replaced by a vector, one row for a
   // vector where there was none — 008's trigger diffs presence, not value.
   const [{ auditAfter }] = await sql`SELECT count(*)::int AS "auditAfter" FROM thought_audit`;
-  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-three (${Number(auditAfter) - Number(auditBefore)})`);
+  assert(Number(auditAfter) - Number(auditBefore) === 1, `the pass wrote one audit row, not thirty-five (${Number(auditAfter) - Number(auditBefore)})`);
   const [auditRow] = await sql`
     SELECT a.actor_name, a.author_session_id, a.diff FROM thought_audit a JOIN thoughts t ON t.id = a.thought_id
     WHERE t.content = ${bare} AND a.action = 'update'`;
@@ -654,7 +741,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…for the row that gained a vector, attributed to the tool and the job (${JSON.stringify(auditRow)})`);
 
   const status = await reembed("--status");
-  assert(status.code === 0 && /32 succeeded, 2 failed/.test(status.out), "--status reports the pass");
+  assert(status.code === 0 && /34 succeeded, 2 failed/.test(status.out), "--status reports the pass");
+  assert(/1 group\(s\) of thoughts share one normalised text/.test(status.out) && /delete_thought/.test(status.out), "…and lists the legacy pair as a dedup task, with what to do about it");
 
   // A capture made after the first run, then a re-run: only the new row is
   // processed, the failed one stays failed, and the exit code says so.
@@ -677,7 +765,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(axisOf(poisonVec) === axisFor(poisonText), "…and it now carries the new vector");
   assert(Number(poisonAttempts) === 1, `…on what counts as its first attempt: --retry-failed reset the count (${poisonAttempts})`);
   const final = await claimCounts();
-  assert(final.succeeded === 35 && !final.failed, `every row is succeeded (${JSON.stringify(final)})`);
+  assert(final.succeeded === 37 && !final.failed, `every row is succeeded (${JSON.stringify(final)})`);
 
   // A lease held by some other process: this run must not report the pass done.
   const held = "held by another process";

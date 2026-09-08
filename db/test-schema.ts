@@ -1486,4 +1486,140 @@ console.log("\n[18] Migration 017 left upsert_thought, match_thoughts and search
   assert(byName.extract_search_needles === "i", "extract_search_needles is IMMUTABLE");
 }
 
+// ── 19. Migration 018 — an unchanged edit is never a duplicate ───────────────
+//
+// Two rows from before migration 003 that normalise to the same text coexist
+// with NULL fingerprints. Re-embedding passes each its own content through
+// update_thought; the first gains a fingerprint, and 013's body then refused
+// the second as DUPLICATE_CONTENT for ever. Here: the second is accepted, told
+// which row it duplicates, and left without a fingerprint so the partial index
+// is never violated — while editing a thought INTO another's text is still
+// refused. No chunks are passed in this file: writing chunk rows crashes the
+// WASM build (see [14]); chunk replacement through update_thought is held by
+// db/test-live.ts [9] and server-portable/test-update-delete.ts [4]. The
+// concurrent half — two twins fingerprinted at the same moment — is
+// db/test-live.ts [6b], which PGlite's single session cannot run.
+
+console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and names the pair");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const legacy = async (content: string) =>
+    (await db.query<{ id: string }>(
+      `INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ($1, NULL, $2::vector) RETURNING id`,
+      [content, unit(0)])).rows[0].id;
+  const twin1 = await legacy("Same Text");
+  const twin2 = await legacy("same   text");
+  const other = await legacy("an unrelated note");
+  const captured = (await db.query<{ r: { id: string } }>(
+    `SELECT upsert_thought('a fingerprinted note', '{}'::jsonb) AS r`)).rows[0].r.id;
+  const rowOf = async (id: string) =>
+    (await db.query<{ content: string; fp: string | null; axis: number | null; metadata: Record<string, unknown> }>(
+      `SELECT content, content_fingerprint AS fp,
+              array_position(embedding::real[], 1::real) - 1 AS axis, metadata
+       FROM thoughts WHERE id = $1`, [id])).rows[0];
+  const update = async (...args: unknown[]) =>
+    (await db.query<{ r: { ok: boolean; error?: string; duplicate_of?: string } }>(
+      `SELECT update_thought($1::uuid, $2::text, $3::jsonb, $4::vector, NULL::jsonb, $5::timestamptz) AS r`,
+      args)).rows[0].r;
+  const fpOf = async (content: string) =>
+    (await db.query<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).rows[0].f;
+
+  // The first twin: its own text back, a new vector. It gains the fingerprint
+  // 003 never backfilled.
+  const r1 = await update(twin1, "Same Text", null, unit(3), null);
+  assert(r1.ok === true && r1.duplicate_of === undefined, `re-embedding the first twin with its own text succeeds, no duplicate named (${JSON.stringify(r1)})`);
+  let row = await rowOf(twin1);
+  assert(row.fp === (await fpOf("Same Text")), "…and it gains the fingerprint it never had");
+  assert(row.axis === 3, `…with the new vector stored (axis ${row.axis})`);
+
+  // The second twin: the same normalised text, now held by a fingerprinted
+  // row. 013 refused this; 018 accepts it, names the other row, and leaves
+  // this row's fingerprint NULL.
+  const r2 = await update(twin2, "same   text", null, unit(4), null);
+  assert(r2.ok === true, `re-embedding the second twin succeeds rather than DUPLICATE_CONTENT (${JSON.stringify(r2)})`);
+  assert(r2.duplicate_of === twin1, `…and names the row it duplicates (${r2.duplicate_of})`);
+  row = await rowOf(twin2);
+  assert(row.fp === null, "…its fingerprint stays NULL, so the partial unique index is never violated");
+  assert(row.axis === 4 && row.content === "same   text", `…the vector is replaced and the text is untouched (axis ${row.axis})`);
+
+  // The check still works for what 009 wrote it for.
+  const r3 = await update(other, "Same Text", null, unit(5), null);
+  assert(r3.ok === false && r3.error === "DUPLICATE_CONTENT", `editing a thought INTO another thought's text is still refused (${JSON.stringify(r3)})`);
+  row = await rowOf(other);
+  assert(row.content === "an unrelated note" && row.axis === 0, "…and nothing about it changed");
+
+  // A whitespace-only edit normalises to the same fingerprint: not a
+  // duplicate of anything, the text moves, the fingerprint does not.
+  const r4 = await update(twin1, "Same    Text", null, unit(6), null);
+  assert(r4.ok === true && r4.duplicate_of === undefined, `a whitespace-only edit of a fingerprinted row succeeds, no duplicate named (${JSON.stringify(r4)})`);
+  row = await rowOf(twin1);
+  assert(row.content === "Same    Text" && row.fp === (await fpOf("Same Text")) && row.axis === 6, "…the text and the vector move, the fingerprint is unchanged");
+
+  // A legacy row with no twin is simply backfilled.
+  const r5 = await update(other, "an unrelated note", null, unit(7), null);
+  assert(r5.ok === true && r5.duplicate_of === undefined, "a legacy row with no twin re-embeds with no duplicate named");
+  assert((await rowOf(other)).fp === (await fpOf("an unrelated note")), "…and gains its fingerprint");
+
+  // A row captured through upsert_thought is the ordinary case: unchanged.
+  // Axes stay below 8 so the CI run at OB1_EMBEDDING_DIM=8 fits.
+  const r6 = await update(captured, "a fingerprinted note", null, unit(2), null);
+  assert(r6.ok === true && r6.duplicate_of === undefined && (await rowOf(captured)).fp === (await fpOf("a fingerprinted note")),
+         "a fingerprinted row re-embedded with its own text keeps its fingerprint, no duplicate named");
+
+  // Metadata-only: nothing about content, fingerprint or vector is touched.
+  const r7 = await update(twin2, null, { k: 1 }, null, null);
+  row = await rowOf(twin2);
+  assert(r7.ok === true && row.fp === null && row.axis === 4 && row.metadata.k === 1, "a metadata-only edit of the unfingerprinted twin leaves fingerprint and vector alone");
+
+  // 009's guard survives the redefinition.
+  const r8 = await update(twin1, "Same Text", null, unit(3), "2000-01-01T00:00:00Z");
+  assert(r8.ok === false && r8.error === "STALE_READ", `if_unchanged_since still refuses a stale write (${JSON.stringify(r8)})`);
+
+  // A stale fingerprint — a raw UPDATE of content around update_thought, which
+  // upstream's pre-009 path never recomputed — describing text the row no
+  // longer holds, on a row whose text another row owns. The edit is unchanged
+  // and reported as a duplicate; the stale hash must not survive it.
+  const stale = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('same text', content_fingerprint_of('what it used to say'), $1::vector) RETURNING id`,
+    [unit(0)])).rows[0].id;
+  const r9 = await update(stale, "same text", null, unit(5), null);
+  assert(r9.ok === true && r9.duplicate_of === twin1, `a row with a stale fingerprint re-saved as its own text is accepted and named a duplicate (${JSON.stringify(r9)})`);
+  assert((await rowOf(stale)).fp === null, "…and the stale fingerprint is cleared rather than kept under text it does not describe");
+
+  // The stale key on the OTHER side: a row whose column still says hash('foo')
+  // while its text is 'bar'. Re-saving a legacy 'foo' row must not call that
+  // row its twin — the texts differ — but cannot take the key either.
+  const holder = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('bar', content_fingerprint_of('foo'), $1::vector) RETURNING id`,
+    [unit(0)])).rows[0].id;
+  const foo = await legacy("foo");
+  const r10 = await update(foo, "foo", null, unit(5), null) as { ok: boolean; duplicate_of?: string; fingerprint_held_by?: string };
+  assert(r10.ok === true && r10.duplicate_of === undefined, `a legacy row whose key another row holds under OTHER text is not told it has a twin (${JSON.stringify(r10)})`);
+  assert(r10.fingerprint_held_by === holder, `…but which row holds the key under a stale fingerprint (${r10.fingerprint_held_by})`);
+  assert((await rowOf(foo)).fp === null && (await rowOf(foo)).axis === 5, "…its fingerprint stays NULL and its vector is replaced");
+  const r11 = await update(other, "foo", null, unit(6), null);
+  assert(r11.ok === false && r11.error === "DUPLICATE_CONTENT", `editing a third row INTO a key a stale holder occupies is still refused — the key is taken (${JSON.stringify(r11)})`);
+  const r12 = await update(holder, "bar", null, unit(6), null) as { ok: boolean; duplicate_of?: string; fingerprint_held_by?: string };
+  assert(r12.ok === true && r12.duplicate_of === undefined && r12.fingerprint_held_by === undefined && (await rowOf(holder)).fp === (await fpOf("bar")),
+         "re-saving the holder's own text corrects its stale key");
+  const r13 = await update(foo, "foo", null, unit(7), null) as { ok: boolean; fingerprint_held_by?: string };
+  assert(r13.ok === true && r13.fingerprint_held_by === undefined && (await rowOf(foo)).fp === (await fpOf("foo")), "…after which the legacy row takes its fingerprint");
+
+  // The carry-forward, read out of pg_proc: one function, and every earlier
+  // migration's piece still in its body by name.
+  const proc = await db.query<{ prosrc: string }>(
+    `SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.proname = 'update_thought' AND n.nspname = 'public'`);
+  assert(proc.rows.length === 1, `still exactly one update_thought (got ${proc.rows.length})`);
+  const src = proc.rows[0]?.prosrc ?? "";
+  assert(/ob1\.actor/.test(src), "…carrying 008's actor for the audit trigger");
+  assert(/date_trunc\('milliseconds'/.test(src) && /p_if_unchanged_since IS NULL\s+OR/.test(src), "…009's millisecond-truncated guard as a predicate in the UPDATE");
+  assert(/elem->>'context'/.test(src), "…013's context in the chunk insert");
+  assert(/content_fingerprint_of\(/.test(src) && !/regexp_replace/.test(src), "…016's fingerprint function rather than a third inline copy of the rule");
+  assert(/FROM thoughts WHERE id = p_id FOR UPDATE/.test(src), "…the row read FOR UPDATE, so \"unchanged\" is decided against a row that cannot change under the call");
+  assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
+  assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();
