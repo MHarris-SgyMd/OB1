@@ -2420,7 +2420,13 @@ since a fresh capture merged around a legacy row produces the same result; it
 says what is known and asks the reader to read both before deleting. A
 vacuous assertion in `test-update-delete.ts` [8b] and two stale numbers in
 this file. Nothing here touched `update_thought`'s rule, which is the signal
-to stop reviewing and open the PR.
+to stop reviewing and open the PR. Then the tidy-ups the three passes had cut
+for space, since the files were open: 018 reports the twin or the stale holder
+straight from the lookup's two columns instead of copying them into two more
+variables, the pass says the two things 018 reports in one place, the pairs
+query counts with a window instead of a second scan of its own CTE, and the
+tool's note lives beside `explainRefusal`, which is where a reader looks for
+what the tool says about an edit.
 
 ## Detached from the fork network
 

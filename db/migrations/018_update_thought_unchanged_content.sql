@@ -160,14 +160,12 @@ AS $$
 DECLARE
   v_existing     thoughts%ROWTYPE;
   v_fingerprint  text;
-  v_unchanged    boolean := false;
+  v_unchanged    boolean;
   -- The row holding v_fingerprint in the unique index, if any, and whether its
   -- text still hashes to it (a raw update around this function can leave a
-  -- stale key). Only one of the two below is ever set.
+  -- stale key): the twin, or the stale holder, reported as such below.
   v_other        uuid;
   v_other_same   boolean;
-  v_duplicate_of uuid;
-  v_held_by      uuid;
   v_updated      timestamptz;
 BEGIN
   -- 008: transaction-local, so it cannot outlive this call on a pooled
@@ -242,11 +240,6 @@ BEGIN
         IF NOT v_unchanged THEN
           RETURN jsonb_build_object('ok', false, 'error', 'DUPLICATE_CONTENT');
         END IF;
-        IF v_other_same THEN
-          v_duplicate_of := v_other;
-        ELSE
-          v_held_by := v_other;
-        END IF;
       END IF;
     END IF;
   END IF;
@@ -299,11 +292,9 @@ BEGIN
   END IF;
 
   RETURN jsonb_build_object('ok', true, 'id', p_id, 'updated_at', v_updated)
-         || CASE WHEN v_duplicate_of IS NOT NULL
-                   THEN jsonb_build_object('duplicate_of', v_duplicate_of)
-                 WHEN v_held_by IS NOT NULL
-                   THEN jsonb_build_object('fingerprint_held_by', v_held_by)
-                 ELSE '{}'::jsonb END;
+         || CASE WHEN v_other IS NULL   THEN '{}'::jsonb
+                 WHEN v_other_same       THEN jsonb_build_object('duplicate_of', v_other)
+                 ELSE jsonb_build_object('fingerprint_held_by', v_other) END;
 END;
 $$;
 

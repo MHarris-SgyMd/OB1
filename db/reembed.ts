@@ -289,12 +289,12 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
     return 0;
   }
   const rows = (await sql`
-    WITH g AS (
-      SELECT array_agg(id ORDER BY created_at, id)::text[] AS ids, min(created_at) AS first
-      FROM thoughts
-      GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
-      HAVING count(*) > 1)
-    SELECT (SELECT count(*) FROM g)::int AS total, ids FROM g ORDER BY first LIMIT ${limit}`) as { total: number; ids: string[] }[];
+    SELECT count(*) OVER ()::int AS total, array_agg(id ORDER BY created_at, id)::text[] AS ids
+    FROM thoughts
+    GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
+    HAVING count(*) > 1
+    ORDER BY min(created_at)
+    LIMIT ${limit}`) as { total: number; ids: string[] }[];
   if (!rows.length) return 0;
   const total = Number(rows[0].total);
   console.error(
@@ -460,23 +460,23 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {
-      if (result.fingerprint_held_by) {
-        // Another row carries this text's key under DIFFERENT text — a stale
-        // fingerprint from a raw update around update_thought — so this row
-        // could not take the fingerprint it should have. Re-embedded; the key
-        // is the other row's problem, and re-saving its own text would fix it.
-        console.error(`  ${current.id}: could not take its fingerprint — ${result.fingerprint_held_by} holds that key under other text (a stale fingerprint; re-saving that thought's own text corrects it)`);
-      }
       // The write is done in every case below: whatever was embedded is better
       // than the vector the row had, and under --switch-model the old one is
       // from another model. What differs is whether the claim may go terminal.
+      // Two things 018 reports are not outcomes — nothing about this row's
+      // vectors is in doubt — and are said once per row here.
       if (result.duplicate_of) {
         // The row's own text is also another thought's — a pair from before the
-        // fingerprint. Re-embedded like any other row; the summary lists the
-        // groups, from the corpus, so it is the count that is authoritative (a
-        // pair's first row is never reported here — nothing owned its text
-        // yet). Not an outcome: nothing about this row's vectors is in doubt.
+        // fingerprint. The summary lists the groups from the corpus, so that
+        // count is the authoritative one (a pair's first row is never reported
+        // here — nothing owned its text yet).
         console.error(`  ${current.id}: duplicates ${result.duplicate_of} — the same text, which deduplication could not see because this row had no fingerprint; re-embedded, see the summary`);
+      } else if (result.fingerprint_held_by) {
+        // Another row carries this text's key under DIFFERENT text — a stale
+        // fingerprint from a raw update around update_thought — so this row
+        // could not take the fingerprint it should have. The key is the other
+        // row's problem, and re-saving its own text fixes it.
+        console.error(`  ${current.id}: could not take its fingerprint — ${result.fingerprint_held_by} holds that key under other text (a stale fingerprint; re-saving that thought's own text corrects it)`);
       }
       if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
         // The whole-content call failed for a reason that says nothing about
