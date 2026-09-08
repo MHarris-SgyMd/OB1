@@ -421,6 +421,19 @@ export async function explainPrepared(
 }
 
 /**
+ * Give every `every`-th synthetic thought (content `row N`) one chunk row
+ * carrying the parent's own vector, so the chunk CTE has an index to reach and
+ * a table to scan. The parent's vector on purpose: the point is rows in the
+ * chunk table, not a chunk that out-scores its parent, so a MAX over parent
+ * and chunk is the parent's score and every exactness assertion is unaffected.
+ * db/bench-plan.ts and db/test-live.ts [5b] both load this shape.
+ */
+export async function loadChunkRows(sql: SQL, every: number): Promise<void> {
+  await sql.unsafe(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
+                    SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % ${Math.max(1, Math.floor(every))} = 0`);
+}
+
+/**
  * Shared buffers the whole statement touched, from EXPLAIN (ANALYZE, BUFFERS)
  * text: the TOP node's `Buffers:` line, hits AND reads. A regex for `hit=`
  * alone under-counts whenever part of the I/O missed shared_buffers — the

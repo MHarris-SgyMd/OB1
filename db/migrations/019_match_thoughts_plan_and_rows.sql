@@ -142,7 +142,10 @@
 --   off` — and the estimate stayed wrong for every other caller: a hand-written
 --   query over PostgREST, a dashboard, the next migration that composes them.
 --
---   `ROWS 10` and `ROWS 25`, in the functions' own CREATE statements. Not an
+--   `ROWS 10` and `ROWS 25`, in the functions' own CREATE statements — the
+--   defaults, since a caller who asks for more asks explicitly; 017 asks the
+--   keyword function for 100 per needle and is planned 4x low rather than
+--   10x high, and clamps at 100 in any case. Not an
 --   `ALTER FUNCTION … ROWS` from 017, which the SMD-958 review passes declined
 --   for a reason worth keeping: CREATE OR REPLACE resets prorows, so a hint set
 --   anywhere but in the defining statement is undone by the next re-apply of

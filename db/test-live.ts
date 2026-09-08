@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, neverAnswers, runScript, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, runScript, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -234,11 +234,9 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
   }
   // Chunk rows for one thought in five, carrying the parent's own vector, so
-  // the chunk CTE has an index to reach and a table to scan in [5c]. The
-  // assertions below are unaffected: MAX over a parent and a copy of it is the
-  // parent's score.
-  await sql.unsafe(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
-                    SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % 5 = 0`);
+  // the chunk CTE has an index to reach and a table to scan in [5c] (the
+  // assertions below are unaffected — the helper says why).
+  await loadChunkRows(sql, 5);
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
   await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
 

@@ -56,7 +56,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -115,10 +115,7 @@ async function load(sql: SQL, n: number): Promise<{ loadMs: number; buildMs: num
     }).join(",");
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
   }
-  // The parent's own vector: the point is a chunk table with rows in it, not
-  // a chunk that out-scores its parent.
-  await sql.unsafe(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
-                    SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % ${CHUNK_EVERY} = 0`);
+  await loadChunkRows(sql, CHUNK_EVERY);
   const loadMs = performance.now() - t0;
   const t1 = performance.now();
   for (const d of defs) await sql.unsafe(d.indexdef);
@@ -143,7 +140,19 @@ async function sizes(sql: SQL): Promise<{ storage: string; heap: string; toast: 
 // ── The measurement ──────────────────────────────────────────────────────────
 
 type Arm = "before (014)" | "seqscan off" | "rpc 1.1" | "after (019) custom" | "after (019) generic";
-type Cell = { scale: number; count: number; arm: Arm; thoughts: string; chunks: string; buffers: number; ms: number; rows: number; text: string };
+/**
+ * What each arm sets before the statement is explained. The "before" arms
+ * carry 014's one SET clause — the function before 019 — plus the arm's own
+ * variable; the "after" arms carry whatever the deployed function declares.
+ */
+const ARMS: Record<Arm, { settings: "014" | "function"; extra?: string; mode: "force_custom_plan" | "force_generic_plan" }> = {
+  "before (014)": { settings: "014", mode: "force_custom_plan" },
+  "seqscan off": { settings: "014", extra: "SET LOCAL enable_seqscan = off", mode: "force_custom_plan" },
+  "rpc 1.1": { settings: "014", extra: "SET LOCAL random_page_cost = 1.1", mode: "force_custom_plan" },
+  "after (019) custom": { settings: "function", mode: "force_custom_plan" },
+  "after (019) generic": { settings: "function", mode: "force_generic_plan" },
+};
+type Cell = { scale: number; count: number; arm: Arm; thoughts: string; chunks: string; buffers: number; ms: number; text: string };
 
 /** Which node produced a CTE's rows, by table. The chunk CTE's alias is `c`, the direct one's `t`. */
 function nodeFor(plan: string, table: "thoughts" | "thought_chunks"): string {
@@ -154,40 +163,26 @@ function nodeFor(plan: string, table: "thoughts" | "thought_chunks"): string {
   return "?";
 }
 
-async function explain(sql: SQL, body: string, q: number[], count: number, arm: Arm): Promise<Cell> {
-  const text = await sql.begin(async (tx: SQL) => {
-    if (arm.startsWith("after")) {
-      await applyFunctionSettings(tx);
-    } else {
-      // 014's one SET clause — the function before 019 — and the arm's variable.
-      await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
-      if (arm === "seqscan off") await tx.unsafe(`SET LOCAL enable_seqscan = off`);
-      if (arm === "rpc 1.1") await tx.unsafe(`SET LOCAL random_page_cost = 1.1`);
-    }
-    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb`, mode: arm === "after (019) generic" ? "force_generic_plan" : "force_custom_plan", warm: true });
+async function explain(sql: SQL, body: string, q: number[], count: number, arm: Arm, scale: number): Promise<Cell> {
+  const a = ARMS[arm];
+  const r = await sql.begin(async (tx: SQL) => {
+    if (a.settings === "function") await applyFunctionSettings(tx);
+    else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+    if (a.extra) await tx.unsafe(a.extra);
+    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb`, mode: a.mode, warm: true });
   });
-  return {
-    scale: 0,
-    count,
-    arm,
-    thoughts: nodeFor(text.text, "thoughts"),
-    chunks: nodeFor(text.text, "thought_chunks"),
-    buffers: text.buffers,
-    ms: text.ms,
-    rows: Number(/^\s*Limit .*rows=(\d+)/m.exec(text.text)?.[1] ?? 0),
-    text: text.text,
-  };
+  return { scale, count, arm, thoughts: nodeFor(r.text, "thoughts"), chunks: nodeFor(r.text, "thought_chunks"), buffers: r.buffers, ms: r.ms, text: r.text };
 }
 
 async function measure(sql: SQL, body: string, queries: number[][], count: number, arm: Arm, scale: number): Promise<Cell> {
   const cells: Cell[] = [];
-  for (const q of queries) cells.push(await explain(sql, body, q, count, arm));
+  for (const q of queries) cells.push(await explain(sql, body, q, count, arm, scale));
   const ms = median(cells.map((c) => c.ms));
   const last = cells[cells.length - 1];
   // Plans are read from every repeat; a cell whose node changed between
   // queries is reported as such rather than as whichever came last.
   const same = (k: "thoughts" | "chunks") => (cells.every((c) => c[k] === last[k]) ? last[k] : `${cells.map((c) => c[k]).join("/")}`);
-  return { ...last, scale, ms, thoughts: same("thoughts"), chunks: same("chunks"), buffers: Math.round(median(cells.map((c) => c.buffers))) };
+  return { ...last, ms, thoughts: same("thoughts"), chunks: same("chunks"), buffers: Math.round(median(cells.map((c) => c.buffers))) };
 }
 
 // ── The filtered statements ──────────────────────────────────────────────────

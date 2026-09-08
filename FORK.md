@@ -2938,7 +2938,12 @@ query. Declined: a table-driven single check for every clause `match_thoughts`
 must carry (two checks warn about different consequences with different
 remedies, and SMD-945 adds no clause) and unifying the three plan-node
 classifiers (they answer different questions). Suites after: schema 367,
-live 222, preflight 92.
+live 222, preflight 92. Then the tidy-ups the passes had cut for space, while
+the files were open: `bench-plan.ts` dispatched its five arms on label
+strings and carried two dead fields, and is one table of what each arm sets;
+the chunk-row loader it and [5b] had both written is `loadChunkRows` in
+`db/test-support.ts`; and 019's header says why `ROWS` is the default page when
+017 asks the keyword function for 100 per needle.
 
 **Not done here.** The recency half of #469 (SMD-945); the walk's generic plan
 on a broad filter at 100,000 rows, measured in change 28 and again here, which
