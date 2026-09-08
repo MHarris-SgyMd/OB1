@@ -668,6 +668,23 @@ export function passUnfinished(c) {
 }
 
 /**
+ * The model and width a re-embed job key names — `reembed:<model>@<dim>`,
+ * optionally `:<suffix>` for a backfill — or null for a key of another shape.
+ * The model part may itself contain ":" (qwen3-embedding:4b), so the width is
+ * read from the LAST "@". reembed.ts refuses a --job whose named model or
+ * width is not the configured one (the run would write one model's vectors
+ * under another's key); preflight tells a pass to a model that is no longer
+ * the recorded one from a backfill under the recorded one (SMD-1024).
+ *
+ * @param {string} key
+ * @returns {{model: string, dim: number} | null}
+ */
+export function parseReembedKey(key) {
+  const m = /^reembed:(.+)@(\d+)(?::[^@]*)?$/.exec(key);
+  return m ? { model: m[1], dim: Number(m[2]) } : null;
+}
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot

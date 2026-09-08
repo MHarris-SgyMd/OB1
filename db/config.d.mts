@@ -141,6 +141,8 @@ export type PassCounts = { thoughts: number; succeeded: number; fellBack: number
 export function formatPassCounts(c: PassCounts): string;
 /** The shared rule for "this pass has not finished": a row is pending, leased or failed. */
 export function passUnfinished(c: Pick<PassCounts, "pending" | "claimed" | "failed">): boolean;
+/** `reembed:<model>@<dim>[:suffix]` → the model and width it names; null for any other shape. */
+export function parseReembedKey(key: string): { model: string; dim: number } | null;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

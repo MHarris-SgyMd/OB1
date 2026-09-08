@@ -766,7 +766,7 @@ if (configFailed) {
          * ranks across the old and the new vectors until the pass is finished.
          */
         try {
-          const { formatPassCounts, passUnfinished } = await import("../db/config.mjs");
+          const { formatPassCounts, parseReembedKey, passUnfinished } = await import("../db/config.mjs");
           const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
@@ -789,22 +789,40 @@ if (configFailed) {
               byKey.set(r.work_type, c);
             }
             const configuredKey = `reembed:${embModel}@${embDim}`;
-            const finishIt = (jobFlag: string, c: PassCounts) =>
-              `Finish it: cd db && bun reembed.ts --url $DATABASE_URL${jobFlag}` +
+            // The command has to be one reembed.ts will run: --switch-model when
+            // the record disagrees with the configuration (it refuses without),
+            // and the model the key names in the environment when that is not
+            // this shell's (it refuses a --job naming another model).
+            const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
+            const cmd = (envPrefix: string, flags: string) => `${envPrefix}bun reembed.ts --url $DATABASE_URL${flags}`;
+            const finishIt = (envPrefix: string, jobFlag: string, c: PassCounts, needsSwitch: boolean) =>
+              `Finish it: cd db && ${cmd(envPrefix, `${jobFlag}${needsSwitch ? " --switch-model" : ""}`)}` +
               `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ` +
-              `bun reembed.ts --url $DATABASE_URL${jobFlag} --status shows where it stands.`;
+              `${cmd(envPrefix, `${jobFlag} --status`)} shows where it stands.`;
             let unfinished = 0;
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
               if (!passUnfinished(c)) continue;
               unfinished++;
+              const named = parseReembedKey(key);
+              const superseded = named !== null && recorded.embedding_model !== undefined &&
+                (named.model !== recorded.embedding_model || named.dim !== Number(recorded.embedding_dim));
               if (key === configuredKey) {
                 add("re-embed pass", "warn",
                     `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
-                    finishIt("", c));
+                    finishIt("", "", c, recordDiffers));
+              } else if (superseded) {
+                // A switch that was abandoned or reverted: the recorded model
+                // has moved on, so finishing this pass under the current shell
+                // would write the wrong model's vectors — reembed.ts refuses
+                // it. Either that switch is completed, or its record retired.
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim}); its rows describe a switch that was abandoned or reverted`,
+                    `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, retire its record: DELETE FROM thought_work_claims WHERE work_type = '${key}';`);
               } else {
+                const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";
                 add("re-embed pass", "warn",
                     `${key}: ${formatPassCounts(c)} — a pass under this key stopped before it finished`,
-                    finishIt(` --job ${key}`, c));
+                    finishIt(envPrefix, ` --job ${key}`, c, named !== null && recordDiffers && named.model === embModel));
               }
             }
             if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");

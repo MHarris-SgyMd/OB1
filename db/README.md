@@ -241,9 +241,17 @@ it is, and a re-run adds anything captured meanwhile. The record and the pool
 are one transaction — the `ob1_config` row, the rows the retry flags return,
 `enqueue_thoughts` — so a run that dies between them leaves both or neither,
 never a record naming the new model with no pool behind it. And a model change
-starts the key's pool over: switching back to a model used before otherwise
-found every thought's terminal row under the key and reported nothing to do
-while every vector was the other model's.
+starts every pass to the new model over — every terminal row, and every lease
+expired with no live holder, under this job and under every key of the
+configured model, the default key and its backfills alike: switching back to a
+model used before otherwise found every thought's terminal row under the key
+and reported nothing to do while every vector was the other model's. A `--job`
+that names a model (`reembed:<model>@<dim>[:suffix]`) must name the configured
+one; a run under another model's key would write this model's vectors and
+record them as the other's, and is refused. Thoughts captured while the pass
+ran by a server not yet switched carry the previous model's vectors and no
+claim row, and nothing can tell them from new-model captures afterwards — the
+run says so at its end; switch the server first, and re-run once.
 
 **What preflight sees.** A pass is *unfinished* while any row under its key is
 pending, leased or failed — `passUnfinished` in `config.mjs`, one rule for this
@@ -257,7 +265,10 @@ detail while a pass is unfinished, and no signal on their own — after a switch
 every new capture is one. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
-it.
+it. A key whose model is no longer the recorded one — a switch abandoned or
+reverted — is reported as such, with its two remedies: finish that switch in
+its own environment, or retire its record (a flag for that, and for accepting a
+row the provider refuses permanently, is SMD-1067).
 
 **What the audit log records: almost nothing, on purpose.** Migration 008's
 trigger diffs the embedding's *presence*, not its value, so a vector replaced
@@ -643,7 +654,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 199 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 204 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs

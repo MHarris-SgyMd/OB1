@@ -58,12 +58,24 @@
  * so a run that dies between them leaves either both or neither: never a
  * database whose record names the new model with no pool to say the corpus is
  * not at it, which nothing could tell from a fresh install (SMD-1024). And a
- * model change STARTS THE KEY'S POOL OVER: the key names the target, and when
- * the recorded model has just become that target the corpus is not at it,
- * whatever an earlier pass to the same model recorded — switching back to a
- * model used before otherwise found every thought's terminal row under the key,
- * enqueued nothing, and reported nothing to do while every vector was the
- * other model's. Rows another process holds are left to it.
+ * model change STARTS EVERY PASS TO THE NEW MODEL OVER: the key names the
+ * target, and when the recorded model has just become that target the corpus
+ * is not at it, whatever an earlier pass to the same model recorded — switching
+ * back to a model used before otherwise found every thought's terminal row
+ * under the key, enqueued nothing, and reported nothing to do while every
+ * vector was the other model's. Every terminal row, and every lease that has
+ * expired with no live holder, under this job and under every key of the
+ * configured model — the default key and its backfills, since a backfill's
+ * rows are as stale as the default key's — returns to the pool; a lease still
+ * running is left to its holder. The same happens when ob1_config records no
+ * model at all: nothing then says what the corpus is at. A record moved by
+ * hand — an UPDATE on ob1_config around this tool — is not a model change this
+ * tool can see, and does not start anything over.
+ *
+ * A --job key that names a model or width (`reembed:<model>@<dim>[:suffix]`)
+ * must name the configured one: a run under `reembed:B@d` with the shell set to
+ * A would write A's vectors and record them as B's, and is refused. A key of
+ * another shape cannot be judged and is accepted.
  *
  * ── What preflight sees ─────────────────────────────────────────────────────
  * A pass is UNFINISHED while any row under its key is pending, still leased or
@@ -180,6 +192,7 @@ import {
   EMBEDDING_MODEL,
   embeddingConfigWarnings,
   formatPassCounts,
+  parseReembedKey,
   passUnfinished,
   validateEmbeddingConfig,
 } from "./config.mjs";
@@ -215,8 +228,23 @@ const DRY_RUN = has("dry-run");
 const SWITCH_MODEL = has("switch-model");
 const RETRY_FAILED = has("retry-failed");
 const RETRY_FALLBACKS = has("retry-fallbacks");
+/** The default key: the pass to the configured model, at the configured width. */
+const HEAD = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
 /** The pass and its target. See migration 015's header on why the target is in the key. */
-const JOB = flag("job") ?? `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
+const JOB = flag("job") ?? HEAD;
+{
+  // A key that names a model must name this one — see "Changing model" in the
+  // header. Judged from the same variables the embedder resolves.
+  const named = parseReembedKey(JOB);
+  if (named && (named.model !== EMBEDDING_MODEL || named.dim !== EMBEDDING_DIM)) {
+    console.error(
+      `  --job ${JOB} names a pass to ${named.model} @ ${named.dim}, but this shell is configured for ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}:\n` +
+        `  the run would write ${EMBEDDING_MODEL}'s vectors and record them as ${named.model}'s. Set OB1_EMBEDDING_MODEL and\n` +
+        `  OB1_EMBEDDING_DIM to what the key names, or drop --job.`
+    );
+    process.exit(2);
+  }
+}
 if (!JOB.startsWith("reembed:")) {
   // Accepted — rows under an existing bare key must stay reachable — but said
   // once: preflight attributes a pass to this tool by the prefix.
@@ -300,6 +328,8 @@ const recorded = Object.fromEntries(
     .map((r) => [r.key, r.value])
 );
 const modelChange = recorded.embedding_model !== undefined && recorded.embedding_model !== embedConfig.embeddingModel;
+/** The run records the model — a change, or no record to compare with — and starts every pass to it over. */
+const recordModel = modelChange || recorded.embedding_model === undefined;
 if (recorded.embedding_model === undefined) {
   console.log(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
 } else if (modelChange) {
@@ -351,6 +381,35 @@ const refusal018: string | null = fn.present
  * three cannot disagree about which rows carry a caveat.
  */
 const withCaveat = () => sql`status = 'succeeded' AND last_error IS NOT NULL`;
+
+/**
+ * The rows a model change returns to the pool — see "Changing model" in the
+ * header: every terminal row, and every lease expired with no live holder,
+ * under this job and under every key of the configured model. One definition
+ * for --dry-run's count and the run's UPDATE.
+ */
+const staleUnderThisModel = () => sql`
+  (work_type = ${JOB} OR work_type = ${HEAD} OR starts_with(work_type, ${HEAD + ":"}))
+  AND (status IN ('succeeded', 'failed') OR (status = 'claimed' AND ttl_expires_at < now()))`;
+
+/**
+ * Return the rows a predicate selects to the pool as if never tried: pending,
+ * nothing known about them, attempt count reset, no lease — the next worker
+ * writes what it finds. A terminal row's error or caveat goes with its status;
+ * the last holder's name stays for diagnosis. Returns how many, per key, for
+ * the caller to print once the transaction it ran in has committed.
+ */
+type Requeued = { n: number; keys: string[] };
+async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<Requeued> {
+  const rows = (await tx`
+    WITH retried AS (
+      UPDATE thought_work_claims
+         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL
+       WHERE ${where} RETURNING work_type)
+    SELECT work_type, count(*)::int AS n FROM retried GROUP BY work_type ORDER BY work_type`) as { work_type: string; n: number }[];
+  return { n: rows.reduce((a, r) => a + Number(r.n), 0), keys: rows.map((r) => r.work_type) };
+}
+const describeRestart = (r: Requeued) => `${r.n} row(s) under ${r.keys.join(", ")} from before the change`;
 
 type Counts = { pending: number; claimed: number; succeeded: number; fellBack: number; failed: number; unpooled: number; thoughts: number };
 async function counts(): Promise<Counts> {
@@ -486,16 +545,24 @@ if (STATUS_ONLY || DRY_RUN) {
       await sql.close();
       process.exit(2);
     }
-    // A model change starts the key's pool over (see the header), so every
-    // terminal row counts towards the run; the retry flags add nothing then.
-    const startOver = modelChange ? c.succeeded + c.failed : 0;
+    // Recording the model starts every pass to it over (see the header), so
+    // the stale rows count towards the run and the retry flags add nothing;
+    // the rows under this job are the ones this run would process.
+    const stale = recordModel
+      ? ((await sql`SELECT work_type, count(*)::int AS n FROM thought_work_claims WHERE ${staleUnderThisModel()} GROUP BY work_type ORDER BY work_type`) as { work_type: string; n: number }[])
+      : [];
+    const restart: Requeued = { n: stale.reduce((a, r) => a + Number(r.n), 0), keys: stale.map((r) => r.work_type) };
+    const restartHere = Number(stale.find((r) => r.work_type === JOB)?.n ?? 0);
+    // Said as what a run WITH the flag would do when the flag is missing: the
+    // run itself refuses, and this line must not read as its plan.
     console.log(
-      `\n  would: ${modelChange ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
-        `${startOver ? `start the pool for ${JOB} over (${startOver} rows from an earlier pass to this model); ` : ""}` +
-        `${RETRY_FAILED && !modelChange ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `${RETRY_FALLBACKS && !modelChange ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
+      `\n  would: ${modelChange && !SWITCH_MODEL ? "refuse without --switch-model; with it: " : ""}` +
+        `${recordModel ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
+        `${restart.n ? `start every pass to ${embedConfig.embeddingModel} over (${describeRestart(restart)} return to the pool); ` : ""}` +
+        `${RETRY_FAILED && !recordModel ? `return ${c.failed} failed rows to the pool; ` : ""}` +
+        `${RETRY_FALLBACKS && !recordModel ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; run ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ` +
-        `over ${c.pending + c.unpooled + startOver + (RETRY_FAILED && !modelChange ? c.failed : 0) + (RETRY_FALLBACKS && !modelChange ? c.fellBack : 0)} rows. Nothing was written.`
+        `over ${c.pending + c.unpooled + restartHere + (RETRY_FAILED && !recordModel ? c.failed : 0) + (RETRY_FALLBACKS && !recordModel ? c.fellBack : 0)} rows. Nothing was written.`
     );
   }
   await sql.close();
@@ -523,48 +590,38 @@ try {
   process.exit(2);
 }
 
-/**
- * Return the rows a predicate selects to the pool as if never tried: pending,
- * nothing known about them, attempt count reset — the next worker writes what
- * it finds. A terminal row's error or caveat goes with its status. Returns how
- * many, for the caller to print once the transaction it ran in has committed.
- */
-async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<number> {
-  const [{ n }] = await tx`
-    WITH retried AS (
-      UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
-      WHERE work_type = ${JOB} AND ${where} RETURNING 1)
-    SELECT count(*)::int AS n FROM retried`;
-  return Number(n);
-}
-
 // The record and the pool, in one transaction — see "Changing model" in the
 // header. Nothing below is printed until it has committed, so what the
 // operator reads is what the database holds.
-const recordModel = modelChange || recorded.embedding_model === undefined;
+const none: Requeued = { n: 0, keys: [] };
 const start = await sql.begin(async (tx: SQL) => {
   if (recordModel) {
     await tx`
       INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${embedConfig.embeddingModel})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
   }
-  // A model change starts the key's pool over: every terminal row under it
-  // returns to the pool, whatever an earlier pass to this model recorded. The
-  // retry flags are subsumed — they select subsets of the same rows.
-  const restarted = modelChange ? await requeue(tx, tx`status IN ('succeeded', 'failed')`) : 0;
-  const retriedFailed = RETRY_FAILED && !modelChange ? await requeue(tx, tx`status = 'failed'`) : 0;
-  const retriedFallbacks = RETRY_FALLBACKS && !modelChange ? await requeue(tx, withCaveat()) : 0;
+  // Recording the model starts every pass to it over, whatever an earlier
+  // pass recorded. The retry flags are subsumed — they select subsets of the
+  // same rows under this job.
+  const restarted = recordModel ? await requeue(tx, staleUnderThisModel()) : none;
+  const retriedFailed = RETRY_FAILED && !recordModel ? await requeue(tx, sql`work_type = ${JOB} AND status = 'failed'`) : none;
+  const retriedFallbacks = RETRY_FALLBACKS && !recordModel ? await requeue(tx, sql`work_type = ${JOB} AND ${withCaveat()}`) : none;
   const [{ added }] = await tx`SELECT enqueue_thoughts(${JOB}) AS added`;
+  // enqueue_thoughts analyses only when it added rows; a requeue moves as many
+  // into the pending index and would otherwise leave the statistics describing
+  // the finished pass (migration 015, "Cost of a claim").
+  if (restarted.n + retriedFailed.n + retriedFallbacks.n > 0 && Number(added) === 0) await tx`ANALYZE thought_work_claims`;
   return { restarted, retriedFailed, retriedFallbacks, added: Number(added) };
 });
 if (recordModel) {
   console.log(`  ob1_config.embedding_model = ${embedConfig.embeddingModel} — a server configured for it now passes preflight; switch it.`);
 }
-if (start.restarted > 0) {
-  console.log(`  --switch-model: the pool for ${JOB} starts over — ${start.restarted} row(s) from an earlier pass to this model returned to it`);
+if (start.restarted.n > 0) {
+  console.log(`  ${modelChange ? "model change" : "no model was recorded"}: every pass to ${embedConfig.embeddingModel} starts over — ${describeRestart(start.restarted)} returned to the pool`);
 }
-if (RETRY_FAILED) console.log(`  --retry-failed: ${start.retriedFailed} failed row(s) returned to the pool${modelChange ? " (already, by the model change)" : ""}`);
-if (RETRY_FALLBACKS) console.log(`  --retry-fallbacks: ${start.retriedFallbacks} row(s) succeeded with a caveat returned to the pool${modelChange ? " (already, by the model change)" : ""}`);
+const subsumed = "nothing to do separately — recording the model returned every terminal row under this job to the pool";
+if (RETRY_FAILED) console.log(`  --retry-failed: ${recordModel ? subsumed : `${start.retriedFailed.n} failed row(s) returned to the pool`}`);
+if (RETRY_FALLBACKS) console.log(`  --retry-fallbacks: ${recordModel ? subsumed : `${start.retriedFallbacks.n} row(s) succeeded with a caveat returned to the pool`}`);
 const before = await counts();
 console.log(`  pool: ${start.added} thought(s) added`);
 printCounts(before, "before");
@@ -856,6 +913,16 @@ if (after.fellBack > 0) await printFallbacks(after.fellBack);
 if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();
+}
+if (recordModel && after.unpooled > 0) {
+  // Captured while the pass ran, by a server that may not have been switched
+  // yet — then on the previous model's vectors, with no row here to say so.
+  // Nothing can tell the two apart afterwards; a re-run brings them over.
+  console.error(
+    `\n  ${after.unpooled} thought(s) were captured while the pass ran and are not in the pool. A server still embedding with\n` +
+      `  ${recorded.embedding_model ?? "the previous model"} when it captured them left them on that model's vectors, and nothing here can tell; once the\n` +
+      `  server is switched, re-run — the pool takes them.`
+  );
 }
 printPreflightNote(after);
 if (after.claimed > 0) {

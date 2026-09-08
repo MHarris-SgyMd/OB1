@@ -689,7 +689,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   delete env.OB1_CHUNK_CONTEXT;
   delete env.OB1_LLM_API_KEY;
   const reembedIn = async (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string }> => {
-    const p = Bun.spawn(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--job", REEMBED_JOB, ...extra], {
+    // The suite's key unless the call names its own (flag() reads the first --job).
+    const job = extra.includes("--job") ? [] : ["--job", REEMBED_JOB];
+    const p = Bun.spawn(["bun", join(HERE, "reembed.ts"), "--url", URL_!, ...job, ...extra], {
       env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe", cwd: HERE,
     });
     const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
@@ -752,10 +754,21 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     await sql`DELETE FROM thought_work_claims WHERE work_type = ${REEMBED_JOB}`;
   }
   frozen = false;
+  // The killed run's probe reached the stub; the model assertion below is
+  // about the first real pass.
+  modelsSeen.clear();
+
+  // A --job that names a model must name the configured one: the run would
+  // otherwise write this shell's vectors and record them as the other's.
+  const wrongKey = await reembed("--job", `reembed:other-model@${DIM}`);
+  assert(wrongKey.code === 2 && /names a pass to other-model @ \d+, but this shell is configured for stub-embed/.test(wrongKey.out),
+    `a --job naming another model is refused with exit 2 (exit ${wrongKey.code})`);
+  assert(Object.keys(await claimCounts()).length === 0 && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type LIKE 'reembed:other-model%'`)[0].c === 0, "…before anything is written");
 
   const dry = await reembed("--dry-run");
   assert(dry.code === 0 && /Nothing was written/.test(dry.out), `--dry-run exits 0 and says it wrote nothing (exit ${dry.code})`);
-  assert(/model change/.test(dry.out) && /would: record stub-embed/.test(dry.out), "…and names the model change it would make");
+  assert(/model change/.test(dry.out) && /would: refuse without --switch-model; with it: record stub-embed/.test(dry.out),
+    "…names the model change it would make, and that the run itself would refuse without the flag");
   assert(Object.keys(await claimCounts()).length === 0, "…and pooled nothing");
 
   const refused = await reembed();
@@ -948,16 +961,38 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // terminal row for every thought, and enqueue_thoughts skips them by primary
   // key — so until SMD-1024 a --switch-model to this model enqueued nothing and
   // reported nothing to do while every vector was the other model's. A model
-  // change starts the key's pool over.
+  // change starts every pass to the model over: this job, and every key of the
+  // configured model — here a backfill key with one finished row, which the
+  // run does not process and preflight then reports as unfinished, correctly
+  // (the corpus left this model and came back). One row is left as a dead
+  // worker of the earlier pass would leave it — claimed, lease long expired,
+  // attempts used up — and must be restarted too, not reaped as failed for
+  // the earlier pass's reason (first review pass).
+  const CTX_KEY = `reembed:stub-embed@${DIM}:ctx`;
+  await sql`SELECT enqueue_thoughts(${CTX_KEY}, (SELECT array_agg(id) FROM (SELECT id FROM thoughts ORDER BY created_at LIMIT 1) s))`;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${CTX_KEY}`;
+  await sql`
+    UPDATE thought_work_claims SET status = 'claimed', finished_at = NULL, ttl_expires_at = now() - interval '1 minute', attempt_count = 3, worker_id = 'dead'
+    WHERE work_type = ${REEMBED_JOB} AND thought_id = (SELECT id FROM thoughts WHERE content = ${held})`;
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   const backDry = await reembed("--dry-run");
-  assert(backDry.code === 0 && /start the pool for reembed:test over \(40 rows from an earlier pass to this model\)/.test(backDry.out) && /over 40 rows/.test(backDry.out),
-    `--dry-run of a switch back to a model used before says the pool starts over (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  assert(backDry.code === 0 && /would: refuse without --switch-model; with it: record stub-embed in ob1_config; start every pass to stub-embed over \(41 row\(s\) under reembed:stub-embed@\d+:ctx, reembed:test from before the change return to the pool\)/.test(backDry.out) && /over 40 rows/.test(backDry.out),
+    `--dry-run of a switch back to a model used before says every pass to it starts over, and which rows this run would take (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
   const back = await reembed("--switch-model");
-  assert(back.code === 0 && /the pool for reembed:test starts over — 40 row\(s\) from an earlier pass to this model returned to it/.test(back.out) && /40 re-embedded, 0 failed/.test(back.out),
+  assert(back.code === 0 && /model change: every pass to stub-embed starts over — 41 row\(s\) under reembed:stub-embed@\d+:ctx, reembed:test from before the change returned to the pool/.test(back.out) && /40 re-embedded, 0 failed/.test(back.out),
     `…and the run re-embeds every thought rather than finding nothing to do (exit ${back.code}: ${back.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   const backCounts = await claimCounts();
-  assert(backCounts.succeeded === 40 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again (${JSON.stringify(backCounts)})`);
+  assert(backCounts.succeeded === 40 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again, the expired lease included (${JSON.stringify(backCounts)})`);
+  const [{ deadAttempts }] = await sql`
+    SELECT attempt_count AS "deadAttempts" FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = (SELECT id FROM thoughts WHERE content = ${held})`;
+  assert(Number(deadAttempts) === 1, `…the dead worker's row on what counts as its first attempt (${deadAttempts})`);
+  {
+    const pf = await preflight();
+    assert(new RegExp(`re-embed pass\\s+reembed:stub-embed@${DIM}:ctx: 40 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 39 not yet in the pool — a pass under this key stopped before it finished`).test(pf.out),
+      "…and preflight reports the backfill key the change returned to the pool, which this run did not process");
+    assert(pf.out.includes(`--job ${CTX_KEY}`) && !/--switch-model/.test(pf.out), "…with its flag and no --switch-model, since the record and the configuration agree");
+  }
+  await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;

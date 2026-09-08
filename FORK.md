@@ -2681,13 +2681,57 @@ reachable — and noted once: preflight will not report it. `test-preflight.ts`
 warns with the counts and `--json` carries it; a capture during the pass is
 counted as not yet pooled; a finished pass with such a capture is finished; a
 leased row is in-flight work; a backfill under another key is reported by its
-key; a fresh install and a schema before 015 are not warnings (73 assertions).
-[9] runs preflight itself at four points and switches the model back at the end
-(199).
+key; a fresh install and a schema before 015 are not warnings. [9] runs
+preflight itself at four points and switches the model back at the end.
+
+**What the first review pass found, and what it changed.** Ten findings,
+triaged; eight fixed, one to a ticket, one stated as a limit. The largest were
+about the restart and about the remedies preflight prints. A switch abandoned
+and reverted — A to B dies at 5%, the operator goes back to A and finishes —
+left B's key with pending rows for ever, and the remedy printed for it,
+`--job reembed:B@d`, would have made `reembed.ts` write A's vectors and record
+them as B's, since the tool takes its model from the shell and never from the
+key. Two changes: `reembed.ts` refuses a `--job` whose `reembed:<model>@<dim>`
+names a model or width other than the configured one (`parseReembedKey`, one
+parser for both files), and preflight tells a pass to a model that is no longer
+the recorded one — "a switch that was abandoned or reverted" — with its two real
+remedies, completing that switch in its own environment or retiring its record
+(the hand `DELETE` that 015 documents; a flag for it is SMD-1067). The
+configured key's remedy now carries `--switch-model` when the record disagrees
+with the configuration, which is the only case where the tool would have
+refused the command preflight printed. The restart was scoped to this job and
+skipped a lease that had expired with no live holder: switching back with a
+`--job` backfill key moved the record and left the default key's terminal rows
+to report "Nothing to do", and a row a dead worker of the earlier pass had used
+its attempts on was reaped as failed for that pass's reason. It now returns
+every terminal row and every expired lease under this job and under every key
+of the configured model (a backfill's rows are as stale as the default key's;
+the run does not process the other keys and preflight then reports them,
+correctly), and also when `ob1_config` records no model at all; a record moved
+by hand is stated as not a change the tool can see. A `--dry-run` without
+`--switch-model` printed the restart as its plan when the run would have
+refused; it says "would: refuse without --switch-model; with it: …". The
+retry flags under a model change printed a count that was zero by
+construction; they say the change subsumed them. A requeue of a hundred
+thousand rows left the statistics describing the finished pass, since
+`enqueue_thoughts` analyses only when it added rows; the transaction analyses
+after a requeue that added nothing. And the run says, when it recorded the
+model and thoughts were captured meanwhile, that a server not yet switched left
+them on the previous model's vectors and a re-run brings them over — the one
+state neither preflight nor `--status` can see afterwards, since a vector
+carries no model. In the tests, the killed run's probe had pre-satisfied "the
+provider was asked for the configured model"; the set is cleared. Suites after:
+live 204, preflight 79.
 
 **Not done here.** The PostgREST branch cannot read the claim table, as it
 cannot read anything else the schema checks read; per-row lease renewal
-(SMD-1023); extraction passes.
+(SMD-1023); extraction passes; an acknowledgement path for a row the provider
+refuses permanently, which otherwise keeps the warning alive on every start
+(SMD-1067 — `--accept-failed` under the caveat rule, and `--retire` for a
+superseded key); a thought captured by a not-yet-switched server after the
+record moved, which has the old model's vector and no claim row, and is
+indistinguishable from a new-model capture once the pass is finished — the run
+says so at its end, and the operator's step is to switch the server first.
 
 ## Detached from the fork network
 
