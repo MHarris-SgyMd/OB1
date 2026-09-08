@@ -218,7 +218,7 @@ bun reembed.ts --url … --dry-run             # what a run would do; writes not
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
-#   --workers N (2)   --batch N (8)   --ttl SECONDS (900)
+#   --workers N (2)   --batch N (8)   --ttl SECONDS (900, or --batch × OB1_LLM_TIMEOUT when that is longer)
 ```
 
 It reads the same variables the server does — model, width, provider URL and
@@ -298,10 +298,17 @@ path), because a 413 is about *that* input's length and a shorter long thought
 may well be accepted — remembering would give every later long row a head
 window it was never asked about, under a reason that was another row's. Every
 provider call is bounded by `OB1_LLM_TIMEOUT` (120 s by default; the server
-reads it too): a call that never returns fails the row with the timeout named
-instead of parking the worker until the second Ctrl-C. Until SMD-1021 a refused
-row was indistinguishable from any other succeeded row, one summary line was the
-only trace, and a terminal claim meant no re-run would look at it again.
+reads it too, for its metadata call as well): a call that never returns — before
+the headers or during the body — fails the row with the timeout named instead of
+parking the worker until the second Ctrl-C. The lease has to outlast a batch
+whose every call runs to that timeout, so the default `--ttl` grows to `--batch`
+× the timeout (× two with chunk context on) when that exceeds 900 s, and an
+explicit `--ttl` below it is refused with the arithmetic shown. A row with two
+things wrong records both: a refusal is appended to a blurb failure rather than
+lost behind it. Until SMD-1021 a refused row was indistinguishable from any
+other succeeded row, one summary line was the only trace, and a terminal claim
+meant no re-run would look at it again. The rule is stated only here and in the
+tool; putting it on the column itself is SMD-1052.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
 0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
@@ -602,7 +609,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 180 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 182 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -650,7 +657,8 @@ container.
   the chunk rows, one audit row rather than thirty-seven, both twins succeeded
   with exactly one fingerprinted and the pair named in the run and under
   `--status`, the refused thought listed under `--status` and the timed-out one
-  failed with the setting named, `ob1_config`, a re-run that processes only a
+  failed with the setting named, a `--ttl` the batch could outlive refused with
+  exit 2 before the pool exists, `ob1_config`, a re-run that processes only a
   later capture, `--retry-failed` resetting the attempt count and giving the
   throttled thought its whole-content vector, `--retry-fallbacks` giving the
   refused one its whole-content vector once the stub relents and clearing the

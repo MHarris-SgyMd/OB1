@@ -62,6 +62,17 @@ const provider = Bun.serve({
       if (input.includes("tarpit") && (input === "tarpit" || estimateTokens(input) > BATCH)) {
         await new Promise(() => {});
       }
+      // Headers, then a body that never ends — the other way a call can fail to
+      // return, and the one a timeout attached to fetch() alone does not name.
+      if (input === "slowbody") {
+        return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+      }
+      // A whole-content call that fails for a reason that says nothing about
+      // the next one: the server's embedder must not remember it (nor count it
+      // as a probe), and the capture reply must say the head window stands in.
+      if (input.includes("flaky") && estimateTokens(input) > BATCH) {
+        return Response.json({ error: { message: "stub: briefly unavailable" } }, { status: 503 });
+      }
       // The whole point: a real provider would silently truncate here. Failing
       // loudly instead turns a silent regression into a red test.
       if (estimateTokens(input) > BATCH) {
@@ -117,7 +128,20 @@ const LONG_MID = `Routine preamble for the third session. ${FILLER.repeat(30)} `
 
 console.log(`\n  long capture ≈ ${estimateTokens(LONG)} tokens, provider batch ${BATCH}\n`);
 
-console.log("[1] A capture longer than the batch is stored without truncation errors");
+console.log("[0] A whole-content call that fails transiently is said in the reply");
+{
+  // Before [1], because [1]'s 400 latches the server's embedder and no later
+  // long capture is asked for its whole content at all. A 503 must not latch,
+  // must not count as a probe, and must be said: the head window stands in
+  // and there is no claim row on this path to say so later.
+  const out = await call("capture_thought", { content: `A flaky start to the notes. ${FILLER.repeat(60)}` });
+  assert(/Note: the whole content could not be embedded in one call \(.*503 .*briefly unavailable/.test(out),
+    "the capture reply says the head window stands in, with the provider's error");
+  assert(/re-capture, or a re-embed pass/.test(out), "…and what would give it the whole-content vector");
+  assert(overBatch === 0, `…and the failure was not the refusal [1] counts (${overBatch} probes)`);
+}
+
+console.log("\n[1] A capture longer than the batch is stored without truncation errors");
 {
   await call("capture_thought", { content: LONG });
   await call("capture_thought", { content: LONG_HEAD });
@@ -142,7 +166,7 @@ console.log("[1] A capture longer than the batch is stored without truncation er
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [t] = await sql`SELECT count(*)::int AS c FROM thoughts`;
-  assert(t.c === 4, `four thoughts stored (${t.c})`);
+  assert(t.c === 5, `five thoughts stored, [0]'s included (${t.c})`);
 
   const [full] = await sql`SELECT length(content) AS n FROM thoughts WHERE content LIKE 'Opening notes%'`;
   assert(Number(full.n) === LONG.length, `content stored whole, ${full.n} chars, nothing trimmed`);
@@ -171,6 +195,8 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
   const hung = await pass.getEmbedding("tarpit").then(() => "", (e: Error) => e.message);
   assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(hung), `a call that never returns times out, naming the setting (${hung})`);
   assert(Date.now() - t0 < 5_000, `…within the timeout, not the test's patience (${Date.now() - t0} ms)`);
+  const stalled = await pass.getEmbedding("slowbody").then(() => "", (e: Error) => e.message);
+  assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(stalled), `…and so does one whose body never ends after the headers arrived (${stalled})`);
   // The same hang on a whole-content call is a transient fallback: head window,
   // not refused, the timeout in the error — what the pass records as retryable.
   const hungLong = await pass.embedCapture(`tarpit ${FILLER.repeat(60)}`);

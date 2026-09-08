@@ -694,6 +694,12 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(refused.code === 2 && /--switch-model/.test(refused.out), `a model change without --switch-model is refused with exit 2 (exit ${refused.code})`);
   const [{ model: stillRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(stillRecorded === recordedModel && Object.keys(await claimCounts()).length === 0, "…touching neither ob1_config nor the pool");
+  // A lease shorter than a batch's worst case — eight rows at the 2 s timeout —
+  // is refused before anything is touched.
+  const shortLease = await reembed("--switch-model", "--ttl", "1");
+  assert(shortLease.code === 2 && /--ttl 1 s cannot cover --batch 8 × 2 s per call \(16 s\)/.test(shortLease.out) && /Raise --ttl or lower --batch/.test(shortLease.out),
+    `a --ttl the batch can outlive is refused with exit 2, showing the arithmetic (exit ${shortLease.code})`);
+  assert(Object.keys(await claimCounts()).length === 0, "…before the pool exists");
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);

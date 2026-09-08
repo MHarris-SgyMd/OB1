@@ -2492,13 +2492,47 @@ run finishes. `test-chunking.ts` [1b] drives a pass-shaped embedder over the
 refusing stub — three long captures, three probes, each with its own 400 — and
 over a request that never returns, both for a short call and for a whole-content
 one. `test-thoughts.ts` [7] pins the variable's resolution: unset, empty, zero
-and non-numeric are the default. Suites: live 180, chunking 20, thoughts 64.
+and non-numeric are the default. Suites: live 182, chunking 24, thoughts 64.
+
+**What the first review pass found, triaged.** Eight fixes, one ticket, one
+declined. The metadata-extraction call in `index.ts` was left without a timeout
+as "not this code path" — but a capture awaits it and the embedding together, so
+a chat call that never returned still held the capture and discarded the
+embedding that had finished under its bound; it carries the same signal now and
+a timeout is one more recorded reason the tags can be missing. The timeout's
+rewrap was attached to the fetch promise alone, so a deadline that passed while
+the body was still arriving surfaced as the bare "The operation timed out"
+without the seconds or the knob — the whole exchange is inside one try now, and
+`test-chunking.ts` [1b] streams a body that never ends. A row refused whole
+*and* missing a blurb was failed with the blurb error and the refusal written
+nowhere; everything a row has to say is collected before the outcome is chosen.
+The provider's error body went uncapped into the caveat and onto the claim row;
+one cap at the source, shared with the worker's catch. `counts()` read the
+status counts and the caveat count in two statements, so `--status` mid-pass
+could show more head-window rows than succeeded rows; one `FILTER` on the
+grouped query. The lease arithmetic I had stated and not enforced — eight rows
+at 120 s exceed the 900 s lease, and three expiries mark a row failed although
+every write succeeded — is enforced as `extract-entities.ts` enforces its own:
+the default lease grows to the product when that is longer, an explicit `--ttl`
+below it exits 2, and [9] asserts the refusal. The timeout gave the interactive
+path a *transient* cause of head-window fallback that the reply did not mention
+(a whole-content call that used to wait now times out); the capture and edit
+replies say so, as they already do for chunks without context, while a
+refusal stays silent as change 27 decided — `test-chunking.ts` [0] drives a 503
+through the server before [1]'s 400 can latch. And the default's rationale now
+says the budget is per request but the queue is shared, so against a provider
+that serves one request at a time the last window is timed against the whole
+queue. The caveat rule lives in the tool and this file and not on the column
+(015 cannot be edited, and a comment-only migration is a second mechanism):
+SMD-1052, to ride with SMD-1043's redefinition. Declined with the reason
+recorded: dropping the server's latch or latching on the shortest refused
+length — change 27 measured and decided that latch, its test still holds, and a
+length latch infers one row's answer from another's, which is exactly what the
+pass stopped doing.
 
 **Not done here.** A bounded in-call retry of a transient whole-content failure
 (a 429 wants a backoff a single retry does not give; the failed-row path is
-tested and stands). The lease arithmetic at the defaults — a batch whose every
-call runs to the timeout can outlive its lease — is stated in the header and
-handled by the existing "another worker will repeat it" path.
+tested and stands).
 
 ## Detached from the fork network
 

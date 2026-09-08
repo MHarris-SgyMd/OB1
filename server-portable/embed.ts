@@ -63,8 +63,23 @@ export type EmbedEnv = {
  * returns: before it, a hung provider parked a re-embed worker until the
  * second Ctrl-C (first review of SMD-946), and the lease it held expired
  * under it.
+ *
+ * The budget is per request, but the queue is shared: a long capture sends its
+ * whole-content request and every window's at once, each timed from dispatch,
+ * and a provider that serves one request at a time (Ollama with
+ * OLLAMA_NUM_PARALLEL=1) answers the last of them after all the others. So the
+ * default has to cover a whole document's worth of requests in series, not
+ * one — lower it towards a hosted API's figure only against a provider that
+ * serves in parallel.
  */
 export const DEFAULT_LLM_TIMEOUT_S = 120;
+
+/**
+ * How much of a provider's error body is kept. A proxy answering a 413 or a
+ * 502 with a full HTML page would otherwise land whole in every message built
+ * from it — and db/reembed.ts stores that message on the claim row.
+ */
+export const PROVIDER_ERROR_CHARS = 500;
 
 export type EmbedConfig = {
   /** Provider base URL, trailing slashes stripped. */
@@ -273,34 +288,39 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
 
   async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
     const cfg = config();
-    const r = await fetch(`${cfg.llmBase}/embeddings`, {
-      method: "POST",
-      headers: cfg.headers,
-      body: JSON.stringify({
-        model: cfg.embeddingModel,
-        input: applyPrompt(cfg, text, kind),
-        ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
-      }),
-      signal: AbortSignal.timeout(cfg.timeoutMs),
-    }).catch((e: Error) => {
-      // A call that never returns is the one failure nothing else here bounds.
-      // Named as what it is, with the knob, and WITHOUT a status: nothing about
-      // the next attempt is known, so embedCapture treats it as transient.
-      if (e.name === "TimeoutError") {
+    let d: { data?: [{ embedding?: unknown }] };
+    try {
+      const r = await fetch(`${cfg.llmBase}/embeddings`, {
+        method: "POST",
+        headers: cfg.headers,
+        body: JSON.stringify({
+          model: cfg.embeddingModel,
+          input: applyPrompt(cfg, text, kind),
+          ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
+        }),
+        signal: AbortSignal.timeout(cfg.timeoutMs),
+      });
+      if (!r.ok) {
+        const msg = await r.text().catch(() => "");
+        const err = new Error(`Embeddings request to ${cfg.llmBase} failed: ${r.status} ${msg.slice(0, PROVIDER_ERROR_CHARS)}`);
+        // Attached rather than parsed back out of the message: embedCapture has to
+        // distinguish "this input is too large for this model", which is a stable
+        // property worth remembering, from a transient outage, which is not.
+        (err as Error & { status?: number }).status = r.status;
+        throw err;
+      }
+      d = await r.json();
+    } catch (e) {
+      // A call that never returns is the one failure nothing else here bounds,
+      // and the deadline can pass while the body is still arriving as easily as
+      // before the headers do — so the whole exchange is inside this try. Named
+      // as what it is, with the knob, and WITHOUT a status: nothing about the
+      // next attempt is known, so embedCapture treats it as transient.
+      if ((e as Error).name === "TimeoutError") {
         throw new Error(`Embeddings request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`);
       }
       throw e;
-    });
-    if (!r.ok) {
-      const msg = await r.text().catch(() => "");
-      const err = new Error(`Embeddings request to ${cfg.llmBase} failed: ${r.status} ${msg}`);
-      // Attached rather than parsed back out of the message: embedCapture has to
-      // distinguish "this input is too large for this model", which is a stable
-      // property worth remembering, from a transient outage, which is not.
-      (err as Error & { status?: number }).status = r.status;
-      throw err;
     }
-    const d = await r.json();
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
       throw new Error(`${cfg.llmBase} returned no embedding for model ${cfg.embeddingModel}`);
