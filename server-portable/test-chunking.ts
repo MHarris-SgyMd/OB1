@@ -83,6 +83,15 @@ const provider = Bun.serve({
       v[axisFor(input)] = 1;
       return Response.json({ data: [{ embedding: v }], model: body.model });
     }
+    // The chat endpoint — metadata extraction and, under OB1_CHUNK_CONTEXT=on,
+    // the blurbs. Two ways not to answer, keyed on the text being processed.
+    const asked = JSON.stringify(body.messages ?? "");
+    if (asked.includes("slowchat")) {
+      return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+    }
+    if (asked.includes("blurbtarpit")) {
+      await new Promise(() => {});
+    }
     return Response.json({
       choices: [{ message: { content: JSON.stringify({ topics: ["long"], type: "reference", people: [] }) } }],
     });
@@ -96,6 +105,8 @@ process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_CHUNK_TOKENS = String(BATCH - 200);   // headroom, as in production
 process.env.OB1_METADATA_MODEL = "stub-meta";
+// One second: [0] captures against a chat body that never ends.
+process.env.OB1_LLM_TIMEOUT = "1";
 process.env.MCP_ACCESS_KEY = "chunk-key";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
@@ -139,6 +150,11 @@ console.log("[0] A whole-content call that fails transiently is said in the repl
     "the capture reply says the head window stands in, with the provider's error");
   assert(/re-capture, or a re-embed pass/.test(out), "…and what would give it the whole-content vector");
   assert(overBatch === 0, `…and the failure was not the refusal [1] counts (${overBatch} probes)`);
+  // The metadata call is bounded by the same setting, and a deadline that
+  // passes while its body is still arriving is recorded as the timeout it is,
+  // not as a body that was not JSON.
+  const slow = await call("capture_thought", { content: "A slowchat note about nothing much." });
+  assert(/automatic tagging failed \(provider_timeout\)/.test(slow), "a metadata call whose body never ends is recorded as a timeout, and the reply says so");
 }
 
 console.log("\n[1] A capture longer than the batch is stored without truncation errors");
@@ -166,7 +182,7 @@ console.log("\n[1] A capture longer than the batch is stored without truncation 
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [t] = await sql`SELECT count(*)::int AS c FROM thoughts`;
-  assert(t.c === 5, `five thoughts stored, [0]'s included (${t.c})`);
+  assert(t.c === 6, `six thoughts stored, [0]'s two included (${t.c})`);
 
   const [full] = await sql`SELECT length(content) AS n FROM thoughts WHERE content LIKE 'Opening notes%'`;
   assert(Number(full.n) === LONG.length, `content stored whole, ${full.n} chars, nothing trimmed`);
@@ -204,6 +220,15 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
     "a whole-content call that never returns falls back as transient, with the timeout in the error");
   assert(hungLong.chunks.length >= 3 && hungLong.embedding.every((x, i) => x === hungLong.chunks[0].embedding[i]),
     `…the windows embedded meanwhile (${hungLong.chunks.length}) and the head window stands in`);
+  // With context on, a blurb call that never returns is a reason the result
+  // carries — so a pass can write "the metadata model timed out" on the row
+  // instead of "fix the metadata model".
+  const withContext = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1", OB1_CHUNK_CONTEXT: "on" }), { rememberRefusal: false });
+  const bare = await withContext.embedCapture(`blurbtarpit ${FILLER.repeat(60)}`);
+  assert(bare.contextFailures === bare.chunks.length && bare.chunks.every((c) => !c.context),
+    `every blurb timed out, so every window went in bare (${bare.contextFailures} of ${bare.chunks.length})`);
+  assert(bare.contextErrors.length === 1 && /Chat completion request .* timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(bare.contextErrors[0]),
+    `…and the result carries the one distinct reason, naming the setting (${JSON.stringify(bare.contextErrors)})`);
 }
 
 console.log("\n[2] Chunks are written only for content that needs them");

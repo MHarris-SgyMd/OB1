@@ -298,17 +298,25 @@ path), because a 413 is about *that* input's length and a shorter long thought
 may well be accepted — remembering would give every later long row a head
 window it was never asked about, under a reason that was another row's. Every
 provider call is bounded by `OB1_LLM_TIMEOUT` (120 s by default; the server
-reads it too, for its metadata call as well): a call that never returns — before
-the headers or during the body — fails the row with the timeout named instead of
-parking the worker until the second Ctrl-C. The lease has to outlast a batch
-whose every call runs to that timeout, so the default `--ttl` grows to `--batch`
-× the timeout (× two with chunk context on) when that exceeds 900 s, and an
-explicit `--ttl` below it is refused with the arithmetic shown. A row with two
-things wrong records both: a refusal is appended to a blurb failure rather than
-lost behind it. Until SMD-1021 a refused row was indistinguishable from any
-other succeeded row, one summary line was the only trace, and a terminal claim
-meant no re-run would look at it again. The rule is stated only here and in the
-tool; putting it on the column itself is SMD-1052.
+reads it too, for its metadata call as well; every provider call goes through
+one function in `embed.ts`): a call that never returns — before the headers or
+during the body — fails the row with the timeout named instead of parking the
+worker until the second Ctrl-C, and a blurb that times out under
+`OB1_CHUNK_CONTEXT=on` puts that reason on the row rather than "fix the metadata
+model". The lease has to outlast a batch whose every call runs to that timeout,
+so the default `--ttl` grows to `--batch` × the timeout (× two with chunk
+context on), plus one row's worth of slack for a re-read, when that exceeds
+900 s — whole seconds, since `claim_thoughts` takes an integer — and an explicit
+`--ttl` below the product is refused with the arithmetic shown (`--status`
+answers regardless, since it never claims). A row with two things wrong records
+both: a refusal is appended to a blurb failure rather than lost behind it. What
+counts as a refusal is a 413, or a 400 whose message names the length — the
+same rule `extract-entities.ts` applies, from one function. Until SMD-1021 a
+refused row was indistinguishable from any other succeeded row, one summary line
+was the only trace, and a terminal claim meant no re-run would look at it again.
+The rule is stated only here and in the tool; putting it on the column itself is
+SMD-1052. The server still remembers a refusal for the life of its process;
+shaping that latch is SMD-1054.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
 0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
@@ -609,7 +617,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 182 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 184 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs

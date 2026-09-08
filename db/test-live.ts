@@ -672,13 +672,14 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   delete env.OB1_EMBEDDING_DIMENSIONS;
   delete env.OB1_CHUNK_CONTEXT;
   delete env.OB1_LLM_API_KEY;
-  const reembed = async (...extra: string[]): Promise<{ code: number; out: string }> => {
+  const reembedIn = async (extraEnv: Record<string, string>, ...extra: string[]): Promise<{ code: number; out: string }> => {
     const p = Bun.spawn(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--job", REEMBED_JOB, ...extra], {
-      env, stdout: "pipe", stderr: "pipe", cwd: HERE,
+      env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe", cwd: HERE,
     });
     const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
     return { code: await p.exited, out };
   };
+  const reembed = (...extra: string[]) => reembedIn({}, ...extra);
   const claimCounts = async () =>
     Object.fromEntries(
       (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} GROUP BY status`)
@@ -700,6 +701,14 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(shortLease.code === 2 && /--ttl 1 s cannot cover --batch 8 × 2 s per call \(16 s\)/.test(shortLease.out) && /Raise --ttl or lower --batch/.test(shortLease.out),
     `a --ttl the batch can outlive is refused with exit 2, showing the arithmetic (exit ${shortLease.code})`);
   assert(Object.keys(await claimCounts()).length === 0, "…before the pool exists");
+  const statusShort = await reembed("--status", "--ttl", "1");
+  assert(statusShort.code === 0 && /status: \d+ thoughts/.test(statusShort.out), `…while --status answers whatever the lease, since it never claims (exit ${statusShort.code})`);
+  // claim_thoughts takes whole seconds, and OB1_LLM_TIMEOUT=120.3 is legal: the
+  // derived default lease is an integer — the floor rounded up, plus one row's
+  // worth of slack for a re-read — or every claim would fail on its signature.
+  const fractional = await reembedIn({ OB1_LLM_TIMEOUT: "120.3" }, "--dry-run");
+  assert(fractional.code === 0 && /8 per claim, 1084 s leases/.test(fractional.out),
+    `a fractional timeout gives a whole-second default lease: ceil(ceil(8 × 120.3) + 120.3) = 1084 (${fractional.out.match(/\d+ s leases/)?.[0]})`);
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);

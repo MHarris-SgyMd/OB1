@@ -1,6 +1,6 @@
 
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
-import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
+import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -160,8 +160,8 @@ function explainHeadWindow(e: EmbeddedCapture | undefined): string {
   if (!e?.wholeContentFellBack || e.wholeContentRefused) return "";
   return (
     `\n\nNote: the whole content could not be embedded in one call (${e.wholeContentError ?? "no detail"}); ` +
-    `the head window's vector stands in for it. The thought is stored and searchable, and its search chunks ` +
-    `are complete; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
+    `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
+    `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
   );
 }
 
@@ -179,17 +179,15 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     metadata_extraction_failed: reason,
   });
 
-  // Bounded like the embedding calls, and by the same setting: a capture awaits
-  // this and the embedding together, so a chat call that never returned held
-  // the capture — and discarded the embedding that had finished — for as long
-  // as the platform allowed. A timeout is one more way the tags can be missing.
-  let r: Response;
+  // Through the one provider call embed.ts owns, so this is bounded like the
+  // embedding calls and by the same setting: a capture awaits this and the
+  // embedding together, so a chat call that never returned held the capture —
+  // and discarded the embedding that had finished — for as long as the
+  // platform allowed. A timeout is one more recorded way the tags can be
+  // missing, told apart from a refused status and from a body that is not JSON.
+  let d: { choices?: [{ message?: { content?: string } }] };
   try {
-    r = await fetch(`${llmBase()}/chat/completions`, {
-    method: "POST",
-    headers: llmHeaders(),
-    signal: AbortSignal.timeout(embedConfig().timeoutMs),
-    body: JSON.stringify({
+    d = await providerCall(embedConfig(), "/chat/completions", {
       model: metadataModel(),
       response_format: { type: "json_object" },
       // Structured extraction has one right answer, so sampling only adds
@@ -214,28 +212,13 @@ Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
       ],
-    }),
     });
   } catch (e) {
-    if ((e as Error).name === "TimeoutError") {
-      console.error(`extractMetadata: ${llmBase()} did not answer within ${embedConfig().timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`);
-      return fallback("provider_timeout");
+    if (e instanceof ProviderError) {
+      console.error(`extractMetadata: ${e.message}`);
+      return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
     }
     throw e;
-  }
-
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    console.error(`extractMetadata: ${llmBase()} returned ${r.status} ${msg.slice(0, 500)}`);
-    return fallback(`provider_${r.status}`);
-  }
-
-  let d: { choices?: [{ message?: { content?: string } }] };
-  try {
-    d = await r.json();
-  } catch {
-    console.error("extractMetadata: provider returned a non-JSON body");
-    return fallback("invalid_response_body");
   }
 
   const content = d?.choices?.[0]?.message?.content;

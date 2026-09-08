@@ -131,10 +131,13 @@
  * the batch's worst case, every call running to the timeout: one phase of
  * concurrent calls per row with context off, two (blurbs, then embeddings)
  * with it on. The defaults alone do not fit (8 rows × 120 s > 900 s), so the
- * default lease grows to that product when it is longer, and an explicit --ttl
- * below it is refused — a batch that outlives its lease is reaped mid-way and
+ * default lease grows to that product plus one row's worth of slack — for the
+ * re-read a concurrent edit costs — when that is longer, and an explicit --ttl
+ * below the product is refused (a run or --dry-run; --status never claims and
+ * answers regardless) — a batch that outlives its lease is reaped mid-way and
  * handed to another worker, and three such expiries mark a row failed although
- * every write succeeded.
+ * every write succeeded. The arithmetic is a stand-in for per-row lease
+ * renewal (SMD-1023).
  */
 
 import { SQL } from "bun";
@@ -196,17 +199,22 @@ const embedConfig = resolveEmbedConfig(process.env);
 const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
 
 // The lease must outlast a batch whose every call runs to the timeout — see
-// the header. Seconds, as the flag is.
-const LEASE_FLOOR = BATCH * (embedConfig.chunkContext ? 2 : 1) * (embedConfig.timeoutMs / 1000);
-const TTL = flag("ttl") === undefined ? Math.max(900, LEASE_FLOOR) : numberFlag("ttl", 900, 1);
-if (TTL < LEASE_FLOOR) {
-  console.error(
-    `--ttl ${TTL} s cannot cover --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s per call (${LEASE_FLOOR} s), which is what a batch\n` +
-      `takes when every call runs to OB1_LLM_TIMEOUT. A batch that outlives its lease is reaped mid-way and repeated by another\n` +
-      `worker, and three expiries mark a row failed although every write succeeded. Raise --ttl or lower --batch.`
-  );
-  process.exit(2);
-}
+// the header. Seconds, as the flag is, and whole ones: claim_thoughts takes an
+// int, and OB1_LLM_TIMEOUT=120.3 is legal. The floor is the certain worst case
+// for one embed per row; the default adds one row's worth of slack for the
+// re-read a concurrent edit costs (processRow retries up to three times), and
+// says so. Per-row lease renewal (SMD-1023) would retire this arithmetic.
+const PHASES = embedConfig.chunkContext ? 2 : 1;
+const PER_ROW_S = PHASES * (embedConfig.timeoutMs / 1000);
+const LEASE_FLOOR = Math.ceil(BATCH * PER_ROW_S);
+const TTL = flag("ttl") === undefined ? Math.max(900, Math.ceil(LEASE_FLOOR + PER_ROW_S)) : numberFlag("ttl", 900, 1);
+// Read-only modes never claim, so they answer whatever the lease; --dry-run
+// reports the refusal a run would make, alongside the 018 check below.
+const refusalTtl: string | null = TTL >= LEASE_FLOOR
+  ? null
+  : ` --ttl ${TTL} s cannot cover --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s per call (${LEASE_FLOOR} s), which is what a batch\n` +
+    `  takes when every call runs to OB1_LLM_TIMEOUT. A batch that outlives its lease is reaped mid-way and repeated by another\n` +
+    `  worker, and three expiries mark a row failed although every write succeeded. Raise --ttl or lower --batch.`;
 
 console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}, ${embedConfig.timeoutMs / 1000} s per call`);
@@ -412,8 +420,9 @@ if (STATUS_ONLY || DRY_RUN) {
   if (c.fellBack > 0) await printFallbacks(c.fellBack);
   await printDuplicateGroups();
   if (DRY_RUN) {
-    if (refusal018) {
-      console.error(`\n  would: refuse.${refusal018}`);
+    const refusal = refusalTtl ?? refusal018;
+    if (refusal) {
+      console.error(`\n  would: refuse.${refusal}`);
       await sql.close();
       process.exit(2);
     }
@@ -431,10 +440,13 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
-if (refusal018) {
-  console.error(`\n ${refusal018}`);
-  await sql.close();
-  process.exit(2);
+{
+  const refusal = refusalTtl ?? refusal018;
+  if (refusal) {
+    console.error(`\n ${refusal}`);
+    await sql.close();
+    process.exit(2);
+  }
 }
 
 // The provider first, so a wrong URL or a wrong width fails before any row is
@@ -590,7 +602,9 @@ async function processRow(row: Row): Promise<Outcome> {
       // written, bare, and the claim is a failure --retry-failed can revisit
       // once the metadata model behaves.
       if (embedConfig.chunkContext && embedded.contextFailures > 0) {
-        failures.push(`${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context — the blurb call failed or its answer was unusable; the bare vectors are stored; fix the metadata model, then --retry-failed`);
+        // With the reasons, distinct: a metadata model slower than
+        // OB1_LLM_TIMEOUT is told apart from one that answers badly.
+        failures.push(`${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context (${embedded.contextErrors.join("; ") || "no detail"}); the bare vectors are stored; fix the cause, then --retry-failed`);
       }
       if (failures.length) return { outcome: "failed", error: [...failures, ...(refused ? [refused] : [])].join("; also: ") };
       return refused ? { outcome: "succeeded", caveat: refused } : { outcome: "succeeded" };

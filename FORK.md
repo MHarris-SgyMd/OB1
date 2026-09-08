@@ -2492,7 +2492,7 @@ run finishes. `test-chunking.ts` [1b] drives a pass-shaped embedder over the
 refusing stub — three long captures, three probes, each with its own 400 — and
 over a request that never returns, both for a short call and for a whole-content
 one. `test-thoughts.ts` [7] pins the variable's resolution: unset, empty, zero
-and non-numeric are the default. Suites: live 182, chunking 24, thoughts 64.
+and non-numeric are the default. Suites: live 184, chunking 27, thoughts 64.
 
 **What the first review pass found, triaged.** Eight fixes, one ticket, one
 declined. The metadata-extraction call in `index.ts` was left without a timeout
@@ -2524,11 +2524,44 @@ says the budget is per request but the queue is shared, so against a provider
 that serves one request at a time the last window is timed against the whole
 queue. The caveat rule lives in the tool and this file and not on the column
 (015 cannot be edited, and a comment-only migration is a second mechanism):
-SMD-1052, to ride with SMD-1043's redefinition. Declined with the reason
-recorded: dropping the server's latch or latching on the shortest refused
-length — change 27 measured and decided that latch, its test still holds, and a
-length latch infers one row's answer from another's, which is exactly what the
-pass stopped doing.
+SMD-1052, to ride with SMD-1043's redefinition. Declined: dropping the server's
+latch or latching on the shortest refused length — change 27 measured and
+decided that latch and its test still holds. The reason first recorded here,
+that a length latch "infers one row's answer from another's", was wrong and the
+second pass said so: a 413 at length L does imply refusal for every longer
+input under one model. The honest reservations are that `estimateTokens` is
+not the provider's tokenizer and that a bare 400 is not about length; the
+latch's shape is SMD-1054.
+
+**A second pass, triaged: nine fixes and one ticket.** The derived default
+lease could be fractional — `OB1_LLM_TIMEOUT=120.3` is legal — and
+`claim_thoughts` takes an integer, so every worker's first claim would have
+failed on the function's signature and the run re-embedded nothing while
+`--dry-run` printed "962.4 s leases"; whole seconds now, and [9] runs a dry run
+at 120.3 and reads the lease back. The metadata call's rewrap closed after
+`fetch()`, the defect the first pass had fixed in `getEmbedding` — a deadline
+passing during the body was recorded as `invalid_response_body`. Rather than
+fix it a third time by hand, every provider call now goes through one function
+in `embed.ts` (`providerCall`: URL, headers, signal, the timeout's name, the
+status attached, the body capped, the JSON parsed), raising a `ProviderError`
+whose `kind` tells a timeout from a refused status from a body that is not
+JSON; the three call sites keep their own degradation and lose their own
+copies of the mechanics, and `test-chunking.ts` [0] streams a chat body that
+never ends and reads `provider_timeout` back off the reply. The lease floor
+covered one embed per row while `processRow` re-embeds up to three times after
+a concurrent edit; the default now carries one row's worth of slack and the
+header says the arithmetic stands in for per-row renewal (SMD-1023). The lease
+check ran before the read-only branch, so a monitor's `--status --ttl 600`
+exited 2 with the lease lecture and no counts; it is exempt as the model-change
+refusal is, and `--dry-run` reports it as a refusal a run would make. A blurb
+that timed out reached the row as "fix the metadata model" — `EmbeddedCapture`
+carries the distinct reasons and the row names them. Any 400 on the
+whole-content call was recorded as a length refusal, a permanent and "correct"
+outcome, while `extract-entities.ts` already read the message; one
+`refusesLength` in `embed.ts` is the rule for both. The reply's "search chunks
+are complete" could follow a note saying their context was missing; it says
+every chunk has its vector. `PROVIDER_ERROR_CHARS` reached the two literals it
+had missed. Suites after: live 184, chunking 27.
 
 **Not done here.** A bounded in-call retry of a transient whole-content failure
 (a 429 wants a backoff a single retry does not give; the failed-row path is
