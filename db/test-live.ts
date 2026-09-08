@@ -589,16 +589,31 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 // must end succeeded, one fingerprinted and one not, with the pair named in the
 // summary and under --status (SMD-1022; 013's update_thought refused the second
 // for ever). Ten milliseconds per embedding so two workers really overlap.
+//
+// Preflight is run as a subprocess against the same database at four points
+// (SMD-1024): after a run killed just after it recorded the new model (the
+// record and the pool are one transaction, so the kill leaves a pool preflight
+// reports, never a bare record), after the first run (three failed rows), while
+// another process holds a lease, and once the pass is finished — and each time
+// the counts it prints are the counts the tool printed. Last, the recorded
+// model is switched back and --switch-model to it again must start the key's
+// pool over rather than find every thought's terminal row and do nothing.
 
 console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
 {
   await sql`DELETE FROM thoughts`;
-  const REEMBED_JOB = "test:reembed";
+  // Prefixed as preflight attributes a pass to the tool — see reembed.ts's
+  // header. The configured model's key is reembed:stub-embed@<dim>; this one
+  // exercises preflight's "another key" wording.
+  const REEMBED_JOB = "reembed:test";
   const DIM = EMBEDDING_DIM;
   let poison = true;
   let throttled = false;
   let refusing = true;
   let tarpitOpen = true;
+  // While set, every embedding request but the run's provider probe hangs, so
+  // a run can be killed between recording the model and its first write.
+  let frozen = false;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
     let h = 0;
@@ -616,6 +631,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
       const body = (await req.json()) as { input?: string; model?: string };
       modelsSeen.add(String(body.model));
       const input = String(body.input ?? "");
+      if (frozen && input !== "reembed.ts provider probe") await neverAnswers();
       if (poison && input.includes("hemlock")) {
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
@@ -686,6 +702,57 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
         .map((r: { status: string; c: number }) => [r.status, Number(r.c)])
     ) as Record<string, number>;
 
+  // server-portable/preflight.ts against the same database, configured as the
+  // run is (the stub is a loopback endpoint, so no credential is needed).
+  const preflight = async (): Promise<{ code: number; out: string }> => {
+    const penv: Record<string, string | undefined> = { ...env, OB1_STORE: "sql", MCP_ACCESS_KEY: "x".repeat(64) };
+    for (const k of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY"]) delete penv[k];
+    const dir = join(HERE, "..", "server-portable");
+    const p = Bun.spawn(["bun", join(dir, "preflight.ts")], { env: penv, stdout: "pipe", stderr: "pipe", cwd: dir });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    return { code: await p.exited, out };
+  };
+  const PASS_LINE = /re-embed pass\s+reembed:test: (\d+ thoughts — [^\n]*not yet in the pool) — a pass under this key stopped before it finished/;
+
+  // The ticket's crash: a run killed after it recorded the new model. The stub
+  // freezes every request but the probe, so the one worker hangs on its first
+  // row and nothing is written; the kill lands between the record and the
+  // first write. The record and the pool are one transaction, so what is left
+  // is a pool — every row pending, or all but the one the dead worker had
+  // claimed, depending on where the kill landed — that
+  // preflight reports, and never a record with nothing behind it.
+  frozen = true;
+  {
+    const p = Bun.spawn(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--job", REEMBED_JOB, "--switch-model", "--workers", "1", "--batch", "1"], {
+      env, stdout: "pipe", stderr: "pipe", cwd: HERE,
+    });
+    const reader = p.stdout.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    while (!/ob1_config\.embedding_model = stub-embed/.test(seen)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += decoder.decode(value, { stream: true });
+    }
+    p.kill(9);
+    await p.exited;
+    assert(/ob1_config\.embedding_model = stub-embed/.test(seen), "a run was killed just after it recorded the new model");
+    const [{ model: afterKill }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
+    const killed = await claimCounts();
+    const pooled = Object.values(killed).reduce((a, b) => a + b, 0);
+    assert(afterKill === "stub-embed" && pooled === 38 && (killed.pending ?? 0) + (killed.claimed ?? 0) === 38,
+      `…leaving the record AND the whole pool, nothing written: ${JSON.stringify(killed)} (${afterKill})`);
+    const pf = await preflight();
+    const line = PASS_LINE.exec(pf.out);
+    assert(pf.code === 0 && /embedding contract\s+stub-embed @ \d+ dimensions, matching/.test(pf.out), `preflight still passes, with the contract matching (exit ${pf.code})`);
+    assert(line !== null && /38 thoughts — 0 succeeded, 0 failed, (1 in flight, 37 pending|0 in flight, 38 pending), 0 not yet in the pool/.test(line?.[1] ?? ""),
+      `…and warns that the pass under this key has not finished, with the counts (${line?.[1] ?? pf.out.split("\n").find((l) => /re-embed pass/.test(l))})`);
+    assert(/--job reembed:test/.test(pf.out) && /--status/.test(pf.out), "…naming the key's flag and --status as the remedy");
+    await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type = ${REEMBED_JOB}`;
+  }
+  frozen = false;
+
   const dry = await reembed("--dry-run");
   assert(dry.code === 0 && /Nothing was written/.test(dry.out), `--dry-run exits 0 and says it wrote nothing (exit ${dry.code})`);
   assert(/model change/.test(dry.out) && /would: record stub-embed/.test(dry.out), "…and names the model change it would make");
@@ -719,6 +786,14 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(/1 succeeded row\(s\) carry a caveat/.test(first.out) && /413 .*stub: input too long/.test(first.out),
     "…and lists the one long thought the provider refused whole, with the 413");
   assert(/35 succeeded \(1 with a caveat\)/.test(first.out), "…which the counts show as succeeded with a caveat, not as failed");
+  const FIRST_COUNTS = "38 thoughts — 35 succeeded (1 with a caveat), 3 failed, 0 in flight, 0 pending, 0 not yet in the pool";
+  assert(first.out.includes(`preflight will warn until this finishes: reembed:test — ${FIRST_COUNTS}`), "…and says what preflight will say until the failed rows are retried");
+  {
+    const pf = await preflight();
+    const line = PASS_LINE.exec(pf.out);
+    assert(pf.code === 0 && line?.[1] === FIRST_COUNTS, `preflight says the same, in the same words, as a warning (exit ${pf.code}: ${line?.[1] ?? "no re-embed pass line"})`);
+    assert(/--retry-failed for the 3 failed/.test(pf.out), "…with --retry-failed in the remedy while rows are failed");
+  }
   const [{ model: nowRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(nowRecorded === "stub-embed", `ob1_config now records the new model (${nowRecorded})`);
   assert(modelsSeen.has("stub-embed"), "the provider was asked for the configured model");
@@ -795,6 +870,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   const status = await reembed("--status");
   assert(status.code === 0 && /35 succeeded \(1 with a caveat\), 3 failed/.test(status.out), "--status reports the pass, caveat included");
+  assert(status.out.includes(`preflight will warn until this finishes: reembed:test — ${FIRST_COUNTS}`), "…and what preflight will say meanwhile");
   assert(/1 succeeded row\(s\) carry a caveat/.test(status.out) && /--retry-fallbacks/.test(status.out), "…lists the refused long thought and names the flag that revisits it");
   assert(/1 group\(s\) of thoughts share one normalised text/.test(status.out) && /delete_thought/.test(status.out), "…and lists the legacy pair as a dedup task, with what to do about it");
   const dryFallbacks = await reembed("--dry-run", "--retry-fallbacks");
@@ -848,6 +924,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`SELECT enqueue_thoughts(${REEMBED_JOB})`;
   const ghost = await sql`SELECT thought_id FROM claim_thoughts(${REEMBED_JOB}, 'ghost', 1)`;
   assert(ghost.length === 1, "another process holds the one pending row");
+  {
+    const pf = await preflight();
+    assert(PASS_LINE.exec(pf.out)?.[1] === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
+      `preflight reports the lease another process holds as unfinished work (${PASS_LINE.exec(pf.out)?.[1] ?? "no re-embed pass line"})`);
+  }
   const blocked = await reembed();
   assert(blocked.code === 1 && /1 row\(s\) are still leased/.test(blocked.out), `a run that finds only another process's lease exits 1 and says so (exit ${blocked.code})`);
   const [{ e: heldVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${held}`;
@@ -855,8 +936,28 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`SELECT release_claims_for_worker(${REEMBED_JOB}, 'ghost')`;
   const finish = await reembed();
   assert(finish.code === 0 && /1 re-embedded, 0 failed/.test(finish.out), `once the lease is returned a run finishes the row and exits 0 (exit ${finish.code})`);
+  assert(!/preflight will warn/.test(finish.out), "…and no longer says preflight will warn");
+  {
+    const pf = await preflight();
+    assert(pf.code === 0 && /re-embed pass\s+none unfinished/.test(pf.out) && !PASS_LINE.test(pf.out), "preflight reports no unfinished pass once every row is terminal without failure");
+  }
   const noop = await reembed();
   assert(noop.code === 0 && /Nothing to do/.test(noop.out), "a further run has nothing to do and exits 0");
+
+  // Switching back to a model used before. The key holds a finished pass's
+  // terminal row for every thought, and enqueue_thoughts skips them by primary
+  // key — so until SMD-1024 a --switch-model to this model enqueued nothing and
+  // reported nothing to do while every vector was the other model's. A model
+  // change starts the key's pool over.
+  await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
+  const backDry = await reembed("--dry-run");
+  assert(backDry.code === 0 && /start the pool for reembed:test over \(40 rows from an earlier pass to this model\)/.test(backDry.out) && /over 40 rows/.test(backDry.out),
+    `--dry-run of a switch back to a model used before says the pool starts over (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  const back = await reembed("--switch-model");
+  assert(back.code === 0 && /the pool for reembed:test starts over — 40 row\(s\) from an earlier pass to this model returned to it/.test(back.out) && /40 re-embedded, 0 failed/.test(back.out),
+    `…and the run re-embeds every thought rather than finding nothing to do (exit ${back.code}: ${back.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  const backCounts = await claimCounts();
+  assert(backCounts.succeeded === 40 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again (${JSON.stringify(backCounts)})`);
 
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;

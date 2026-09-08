@@ -742,6 +742,78 @@ if (configFailed) {
           add("embedding contract", "ok", `${recorded.embedding_model} @ ${recorded.embedding_dim} dimensions, matching`);
         }
 
+        /**
+         * An unfinished re-embed pass (SMD-1024). `db/reembed.ts --switch-model`
+         * records the new model in ob1_config before any row is re-embedded —
+         * deliberately: that is what lets a server configured for the new model
+         * pass the check above and be switched while the pass runs. So the line
+         * above says "matching" for a pass that died at 5%, or was never re-run
+         * after --retry-failed, while most vectors are another model's and every
+         * search ranks across the two. The claim table is the record of the
+         * pass (migration 015's fourth principle) and reembed.ts writes the
+         * record and the pool in one transaction, so its counts are the whole
+         * signal: a pass is unfinished while any row under its key is pending,
+         * leased or failed — passUnfinished() in db/config.mjs, the rule
+         * reembed.ts prints by, in the phrase formatPassCounts() gives both. No
+         * marker row: a second record could disagree with the first and would
+         * need clearing across processes. Every key with the tool's prefix is
+         * read, so a backfill under --job is reported too; extraction keys are
+         * not — 016's trigger keeps that pool fed between worker runs. Thoughts
+         * with no row under a key are detail, not a signal: after a finished
+         * switch every new capture is one.
+         *
+         * A warning, as the model mismatch above is: the server answers, and
+         * ranks across the old and the new vectors until the pass is finished.
+         */
+        try {
+          const { formatPassCounts, passUnfinished } = await import("../db/config.mjs");
+          const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
+          if (!present) {
+            add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
+          } else {
+            type PassCounts = { thoughts: number; succeeded: number; fellBack: number; failed: number; claimed: number; pending: number; unpooled: number };
+            const rows = (await sql`
+              SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
+                     (SELECT count(*)::int FROM thoughts) AS thoughts
+              FROM thought_work_claims WHERE work_type LIKE 'reembed:%' GROUP BY work_type, status`) as
+              { work_type: string; status: string; c: number; noted: number; thoughts: number }[];
+            const byKey = new Map<string, PassCounts>();
+            for (const r of rows) {
+              const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
+              const n = Number(r.c);
+              if (r.status === "succeeded") { c.succeeded = n; c.fellBack = Number(r.noted); }
+              else if (r.status === "failed") c.failed = n;
+              else if (r.status === "claimed") c.claimed = n;
+              else if (r.status === "pending") c.pending = n;
+              c.unpooled -= n;
+              byKey.set(r.work_type, c);
+            }
+            const configuredKey = `reembed:${embModel}@${embDim}`;
+            const finishIt = (jobFlag: string, c: PassCounts) =>
+              `Finish it: cd db && bun reembed.ts --url $DATABASE_URL${jobFlag}` +
+              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ` +
+              `bun reembed.ts --url $DATABASE_URL${jobFlag} --status shows where it stands.`;
+            let unfinished = 0;
+            for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
+              if (!passUnfinished(c)) continue;
+              unfinished++;
+              if (key === configuredKey) {
+                add("re-embed pass", "warn",
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
+                    finishIt("", c));
+              } else {
+                add("re-embed pass", "warn",
+                    `${key}: ${formatPassCounts(c)} — a pass under this key stopped before it finished`,
+                    finishIt(` --job ${key}`, c));
+              }
+            }
+            if (unfinished === 0) add("re-embed pass", "ok", "none unfinished");
+          }
+        } catch (e) {
+          add("re-embed pass", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads thought_work_claims and counts thoughts.");
+        }
+
         if (Number(applied[0].c) === 0)
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");

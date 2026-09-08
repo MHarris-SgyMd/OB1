@@ -136,6 +136,12 @@ export function embeddingConfigWarnings(
   truncate?: boolean
 ): string[];
 
+/** A bulk pass's counts in one phrase — printed by db/reembed.ts, embedded by preflight (SMD-1024). */
+export type PassCounts = { thoughts: number; succeeded: number; fellBack: number; failed: number; claimed: number; pending: number; unpooled: number };
+export function formatPassCounts(c: PassCounts): string;
+/** The shared rule for "this pass has not finished": a row is pending, leased or failed. */
+export function passUnfinished(c: Pick<PassCounts, "pending" | "claimed" | "failed">): boolean;
+
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;
 

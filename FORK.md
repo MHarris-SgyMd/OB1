@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-four numbered changes on top of the pin. Seven fix defects found in an
+Thirty-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–34 are the numbered `###` sections** further down, which is
+sections. Changes **18–35 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -1757,11 +1757,11 @@ lease problem. The chunk-context template fill moved into `db/config.mjs` and
 The 1 s lease in the live suite became 2 s. Writing the new model into
 `ob1_config` before the pass stays as it is — it is what lets the server be
 switched, and a later run resumes the same key — and preflight not seeing an
-incomplete pass is SMD-1024.
+incomplete pass is SMD-1024 (fixed in change 35).
 
-**Not done here.** Preflight does not report an incomplete pass (`--status`
-does); a width-changing migration; the entity-extraction consumer (SMD-947),
-which this exists for. `deploy/compose.yaml` does not run the tool — it needs
+**Not done here.** Preflight did not report an incomplete pass (`--status`
+did; change 35 made preflight do so); a width-changing migration; the
+entity-extraction consumer (SMD-947), which this exists for. `deploy/compose.yaml` does not run the tool — it needs
 the provider, and runs from a checkout.
 
 ### 30. Entities and relationships — a structured layer, and what a 7B model gets right
@@ -2613,6 +2613,81 @@ not a stored value.
 **Not done here.** A bounded in-call retry of a transient whole-content failure
 (a 429 wants a backoff a single retry does not give; the failed-row path is
 tested and stands).
+
+### 35. Preflight sees an unfinished re-embed — and a pass starts as one transaction
+
+`server-portable/preflight.ts`, `db/reembed.ts`, `db/config.mjs` (Linear
+SMD-1024, named "not done" by change 29 and made a ticket by its second review
+pass). `reembed.ts --switch-model` records the new model in `ob1_config` before
+the first row is re-embedded, on purpose: that is what lets a server configured
+for the new model pass preflight and be switched while the pass runs, and lets
+a later run resume the same key. The cost was what preflight then said. It
+compared the configured model with the recorded one and reported `matching` —
+for a pass that died at 5%, or was never re-run after `--retry-failed`, leaving
+a server that passed every check while most of its vectors were another model's
+and every search ranked across the two. `--status` said so, but only when
+someone ran it.
+
+**The signal is the claim table, not a marker.** The ticket offered two: a
+marker row in `ob1_config` (`reembed_in_progress = <key>`, written at start and
+cleared at completion) or an inference from the claim counts. The counts won.
+Migration 015's fourth principle already makes terminal rows *the record of the
+pass*; a marker would be a second record that can disagree with the first — the
+process that drained the pool dies before clearing it, two processes finish at
+once, an operator clears rows by hand — and needs a clearing protocol across
+concurrent processes. The rule is one line, `passUnfinished` in
+`db/config.mjs`: **a pass is unfinished while any row under its key is pending,
+leased or failed.** Succeeded rows with a caveat (change 34) are finished.
+Thoughts with no row under the key are not a signal on their own — after a
+completed switch every new capture is one, for ever — and are reported as detail
+while a pass is unfinished. Preflight reads every key with the tool's prefix
+(`reembed:`), so a backfill under `--job` is reported by its key too; extraction
+keys are excluded because 016's trigger keeps that pool fed between worker runs.
+A new check, `re-embed pass`, sits directly under `embedding contract`, whose
+`matching` stays literally true of the record; the line beneath qualifies it, as
+a warning — the server answers, ranking across the old and the new vectors —
+with the counts and the command that finishes the pass (`--retry-failed` named
+while rows are failed, `--status` for where it stands). Before migration 015
+there is nothing to read and the check says so rather than warning.
+
+**What the counts could not see, until the start was one transaction.** The
+ticket's own crash: the `ob1_config` write succeeds, the connection drops during
+`enqueue_thoughts`, the operator forgets. That left a record naming the new
+model with *no* claim rows, which no reading of the claim table could tell from
+a fresh install. `reembed.ts` now writes the record, the rows the retry flags
+return, and the pool in one transaction; a run that dies between them leaves
+either both or neither, and `test-live.ts` [9] kills a run just after it prints
+the record (the stub freezes every request but the probe, so nothing is
+written) and asserts the whole pool is there for preflight to report. Reading
+the start with that in mind found a second gap: **switching back to a model
+used before did nothing.** The key `reembed:<model>@<dim>` still held the
+earlier pass's terminal row for every thought that existed then,
+`enqueue_thoughts` skipped them by primary key, and the run reported "Nothing to
+do", exit 0, while every vector was the other model's — a state preflight would
+have called finished, whatever signal it read. A model change now starts the
+key's pool over inside the same transaction: every succeeded or failed row
+returns to pending (rows another process holds are left to it), the run says
+how many, and `--dry-run` reports it in its `would:` line.
+
+**The two agree by sharing the words.** `formatPassCounts` in `db/config.mjs`
+is the phrase `--status` and the end of a run print ("38 thoughts — 35
+succeeded (1 with a caveat), 3 failed, 0 in flight, 0 pending, 0 not yet in the
+pool") and the phrase preflight embeds; `reembed.ts` prints `preflight will warn
+until this finishes:` with it whenever the rule holds at the end of a run or
+under `--status`, so an operator reading either sees one account. A `--job` key
+without the prefix is accepted — rows under an existing bare key must stay
+reachable — and noted once: preflight will not report it. `test-preflight.ts`
+[5] writes the states to the claim table as the tool would leave them: mid-pass
+warns with the counts and `--json` carries it; a capture during the pass is
+counted as not yet pooled; a finished pass with such a capture is finished; a
+leased row is in-flight work; a backfill under another key is reported by its
+key; a fresh install and a schema before 015 are not warnings (73 assertions).
+[9] runs preflight itself at four points and switches the model back at the end
+(199).
+
+**Not done here.** The PostgREST branch cannot read the claim table, as it
+cannot read anything else the schema checks read; per-row lease renewal
+(SMD-1023); extraction passes.
 
 ## Detached from the fork network
 
