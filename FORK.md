@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-three numbered changes on top of the pin. Seven fix defects found in an
+Thirty-four numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–33 are the numbered `###` sections** further down, which is
+sections. Changes **18–34 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -1702,8 +1702,8 @@ trigger diffs the embedding's *presence*, not its value: a vector replaced by a
 vector is `{}`, and `{}` was ruled not-an-event when 008 stopped a repeated
 import from writing ten thousand empty rows. So a full re-embed writes no audit
 rows for rows that had a vector, and exactly one for a row that had none.
-`test-live.ts` [9] asserts one row for thirty-six thoughts (thirty-four when
-this was written; change 33 added two). Nothing was
+`test-live.ts` [9] asserts one row for thirty-eight thoughts (thirty-four when
+this was written; changes 33 and 34 added two each). Nothing was
 suppressed; the trigger never recorded this, and the claim row — job key,
 worker, attempts, error, times — is the per-thought record of the pass. Making
 the trigger record vector changes would be a new migration and would reintroduce
@@ -1733,7 +1733,7 @@ and terminal — it is a failure now, so `--retry-failed` can revisit it;
 `--retry-failed` did not reset the attempt count; a second Ctrl-C could not end
 a run parked on a hung provider. `test-thoughts.ts` [7] and `test-live.ts` [9]
 cover each. Three findings went to tickets rather than code: the fallback as a
-per-row outcome (SMD-1021), `update_thought` refusing unchanged content that
+per-row outcome (SMD-1021 — fixed in change 34), `update_thought` refusing unchanged content that
 duplicates a pre-fingerprint row (SMD-1022 — fixed in change 33), and lease
 renewal (SMD-1023).
 
@@ -2337,7 +2337,7 @@ list is the same before, during and after a pass. Both rows are re-embedded;
 only one carries the fingerprint, so a later capture of that text merges into
 it and not the other. Whether they should be one thought is the operator's
 call, and nothing is written to the claim row — that per-row-outcome decision
-belongs to SMD-1021. The `update_thought` tool appends the same note to its
+belonged to SMD-1021, change 34. The `update_thought` tool appends the same note to its
 reply, and `normaliseMutation` carries `duplicateOf` for both stores. Stated in
 018's header and not fixed: `upsert_thought` capturing text equal to a legacy
 NULL-fingerprint row still creates a second row, since `ON CONFLICT` cannot see
@@ -2427,6 +2427,78 @@ variables, the pass says the two things 018 reports in one place, the pairs
 query counts with a window instead of a second scan of its own CTE, and the
 tool's note lives beside `explainRefusal`, which is where a reader looks for
 what the tool says about an edit.
+
+### 34. The head window is recorded on the row — and a provider call cannot hang for ever
+
+`server-portable/embed.ts` and `db/reembed.ts` (Linear SMD-1021, found by the
+first review pass of change 29 and deliberately not decided there). A long
+thought is embedded whole and in windows, and when the whole-content call fails
+the head window's vector stands in for it. The server accepts that silently by
+design (change 27: a provider that refuses over-length input must not fail a
+capture that used to succeed). The re-embed runs the same function over every
+row, and there the silence was a defect of a different size: a row that fell
+back was written and released `succeeded`, the claim row is terminal, and the
+backfill the tool promises — a long thought captured before change 27 gets its
+whole-content vector — was defeated for every affected row with one line on
+stderr. Change 29's second pass had already made the *transient* case a failure
+(`--retry-failed` revisits it); what remained was the *refusal* — 400 or 413, a
+hosted API that will not take input that long — which is the provider's final
+answer and was recorded as an unqualified success.
+
+**The decision: a caveat on a succeeded row, not a new status.** `release_thought`
+already stores `p_error` whatever the status, so the rule costs no migration:
+**a succeeded row's `last_error`, when set, is what the worker could not do** —
+the write stands, and this is what it fell short of. A refused row is released
+`succeeded` with the provider's status and message on it and the flag that
+revisits it; `--status` and the end of a run count them ("35 succeeded (1 with
+the head window)") and list them from the record rather than from a counter, so
+two processes' views agree; `--retry-fallbacks` returns them to the pool for the
+day the provider or its input limit changes. A fifth status would have meant a
+migration altering the CHECK, redefining `release_thought` and every consumer's
+counts, for a row whose write did succeed. The exit code is unchanged by them:
+the vector stored is what a capture would have stored.
+
+**The pass asks every long thought itself.** The server's embedder remembers a
+refusal for the life of the process — one wasted probe per process on the
+interactive path, and `test-chunking.ts` [1] still asserts exactly one across
+four captures. In a pass that memory was wrong twice over: its purpose is the
+whole-content vector, and a 413 is about *that* input's length, so a shorter
+long thought may well be accepted — remembering one row's refusal gave every
+later long row a head window it was never asked about, under a reason that was
+another row's, and `--retry-fallbacks` could never have retried anything after
+the first. `createEmbedder` takes `rememberRefusal`; the pass passes false and
+pays one refused round trip per long row, answered before any embedding is
+computed. `EmbeddedCapture` carries `wholeContentError`, the provider's words,
+which is what lands on the claim row.
+
+**A call that never returns.** Neither fetch in `embed.ts` had a timeout, so a
+hung provider parked a worker until the second Ctrl-C the first pass added, and
+its lease expired under it. Both carry `AbortSignal.timeout` now, from
+`OB1_LLM_TIMEOUT` (seconds, default 120 — generous on purpose: what it exists
+for is the call that never returns, not the slow one). A timeout on a window or
+a short thought fails the row naming the setting; on the whole-content call it
+is a transient fallback, with the timeout in the row's error. The server reads
+the same variable; `deploy/.env.example` documents it and `compose.yaml`
+forwards it, as the consistency check requires. The metadata-extraction fetch in
+`index.ts` is not this code path and is left as it is.
+
+**Verified** in `test-live.ts` [9], extended rather than given a suite of its own:
+a third long thought refused whole with a 413 every time ends succeeded with its
+head window and the refusal on its row, is listed under `--status`, costs the
+other two long thoughts nothing, and gets its whole-content vector from
+`--retry-fallbacks` once the stub relents; a short thought whose first request
+is never answered fails with `timed out after 2 s (OB1_LLM_TIMEOUT)` while the
+run finishes. `test-chunking.ts` [1b] drives a pass-shaped embedder over the
+refusing stub — three long captures, three probes, each with its own 400 — and
+over a request that never returns, both for a short call and for a whole-content
+one. `test-thoughts.ts` [7] pins the variable's resolution: unset, empty, zero
+and non-numeric are the default. Suites: live 180, chunking 20, thoughts 64.
+
+**Not done here.** A bounded in-call retry of a transient whole-content failure
+(a 429 wants a backoff a single retry does not give; the failed-row path is
+tested and stands). The lease arithmetic at the defaults — a batch whose every
+call runs to the timeout can outlive its lease — is stated in the header and
+handled by the existing "another worker will repeat it" path.
 
 ## Detached from the fork network
 

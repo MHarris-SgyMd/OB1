@@ -16,7 +16,7 @@
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS } from "../db/config.mjs";
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
-import { resolveEmbedConfig } from "./embed.ts";
+import { DEFAULT_LLM_TIMEOUT_S, resolveEmbedConfig } from "./embed.ts";
 import { parseExtraction } from "./entities.ts";
 import { DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS } from "./chunk.ts";
 
@@ -119,6 +119,15 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({ OB1_CHUNK_OVERLAP: "0" }).chunkOverlap === 0, "…while an explicit 0 is honoured");
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "" }).chunkTokens === DEFAULT_MAX_TOKENS, `and OB1_CHUNK_TOKENS='' is the default window (${DEFAULT_MAX_TOKENS})`);
   assert(resolveEmbedConfig({ OB1_CHUNK_TOKENS: "900", OB1_CHUNK_OVERLAP: "50" }).chunkTokens === 900, "explicit values are read");
+
+  // The provider timeout follows the same rule. A zero would fail every call,
+  // so it means the default rather than "no time at all".
+  const defaultMs = DEFAULT_LLM_TIMEOUT_S * 1000;
+  assert(resolveEmbedConfig({}).timeoutMs === defaultMs, `an unset OB1_LLM_TIMEOUT is ${DEFAULT_LLM_TIMEOUT_S} s`);
+  assert(resolveEmbedConfig({ OB1_LLM_TIMEOUT: "" }).timeoutMs === defaultMs, "OB1_LLM_TIMEOUT='' is the default too");
+  assert(resolveEmbedConfig({ OB1_LLM_TIMEOUT: "0" }).timeoutMs === defaultMs, "…as is 0, which would fail every call");
+  assert(resolveEmbedConfig({ OB1_LLM_TIMEOUT: "soon" }).timeoutMs === defaultMs, "…and a value that is not a number");
+  assert(resolveEmbedConfig({ OB1_LLM_TIMEOUT: "30" }).timeoutMs === 30_000, "OB1_LLM_TIMEOUT=30 is thirty seconds, in milliseconds for the signal");
 }
 
 // ── 8. The extraction parser knows an answer from a non-answer ───────────────

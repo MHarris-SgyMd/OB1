@@ -51,7 +51,20 @@ export type EmbedEnv = {
   OB1_METADATA_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
+  OB1_LLM_TIMEOUT?: string;
 };
+
+/**
+ * Seconds a single provider call may take before it is abandoned. Generous on
+ * purpose: the whole-content embedding of a long document on a local model, or
+ * a blurb generated from a whole document by a large chat model, can run to
+ * tens of seconds on modest hardware, and a timeout that fires on slow-but-
+ * working is worse than none. What it exists for is the call that never
+ * returns: before it, a hung provider parked a re-embed worker until the
+ * second Ctrl-C (first review of SMD-946), and the lease it held expired
+ * under it.
+ */
+export const DEFAULT_LLM_TIMEOUT_S = 120;
 
 export type EmbedConfig = {
   /** Provider base URL, trailing slashes stripped. */
@@ -71,6 +84,8 @@ export type EmbedConfig = {
   metadataTemperature: number;
   /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
   metadataReasoning: Record<string, unknown>;
+  /** Per provider call, both endpoints. OB1_LLM_TIMEOUT in seconds; see DEFAULT_LLM_TIMEOUT_S. */
+  timeoutMs: number;
 };
 
 /**
@@ -123,6 +138,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
     metadataTemperature: metadataTemperature(env.OB1_METADATA_TEMPERATURE),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
+    timeoutMs: llmTimeoutMs(env.OB1_LLM_TIMEOUT),
   };
 }
 
@@ -131,6 +147,16 @@ function metadataTemperature(raw: string | undefined): number {
   if (raw === undefined || raw === "") return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Seconds, as --ttl and --timeout are elsewhere in this fork. Empty, non-numeric
+ * and non-positive all mean the default — a timeout of zero would fail every
+ * call, and "" is what compose forwards for an unset variable.
+ */
+function llmTimeoutMs(raw: string | undefined): number {
+  const n = raw ? Number(raw) : NaN;
+  return (Number.isFinite(n) && n > 0 ? n : DEFAULT_LLM_TIMEOUT_S) * 1000;
 }
 
 /**
@@ -161,16 +187,25 @@ export type EmbeddedCapture = {
   /**
    * The content was long enough to chunk and the whole-content embedding could
    * not be had, so `embedding` is the head window's vector. The server accepts
-   * this silently, as it always has; a bulk pass wants to count it.
+   * this silently, as it always has; a bulk pass records it on the row.
    */
   wholeContentFellBack: boolean;
   /**
-   * The provider has refused a whole-content embedding outright (400 or 413) at
-   * some point in this process, so the fallback above is the permanent answer
-   * for this model rather than a transient one — the distinction a bulk pass
-   * needs between "recorded, done" and "retry later".
+   * The whole-content request was refused outright (400 or 413) — this call's
+   * own, or, when the embedder remembers refusals, an earlier one's that meant
+   * this call was not made. Either way the fallback above is the permanent
+   * answer for this model rather than a transient one — the distinction a bulk
+   * pass needs between "recorded, done" and "retry later".
    */
   wholeContentRefused: boolean;
+  /**
+   * Why the whole content fell back, in the words of the error: the provider's
+   * status and message, or the timeout. Absent when it did not fall back, and
+   * when a remembered refusal meant the call was never made. What a bulk pass
+   * writes on the claim row, so the row says what happened to it rather than
+   * that something did.
+   */
+  wholeContentError?: string;
 };
 
 export type Embedder = {
@@ -189,15 +224,24 @@ export type Embedder = {
  * to the provider, which is what the server did before this file existed.
  *
  * One piece of state lives in the returned object: whether the provider has
- * refused a whole-content embedding, which is a fact about the configured model
- * and is remembered for the life of the embedder so it is not re-discovered on
- * every long capture.
+ * refused a whole-content embedding. The server remembers it for the life of
+ * the embedder (`rememberRefusal`, the default), so a provider that refuses
+ * over-length input is not asked again on every long capture — one wasted
+ * round trip per process instead of one per capture, on the interactive path.
+ * A bulk pass passes false: its purpose is the whole-content vector, each long
+ * row's outcome is recorded on that row, and a 413 is about THAT input's
+ * length — a shorter long thought may well be accepted — so remembering one
+ * row's refusal would give every later row a head window it was never asked
+ * about, under a reason that was another row's. The cost there is one refused
+ * round trip per long row, answered before any embedding is computed.
  */
-export function createEmbedder(config: () => EmbedConfig): Embedder {
+export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusal?: boolean } = {}): Embedder {
+  const rememberRefusal = opts.rememberRefusal ?? true;
   /**
-   * Set when the provider rejects a whole-content embedding outright. One-way:
-   * the only thing that flips it is a 4xx, which is a property of the
-   * configured model rather than a transient condition.
+   * Set when the provider rejects a whole-content embedding outright and
+   * `rememberRefusal` is on. One-way: the only thing that flips it is a 400 or
+   * 413, which is a property of the configured model rather than a transient
+   * condition.
    */
   let wholeContentRefused = false;
 
@@ -237,6 +281,15 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
         input: applyPrompt(cfg, text, kind),
         ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
       }),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    }).catch((e: Error) => {
+      // A call that never returns is the one failure nothing else here bounds.
+      // Named as what it is, with the knob, and WITHOUT a status: nothing about
+      // the next attempt is known, so embedCapture treats it as transient.
+      if (e.name === "TimeoutError") {
+        throw new Error(`Embeddings request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`);
+      }
+      throw e;
     });
     if (!r.ok) {
       const msg = await r.text().catch(() => "");
@@ -315,6 +368,7 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
           ...cfg.metadataReasoning,
           messages: [{ role: "user", content: prompt }],
         }),
+        signal: AbortSignal.timeout(cfg.timeoutMs),
       });
       if (!r.ok) {
         console.error(`contextualiseChunk: ${cfg.llmBase} returned ${r.status}`);
@@ -331,7 +385,12 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
       }
       return out;
     } catch (e) {
-      console.error(`contextualiseChunk: ${(e as Error).message}`);
+      // The timeout lands here too, as a TimeoutError whose message does not say
+      // how long; the window goes in bare, as for any other failure of this call.
+      const err = e as Error;
+      console.error(
+        `contextualiseChunk: ${err.name === "TimeoutError" ? `timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)` : err.message}`
+      );
       return "";
     }
   }
@@ -400,25 +459,32 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
       ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content)))
       : windows.map(() => "");
 
+    // This call's own refusal, distinct from the remembered one: with
+    // rememberRefusal off it is the only record there is.
+    let refusedHere = false;
+    let wholeContentError: string | undefined;
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
         ? Promise.resolve(null)
         : getEmbedding(content).catch((e: Error & { status?: number }) => {
             // 400 or 413 here means the provider REFUSED the input rather than
-            // truncating it, which is a fact about the model and will be just as
-            // true for the next long capture. Remembering it turns a wasted round
-            // trip on every long capture into one per process. A 5xx or a network
-            // error says nothing durable, so it is not latched — and neither is
-            // any other 4xx: 429 is a rate limit, 408 a timeout, 401 and 403 a
-            // credential. This used to latch on every 4xx, so one throttled call
-            // in a bulk pass downgraded every later long thought to its head
-            // window while recording success (first review of SMD-946).
+            // truncating it, which is a fact about the model and this input and
+            // will be just as true next time. Remembering it (the server) turns a
+            // wasted round trip on every long capture into one per process. A
+            // 5xx or a network error says nothing durable, so it is never
+            // remembered — and neither is any other 4xx: 429 is a rate limit,
+            // 408 a timeout, 401 and 403 a credential. This used to latch on
+            // every 4xx, so one throttled call in a bulk pass downgraded every
+            // later long thought to its head window while recording success
+            // (first review of SMD-946).
+            wholeContentError = e.message;
             if (e.status === 400 || e.status === 413) {
-              wholeContentRefused = true;
+              refusedHere = true;
+              if (rememberRefusal) wholeContentRefused = true;
               console.error(
                 `embedCapture: ${cfg.embeddingModel} refused the whole content (${e.status}); ` +
-                  `falling back to the head window here and skipping the attempt for the rest ` +
-                  `of this process.`
+                  `falling back to the head window` +
+                  (rememberRefusal ? ` here and skipping the attempt for the rest of this process.` : `.`)
               );
             } else {
               console.error(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
@@ -437,7 +503,8 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
       })),
       contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
       wholeContentFellBack: whole === null,
-      wholeContentRefused,
+      wholeContentRefused: wholeContentRefused || refusedHere,
+      ...(wholeContentError !== undefined ? { wholeContentError } : {}),
     };
   }
 

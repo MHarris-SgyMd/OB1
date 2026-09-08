@@ -21,6 +21,7 @@
 
 import { SQL } from "bun";
 import { estimateTokens } from "./chunk.ts";
+import { createEmbedder, resolveEmbedConfig } from "./embed.ts";
 import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
 
@@ -55,6 +56,12 @@ const provider = Bun.serve({
     if (url.pathname.endsWith("/embeddings")) {
       embedCalls++;
       const input = String(body.input ?? "");
+      // A request that never returns, for [1b]: the bare word, or a whole
+      // content carrying it — never a window, which is under the batch, so a
+      // long capture's windows still embed while its whole-content call hangs.
+      if (input.includes("tarpit") && (input === "tarpit" || estimateTokens(input) > BATCH)) {
+        await new Promise(() => {});
+      }
       // The whole point: a real provider would silently truncate here. Failing
       // loudly instead turns a silent regression into a red test.
       if (estimateTokens(input) > BATCH) {
@@ -142,6 +149,37 @@ console.log("[1] A capture longer than the batch is stored without truncation er
   await sql.close();
 }
 
+console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and no call waits for ever");
+{
+  // db/reembed.ts builds its embedder with rememberRefusal off: each long row's
+  // outcome is recorded on that row, so it has to be that row's own. Against the
+  // same refusing stub, three long captures are three probes, not one — and each
+  // result carries the provider's answer, which is what the pass writes down.
+  const cfg = resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1" });
+  const pass = createEmbedder(() => cfg, { rememberRefusal: false });
+  const probesBefore = overBatch;
+  const results = [];
+  for (const text of [LONG, LONG_HEAD, LONG_MID]) results.push(await pass.embedCapture(text));
+  assert(overBatch - probesBefore === 3, `three long captures, three over-batch probes — nothing remembered between them (${overBatch - probesBefore})`);
+  assert(results.every((r) => r.wholeContentFellBack && r.wholeContentRefused && /400/.test(r.wholeContentError ?? "")),
+    "…and each reports its own refusal, with the provider's 400 in the error");
+  assert(results.every((r) => r.embedding.every((x, i) => x === r.chunks[0].embedding[i])), "…with the head window's vector standing in");
+
+  // The timeout. A short call that never returns fails with the knob named and
+  // no status, in about the configured second rather than never.
+  const t0 = Date.now();
+  const hung = await pass.getEmbedding("tarpit").then(() => "", (e: Error) => e.message);
+  assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(hung), `a call that never returns times out, naming the setting (${hung})`);
+  assert(Date.now() - t0 < 5_000, `…within the timeout, not the test's patience (${Date.now() - t0} ms)`);
+  // The same hang on a whole-content call is a transient fallback: head window,
+  // not refused, the timeout in the error — what the pass records as retryable.
+  const hungLong = await pass.embedCapture(`tarpit ${FILLER.repeat(60)}`);
+  assert(hungLong.wholeContentFellBack && !hungLong.wholeContentRefused && /timed out after 1 s/.test(hungLong.wholeContentError ?? ""),
+    "a whole-content call that never returns falls back as transient, with the timeout in the error");
+  assert(hungLong.chunks.length >= 3 && hungLong.embedding.every((x, i) => x === hungLong.chunks[0].embedding[i]),
+    `…the windows embedded meanwhile (${hungLong.chunks.length}) and the head window stands in`);
+}
+
 console.log("\n[2] Chunks are written only for content that needs them");
 {
   const sql = new SQL({ url: URL_, max: 1 });
@@ -210,6 +248,7 @@ console.log("\n[6] Deleting a thought removes its chunks");
   await sql.close();
 }
 
-server.stop(); provider.stop();
+// Forced: [1b] left two requests the stub will never answer.
+server.stop(); provider.stop(true);
 console.log(`\n  ${embedCalls} embedding calls`);
 report();
