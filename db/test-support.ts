@@ -380,7 +380,7 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
  * the function. A plan mode is skipped: the callers exist to show both plans,
  * and a successor that forced one would otherwise hide the other.
  */
-export async function applyFunctionSettings(tx: SQL): Promise<string[]> {
+export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transaction" | "session" } = {}): Promise<string[]> {
   const entries = await tx.unsafe(
     `SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
   );
@@ -389,10 +389,27 @@ export async function applyFunctionSettings(tx: SQL): Promise<string[]> {
     const eq = kv.indexOf("=");
     if (eq < 0) throw new Error(`unexpected proconfig entry ${JSON.stringify(kv)}`);
     if (kv.slice(0, eq) === "plan_cache_mode") continue;
-    await tx.unsafe(`SELECT set_config($1, $2, true)`, [kv.slice(0, eq), kv.slice(eq + 1)]);
-    applied.push(kv);
+    // Transaction scope (set_config's is_local) is the default and matches
+    // SET LOCAL; a caller that PREPAREs once and EXECUTEs many statements
+    // outside a transaction asks for session scope and RESETs the names
+    // returned here when it is done (bench-hnsw.ts section D).
+    await tx.unsafe(`SELECT set_config($1, $2, $3)`, [kv.slice(0, eq), kv.slice(eq + 1), opts.scope !== "session"]);
+    applied.push(kv.slice(0, eq));
   }
   return applied;
+}
+
+/**
+ * Shared buffers the whole statement touched, from EXPLAIN (ANALYZE, BUFFERS)
+ * text: the TOP node's `Buffers:` line, hits AND reads. A regex for `hit=`
+ * alone under-counts whenever part of the I/O missed shared_buffers — the
+ * default 128 MB container cannot hold a 527 MB TOAST relation, so a seq scan
+ * there lands mostly in `read=` — and under-counts in the direction that
+ * flatters the plan that read less (first review pass).
+ */
+export function buffersOf(plan: string): number {
+  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(plan);
+  return m ? Number(m[1] ?? 0) + Number(m[2] ?? 0) : 0;
 }
 
 /**

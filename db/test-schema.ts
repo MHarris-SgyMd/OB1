@@ -80,6 +80,35 @@ function blend(a: number, b: number, wa: number, wb: number): string {
 const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")).sort();
 const db = new PGlite({ extensions: { vector, pg_trgm } });
 
+/** Re-apply one migration by prefix, as [1] applied it. */
+async function reapply(prefix: string): Promise<string> {
+  const f = files.find((x) => x.startsWith(prefix));
+  if (!f) throw new Error(`no migration starts with ${prefix}`);
+  await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  return f;
+}
+
+/**
+ * The migration that last defines a function, by reading the files rather
+ * than naming one: a section that re-applies an OLD migration on purpose
+ * ([8b] re-applies 014 to test its seeding; [20] re-applies 014 and 012 to
+ * prove the bodies did not move) puts that migration's function back, and
+ * must restore the shipped one for the sections after it. A hard-coded "019"
+ * would keep reinstalling 019's function the day 020 redefines it, and every
+ * later section would pass against a superseded body (first review pass).
+ */
+function lastDefinerOf(fn: string): string {
+  const re = new RegExp(`CREATE OR REPLACE FUNCTION ${fn}\\(`);
+  const f = [...files].reverse().find((x) => re.test(readFileSync(join(MIGRATIONS, x), "utf8")));
+  if (!f) throw new Error(`no migration defines ${fn}`);
+  return f;
+}
+async function restoreShipped(...fns: string[]): Promise<string[]> {
+  const latest = [...new Set(fns.map(lastDefinerOf))].sort();
+  for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
+  return latest;
+}
+
 // ── 1. Migrations apply, in order ────────────────────────────────────────────
 
 console.log("[1] Migrations apply cleanly in lexical order");
@@ -509,8 +538,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     assert(seeded[name] === String(value), `${name}=${value} is seeded on the database (${JSON.stringify(seeded)})`);
   }
   await alterDb("hnsw.max_scan_tuples = 250000");
-  const f014 = files.find((f) => f.startsWith("014"))!;
-  await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
+  await reapply("014");
   assert((await dbSettings())["hnsw.max_scan_tuples"] === "250000", "re-applying 014 leaves an operator's database-level bound alone");
   // A ROLE-level value is not a reason to skip the seed: it reaches one role,
   // sits ABOVE the database level in precedence (so the seed cannot undo it),
@@ -520,7 +548,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   // row, set the value in the session, re-apply, and the row must come back.
   await db.exec((await db.query<{ q: string }>(`SELECT format('ALTER DATABASE %I RESET hnsw.max_scan_tuples', current_database()) AS q`)).rows[0].q);
   await db.exec(`SET hnsw.max_scan_tuples = 5000`);
-  await db.exec(subst(readFileSync(join(MIGRATIONS, f014), "utf8")));
+  await reapply("014");
   assert((await dbSettings())["hnsw.max_scan_tuples"] === String(HNSW_SEED_MAX_SCAN_TUPLES),
     "a value set only for this role/session does not stop 014 seeding the database-level default for everyone else");
   await db.exec(`RESET hnsw.max_scan_tuples`);
@@ -528,7 +556,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   // Re-applying 014 also put 014's match_thoughts back — CREATE OR REPLACE
   // rewrites the whole definition, clauses included, which is the trap [20]
   // reproduces on purpose. Restore the shipped function for the sections after.
-  await db.exec(subst(readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("019"))!), "utf8")));
+  await restoreShipped("match_thoughts");
 }
 
 // ── 8c. The walk branch, held to the exact answer ────────────────────────────
@@ -1676,8 +1704,6 @@ console.log("\n[20] Migration 019: the plan setting and the row estimates, and t
   // and it is the trap SMD-1041's ticket recorded: CREATE OR REPLACE resets
   // prorows and drops the SET clauses, so a hint set from another migration or
   // by ALTER FUNCTION would be undone by exactly this re-apply.
-  const reapply = async (prefix: string) =>
-    db.exec(subst(readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith(prefix))!), "utf8")));
   await reapply("014");
   const mt014 = await proc(MT);
   assert(mt014.prosrc === mt.prosrc, "019's match_thoughts body is 014's, byte for byte");
@@ -1687,10 +1713,11 @@ console.log("\n[20] Migration 019: the plan setting and the row estimates, and t
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
   assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate too (prorows ${kw012.prorows})`);
-  await reapply("019");
+  const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
   assert(Number(back.prorows) === 10 && /enable_seqscan=off/.test(back.cfg ?? "") && Number((await proc(KW)).prorows) === 25,
-         "re-applying 019 restores both — the shipped state, for whatever runs after");
+         `re-applying the migration that last defines each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
+  assert(restored.length === 1 && restored[0].startsWith("019"), `019 is the last definer of both functions (${restored.join(", ")}) — a successor that redefines one must carry its clauses, and [20]'s asserts then read that file`);
 
   // The migrator's floor line, since this file redefines the function with the
   // hnsw.* clause 014 needed pgvector 0.8 for.

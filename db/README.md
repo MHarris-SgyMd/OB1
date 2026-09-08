@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `347 assertions: 347 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports eighteen migrations applied, and
+`bun test-schema.ts` prints `365 assertions: 365 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports nineteen migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -606,14 +606,22 @@ statement read:
 
 | rows | heap / TOAST | count | as 014 plans it | buffers | `enable_seqscan = off` | buffers | `random_page_cost = 1.1` |
 | ---: | --- | ---: | --- | ---: | --- | ---: | --- |
-| 1,000 | 96 kB / 5.4 MB | 10 | seq / seq, 3.1 ms | 8,026 | index / index, 1.0 ms | 1,872 | index / seq |
-| 1,000 | | 50 | seq / seq, 3.8 ms | 8,026 | index / index, 2.8 ms | 5,683 | seq / seq |
-| 10,000 | 912 kB / 53 MB | 10 | index / **seq**, 6.4 ms | 15,295 | index / index, 2.6 ms | 3,279 | index / index |
-| 10,000 | | 50 | seq / seq, 31.5 ms | 80,247 | index / index, 8.8 ms | 11,113 | index / seq |
-| 10,000 | | 500 | seq / seq, 33.9 ms | 80,247 | index / index, 40.9 ms | 54,696 | seq / seq |
-| 100,000 | 9.8 MB / 527 MB | 10 | index / index, 3.2 ms | 4,338 | the same plan | | index / index |
-| 100,000 | | 50 | index / index, 13.8 ms | 16,334 | the same plan | | index / index |
-| 100,000 | | 500 | seq / seq, 319 ms | 932,017 | index / index, 196 ms | 44,664 | index / seq |
+| 1,000 | 120 kB / 5.4 MB | 10 | seq / seq, 2.7 ms | 8,032 | index / index, 0.8 ms | 1,887 | index / seq |
+| 1,000 | | 50 | seq / seq, 2.9 ms | 8,032 | index / index, 2.1 ms | 5,675 | seq / seq |
+| 10,000 | 1.2 MB / 53 MB | 10 | index / **seq**, 5.3 ms | 15,412 | index / index, 1.8 ms | 3,404 | index / index |
+| 10,000 | | 50 | seq / seq, 28.8 ms | 80,317 | index / index, 6.5 ms | 11,143 | index / seq |
+| 10,000 | | 500 | seq / seq, 30.8 ms | 80,317 | index / index, 32.4 ms | 57,406 | seq / seq |
+| 100,000 | 12 MB / 527 MB | 10 | index / index, 2.7 ms | 4,449 | the same plan | | index / index |
+| 100,000 | | 50 | index / index, 12.1 ms | 17,391 | the same plan | | index / index |
+| 100,000 | | 500 | seq / seq, 275 ms | 1,016,132 | index / index, 170–290 ms | 115,370 | index / seq |
+
+Buffers are shared hits *and* reads — the default 128 MB of `shared_buffers`
+cannot hold a 527 MB TOAST relation, so the large seq scans land mostly in
+reads. The second table the bench prints is the filtered statements under
+both settings, since the clause is function-wide: the routing statement takes
+the GIN bitmap either way, the exact branch is unchanged, and the walk's plan
+is the same or better (its chunk side moves from a seq scan to its HNSW index
+at 10,000 rows).
 
 The mechanism is in the heap / TOAST column: at 1,024 dimensions a vector is
 ~4 KB, past the TOAST threshold, so at 10,000 rows the heap is 912 kB and the
@@ -626,7 +634,7 @@ up to some tens of thousands of thoughts — the chunk table first, since it is
 "small" in heap pages while every one of its rows is a vector — and the
 ceiling at every size. At 100,000 rows the heap alone is 1,225 pages and the
 estimate turns for the counts callers send, so the setting changes nothing
-there but the ceiling, where the index wins by 1.6x. At 64 dimensions the
+there but the ceiling, where the index touches a ninth of the buffers. At 64 dimensions the
 vectors are inline and the planner is right, which is why the 64-dimensional
 bench could not see this. The full table is in the header of
 `migrations/019_match_thoughts_plan_and_rows.sql`; `test-live.ts` [5c] holds
@@ -709,7 +717,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 365 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 218 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 222 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -790,7 +798,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 347 properties, including:
+asserts 365 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

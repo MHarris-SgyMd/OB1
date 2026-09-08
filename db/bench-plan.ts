@@ -30,10 +30,17 @@
  *               custom and generic plan, which is what a call gets.
  *
  * For each: which node produced the `thoughts` CTE's rows and the chunk CTE's
- * rows, shared buffers read, and execution time. The table prints TOAST size
- * beside heap size, because that ratio is the mechanism: at the shipped width
- * a vector is stored out of line, and the planner's seq-scan estimate counts
- * heap pages and never the detoast reads.
+ * rows, shared buffers touched, and execution time. The table prints TOAST
+ * size beside heap size, because that ratio is the mechanism: at the shipped
+ * width a vector is stored out of line, and the planner's seq-scan estimate
+ * counts heap pages and never the detoast reads.
+ *
+ * Then the FILTERED statements, because the setting is function-wide and they
+ * never read the vector column where the estimate goes wrong (first review
+ * pass): the routing statement on the broadest filter (50%) and on one
+ * matching nothing, the exact branch on 1%, and the walk on 50% where the
+ * function routes it there — each under 014's settings and under 019's, custom
+ * and generic plan, listing every scan node the plan took.
  *
  * ── Running ──────────────────────────────────────────────────────────────────
  *
@@ -49,7 +56,8 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, buffersOf, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-plan.ts");
@@ -86,7 +94,7 @@ const fmtMs = (ms: number) => (ms < 10 ? `${ms.toFixed(2)} ms` : `${ms.toFixed(1
 const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"];
 
 async function load(sql: SQL, n: number): Promise<{ loadMs: number; buildMs: number; queries: number[][] }> {
-  const { unitVector } = seededRandom(20260908 + n);
+  const { rnd, unitVector } = seededRandom(20260908 + n);
   // Drop the HNSW indexes for the load and build them after it, with the
   // schema's own definitions. Inserting 1,024-wide vectors into a live HNSW
   // index runs at tens of rows a second by 40,000 rows — the first run of this
@@ -99,7 +107,12 @@ async function load(sql: SQL, n: number): Promise<{ loadMs: number; buildMs: num
   const t0 = performance.now();
   const B = 200;
   for (let i = 0; i < n; i += B) {
-    const values = Array.from({ length: Math.min(B, n - i) }, (_, k) => `('row ${i + k}', '{}'::jsonb, '${lit(unitVector(DIM))}'::vector)`).join(",");
+    const values = Array.from({ length: Math.min(B, n - i) }, (_, k) => {
+      // Nested tiers, as bench-hnsw.ts plants them: a row in t1 is also in t50.
+      const r = rnd();
+      const tiers = r < 0.01 ? '["t50","t1"]' : r < 0.5 ? '["t50"]' : "[]";
+      return `('row ${i + k}', '{"tiers": ${tiers}}'::jsonb, '${lit(unitVector(DIM))}'::vector)`;
+    }).join(",");
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
   }
   // The parent's own vector: the point is a chunk table with rows in it, not
@@ -164,7 +177,7 @@ async function explain(sql: SQL, body: string, q: number[], count: number, arm: 
     arm,
     thoughts: nodeFor(text, "thoughts"),
     chunks: nodeFor(text, "thought_chunks"),
-    buffers: Number(/Buffers: shared hit=(\d+)/.exec(text)?.[1] ?? 0),
+    buffers: buffersOf(text),
     ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN),
     rows: Number(/^\s*Limit .*rows=(\d+)/m.exec(text)?.[1] ?? 0),
     text,
@@ -182,9 +195,38 @@ async function measure(sql: SQL, body: string, queries: number[][], count: numbe
   return { ...last, scale, ms, thoughts: same("thoughts"), chunks: same("chunks"), buffers: Math.round(median(cells.map((c) => c.buffers))) };
 }
 
+// ── The filtered statements ──────────────────────────────────────────────────
+
+type FilteredCell = { scale: number; branch: Branch; filter: string; matches: number; arm: "before (014)" | "after (019)"; mode: "custom" | "generic"; scans: string; buffers: number; ms: number };
+
+/** Every scan node in the plan, in order, deduplicated — the answer to "what did the setting change". */
+function scansOf(plan: string): string {
+  const seen = new Set<string>();
+  for (const m of plan.matchAll(/(Seq Scan|Index Scan using \w+|Index Only Scan using \w+|Bitmap Heap Scan|Bitmap Index Scan on \w+) (?:on (\w+) (\w+)\b)?/g)) {
+    seen.add(m[2] ? `${m[1]} on ${m[2]} ${m[3]}` : m[1]);
+  }
+  return [...seen].map((x) => x.replace("Index Scan using ", "").replace("Index Only Scan using ", "only ").replace("Bitmap Index Scan on ", "bitmap ").replace("Bitmap Heap Scan on", "bitmap heap").replace("Seq Scan on", "SEQ")).join("; ");
+}
+
+async function explainFiltered(sql: SQL, branch: Branch, filter: string, matches: number, q: number[], arm: FilteredCell["arm"], mode: FilteredCell["mode"], scale: number): Promise<FilteredCell> {
+  const body = await extractBody(sql, branch, DIM);
+  const text = await sql.begin(async (tx: SQL) => {
+    if (arm === "after (019)") await applyFunctionSettings(tx);
+    else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+    await tx.unsafe(`SET LOCAL plan_cache_mode = force_${mode}_plan`);
+    await tx.unsafe(`PREPARE bench_f(vector(${DIM}), float, int, jsonb) AS ${body}`);
+    await tx.unsafe(`EXECUTE bench_f('${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb)`);
+    const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_f('${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb)`);
+    await tx.unsafe(`DEALLOCATE bench_f`);
+    return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+  });
+  return { scale, branch, filter, matches, arm, mode, scans: scansOf(text), buffers: buffersOf(text), ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN) };
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const results: Cell[] = [];
+const filteredResults: FilteredCell[] = [];
 const loads: { scale: number; loadMs: number; buildMs: number; sizes: Awaited<ReturnType<typeof sizes>> }[] = [];
 let banner = false;
 
@@ -215,6 +257,35 @@ for (const n of SCALES) {
     console.log(" done");
   }
 
+  // The filtered statements, on the filters the function routes to each:
+  // the routing statement on the broadest filter and on one matching nothing,
+  // the exact branch on 1% (under the 1,000-row threshold at every scale here),
+  // the walk on 50% where 50% exceeds the threshold. Under 014's settings now,
+  // under 019's after it is applied.
+  const V_EXACT = 1000; // 014's GREATEST(v_fetch * 4, 1000) at the default count
+  const [{ m50, m1 }] = await sql.unsafe(`SELECT count(*) FILTER (WHERE metadata @> '{"tiers": ["t50"]}')::int AS m50, count(*) FILTER (WHERE metadata @> '{"tiers": ["t1"]}')::int AS m1 FROM thoughts`);
+  const filteredCases: { branch: Branch; filter: string; matches: number }[] = [
+    { branch: "route", filter: '{"tiers": ["t50"]}', matches: Number(m50) },
+    { branch: "route", filter: '{"tiers": ["none"]}', matches: 0 },
+    { branch: "exact", filter: '{"tiers": ["t1"]}', matches: Number(m1) },
+    ...(Number(m50) > V_EXACT ? [{ branch: "walk" as Branch, filter: '{"tiers": ["t50"]}', matches: Number(m50) }] : []),
+  ];
+  const runFiltered = async (arm: FilteredCell["arm"]) => {
+    process.stdout.write(`  filtered, ${arm.padEnd(12)}`);
+    for (const c of filteredCases) {
+      for (const mode of ["custom", "generic"] as const) {
+        const cells: FilteredCell[] = [];
+        for (const q of queries) cells.push(await explainFiltered(sql, c.branch, c.filter, c.matches, q, arm, mode, n));
+        const last = cells[cells.length - 1];
+        const scans = cells.every((x) => x.scans === last.scans) ? last.scans : cells.map((x) => x.scans).join(" | ");
+        filteredResults.push({ ...last, scans, ms: median(cells.map((x) => x.ms)), buffers: Math.round(median(cells.map((x) => x.buffers))) });
+        process.stdout.write(".");
+      }
+    }
+    console.log(" done");
+  };
+  await runFiltered("before (014)");
+
   // 019, onto the same rows. Its statement is read from the catalog again: it
   // should be 014's byte for byte (db/test-schema.ts [20] asserts it), and the
   // bench refuses to assume so.
@@ -231,6 +302,7 @@ for (const n of SCALES) {
     }
     console.log(" done");
   }
+  await runFiltered("after (019)");
   await sql.close();
 }
 
@@ -244,6 +316,14 @@ for (const r of results) {
   const l = loads.find((x) => x.scale === r.scale)!;
   console.log(`| ${r.scale.toLocaleString()} | ${l.sizes.heap} / ${l.sizes.toast} | ${r.count} | ${r.arm} | ${r.thoughts} | ${r.chunks} | ${r.buffers.toLocaleString()} | ${fmtMs(r.ms)} |`);
 }
+console.log(`\n### The filtered statements under 014's settings and under 019's (custom / generic plan)\n`);
+console.log("Every scan node the plan took, in order. `route` is the capped id collection every filtered call runs first; `exact` scores the collected ids; `walk` is the HNSW scan with the predicate inside it.\n");
+console.log("| rows | statement | filter | matching | arm | plan | scans | buffers | exec |");
+console.log("| ---: | --- | --- | ---: | --- | --- | --- | ---: | ---: |");
+for (const f of filteredResults) {
+  console.log(`| ${f.scale.toLocaleString()} | ${f.branch} | ${f.filter.replace(/.*\["(\w+)"\].*/, "$1")} | ${f.matches.toLocaleString()} | ${f.arm} | ${f.mode} | ${f.scans} | ${f.buffers.toLocaleString()} | ${fmtMs(f.ms)} |`);
+}
+
 console.log("\n| rows | load | HNSW build | thoughts heap | thoughts TOAST | HNSW | chunk heap | chunk TOAST |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 for (const l of loads) {

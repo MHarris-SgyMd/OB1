@@ -485,7 +485,7 @@ if (configFailed) {
           // (By name and arity, an earlier draft read the first of however
           // many 4-argument overloads existed.)
           const mt = await sql`
-            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src FROM pg_proc p
+            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prosrc AS src, p.prorows AS rows FROM pg_proc p
             WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
           // The body's semantics are declared by a sentinel comment in the body
           // itself, `ob1:filter-inside-scan`, which 014 carries and any successor
@@ -563,7 +563,7 @@ if (configFailed) {
           const seedBounds =
             `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
           const putBack =
-            "Put it back: SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order;  and carry it into the migration that redefined it.";
+            "Put it back: SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's too (the candidate scan check below says) — and carry them into the migration that redefined it.";
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
@@ -620,6 +620,53 @@ if (configFailed) {
         } catch (e) {
           add("filtered search", "warn", `could not verify: ${(e as Error).message}`,
               "The catalog reads behind this check need SELECT on pg_proc, pg_extension and pg_available_extensions.");
+        }
+
+        /**
+         * Migration 019: `SET enable_seqscan = off` on match_thoughts. At the
+         * shipped width a vector is TOASTed and the planner's seq-scan estimate
+         * never counts the detoast reads, so on brains up to some tens of
+         * thousands of thoughts it chose a sequential scan of the chunk table
+         * on every search and of both tables above the default count — five to
+         * twenty times the buffers the index reads (019's header has the
+         * table). The clause lives on the function and CREATE OR REPLACE drops
+         * it silently, exactly as 014's does, so it is checked the same way and
+         * by the same rule: the catalog says what the deployed function carries
+         * (CI proves the plan; db/test-live.ts [5c]). The row estimate 019
+         * declares is read beside it, since the same redefinition resets both.
+         * A WARNING: every search still answers, at the seq scan's cost.
+         */
+        try {
+          const mt = await sql`
+            SELECT array_to_string(p.proconfig, ',') AS cfg, p.prorows AS rows FROM pg_proc p
+            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
+          if (mt.length) {
+            const cfgText = String(mt[0]?.cfg ?? "");
+            const seqOff = /(^|,)enable_seqscan=off(,|$)/.test(cfgText);
+            const rows = Number(mt[0]?.rows ?? 0);
+            let ledgerHas019 = false;
+            try {
+              const led = await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '019\\_%'`;
+              ledgerHas019 = Number(led[0]?.c ?? 0) > 0;
+            } catch {
+              /* no ledger */
+            }
+            const alter = "SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET enable_seqscan = off ROWS 10;  and carry both into the migration that redefined it.";
+            if (seqOff && rows === 10) {
+              add("candidate scan", "ok", "match_thoughts declares enable_seqscan = off and ROWS 10 (019), so the candidate scan takes the HNSW indexes at the shipped width and callers plan against its real row count");
+            } else if (!seqOff) {
+              add("candidate scan", "warn",
+                  `match_thoughts does not carry enable_seqscan = off${ledgerHas019 ? " although migration 019 is recorded as applied — a later redefinition dropped its SET clause" : " — migration 019 is not applied"}${rows !== 10 ? `, and its row estimate is ${rows} rather than 10` : ""} — so at the shipped width the planner seq-scans the chunk table on every search and both tables above the default count, on brains up to some tens of thousands of thoughts (019's header has the numbers)`,
+                  ledgerHas019 ? `Put it back: ${alter}` : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.");
+            } else {
+              add("candidate scan", "warn",
+                  `match_thoughts carries enable_seqscan = off but its row estimate is ${rows} rather than the ROWS 10 019 declares — every query composing it is planned against that count (017's header records what a 1,000-row estimate cost)`,
+                  ledgerHas019 ? `Put it back: ${alter}` : "Apply db/migrations/019_match_thoughts_plan_and_rows.sql.");
+            }
+          }
+          // Not defined: the check above already said so.
+        } catch (e) {
+          add("candidate scan", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
         }
 
         /**

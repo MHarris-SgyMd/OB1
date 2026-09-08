@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, createAssert, dropSchema, extractBody, neverAnswers, runScript, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, buffersOf, createAssert, dropSchema, extractBody, neverAnswers, runScript, seededRandom } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -184,12 +184,16 @@ console.log("\n[5] The planner can reach the HNSW index");
   // plan, which proves it exists and fits the operator class. Whether the
   // planner CHOOSES it on the function's own statements, at a size where it
   // has a real alternative, is [5c].
-  await sql`SET enable_seqscan = off`;
-  const plan = (await sql`EXPLAIN SELECT id FROM thoughts ORDER BY embedding <=> ${unit(0)}::vector LIMIT 1`)
-    .map((r: Record<string, string>) => Object.values(r)[0])
-    .join(" ");
+  // SET LOCAL inside one transaction, not a session SET on this max-4 pool: the
+  // pool does not promise the EXPLAIN the connection that received the SET,
+  // and a connection left with seq scans off would reach later sections.
+  const plan = await sql.begin(async (tx: SQL) => {
+    await tx`SET LOCAL enable_seqscan = off`;
+    return (await tx`EXPLAIN SELECT id FROM thoughts ORDER BY embedding <=> ${unit(0)}::vector LIMIT 1`)
+      .map((r: Record<string, string>) => Object.values(r)[0])
+      .join(" ");
+  });
   assert(/thoughts_embedding_idx/.test(plan), "thoughts_embedding_idx appears in the plan");
-  await sql`SET enable_seqscan = on`;
 }
 
 console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
@@ -294,9 +298,14 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
   // under both plan modes, since plpgsql may use either after five calls.
   //
   // The control comes first and is asserted too: the same statement WITHOUT
-  // 019's setting must seq-scan at least one side at this scale. If it ever
-  // stops doing so, the scale no longer reproduces the decision and the
-  // assertions after it would pass vacuously — say so rather than pass.
+  // 019's setting must leave at least one candidate CTE off its HNSW index at
+  // this scale — judged by the two index names, not by any `Seq Scan` in the
+  // plan, since the outer merge's join seq-scans the heap on a small table
+  // whether or not the CTEs did (first review pass). Where the planner already
+  // takes both indexes unaided — a narrower width whose vectors are inline, a
+  // server tuned differently — the scale does not reproduce the decision, and
+  // the control is SKIPPED with the reason rather than failing a correct 019;
+  // the assertions after it still hold what the setting must deliver.
   const body = await extractBody(sql, "unfiltered", EMBEDDING_DIM);
   const qv = `[${seededRandom(969).unitVector(EMBEDDING_DIM).join(",")}]`;
   const explain = async (count: number, mode: "force_custom_plan" | "force_generic_plan", withSettings: boolean) =>
@@ -310,27 +319,31 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
       await tx.unsafe(`DEALLOCATE live_mt`);
       return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
     });
-  const buffers = (plan: string) => Number(/Buffers: shared hit=(\d+)/.exec(plan)?.[1] ?? 0);
-  // Named by table and alias: the direct CTE reads `thoughts t` (renamed `t_1`
-  // when the outer merge also reads `thoughts t`), the chunk CTE `thought_chunks
-  // c`. The merge's own join is a seq scan too on a small table — of the heap
-  // without the vector column, so cheap and correct there — and is listed when
-  // it is; 019's setting turns it into primary-key probes, microseconds either way.
+  const buffers = buffersOf;
+  const onIndex = (plan: string) => ({
+    thoughts: /Index Scan using thoughts_embedding_idx on thoughts/.test(plan),
+    chunks: /Index Scan using thought_chunks_embedding_idx on thought_chunks/.test(plan),
+  });
+  // Named by table and alias, for the message: the direct CTE reads `thoughts
+  // t` (renamed `t_1` when the outer merge also reads `thoughts t`), the chunk
+  // CTE `thought_chunks c`; the merge's own join is listed when it seq-scans.
   const seqOn = (plan: string) => [...new Set([...plan.matchAll(/Seq Scan on (thoughts|thought_chunks) (\w+)/g)].map((m) => `${m[1]} ${m[2]}`))];
 
   const [{ storage }] = await sql`SELECT typstorage AS storage FROM pg_type WHERE typname = 'vector'`;
   const [{ toast }] = await sql`SELECT pg_size_pretty(pg_total_relation_size('thoughts') - pg_relation_size('thoughts')) AS toast`;
   for (const count of [10, 50]) {
     const control = await explain(count, "force_custom_plan", false);
-    const scanned = seqOn(control);
-    assert(scanned.length > 0,
-      `count ${count}: without 019's setting the planner seq-scans ${scanned.join(" and ") || "nothing"} at 2,000 rows (${buffers(control)} buffers; vector storage '${storage}', ${toast} out of line) — the scale reproduces the decision`);
+    const off = onIndex(control);
+    const label = `count ${count}: without 019's setting the planner leaves ${[!off.thoughts && "the thoughts CTE", !off.chunks && "the chunk CTE"].filter(Boolean).join(" and ") || "neither CTE"} off its HNSW index at ${EMBEDDING_DIM} dimensions (seq scans: ${seqOn(control).join(", ") || "none"}; ${buffers(control)} buffers; vector storage '${storage}', ${toast} out of line)`;
+    if (!off.thoughts || !off.chunks) assert(true, `${label} — the scale reproduces the decision`);
+    else skip(label, "the planner already takes both indexes unaided here, so this scale and width do not reproduce the decision; the assertions below still hold what 019 must deliver");
     for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
       const plan = await explain(count, mode, true);
-      assert(/Index Scan using thoughts_embedding_idx on thoughts/.test(plan) && seqOn(plan).length === 0,
+      const on = onIndex(plan);
+      assert(on.thoughts,
         `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan: the thoughts CTE is an Index Scan using thoughts_embedding_idx (${buffers(plan)} buffers)`);
-      assert(/Index Scan using thought_chunks_embedding_idx on thought_chunks/.test(plan),
-        `…and the chunk CTE an Index Scan using thought_chunks_embedding_idx`);
+      assert(on.chunks, `…and the chunk CTE an Index Scan using thought_chunks_embedding_idx`);
+      assert(seqOn(plan).length === 0, `…and nothing in the statement seq-scans (${seqOn(plan).join(", ") || "none"})`);
     }
   }
 

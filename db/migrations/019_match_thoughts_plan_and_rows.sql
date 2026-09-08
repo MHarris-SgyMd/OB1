@@ -26,30 +26,35 @@
 --   holds it):
 --
 --     rows      count   as 014 plans it (thoughts / chunks)    with enable_seqscan = off
---       1,000     10    seq / seq      3.1 ms    8,026 buf   index / index   1.0 ms    1,872 buf
---       1,000     50    seq / seq      3.8 ms    8,026       index / index   2.8 ms    5,683
---      10,000     10    index / SEQ    6.4 ms   15,295       index / index   2.6 ms    3,279
---      10,000     50    seq / seq     31.5 ms   80,247       index / index   8.8 ms   11,113
---      10,000    500    seq / seq     33.9 ms   80,247       index / index  40.9 ms   54,696
---     100,000     10    index / index  3.2 ms    4,338       (the same plan)
---     100,000     50    index / index 13.8 ms   16,334       (the same plan)
---     100,000    500    seq / seq    318.8 ms  932,017       index / index 196.0 ms   44,664
+--       1,000     10    seq / seq      2.7 ms    8,032 buf   index / index   0.8 ms    1,887 buf
+--       1,000     50    seq / seq      2.9 ms    8,032       index / index   2.1 ms    5,675
+--      10,000     10    index / SEQ    5.3 ms   15,412       index / index   1.8 ms    3,404
+--      10,000     50    seq / seq     28.8 ms   80,317       index / index   6.5 ms   11,143
+--      10,000    500    seq / seq     30.8 ms   80,317       index / index  32.4 ms   57,406
+--     100,000     10    index / index  2.7 ms    4,449       (the same plan)
+--     100,000     50    index / index 12.1 ms   17,391       (the same plan)
+--     100,000    500    seq / seq    275   ms 1,016,132      index / index 170–290 ms 115,370
 --     10,000 @ 64 dims  index at every count; the chunk table seq-scans above
 --                       200 candidates, correctly — 80 buffers, 0.3 ms
+--
+--   (Buffers are shared hits AND reads: the default 128 MB of shared_buffers
+--   cannot hold a 527 MB TOAST relation, so a seq scan there lands mostly in
+--   reads, and a count of hits alone flattered it — first review pass.)
 --
 --   So the sequential scan is chosen where the HEAP is small: at the shipped
 --   width that is every brain up to some tens of thousands of thoughts — the
 --   chunk side at the default count (the default path's cost at 10,000 rows
 --   was 6.4 ms with the chunk scan and 2.6 ms without it), both sides above
 --   it — and the ceiling at every size measured. At 100,000 rows the heap
---   alone is 1,225 pages and the estimate turns for the counts callers send;
---   at the ceiling it does not, and the scan reads 932,017 buffers for 500
---   rows. The band the estimate gets wrong is the band real brains occupy —
---   upstream's report is a 9,300-row table.
+--   alone is ~1,500 pages and the estimate turns for the counts callers send;
+--   at the ceiling it does not, and the scan touches a million buffers for
+--   500 rows where the index touches 115,000. The band the estimate gets wrong
+--   is the band real brains occupy — upstream's report is a 9,300-row table.
 --
 --   The mechanism, which is why no cost knob fixes it. pg_type.typstorage for
---   `vector` is `e` (extended): a 1024-wide vector is ~4 KB, past the TOAST
---   threshold, and lives out of line. At 10,000 rows the heap is 912 kB and
+--   `vector` is `e` — EXTERNAL: out of line, uncompressed, which is what
+--   pgvector declares for the type — so a 1024-wide vector, ~4 KB and past the
+--   TOAST threshold, lives in the TOAST relation. At 10,000 rows the heap is 912 kB and
 --   the TOAST relation ~55 MB. The planner prices a sequential scan by heap
 --   pages plus per-tuple CPU and NEVER counts the detoast reads — it estimated
 --   114 pages and the scan read 66,780 buffers. The estimate is wrong in kind,
@@ -84,6 +89,22 @@
 --   index at the counts callers send, it changes nothing but the ceiling. The
 --   setting is scoped to the call, as 014's is.
 --
+--   The filtered statements never read the vector column where the estimate
+--   goes wrong, and the setting reaches them too, so they were measured under
+--   both (db/bench-plan.ts, second table; first review pass). The routing
+--   statement takes the GIN bitmap under either — 0.12 / 0.37 / 2.1 ms at the
+--   three scales on a 50% filter, 0.01 ms on one matching nothing; what the
+--   setting changes is its EXISTS subplan on the chunk table, a seq scan of the
+--   heap without the vector column that becomes an index-only scan at the same
+--   cost. The exact branch is unchanged (5.4–6.5 ms for 936 matching rows at
+--   100,000). The walk's custom plan — the one plpgsql runs for the first five
+--   calls — is the same or better: at 10,000 rows the chunk side moves from a
+--   seq scan to its HNSW index (18.7 to 15.6 ms), at 100,000 both plans are
+--   HNSW and primary-key probes (4.7 to 4.3 ms). Its generic plan on a 50%
+--   filter at 100,000 rows is a GIN bitmap over 50,000 parents in both arms
+--   (249 and 258 ms) — 014's section C measured that choice and it is not
+--   this migration's to change.
+--
 --   Not chosen, and why:
 --   * `random_page_cost` in deploy/compose.yaml. Measured insufficient above;
 --     also a server setting a hosted Postgres may not expose, where the
@@ -96,6 +117,16 @@
 --     scoped, not call-scoped: it would leak into the caller's transaction and
 --     into search_thoughts_hybrid's other arm, and it is a second mechanism
 --     beside the SET clause the function already has.
+--   * `ALTER TABLE thoughts ALTER COLUMN embedding SET STORAGE MAIN` (and the
+--     same for thought_chunks): keep the vector in the heap so relpages says
+--     what a scan reads. It would make this estimate right instead of
+--     overriding it, and it is rejected for what it does to every OTHER scan:
+--     the heap grows fifty-fold (912 kB to ~55 MB at 10,000 rows), and the
+--     keyword search's ILIKE, the fingerprint lookups, the routing statement's
+--     GIN heap fetches and every audit and metadata read then pay for the
+--     vector they never use. pgvector declares EXTERNAL for that reason; it
+--     also rewrites nothing already stored, so a migrated brain would need a
+--     table rewrite besides.
 --   * Changing the shape. There is no SQL that makes the planner see TOAST.
 --
 -- Why — the row estimate (Linear SMD-1041)

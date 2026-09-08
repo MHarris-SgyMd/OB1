@@ -280,7 +280,9 @@ async function run(label: string): Promise<Run> {
 }
 
 const before = await run("before (001–013)");
-await applyMigrations(DB_URL, { dim: DIM, model: spec.name, only: (f) => f.startsWith("014") });
+// 014 and everything after it — 019 redefines match_thoughts, and this arm
+// must hold the function a deployment actually has (as db/bench-hnsw.ts does).
+await applyMigrations(DB_URL, { dim: DIM, model: spec.name, only: (f) => f >= "014" });
 // 014 seeds the walk's bounds at DATABASE level, read at session start: a
 // session opened before it keeps pgvector's defaults. Reconnect, and say what
 // the after arm actually ran under.
@@ -290,7 +292,7 @@ sql = new SQL({ url: DB_URL, max: 1 });
   const bounds = await sql.unsafe(BOUNDS_IN_FORCE_SQL);
   console.log(`  after arm runs with ${bounds.map((r: { name: string; value: string | null }) => `${r.name}=${r.value}`).join(", ")}`);
 }
-const after = await run("after (014)");
+const after = await run("after (014 on)");
 await sql.close();
 
 // ── The control: the unfiltered path did not move ───────────────────────────

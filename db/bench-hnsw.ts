@@ -500,7 +500,10 @@ for (const n of SCALES) {
   // restoring.
   process.stdout.write("  the walk, forced  ");
   const walkBody = await extractBody(sql, "walk", DIM);
-  await sql.unsafe(`SET hnsw.iterative_scan = relaxed_order`);
+  // The function's own SET clauses, session-scoped since the EXECUTEs below run
+  // outside a transaction — under 019 that is the scan mode AND enable_seqscan,
+  // and a plan the deployed function cannot produce is not worth timing.
+  const applied = await applyFunctionSettings(sql, { scope: "session" });
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb) AS ${walkBody}`);
   const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`;
@@ -512,7 +515,7 @@ for (const n of SCALES) {
   }
   await sql.unsafe(`DEALLOCATE bench_walk`);
   await sql.unsafe(`RESET plan_cache_mode`);
-  await sql.unsafe(`RESET hnsw.iterative_scan`);
+  for (const name of applied) await sql.unsafe(`RESET ${name}`);
   console.log(" done");
 }
 

@@ -2798,13 +2798,14 @@ half that matters.** `db/bench-plan.ts`: random unit vectors, one thought in
 five with a chunk row, the unfiltered branch's own statement read from the
 catalog and explained under `EXPLAIN (ANALYZE, BUFFERS)` at 1,000, 10,000 and
 100,000 rows. At 10,000 rows and the default count the `thoughts` CTE is an
-index scan and the chunk CTE a **sequential scan** of 2,000 rows that reads
-13,353 buffers — the whole statement 6.4 ms against 2.6 with the index. Above
-the default count both sides scan: 31.5 ms and 80,247 buffers at match_count
-50, against 8.8 ms and 11,113. At 1,000 rows everything seq-scans at every
-count. At 100,000 rows the heap alone is 1,225 pages, the estimate turns, and
+index scan and the chunk CTE a **sequential scan** of 2,000 rows that touches
+13,000 buffers — the whole statement 5.3 ms against 1.8 with the index. Above
+the default count both sides scan: 28.8 ms and 80,317 buffers at match_count
+50, against 6.5 ms and 11,143. At 1,000 rows everything seq-scans at every
+count. At 100,000 rows the heap alone is ~1,500 pages, the estimate turns, and
 the planner takes the index at the counts callers send on its own — and still
-seq-scans at the ceiling, 932,017 buffers and 319 ms for 500 rows against 196.
+seq-scans at the ceiling, a million buffers and 275 ms for 500 rows against
+the index's 115,000 and 170–290.
 Upstream's report is a 9,300-row table: the band the estimate gets wrong is
 the band real brains occupy. At 64 dimensions the planner is right at every
 size, which is why the earlier bench could not have seen it.
@@ -2843,10 +2844,10 @@ the rows it returns — but it edits a catalog row pgvector owns); `set_config`
 inside the body (transaction-scoped, and a second mechanism). After: both
 sides are an index scan at every count and scale, under both plan modes. At
 the counts callers send the index wins by three to four times where the
-planner was choosing the scan; at the ceiling the two plans cost the same up
-to 10,000 rows and the index wins by 1.6x at 100,000; at 100,000 rows and the
-counts callers send the setting changes nothing, since the planner already
-chose the index.
+planner was choosing the scan; at the ceiling the two plans cost about the
+same at every size, with the index touching a ninth of the buffers at
+100,000; at 100,000 rows and the counts callers send the setting changes
+nothing, since the planner already chose the index.
 
 **SMD-1041, folded in because it needs the same migration.** PostgreSQL
 assumes 1,000 rows from a plpgsql set-returning function; `match_thoughts`
@@ -2875,7 +2876,7 @@ The extraction (`extractBody`) and the settings loop (`applyFunctionSettings`)
 moved from `bench-hnsw.ts` into `db/test-support.ts`, so the three explainers
 rewrite the same text the same way; `bench-hnsw.ts`'s after arm applies 014
 and every later migration, since its plans are read from the catalog and 019
-redefines the function. Live suite 218, schema 365.
+redefines the function. Live suite 222, schema 366.
 
 **Handed to SMD-945.** The recency blend's plan to graft onto the existing
 structure assumed that structure gets an index scan. It does now, *because of*
@@ -2884,12 +2885,41 @@ off`, `SET hnsw.iterative_scan = relaxed_order`, `ROWS 10`, the `requires`
 line and the `ob1:filter-inside-scan` sentinel — 019's header lists the five —
 and [5c] fails without the first at 2,000 rows.
 
-**Not done here.** The recency half of #469 (SMD-945); the walk branch's plan
-above the exact threshold at the shipped width, which change 28 measured at 64
-dimensions and which the same setting now governs but this bench does not
-explain; `ROWS` on `search_thoughts_hybrid` itself, which returns at most
-`match_count` rows and is composed by nothing in the repo; a per-width run of
-`bench-hnsw.ts`, whose published tables stay at 64 dimensions.
+**A first pass, triaged: nine fixes, one measurement.** Preflight checked
+`match_thoughts` for 014's clause and never for 019's, and its remedy restored
+only the first, so following the repo's own advice would have reinstalled the
+plan defect; a `candidate scan` check reads `proconfig` and `prorows`, names
+what a redefinition dropped, and gives the `ALTER FUNCTION` that puts both back
+when 019 is recorded and the migration when it is not (`test-preflight.ts`
+holds the three wordings, 89). [5c]'s control counted any `Seq Scan`,
+including the outer merge's join over a small heap, so it could have passed
+while both CTEs already index-scanned; it judges the two HNSW index names and
+skips with the reason where the planner takes both unaided. The setting is
+function-wide and the filtered statements never read the vector column, so
+`bench-plan.ts` measures them too — the routing statement takes the GIN
+bitmap under either setting (2.1 ms on a 50% filter at 100,000 rows), the
+exact branch is unchanged, the walk's custom plan is the same or better (its
+chunk side moves from a seq scan to its HNSW index at 10,000 rows, 18.7 to
+15.6 ms), and its generic plan on a broad filter at 100,000 rows is a GIN
+bitmap over 50,000 parents in both arms, which change 28 measured and this
+change leaves. Buffers had been parsed from `hit=` alone, a floor once the
+TOAST relation outgrows `shared_buffers`; hits and reads are summed and every
+table above is re-measured (the 100,000-row seq scan touches a million
+buffers, not 932,017). `eval-filtered.ts`'s after arm still applied 014 alone;
+`bench-hnsw.ts` section D ran the walk outside the function's settings; [5]
+issued session `SET`s on a pooled connection; `test-schema.ts` restored the
+shipped function by a hard-coded `019` and now re-applies whichever migration
+last defines it, read from the files. The header called `typstorage` `e`
+"extended" — it is EXTERNAL, what pgvector declares — and now weighs `SET
+STORAGE MAIN`, which would make the estimate right by making the heap fifty
+times larger for every scan that never reads the vector. README counts.
+
+**Not done here.** The recency half of #469 (SMD-945); the walk's generic plan
+on a broad filter at 100,000 rows, measured in change 28 and again here, which
+no setting in this change addresses; `ROWS` on `search_thoughts_hybrid`
+itself, which returns at most `match_count` rows and is composed by nothing in
+the repo; a per-width run of `bench-hnsw.ts`, whose published tables stay at
+64 dimensions.
 
 ## Detached from the fork network
 

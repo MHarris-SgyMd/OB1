@@ -174,6 +174,7 @@ else {
    * still answers — with the filtered recall it had before 014.
    */
   assert(/filtered search.*scans iteratively/s.test(withKw.out), "a fully migrated match_thoughts is reported as scanning iteratively");
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10/s.test(withKw.out), "…and as carrying 019's plan setting and row estimate");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("007") });
   const pre014 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(pre014.code === 0, "a match_thoughts without 014's SET clause still starts");
@@ -211,6 +212,22 @@ else {
   assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
   assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
   assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy");
+  // RESET ALL took 019's clause with it, and CREATE OR REPLACE would have
+  // reset the row estimate too: the second check names both, as a warning, with
+  // the migration as the remedy since this ledger does not record 019.
+  assert(/candidate scan.*does not carry enable_seqscan = off — migration 019 is not applied/s.test(noClause.out), "the candidate-scan check reports 019's clause missing");
+  assert(/019_match_thoughts_plan_and_rows\.sql/.test(noClause.out), "…with 019 as the remedy while the ledger does not record it");
+  // The other remedy: 019 recorded, the clause gone — the ALTER that restores both.
+  const led019 = new SQL({ url: LIVE, max: 1 });
+  await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test')`);
+  // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would.
+  await led019.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order ROWS 1000`);
+  await led019.close();
+  const noSeq = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noSeq.code === 0, "a recorded 019 whose function lost only its plan setting still starts");
+  assert(/filtered search.*scans iteratively/s.test(noSeq.out) && /candidate scan.*although migration 019 is recorded as applied — a later redefinition dropped its SET clause, and its row estimate is 1000 rather than 10/s.test(noSeq.out),
+         "…014's check is satisfied while 019's names the dropped clause and the reset estimate");
+  assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET enable_seqscan = off ROWS 10/.test(noSeq.out), "…with the ALTER FUNCTION that puts both back as the remedy");
   const unledger = new SQL({ url: LIVE, max: 1 });
   await unledger.unsafe(`DROP TABLE schema_migrations`);
   await unledger.close();
