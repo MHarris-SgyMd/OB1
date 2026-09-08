@@ -21,7 +21,8 @@
 
 import { SQL } from "bun";
 import { estimateTokens } from "./chunk.ts";
-import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
+import { createEmbedder, resolveEmbedConfig } from "./embed.ts";
+import { createAssert, neverAnswers, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
 
 const URL_ = requireDatabaseUrl("test-chunking.ts");
@@ -55,6 +56,23 @@ const provider = Bun.serve({
     if (url.pathname.endsWith("/embeddings")) {
       embedCalls++;
       const input = String(body.input ?? "");
+      // A request that never returns, for [1b]: the bare word, or a whole
+      // content carrying it — never a window, which is under the batch, so a
+      // long capture's windows still embed while its whole-content call hangs.
+      if (input.includes("tarpit") && (input === "tarpit" || estimateTokens(input) > BATCH)) {
+        await neverAnswers();
+      }
+      // Headers, then a body that never ends — the other way a call can fail to
+      // return, and the one a timeout attached to fetch() alone does not name.
+      if (input === "slowbody") {
+        return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+      }
+      // A whole-content call that fails for a reason that says nothing about
+      // the next one: the server's embedder must not remember it (nor count it
+      // as a probe), and the capture reply must say the head window stands in.
+      if (input.includes("flaky") && estimateTokens(input) > BATCH) {
+        return Response.json({ error: { message: "stub: briefly unavailable" } }, { status: 503 });
+      }
       // The whole point: a real provider would silently truncate here. Failing
       // loudly instead turns a silent regression into a red test.
       if (estimateTokens(input) > BATCH) {
@@ -64,6 +82,15 @@ const provider = Bun.serve({
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
       return Response.json({ data: [{ embedding: v }], model: body.model });
+    }
+    // The chat endpoint — metadata extraction and, under OB1_CHUNK_CONTEXT=on,
+    // the blurbs. Two ways not to answer, keyed on the text being processed.
+    const asked = JSON.stringify(body.messages ?? "");
+    if (asked.includes("slowchat")) {
+      return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+    }
+    if (asked.includes("blurbtarpit")) {
+      await neverAnswers();
     }
     return Response.json({
       choices: [{ message: { content: JSON.stringify({ topics: ["long"], type: "reference", people: [] }) } }],
@@ -78,6 +105,8 @@ process.env.OB1_EMBEDDING_MODEL = EMB_MODEL;
 process.env.OB1_EMBEDDING_DIM = String(DIM);
 process.env.OB1_CHUNK_TOKENS = String(BATCH - 200);   // headroom, as in production
 process.env.OB1_METADATA_MODEL = "stub-meta";
+// One second: [0] captures against a chat body that never ends.
+process.env.OB1_LLM_TIMEOUT = "1";
 process.env.MCP_ACCESS_KEY = "chunk-key";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
@@ -110,7 +139,25 @@ const LONG_MID = `Routine preamble for the third session. ${FILLER.repeat(30)} `
 
 console.log(`\n  long capture ≈ ${estimateTokens(LONG)} tokens, provider batch ${BATCH}\n`);
 
-console.log("[1] A capture longer than the batch is stored without truncation errors");
+console.log("[0] A whole-content call that fails transiently is said in the reply");
+{
+  // Before [1], because [1]'s 400 latches the server's embedder and no later
+  // long capture is asked for its whole content at all. A 503 must not latch,
+  // must not count as a probe, and must be said: the head window stands in
+  // and there is no claim row on this path to say so later.
+  const out = await call("capture_thought", { content: `A flaky start to the notes. ${FILLER.repeat(60)}` });
+  assert(/Note: the whole content could not be embedded in one call \(.*503 .*briefly unavailable/.test(out),
+    "the capture reply says the head window stands in, with the provider's error");
+  assert(/re-capture, or a re-embed pass/.test(out), "…and what would give it the whole-content vector");
+  assert(overBatch === 0, `…and the failure was not the refusal [1] counts (${overBatch} probes)`);
+  // The metadata call is bounded by the same setting, and a deadline that
+  // passes while its body is still arriving is recorded as the timeout it is,
+  // not as a body that was not JSON.
+  const slow = await call("capture_thought", { content: "A slowchat note about nothing much." });
+  assert(/automatic tagging failed \(provider_timeout\)/.test(slow), "a metadata call whose body never ends is recorded as a timeout, and the reply says so");
+}
+
+console.log("\n[1] A capture longer than the batch is stored without truncation errors");
 {
   await call("capture_thought", { content: LONG });
   await call("capture_thought", { content: LONG_HEAD });
@@ -135,11 +182,53 @@ console.log("[1] A capture longer than the batch is stored without truncation er
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [t] = await sql`SELECT count(*)::int AS c FROM thoughts`;
-  assert(t.c === 4, `four thoughts stored (${t.c})`);
+  assert(t.c === 6, `six thoughts stored, [0]'s two included (${t.c})`);
 
   const [full] = await sql`SELECT length(content) AS n FROM thoughts WHERE content LIKE 'Opening notes%'`;
   assert(Number(full.n) === LONG.length, `content stored whole, ${full.n} chars, nothing trimmed`);
   await sql.close();
+}
+
+console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and no call waits for ever");
+{
+  // db/reembed.ts builds its embedder with rememberRefusal off: each long row's
+  // outcome is recorded on that row, so it has to be that row's own. Against the
+  // same refusing stub, three long captures are three probes, not one — and each
+  // result carries the provider's answer, which is what the pass writes down.
+  const cfg = resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1" });
+  const pass = createEmbedder(() => cfg, { rememberRefusal: false });
+  const probesBefore = overBatch;
+  const results = [];
+  for (const text of [LONG, LONG_HEAD, LONG_MID]) results.push(await pass.embedCapture(text));
+  assert(overBatch - probesBefore === 3, `three long captures, three over-batch probes — nothing remembered between them (${overBatch - probesBefore})`);
+  assert(results.every((r) => r.wholeContentFellBack && r.wholeContentRefused && /400/.test(r.wholeContentError ?? "")),
+    "…and each reports its own refusal, with the provider's 400 in the error");
+  assert(results.every((r) => r.embedding.every((x, i) => x === r.chunks[0].embedding[i])), "…with the head window's vector standing in");
+
+  // The timeout. A short call that never returns fails with the knob named and
+  // no status, in about the configured second rather than never.
+  const t0 = Date.now();
+  const hung = await pass.getEmbedding("tarpit").then(() => "", (e: Error) => e.message);
+  assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(hung), `a call that never returns times out, naming the setting (${hung})`);
+  assert(Date.now() - t0 < 5_000, `…within the timeout, not the test's patience (${Date.now() - t0} ms)`);
+  const stalled = await pass.getEmbedding("slowbody").then(() => "", (e: Error) => e.message);
+  assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(stalled), `…and so does one whose body never ends after the headers arrived (${stalled})`);
+  // The same hang on a whole-content call is a transient fallback: head window,
+  // not refused, the timeout in the error — what the pass records as retryable.
+  const hungLong = await pass.embedCapture(`tarpit ${FILLER.repeat(60)}`);
+  assert(hungLong.wholeContentFellBack && !hungLong.wholeContentRefused && /timed out after 1 s/.test(hungLong.wholeContentError ?? ""),
+    "a whole-content call that never returns falls back as transient, with the timeout in the error");
+  assert(hungLong.chunks.length >= 3 && hungLong.embedding.every((x, i) => x === hungLong.chunks[0].embedding[i]),
+    `…the windows embedded meanwhile (${hungLong.chunks.length}) and the head window stands in`);
+  // With context on, a blurb call that never returns is a reason the result
+  // carries — so a pass can write "the metadata model timed out" on the row
+  // instead of "fix the metadata model".
+  const withContext = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_LLM_TIMEOUT: "1", OB1_CHUNK_CONTEXT: "on" }), { rememberRefusal: false });
+  const bare = await withContext.embedCapture(`blurbtarpit ${FILLER.repeat(60)}`);
+  assert(bare.contextFailures === bare.chunks.length && bare.chunks.every((c) => !c.context),
+    `every blurb timed out, so every window went in bare (${bare.contextFailures} of ${bare.chunks.length})`);
+  assert(bare.contextErrors.length === 1 && /Chat completion request .* timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(bare.contextErrors[0]),
+    `…and the result carries the one distinct reason, naming the setting (${JSON.stringify(bare.contextErrors)})`);
 }
 
 console.log("\n[2] Chunks are written only for content that needs them");
@@ -210,6 +299,7 @@ console.log("\n[6] Deleting a thought removes its chunks");
   await sql.close();
 }
 
-server.stop(); provider.stop();
+// Forced: [1b] left two requests the stub will never answer.
+server.stop(); provider.stop(true);
 console.log(`\n  ${embedCalls} embedding calls`);
 report();

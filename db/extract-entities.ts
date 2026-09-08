@@ -80,7 +80,7 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { resolveEmbedConfig } from "../server-portable/embed.ts";
+import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 
@@ -427,7 +427,11 @@ function classifyError(e: unknown): ErrorKind {
   const name = (e as Error).name ?? "";
   if (name === "TimeoutError" || /timed out/i.test(msg)) return "thought";
   if (status === 429 || (status !== undefined && status >= 500)) return "transient";
-  if (status === 400 && /context|length|too long|tokens|too large/i.test(msg)) return "thought";
+  // The one rule for "this 400 is about the input's length", shared with
+  // embed.ts so the two tools cannot drift. A 413 stays fatal below, as it
+  // was: the extraction request is the same shape for every thought, so a
+  // provider refusing its size would refuse the next one too.
+  if (status === 400 && refusesLength(status, msg)) return "thought";
   if (status !== undefined && status >= 400 && status < 500) return "fatal";
   if (/ECONNREFUSED|ECONNRESET|EAI_AGAIN|ENOTFOUND|fetch failed|Unable to connect|socket/i.test(msg)) return "transient";
   return "thought";
@@ -483,7 +487,7 @@ async function worker(n: number): Promise<void> {
               outcome = await processRow(row);
             } catch (e) {
               const kind = classifyError(e);
-              const msg = (e as Error).message.slice(0, 500);
+              const msg = (e as Error).message.slice(0, PROVIDER_ERROR_CHARS);
               if (kind === "thought") {
                 outcome = { outcome: "failed", error: msg };
               } else if (kind === "fatal") {

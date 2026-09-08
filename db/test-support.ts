@@ -261,6 +261,18 @@ export function createAssert(): {
 }
 
 /** The DATABASE_URL check every suite opens with. */
+/**
+ * A stub provider's answer that never comes: the request stays open until the
+ * client's own deadline (OB1_LLM_TIMEOUT) abandons it. Two things follow for
+ * the test: the stub decides WHICH request hangs from its body, since a
+ * hanging window would fail a long capture where a hanging whole-content call
+ * only degrades it; and the stub is stopped with `stop(true)`, because the
+ * handler is still pending when the test ends.
+ */
+export function neverAnswers(): Promise<never> {
+  return new Promise<never>(() => {});
+}
+
 export function requireDatabaseUrl(script: string): string {
   const url = process.env.DATABASE_URL;
   if (!url) {

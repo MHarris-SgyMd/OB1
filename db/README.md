@@ -217,7 +217,8 @@ bun reembed.ts --url … --status              # where the pass stands
 bun reembed.ts --url … --dry-run             # what a run would do; writes nothing
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
-#   --workers N (2)   --batch N (8)   --ttl SECONDS (900)
+bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
+#   --workers N (2)   --batch N (8)   --ttl SECONDS (900, or --batch × OB1_LLM_TIMEOUT when that is longer)
 ```
 
 It reads the same variables the server does — model, width, provider URL and
@@ -276,6 +277,52 @@ read-only `--status` runs against any schema; a pass that would write requires
 adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
 the file's body rather than to apply a migration the migrator will skip. A one-shot backfill that fingerprints every legacy
 singleton without a re-embed is SMD-1042.
+
+**The head window, recorded.** A long thought is embedded whole and in windows;
+when the whole-content call fails, the head window's vector stands in for it
+(`server-portable/embed.ts`, change 27). The server accepts that silently by
+design. The pass does not: a *transient* failure — 429, 5xx, a lost connection,
+the timeout — stores the head window and marks the claim failed, so
+`--retry-failed` tries the whole content again; a *refusal* — a 413, or a 400
+whose own words name the length: a hosted API that will not take input that
+long — stores the head window and marks the claim succeeded, because that
+vector is the provider's final answer and is what a capture would have stored,
+**with the refusal written on the claim row**. A 400 that says nothing about
+length is not known to be about this input and is treated as transient; the
+row says what it got. The rule is general: a succeeded row's `last_error`, when set, is
+what the worker could not do — the write stands, and this is what it fell short
+of. `--status` and the end of a run count them ("35 succeeded (1 with the head
+window)") and list them; `--retry-fallbacks` returns them to the pool for the
+day the provider or its input limit changes. For that to be a fact about the
+row, the pass asks every long thought itself: its embedder does not remember a
+refusal the way the server's does (one probe per process on the interactive
+path), because a 413 is about *that* input's length and a shorter long thought
+may well be accepted — remembering would give every later long row a head
+window it was never asked about, under a reason that was another row's. Every
+provider call the server and this pass make is bounded by `OB1_LLM_TIMEOUT`
+(120 s by default; the server reads it too, for its metadata call as well; those
+calls go through one function in `embed.ts` — `extract-entities.ts` keeps its
+own `--timeout` per model call): a call that never returns — before the headers or
+during the body — fails the row with the timeout named instead of parking the
+worker until the second Ctrl-C, and a blurb that times out under
+`OB1_CHUNK_CONTEXT=on` puts that reason on the row rather than "fix the metadata
+model". The lease has to outlast a batch whose every call runs to that timeout,
+so the default `--ttl` grows to `--batch` × the timeout (× two with chunk
+context on), plus one row's worth of slack for a re-read, when that exceeds
+900 s — whole seconds, since `claim_thoughts` takes an integer — and an explicit
+`--ttl` below the product is refused with the arithmetic shown (`--status`
+answers regardless, since it never claims). A row with two things wrong records
+both: a refusal is appended to a blurb failure rather than lost behind it. What
+counts as a refusal is a 413, or a 400 whose own words name the length — read
+from the provider's body, its error code first, never from a message that also
+carries the base URL — the same rule `extract-entities.ts` applies to its 400s,
+from one function. `--status` counts and lists succeeded rows with *a caveat*,
+in the rule's words rather than one caveat's, and each row's text says which. Until SMD-1021 a
+refused row was indistinguishable from any other succeeded row, one summary line
+was the only trace, and a terminal claim meant no re-run would look at it again.
+The rule is stated only here and in the tool; putting it on the column itself is
+SMD-1052. The server still remembers a refusal for the life of its process;
+shaping that latch is SMD-1054.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
 0.48 ms for the first hundred of a 100,000-row pool and 0.47 ms for the last,
@@ -576,7 +623,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 347 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 164 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 184 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -614,15 +661,22 @@ container.
   which is why the assertion names the lock type.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
-  thirty-six rows including two chunked ones (one of whose whole-content calls
-  is throttled with a 429, once — the other must still get its whole vector), a
-  poisoned one, one with no vector and two legacy twins with NULL fingerprints
-  and the same text but for whitespace; asserts every vector, the chunk rows,
-  one audit row rather than thirty-five, both twins succeeded with exactly one
-  fingerprinted and the pair named in the run and under `--status`,
-  `ob1_config`, a re-run that processes only a later capture, `--retry-failed`
-  resetting the attempt count and giving the throttled thought its
-  whole-content vector, and exit 1 while another process holds a lease.
+  thirty-eight rows including three chunked ones (one of whose whole-content
+  calls is throttled with a 429, once — the other must still get its whole
+  vector; the third is refused whole with a 413 every time, and must end
+  succeeded with its head window, the refusal on its claim row, and the other
+  two unaffected), a poisoned one, one whose first request is never answered
+  under a 2 s `OB1_LLM_TIMEOUT`, one with no vector and two legacy twins with
+  NULL fingerprints and the same text but for whitespace; asserts every vector,
+  the chunk rows, one audit row rather than thirty-seven, both twins succeeded
+  with exactly one fingerprinted and the pair named in the run and under
+  `--status`, the refused thought listed under `--status` and the timed-out one
+  failed with the setting named, a `--ttl` the batch could outlive refused with
+  exit 2 before the pool exists, `ob1_config`, a re-run that processes only a
+  later capture, `--retry-failed` resetting the attempt count and giving the
+  throttled thought its whole-content vector, `--retry-fallbacks` giving the
+  refused one its whole-content vector once the stub relents and clearing the
+  caveat, and exit 1 while another process holds a lease.
 - **Entity extraction, end to end.** [10] runs `extract-entities.ts` against a
   stub model that answers from a table, so the expected graph is known exactly:
   seven entities, fourteen mentions, five edges from ten thoughts, one of which

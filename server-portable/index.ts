@@ -1,6 +1,6 @@
 
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
-import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedKind } from "./embed.ts";
+import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -59,6 +59,8 @@ type Env = {
   OB1_LLM_BASE_URL?: string;
   /** Preferred over OPENROUTER_API_KEY. Not needed for a loopback endpoint. */
   OB1_LLM_API_KEY?: string;
+  /** Seconds a single provider call — embedding, blurb or metadata extraction — may take. Default 120 — see embed.ts. */
+  OB1_LLM_TIMEOUT?: string;
   OPEN_BRAIN_CITATION_BASE_URL?: string;
   /**
    * How long a resolved agent identity is cached, in milliseconds. Also the
@@ -110,12 +112,6 @@ function agents(): AgentResolver {
 function embedConfig(): EmbedConfig {
   return resolveEmbedConfig(env());
 }
-function llmBase(): string {
-  return embedConfig().llmBase;
-}
-function llmHeaders(): Record<string, string> {
-  return embedConfig().headers;
-}
 function metadataModel(): string {
   return embedConfig().metadataModel;
 }
@@ -146,12 +142,46 @@ const embedder = createEmbedder(embedConfig);
 const embedCapture = (content: string) => embedder.embedCapture(content);
 const getEmbedding = (text: string, kind: EmbedKind = "document") => embedder.getEmbedding(text, kind);
 
+/**
+ * What a capture or an edit reply says when the whole-content vector could
+ * not be had for a reason that says nothing about the next attempt — a 429, a
+ * 5xx, a lost connection, OB1_LLM_TIMEOUT. The head window stands in, which is
+ * a legitimate state and a silent one, and unlike the re-embed there is no
+ * claim row here to record it. A provider that REFUSED the length stays silent,
+ * as change 27 decided: that is the vector every long capture gets there.
+ */
+function explainHeadWindow(e: EmbeddedCapture | undefined): string {
+  if (!e?.wholeContentFellBack || e.wholeContentRefused) return "";
+  return (
+    `\n\nNote: the whole content could not be embedded in one call (${e.wholeContentError ?? "no detail"}); ` +
+    `the head window's vector stands in for it. The thought is stored and searchable, and every search chunk ` +
+    `has its vector; re-capture, or a re-embed pass, gives it the whole-content vector once the provider answers.`
+  );
+}
+
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${llmBase()}/chat/completions`, {
-    method: "POST",
-    headers: llmHeaders(),
-    body: JSON.stringify({
+  // The original swallowed every failure into the fallback below: an auth error,
+  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
+  // "uncategorized" and a success message to the user, with no way to tell a
+  // genuinely uncategorisable thought from a broken API key. Capture must still
+  // succeed — the content matters more than the tags — but the degradation is
+  // now recorded on the thought and surfaced in the confirmation.
+  const fallback = (reason: string): Record<string, unknown> => ({
+    topics: ["uncategorized"],
+    type: "observation",
+    metadata_extraction_failed: reason,
+  });
+
+  // Through the one provider call embed.ts owns, so this is bounded like the
+  // embedding calls and by the same setting: a capture awaits this and the
+  // embedding together, so a chat call that never returned held the capture —
+  // and discarded the embedding that had finished — for as long as the
+  // platform allowed. A timeout is one more recorded way the tags can be
+  // missing, told apart from a refused status and from a body that is not JSON.
+  let d: { choices?: [{ message?: { content?: string } }] };
+  try {
+    d = await providerCall(embedConfig(), "/chat/completions", {
       model: metadataModel(),
       response_format: { type: "json_object" },
       // Structured extraction has one right answer, so sampling only adds
@@ -176,33 +206,13 @@ Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
       ],
-    }),
-  });
-
-  // The original swallowed every failure into the fallback below: an auth error,
-  // a rate limit, or a 500 from OpenRouter all produced a thought tagged
-  // "uncategorized" and a success message to the user, with no way to tell a
-  // genuinely uncategorisable thought from a broken API key. Capture must still
-  // succeed — the content matters more than the tags — but the degradation is
-  // now recorded on the thought and surfaced in the confirmation.
-  const fallback = (reason: string): Record<string, unknown> => ({
-    topics: ["uncategorized"],
-    type: "observation",
-    metadata_extraction_failed: reason,
-  });
-
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    console.error(`extractMetadata: ${llmBase()} returned ${r.status} ${msg.slice(0, 500)}`);
-    return fallback(`provider_${r.status}`);
-  }
-
-  let d: { choices?: [{ message?: { content?: string } }] };
-  try {
-    d = await r.json();
-  } catch {
-    console.error("extractMetadata: provider returned a non-JSON body");
-    return fallback("invalid_response_body");
+    });
+  } catch (e) {
+    if (e instanceof ProviderError) {
+      console.error(`extractMetadata: ${e.message}`);
+      return fallback(e.kind === "timeout" ? "provider_timeout" : e.kind === "http" ? `provider_${e.status}` : "invalid_response_body");
+    }
+    throw e;
   }
 
   const content = d?.choices?.[0]?.message?.content;
@@ -803,10 +813,11 @@ function buildServer(principal: Principal): McpServer {
     async ({ content }) => {
       try {
         // Independent of each other, so they overlap.
-        const [{ embedding, chunks, contextFailures }, metadata] = await Promise.all([
+        const [embedded, metadata] = await Promise.all([
           embedCapture(content),
           extractMetadata(content),
         ]);
+        const { embedding, chunks, contextFailures } = embedded;
 
         const payload = { metadata: { ...metadata, source: "mcp" } };
 
@@ -870,6 +881,7 @@ function buildServer(principal: Principal): McpServer {
             `They are stored and searchable; re-capture to regenerate, or check the model at ` +
             `OB1_LLM_BASE_URL.`;
         }
+        confirmation += explainHeadWindow(embedded);
 
         // Tell the user when tags are placeholders rather than real extraction,
         // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.
@@ -955,7 +967,7 @@ function buildServer(principal: Principal): McpServer {
         return {
           content: [{
             type: "text" as const,
-            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}`,
+            text: `Updated ${id} (${what}).\nupdated_at: ${result.updatedAt}\nPass that value as if_unchanged_since on your next edit.${explainPair(result)}${explainHeadWindow(embedded)}`,
           }],
         };
       } catch (e) {

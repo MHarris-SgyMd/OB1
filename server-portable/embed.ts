@@ -51,7 +51,139 @@ export type EmbedEnv = {
   OB1_METADATA_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
   OB1_METADATA_REASONING?: string;
+  OB1_LLM_TIMEOUT?: string;
 };
+
+/**
+ * Seconds a single provider call may take before it is abandoned. Generous on
+ * purpose: the whole-content embedding of a long document on a local model, or
+ * a blurb generated from a whole document by a large chat model, can run to
+ * tens of seconds on modest hardware, and a timeout that fires on slow-but-
+ * working is worse than none. What it exists for is the call that never
+ * returns: before it, a hung provider parked a re-embed worker until the
+ * second Ctrl-C (first review of SMD-946), and the lease it held expired
+ * under it.
+ *
+ * The budget is per request, but the queue is shared: a long capture sends its
+ * whole-content request and every window's at once, each timed from dispatch,
+ * and a provider that serves one request at a time (Ollama with
+ * OLLAMA_NUM_PARALLEL=1) answers the last of them after all the others. So the
+ * default has to cover a whole document's worth of requests in series, not
+ * one — lower it towards a hosted API's figure only against a provider that
+ * serves in parallel.
+ */
+export const DEFAULT_LLM_TIMEOUT_S = 120;
+
+/**
+ * How much of a provider's error body is kept. A proxy answering a 413 or a
+ * 502 with a full HTML page would otherwise land whole in every message built
+ * from it — and db/reembed.ts stores that message on the claim row.
+ */
+export const PROVIDER_ERROR_CHARS = 500;
+
+/**
+ * What a provider call can fail with, told apart without parsing messages:
+ * the deadline passed (`timeout`), the provider answered with an error status
+ * (`http`, with the status), or it answered 2xx with a body that is not JSON
+ * (`body`). Anything else — a refused connection, a reset — is the runtime's
+ * own error and is rethrown as it came.
+ */
+export class ProviderError extends Error {
+  /**
+   * @param body The provider's own words, capped — what refusesLength reads,
+   *   kept apart from the message so the base URL in the message cannot be
+   *   mistaken for them.
+   */
+  constructor(message: string, readonly kind: "timeout" | "http" | "body", readonly status?: number, readonly body = "") {
+    super(message);
+    this.name = "ProviderError";
+  }
+}
+
+/**
+ * One call to the OpenAI-compatible provider, and the only place that makes
+ * one: URL join, headers, the timeout and its name, the status attached, the
+ * error body capped, the JSON parsed. The server's embedding, blurb and
+ * metadata calls and the bulk passes' all come through here, so the next
+ * request-level concern — a Retry-After read, a request id — is added once.
+ * Before this the timeout rewrap was hand-written three times with three try
+ * scopes, and the one that closed after fetch() let a deadline passing during
+ * the body read escape as the bare "The operation timed out" (second review
+ * of SMD-1021). The whole exchange, headers and body, is bounded here.
+ *
+ * Not every call in the repository: db/extract-entities.ts's model call has
+ * its own bound (--timeout, per model call) and preflight's probes are one
+ * interactive shot; both keep their own fetch.
+ */
+export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown): Promise<T> {
+  const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
+  const timedOut = () =>
+    new ProviderError(`${what} request to ${cfg.llmBase} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
+  let r: Response;
+  try {
+    r = await fetch(`${cfg.llmBase}${path}`, {
+      method: "POST",
+      headers: cfg.headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+  } catch (e) {
+    // Named as what it is, with the knob, and WITHOUT a status: nothing about
+    // the next attempt is known, so embedCapture treats it as transient.
+    if ((e as Error).name === "TimeoutError") throw timedOut();
+    throw e;
+  }
+  // The status is known from here on and must not be lost: a body that fails
+  // to arrive after a 413 is still a 413 (the third review found a reset
+  // mid-body turning a refusal into a transient, and failing a capture that
+  // the metadata fallback exists to save). The deadline passing during the
+  // body is the timeout; anything else leaves the body empty.
+  let text = "";
+  try {
+    text = await r.text();
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw timedOut();
+  }
+  const capped = text.slice(0, PROVIDER_ERROR_CHARS);
+  if (!r.ok) {
+    // The status is a field rather than parsed back out of the message:
+    // embedCapture has to distinguish "this input is too large for this model",
+    // which is a stable property, from a transient outage, which is not.
+    throw new ProviderError(`${what} request to ${cfg.llmBase} failed: ${r.status} ${capped}`, "http", r.status, capped);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ProviderError(`${cfg.llmBase} answered ${r.status} with a body that is not JSON`, "body", r.status, capped);
+  }
+}
+
+/**
+ * Whether a provider's error refuses the INPUT'S LENGTH — a 413, or a 400
+ * whose own words say so — as against any other client error. This is the
+ * fact worth acting on: a length refusal is the provider's final answer for
+ * that input, where a 400 for any other reason is not. Read from the
+ * provider's body, never from a message that also carries the base URL (a
+ * host named "tokens" would otherwise make every 400 permanent): the error
+ * object's code and type first, where an OpenAI-shaped provider puts
+ * `context_length_exceeded`, then its message. Shared with
+ * db/extract-entities.ts, which passes what its own error carries, so the two
+ * tools read a 400 by one rule (the second review of SMD-1021 found any 400
+ * recorded as a length refusal here while that tool already read the message).
+ */
+export function refusesLength(status: number | undefined, body: string): boolean {
+  if (status === 413) return true;
+  if (status !== 400) return false;
+  let words = body;
+  try {
+    const err = (JSON.parse(body) as { error?: { code?: unknown; type?: unknown; message?: unknown } | string })?.error;
+    if (err && typeof err === "object") words = [err.code, err.type, err.message].filter((x) => typeof x === "string").join(" ");
+    else if (typeof err === "string") words = err;
+  } catch {
+    // Prose, or not JSON at all — read it as it came.
+  }
+  return /context|length|too long|too_long|tokens|too large/i.test(words);
+}
 
 export type EmbedConfig = {
   /** Provider base URL, trailing slashes stripped. */
@@ -71,6 +203,8 @@ export type EmbedConfig = {
   metadataTemperature: number;
   /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
   metadataReasoning: Record<string, unknown>;
+  /** Per provider call, both endpoints. OB1_LLM_TIMEOUT in seconds; see DEFAULT_LLM_TIMEOUT_S. */
+  timeoutMs: number;
 };
 
 /**
@@ -87,14 +221,6 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
   // logs, so the header is omitted entirely when there is no key.
   const key = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
-  // Number("") is 0, which passes the overlap's `>= 0` below and windowed long
-  // captures with NO overlap — and deploy/compose.yaml forwards every optional
-  // variable as `${VAR:-}`, so a composed server saw "" wherever the operator
-  // set nothing. Empty means unset, as db/config.mjs's ENV proxy already says;
-  // the first review of SMD-946 found the server and reembed.ts chunking
-  // differently over the same corpus for exactly this reason.
-  const chunkTokens = env.OB1_CHUNK_TOKENS ? Number(env.OB1_CHUNK_TOKENS) : NaN;
-  const chunkOverlap = env.OB1_CHUNK_OVERLAP ? Number(env.OB1_CHUNK_OVERLAP) : NaN;
   return {
     llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
     headers: key
@@ -117,20 +243,33 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     // than close to it: the token count is an estimate, and a chunk that
     // overshoots is silently truncated, which is the failure being fixed rather
     // than a degradation of it.
-    chunkTokens: Number.isFinite(chunkTokens) && chunkTokens > 0 ? chunkTokens : DEFAULT_MAX_TOKENS,
-    chunkOverlap: Number.isFinite(chunkOverlap) && chunkOverlap >= 0 ? chunkOverlap : DEFAULT_OVERLAP_TOKENS,
+    chunkTokens: numberOr(env.OB1_CHUNK_TOKENS, DEFAULT_MAX_TOKENS, "positive"),
+    chunkOverlap: numberOr(env.OB1_CHUNK_OVERLAP, DEFAULT_OVERLAP_TOKENS, "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
     metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
-    metadataTemperature: metadataTemperature(env.OB1_METADATA_TEMPERATURE),
+    // Deterministic by default; overridable for anyone who wants variety.
+    metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),
+    // Seconds, as --ttl and --timeout are elsewhere in this fork; a timeout of
+    // zero would fail every call, so zero means the default too.
+    timeoutMs: numberOr(env.OB1_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT_S, "positive") * 1000,
   };
 }
 
-/** Deterministic by default; overridable for anyone who wants variety. */
-function metadataTemperature(raw: string | undefined): number {
-  if (raw === undefined || raw === "") return 0;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
+/**
+ * One rule for every numeric variable this file reads: empty, non-numeric and
+ * out-of-range all mean the default. Number("") is 0, which passed the
+ * overlap's `>= 0` and windowed long captures with NO overlap — and
+ * deploy/compose.yaml forwards every optional variable as `${VAR:-}`, so a
+ * composed server saw "" wherever the operator set nothing. Empty means
+ * unset, as db/config.mjs's ENV proxy already says; the first review of
+ * SMD-946 found the server and reembed.ts chunking differently over the same
+ * corpus for exactly this reason, and this was four hand-rolled copies of the
+ * same test until the boyscout pass of SMD-1021.
+ */
+function numberOr(raw: string | undefined, fallback: number, range: "positive" | "non-negative"): number {
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && (range === "positive" ? n > 0 : n >= 0) ? n : fallback;
 }
 
 /**
@@ -159,18 +298,35 @@ export type EmbeddedCapture = {
   /** Windows that were meant to carry a blurb and went in bare instead. */
   contextFailures: number;
   /**
+   * Why, in the words of each failure, one entry per distinct reason — the
+   * provider's status, the timeout, a blurb too long to be one. A bulk pass
+   * writes these on the claim row, so an operator whose metadata model is
+   * slower than OB1_LLM_TIMEOUT is told to raise the timeout, not to fix the
+   * model. Empty when every blurb arrived.
+   */
+  contextErrors: string[];
+  /**
    * The content was long enough to chunk and the whole-content embedding could
    * not be had, so `embedding` is the head window's vector. The server accepts
-   * this silently, as it always has; a bulk pass wants to count it.
+   * this silently, as it always has; a bulk pass records it on the row.
    */
   wholeContentFellBack: boolean;
   /**
-   * The provider has refused a whole-content embedding outright (400 or 413) at
-   * some point in this process, so the fallback above is the permanent answer
-   * for this model rather than a transient one — the distinction a bulk pass
-   * needs between "recorded, done" and "retry later".
+   * The whole-content request was refused outright (400 or 413) — this call's
+   * own, or, when the embedder remembers refusals, an earlier one's that meant
+   * this call was not made. Either way the fallback above is the permanent
+   * answer for this model rather than a transient one — the distinction a bulk
+   * pass needs between "recorded, done" and "retry later".
    */
   wholeContentRefused: boolean;
+  /**
+   * Why the whole content fell back, in the words of the error: the provider's
+   * status and message, or the timeout. Absent when it did not fall back, and
+   * when a remembered refusal meant the call was never made. What a bulk pass
+   * writes on the claim row, so the row says what happened to it rather than
+   * that something did.
+   */
+  wholeContentError?: string;
 };
 
 export type Embedder = {
@@ -189,15 +345,24 @@ export type Embedder = {
  * to the provider, which is what the server did before this file existed.
  *
  * One piece of state lives in the returned object: whether the provider has
- * refused a whole-content embedding, which is a fact about the configured model
- * and is remembered for the life of the embedder so it is not re-discovered on
- * every long capture.
+ * refused a whole-content embedding. The server remembers it for the life of
+ * the embedder (`rememberRefusal`, the default), so a provider that refuses
+ * over-length input is not asked again on every long capture — one wasted
+ * round trip per process instead of one per capture, on the interactive path.
+ * A bulk pass passes false: its purpose is the whole-content vector, each long
+ * row's outcome is recorded on that row, and a 413 is about THAT input's
+ * length — a shorter long thought may well be accepted — so remembering one
+ * row's refusal would give every later row a head window it was never asked
+ * about, under a reason that was another row's. The cost there is one refused
+ * round trip per long row, answered before any embedding is computed.
  */
-export function createEmbedder(config: () => EmbedConfig): Embedder {
+export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusal?: boolean } = {}): Embedder {
+  const rememberRefusal = opts.rememberRefusal ?? true;
   /**
-   * Set when the provider rejects a whole-content embedding outright. One-way:
-   * the only thing that flips it is a 4xx, which is a property of the
-   * configured model rather than a transient condition.
+   * Set when the provider rejects a whole-content embedding outright and
+   * `rememberRefusal` is on. One-way: the only thing that flips it is a 400 or
+   * 413, which is a property of the configured model rather than a transient
+   * condition.
    */
   let wholeContentRefused = false;
 
@@ -229,25 +394,11 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
 
   async function getEmbedding(text: string, kind: EmbedKind = "document"): Promise<number[]> {
     const cfg = config();
-    const r = await fetch(`${cfg.llmBase}/embeddings`, {
-      method: "POST",
-      headers: cfg.headers,
-      body: JSON.stringify({
-        model: cfg.embeddingModel,
-        input: applyPrompt(cfg, text, kind),
-        ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
-      }),
+    const d = await providerCall<{ data?: [{ embedding?: unknown }] }>(cfg, "/embeddings", {
+      model: cfg.embeddingModel,
+      input: applyPrompt(cfg, text, kind),
+      ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
     });
-    if (!r.ok) {
-      const msg = await r.text().catch(() => "");
-      const err = new Error(`Embeddings request to ${cfg.llmBase} failed: ${r.status} ${msg}`);
-      // Attached rather than parsed back out of the message: embedCapture has to
-      // distinguish "this input is too large for this model", which is a stable
-      // property worth remembering, from a transient outage, which is not.
-      (err as Error & { status?: number }).status = r.status;
-      throw err;
-    }
-    const d = await r.json();
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
       throw new Error(`${cfg.llmBase} returned no embedding for model ${cfg.embeddingModel}`);
@@ -282,8 +433,8 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
   /**
    * Generate the blurb that situates one window in its document.
    *
-   * Returns "" on any failure, and the caller degrades to a bare window rather
-   * than failing the capture. That choice is the one this feature turns on, so it
+   * Returns an empty text with the reason on any failure, and the caller
+   * degrades to a bare window rather than failing the capture. That choice is the one this feature turns on, so it
    * is worth stating why: the alternative — fail the capture — makes one flaky
    * local model call lose a thought outright, which is the failure migration 008
    * spent a whole atomic-capture design avoiding. The usual objection to
@@ -292,47 +443,45 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
    * `thought_chunks.context` is NULL for a window embedded bare, preflight counts
    * both kinds, and the capture response says so at the time.
    */
-  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string): Promise<string> {
+  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string): Promise<{ text: string; error?: string }> {
     // Filled by db/config.mjs's function, shared with evals/eval-contextual.ts,
     // so the harness measures the prompt the server sends; it is one pass with
     // a function, because two string replaces read `$&` and its relatives in
     // the document as substitution patterns and would drop the window into a
     // document that itself contains the literal `{chunk}`.
     const prompt = applyChunkContextPrompt(CHUNK_CONTEXT_PROMPTS.chunk, { document, chunk });
+    const bare = (error: string) => {
+      console.error(`contextualiseChunk: ${error}`);
+      return { text: "", error };
+    };
     try {
-      const r = await fetch(`${cfg.llmBase}/chat/completions`, {
-        method: "POST",
-        headers: cfg.headers,
-        body: JSON.stringify({
-          model: cfg.metadataModel,
-          // The same two settings extractMetadata sends, for the same reason:
-          // this is the other LLM call on the interactive capture path, and a
-          // thinking model left to reason costs 5.5x the latency there.
-          // `qwen3.8:27b` is suggested in db/config.mjs as an OB1_METADATA_MODEL,
-          // so the case is real rather than hypothetical — and reasoning text
-          // arriving in a blurb would be embedded along with it.
-          temperature: cfg.metadataTemperature,
-          ...cfg.metadataReasoning,
-          messages: [{ role: "user", content: prompt }],
-        }),
+      const d = await providerCall<{ choices?: [{ message?: { content?: string } }] }>(cfg, "/chat/completions", {
+        model: cfg.metadataModel,
+        // The same two settings extractMetadata sends, for the same reason:
+        // this is the other LLM call on the interactive capture path, and a
+        // thinking model left to reason costs 5.5x the latency there.
+        // `qwen3.8:27b` is suggested in db/config.mjs as an OB1_METADATA_MODEL,
+        // so the case is real rather than hypothetical — and reasoning text
+        // arriving in a blurb would be embedded along with it.
+        temperature: cfg.metadataTemperature,
+        ...cfg.metadataReasoning,
+        messages: [{ role: "user", content: prompt }],
       });
-      if (!r.ok) {
-        console.error(`contextualiseChunk: ${cfg.llmBase} returned ${r.status}`);
-        return "";
-      }
-      const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
       const out = (d?.choices?.[0]?.message?.content ?? "").trim();
       // The rule lives in db/config.mjs so the benchmark applies the same one. A
       // blurb this file accepted and the harness rejected would mean every
       // measured number described text the server does not embed.
       if (!usableChunkContext(out, chunk)) {
-        if (out) console.error(`contextualiseChunk: rejected a ${out.length}-char blurb for a ${chunk.length}-char window`);
-        return "";
+        // The lengths go to the log, not the reason: the reasons are deduplicated
+        // per capture, and a bulk pass writes them on the claim row.
+        if (out) console.error(`contextualiseChunk: a ${out.length}-char blurb for a ${chunk.length}-char window`);
+        return bare(out ? "the model returned a blurb longer than a blurb should be" : "the model returned an empty blurb");
       }
-      return out;
+      return { text: out };
     } catch (e) {
-      console.error(`contextualiseChunk: ${(e as Error).message}`);
-      return "";
+      // The timeout lands here too, already named with the knob by providerCall;
+      // the window goes in bare, as for any other failure of this call.
+      return bare((e as Error).message);
     }
   }
 
@@ -392,35 +541,46 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, wholeContentFellBack: false, wholeContentRefused };
+      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
     }
 
     const wantContext = cfg.chunkContext;
-    const contexts = wantContext
+    const blurbs = wantContext
       ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content)))
-      : windows.map(() => "");
+      : windows.map((): { text: string; error?: string } => ({ text: "" }));
+    const contexts = blurbs.map((b) => b.text);
 
+    // What this result reports: the remembered refusal, or this call's own —
+    // with rememberRefusal off the latter is the only record there is.
+    let refused = wholeContentRefused;
+    let wholeContentError: string | undefined;
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
         ? Promise.resolve(null)
-        : getEmbedding(content).catch((e: Error & { status?: number }) => {
-            // 400 or 413 here means the provider REFUSED the input rather than
-            // truncating it, which is a fact about the model and will be just as
-            // true for the next long capture. Remembering it turns a wasted round
-            // trip on every long capture into one per process. A 5xx or a network
-            // error says nothing durable, so it is not latched — and neither is
-            // any other 4xx: 429 is a rate limit, 408 a timeout, 401 and 403 a
-            // credential. This used to latch on every 4xx, so one throttled call
-            // in a bulk pass downgraded every later long thought to its head
-            // window while recording success (first review of SMD-946).
-            if (e.status === 400 || e.status === 413) {
-              wholeContentRefused = true;
+        : getEmbedding(content).catch((e: Error & { status?: number; body?: string }) => {
+            // A 413, or a 400 that names the length, means the provider REFUSED
+            // the input rather than truncating it, which is a fact about the
+            // model and this input and will be just as true next time.
+            // Remembering it (the server) turns a wasted round trip on every
+            // long capture into one per process. A 5xx or a network error says
+            // nothing durable, so it is never remembered — and neither is any
+            // other 4xx: 429 is a rate limit, 408 a timeout, 401 and 403 a
+            // credential, and a 400 for any other reason is not about length.
+            // This used to latch on every 4xx, so one throttled call in a bulk
+            // pass downgraded every later long thought to its head window while
+            // recording success (first review of SMD-946).
+            wholeContentError = e.message;
+            if (refusesLength(e.status, e.body ?? "")) {
+              refused = true;
+              if (rememberRefusal) wholeContentRefused = true;
               console.error(
                 `embedCapture: ${cfg.embeddingModel} refused the whole content (${e.status}); ` +
-                  `falling back to the head window here and skipping the attempt for the rest ` +
-                  `of this process.`
+                  `falling back to the head window` +
+                  (rememberRefusal ? ` here and skipping the attempt for the rest of this process.` : `.`)
               );
             } else {
+              // Including a 400 whose words do not name the length: not known
+              // to be about this input, so not remembered and not final.
               console.error(`embedCapture: whole-content embedding failed, using the head window: ${e.message}`);
             }
             return null;
@@ -436,8 +596,10 @@ export function createEmbedder(config: () => EmbedConfig): Embedder {
         ...(contexts[i] ? { context: contexts[i] } : {}),
       })),
       contextFailures: wantContext ? contexts.filter((c) => !c).length : 0,
+      contextErrors: [...new Set(blurbs.flatMap((b) => (b.error ? [b.error] : [])))],
       wholeContentFellBack: whole === null,
-      wholeContentRefused,
+      wholeContentRefused: refused,
+      wholeContentError,
     };
   }
 

@@ -26,12 +26,14 @@
  *   bun db/reembed.ts --url … --switch-model              # required when the model differs from ob1_config
  *   bun db/reembed.ts --url … --job reembed:x@1024:ctx    # a backfill under the same model
  *   bun db/reembed.ts --url … --retry-failed              # put this job's failed rows back in the pool first
- *   --workers N (2)   --batch N (8)   --ttl SECONDS (900)
+ *   bun db/reembed.ts --url … --retry-fallbacks           # …and the rows stored with a head window (see Failure policy)
+ *   --workers N (2)   --batch N (8)   --ttl SECONDS (900, or --batch × OB1_LLM_TIMEOUT when that is longer)
  *
  * The model, width and provider come from the same variables the server reads —
  * OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_EMBEDDING_DIMENSIONS,
- * OB1_LLM_BASE_URL, OB1_LLM_API_KEY, OB1_CHUNK_TOKENS, OB1_CHUNK_OVERLAP,
- * OB1_CHUNK_CONTEXT, OB1_METADATA_MODEL — resolved by the same function.
+ * OB1_LLM_BASE_URL, OB1_LLM_API_KEY, OB1_LLM_TIMEOUT, OB1_CHUNK_TOKENS,
+ * OB1_CHUNK_OVERLAP, OB1_CHUNK_CONTEXT, OB1_METADATA_MODEL — resolved by the
+ * same function.
  *
  * ── Changing model: what this does and does not cover ──────────────────────
  * SAME WIDTH ONLY. `thoughts.embedding` is vector(N) and N is baked into the
@@ -97,11 +99,47 @@
  * Whatever was embedded is always written before the outcome is decided, since
  * under --switch-model the vector already in the row is another model's. Then:
  * a long thought whose whole-content call failed transiently (429, 5xx, a lost
- * connection) has its head window stored and its claim marked failed, so
- * --retry-failed tries the whole content again; one the provider refused
- * outright (400, 413) has the head window stored and is succeeded, as a capture
- * would be, and is counted in the summary; a window whose blurb failed under
- * OB1_CHUNK_CONTEXT=on is stored bare and the claim marked failed.
+ * connection, the timeout) has its head window stored and its claim marked
+ * failed, so --retry-failed tries the whole content again; a window whose blurb
+ * failed under OB1_CHUNK_CONTEXT=on is stored bare and the claim marked failed.
+ *
+ * ── The head window, recorded ───────────────────────────────────────────────
+ * A long thought the provider REFUSED to embed whole (a 413, or a 400 whose own
+ * words name the length — hosted APIs refuse over-length input where Ollama
+ * truncates it; a 400 that says nothing about length is not known to be about
+ * this input and is treated as transient) has the head window's
+ * vector stored, as a capture would have stored it, and its claim is succeeded:
+ * the write happened and that vector is the provider's final answer. It is not
+ * silent. The claim row's last_error carries the caveat, and the rule is
+ * general: A SUCCEEDED ROW'S last_error, WHEN SET, IS WHAT THE WORKER COULD
+ * NOT DO — the write stands, and this is what it fell short of. --status and
+ * the end of a run count and list them; --retry-fallbacks returns them to the
+ * pool, for the day the provider or its input limit changes (against the same
+ * provider each is refused again and re-recorded, harmless). Until SMD-1021
+ * such a row was indistinguishable from any other succeeded row, one line in a
+ * summary was the only trace, and a terminal claim meant no re-run would ever
+ * look at it again.
+ *
+ * For that to be a fact about THE ROW, the pass asks every long thought itself:
+ * its embedder does not remember a refusal the way the server's does (one
+ * probe per process on the interactive path), because a 413 is about that
+ * input's length and a shorter long thought may well be accepted. One refused
+ * round trip per long row, answered before any embedding is computed.
+ *
+ * Every provider call is bounded by OB1_LLM_TIMEOUT (120 s by default). A call
+ * that never returns fails the row with the timeout named — or, on the
+ * whole-content call, falls back as transient — instead of parking the worker
+ * until the second signal. The lease is stamped per batch and has to outlast
+ * the batch's worst case, every call running to the timeout: one phase of
+ * concurrent calls per row with context off, two (blurbs, then embeddings)
+ * with it on. The defaults alone do not fit (8 rows × 120 s > 900 s), so the
+ * default lease grows to that product plus one row's worth of slack — for the
+ * re-read a concurrent edit costs — when that is longer, and an explicit --ttl
+ * below the product is refused (a run or --dry-run; --status never claims and
+ * answers regardless) — a batch that outlives its lease is reaped mid-way and
+ * handed to another worker, and three such expiries mark a row failed although
+ * every write succeeded. The arithmetic is a stand-in for per-row lease
+ * renewal (SMD-1023).
  */
 
 import { SQL } from "bun";
@@ -113,7 +151,7 @@ import {
   embeddingConfigWarnings,
   validateEmbeddingConfig,
 } from "./config.mjs";
-import { createEmbedder, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -140,11 +178,11 @@ if (!url) {
 
 const WORKERS = numberFlag("workers", 2, 1);
 const BATCH = numberFlag("batch", 8, 1);
-const TTL = numberFlag("ttl", 900, 1);
 const STATUS_ONLY = has("status");
 const DRY_RUN = has("dry-run");
 const SWITCH_MODEL = has("switch-model");
 const RETRY_FAILED = has("retry-failed");
+const RETRY_FALLBACKS = has("retry-fallbacks");
 /** The pass and its target. See migration 015's header on why the target is in the key. */
 const JOB = flag("job") ?? `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM}`;
 
@@ -159,10 +197,39 @@ if (problems.length > 0) {
 for (const w of embeddingConfigWarnings()) console.error(`  ⚠  ${w}`);
 
 const embedConfig = resolveEmbedConfig(process.env);
-const embedder = createEmbedder(() => embedConfig);
+// Not remembering a refusal: see "The head window, recorded" in the header.
+const embedder = createEmbedder(() => embedConfig, { rememberRefusal: false });
+
+// The lease must outlast a batch whose every call runs to the timeout — see
+// the header. Seconds, as the flag is, and whole ones: claim_thoughts takes an
+// int, and OB1_LLM_TIMEOUT=120.3 is legal. The floor is the certain worst case
+// for one embed per row; the default adds one row's worth of slack for the
+// re-read a concurrent edit costs (processRow retries up to three times), and
+// says so. Per-row lease renewal (SMD-1023) would retire this arithmetic.
+const PHASES = embedConfig.chunkContext ? 2 : 1;
+const PER_ROW_S = PHASES * (embedConfig.timeoutMs / 1000);
+const LEASE_FLOOR = Math.ceil(BATCH * PER_ROW_S);
+const TTL = flag("ttl") === undefined ? Math.max(900, Math.ceil(LEASE_FLOOR + PER_ROW_S)) : numberFlag("ttl", 900, 1);
+if (flag("ttl") === undefined && TTL > 900) {
+  // The other side of a long lease: a worker that dies without reaching its
+  // finally holds its batch until the lease expires. Said when the derivation
+  // made it long, since nothing else would.
+  console.error(
+    `  ⚠  lease: ${TTL} s, derived from --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s (OB1_LLM_TIMEOUT) plus one row.\n` +
+      `     A worker that dies holds its rows for that long before they return to the pool; lower --batch to shorten it.`
+  );
+}
+// Read-only modes never claim, so they answer whatever the lease; --dry-run
+// reports the refusal a run would make, alongside the 018 check below.
+const refusalTtl: string | null = TTL >= LEASE_FLOOR
+  ? null
+  : ` --ttl ${TTL} s cannot cover --batch ${BATCH} × ${embedConfig.chunkContext ? "two phases × " : ""}${embedConfig.timeoutMs / 1000} s per call (${LEASE_FLOOR} s), which is what a batch\n` +
+    `  takes when every call runs to OB1_LLM_TIMEOUT once per row — a re-read after a concurrent edit costs a row's worth more. A batch\n` +
+    `  that outlives its lease is reaped mid-way and repeated by another worker, and three expiries mark a row failed although every\n` +
+    `  write succeeded. Raise --ttl or lower --batch.`;
 
 console.log(`  job:       ${JOB}`);
-console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}`);
+console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}, ${embedConfig.timeoutMs / 1000} s per call`);
 console.log(`  chunks:    ${embedConfig.chunkTokens} tokens, overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? "on" : "off"}`);
 
 const sql = new SQL({ url, max: WORKERS + 1 });
@@ -241,11 +308,22 @@ const refusal018: string | null = fn.present
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
-type Counts = { pending: number; claimed: number; succeeded: number; failed: number; unpooled: number; thoughts: number };
+/**
+ * The caveat rule as a predicate — see "The head window, recorded" in the
+ * header. One definition for the count, the list and --retry-fallbacks, so the
+ * three cannot disagree about which rows carry a caveat.
+ */
+const withCaveat = () => sql`status = 'succeeded' AND last_error IS NOT NULL`;
+
+type Counts = { pending: number; claimed: number; succeeded: number; fellBack: number; failed: number; unpooled: number; thoughts: number };
 async function counts(): Promise<Counts> {
+  // One statement, so the caveat count is a subset of the succeeded count it
+  // qualifies — --status is asked while workers release rows.
   const rows = (await sql`
-    SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number }[];
+    SELECT status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted
+    FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number; noted: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
+  const fellBack = Number(rows.find((r) => r.status === "succeeded")?.noted ?? 0);
   const [{ unpooled, thoughts }] = await sql`
     SELECT count(*)::int AS thoughts,
            count(*) FILTER (WHERE NOT EXISTS (
@@ -255,6 +333,7 @@ async function counts(): Promise<Counts> {
     pending: by.pending ?? 0,
     claimed: by.claimed ?? 0,
     succeeded: by.succeeded ?? 0,
+    fellBack: Number(fellBack),
     failed: by.failed ?? 0,
     unpooled: Number(unpooled),
     thoughts: Number(thoughts),
@@ -263,9 +342,30 @@ async function counts(): Promise<Counts> {
 
 function printCounts(c: Counts, label: string): void {
   console.log(
-    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} succeeded, ${c.failed} failed, ` +
+    `  ${label}: ${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with a caveat)` : ""}, ${c.failed} failed, ` +
       `${c.claimed} in flight, ${c.pending} pending, ${c.unpooled} not yet in the pool`
   );
+}
+
+/**
+ * The succeeded rows that carry a caveat. Listed from the record, not from a
+ * counter, so --status and the end of a run agree whichever process did the
+ * work. The wording is the rule's, not one caveat's: the only caveat written
+ * today is the head window, but the count and the list are true of any
+ * caveat a later worker records, and each row's text says which it is.
+ */
+async function printFallbacks(total: number, limit = 10): Promise<void> {
+  const rows = (await sql`
+    SELECT thought_id, last_error FROM thought_work_claims
+    WHERE work_type = ${JOB} AND ${withCaveat()}
+    ORDER BY finished_at DESC LIMIT ${limit}`) as { thought_id: string; last_error: string }[];
+  console.error(
+    `\n  ${total} succeeded row(s) carry a caveat (${Math.min(total, limit)} of ${total} listed): the write stands, and the caveat is what the\n` +
+      `  worker could not do — today, a long thought the provider refused to embed whole, stored with its head window's vector as a\n` +
+      `  capture would have stored it. --retry-fallbacks returns them to the pool once the cause — the provider, or its input limit —\n` +
+      `  has changed.`
+  );
+  for (const r of rows) console.error(`    ${r.thought_id}  ${r.last_error}`);
 }
 
 /**
@@ -331,18 +431,21 @@ if (STATUS_ONLY || DRY_RUN) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
     await printFailures();
   }
+  if (c.fellBack > 0) await printFallbacks(c.fellBack);
   await printDuplicateGroups();
   if (DRY_RUN) {
-    if (refusal018) {
-      console.error(`\n  would: refuse.${refusal018}`);
+    const refusal = refusalTtl ?? refusal018;
+    if (refusal) {
+      console.error(`\n  would: refuse.${refusal}`);
       await sql.close();
       process.exit(2);
     }
     console.log(
       `\n  would: ${modelChange ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
         `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
+        `${RETRY_FALLBACKS ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; run ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ` +
-        `over ${c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0)} rows. Nothing was written.`
+        `over ${c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0) + (RETRY_FALLBACKS ? c.fellBack : 0)} rows. Nothing was written.`
     );
   }
   await sql.close();
@@ -351,10 +454,13 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
-if (refusal018) {
-  console.error(`\n ${refusal018}`);
-  await sql.close();
-  process.exit(2);
+{
+  const refusal = refusalTtl ?? refusal018;
+  if (refusal) {
+    console.error(`\n ${refusal}`);
+    await sql.close();
+    process.exit(2);
+  }
 }
 
 // The provider first, so a wrong URL or a wrong width fails before any row is
@@ -374,14 +480,21 @@ if (modelChange || recorded.embedding_model === undefined) {
   console.log(`  ob1_config.embedding_model = ${embedConfig.embeddingModel} — a server configured for it now passes preflight; switch it.`);
 }
 
-if (RETRY_FAILED) {
+/**
+ * Return the rows a predicate selects to the pool as if never tried: pending,
+ * nothing known about them, attempt count reset — the next worker writes what
+ * it finds. A terminal row's error or caveat goes with its status.
+ */
+async function requeue(where: ReturnType<typeof withCaveat>, label: string, what: string): Promise<void> {
   const [{ n }] = await sql`
     WITH retried AS (
       UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0
-      WHERE work_type = ${JOB} AND status = 'failed' RETURNING 1)
+      WHERE work_type = ${JOB} AND ${where} RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
-  console.log(`  --retry-failed: ${n} failed row(s) returned to the pool`);
+  console.log(`  --${label}: ${n} ${what} returned to the pool`);
 }
+if (RETRY_FAILED) await requeue(sql`status = 'failed'`, "retry-failed", "failed row(s)");
+if (RETRY_FALLBACKS) await requeue(withCaveat(), "retry-fallbacks", "row(s) succeeded with a caveat");
 
 const [{ added }] = await sql`SELECT enqueue_thoughts(${JOB}) AS added`;
 const before = await counts();
@@ -408,8 +521,6 @@ let stopping = false;
 let done = 0;
 let failed = 0;
 let vanished = 0;
-/** Long thoughts stored with the head window's vector because the whole-content call failed. */
-let headWindow = 0;
 /** Worker ids with leases possibly outstanding, for a forced exit. */
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -440,10 +551,12 @@ function progress(force = false): void {
 type Row = { id: string; content: string; updated_at: Date };
 
 /**
- * Embed and write one thought. Returns "succeeded", "failed" with an error, or
- * "vanished" when the thought was deleted after it was claimed.
+ * Embed and write one thought. Returns "succeeded" — with a caveat when the
+ * write fell short of what was asked and the row should say so — "failed" with
+ * an error, or "vanished" when the thought was deleted after it was claimed.
  */
-async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" }> {
+type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" };
+async function processRow(row: Row): Promise<Outcome> {
   let current = row;
   for (let attempt = 0; attempt < 3; attempt++) {
     const embedded = await embedder.embedCapture(current.content);
@@ -478,27 +591,42 @@ async function processRow(row: Row): Promise<{ outcome: "succeeded" } | { outcom
         // row's problem, and re-saving its own text fixes it.
         console.error(`  ${current.id}: could not take its fingerprint — ${result.fingerprint_held_by} holds that key under other text (a stale fingerprint; re-saving that thought's own text corrects it)`);
       }
+      // Everything the row should say about itself is collected before the
+      // outcome is chosen, so a row with two things wrong records both: a
+      // refusal is not lost behind a blurb failure, nor a blurb failure behind
+      // a transient fallback.
+      //
+      // Refused outright: the head window is the provider's final answer for
+      // this input, as it would be for a capture, and the row says so — as a
+      // caveat on success, or appended to a failure. See "The head window,
+      // recorded" in the header.
+      const refused = embedded.wholeContentFellBack && embedded.wholeContentRefused
+        ? `whole-content embedding refused by the provider (${embedded.wholeContentError ?? "no detail"}); the head window's vector is stored, as a capture would have stored it — --retry-fallbacks once the provider or its input limit changes`
+        : null;
+      const failures: string[] = [];
       if (embedded.wholeContentFellBack && !embedded.wholeContentRefused) {
         // The whole-content call failed for a reason that says nothing about
-        // the next attempt — a 429, a 5xx, a dropped connection — so the head
-        // window is in the row and the claim is retryable rather than final.
-        return {
-          outcome: "failed",
-          error: "whole-content embedding failed transiently and the head window's vector was stored — --retry-failed will try the whole content again",
-        };
+        // the next attempt — a 429, a 5xx, a dropped connection, the timeout —
+        // so the head window is in the row and the claim is retryable rather
+        // than final.
+        // "Transiently" covers a 400 whose words do not name the length: not
+        // known to be about this input, so retryable rather than final. A
+        // provider that answers that 400 for every long input will fail these
+        // rows on every --retry-failed; the row says what it got.
+        failures.push(`whole-content embedding failed transiently (${embedded.wholeContentError ?? "no detail"}) and the head window's vector was stored — not a stated refusal of the length, so --retry-failed will try the whole content again`);
       }
-      if (embedded.wholeContentFellBack) headWindow++;
       // The server stores a bare window and tells the caller; here there is no
       // caller, and a terminal claim cannot be re-run. So the new vectors are
       // written, bare, and the claim is a failure --retry-failed can revisit
       // once the metadata model behaves.
       if (embedConfig.chunkContext && embedded.contextFailures > 0) {
-        return {
-          outcome: "failed",
-          error: `${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context — the blurb call failed or its answer was unusable; the bare vectors are stored; fix the metadata model, then --retry-failed`,
-        };
+        // With the reasons, distinct: a metadata model slower than
+        // OB1_LLM_TIMEOUT is told apart from one that answers badly.
+        const reasons = embedded.contextErrors.slice(0, 3).join("; ") + (embedded.contextErrors.length > 3 ? `; and ${embedded.contextErrors.length - 3} more` : "");
+        failures.push(`${embedded.contextFailures} of ${embedded.chunks.length} windows were embedded without context (${reasons || "no detail"}); the bare vectors are stored; fix the cause, then --retry-failed`);
       }
-      return { outcome: "succeeded" };
+      if (failures.length) return { outcome: "failed", error: [...failures, ...(refused ? [refused] : [])].join("; also: ") };
+      return refused ? { outcome: "succeeded", caveat: refused } : { outcome: "succeeded" };
     }
     if (result.error === "NOT_FOUND") return { outcome: "vanished" };
     if (result.error === "STALE_READ" || result.error === "DUPLICATE_CONTENT") {
@@ -552,14 +680,14 @@ async function worker(n: number): Promise<void> {
         if (stopping) return;
         const row = byId.get(b.thought_id);
         if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier worker's lease expired on it`);
-        let outcome: Awaited<ReturnType<typeof processRow>>;
+        let outcome: Outcome;
         if (!row) {
           outcome = { outcome: "vanished" };
         } else {
           try {
             outcome = await processRow(row);
           } catch (e) {
-            outcome = { outcome: "failed", error: (e as Error).message.slice(0, 500) };
+            outcome = { outcome: "failed", error: (e as Error).message.slice(0, PROVIDER_ERROR_CHARS) };
           }
         }
         if (outcome.outcome === "vanished") {
@@ -571,9 +699,10 @@ async function worker(n: number): Promise<void> {
         let ok: boolean;
         let gone = false;
         try {
+          // A succeeded row's last_error is its caveat — see the header.
           [{ ok }] = await sql`
             SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId},
-                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : null}) AS ok`;
+                                   ${outcome.outcome}, ${outcome.outcome === "failed" ? outcome.error : outcome.caveat ?? null}) AS ok`;
           // False has two causes and only one of them is about the lease: the
           // thought may have been deleted between the write and this call, its
           // claim row cascading away with it.
@@ -604,6 +733,7 @@ async function worker(n: number): Promise<void> {
           console.error(`  ${b.thought_id}: ${outcome.error}`);
         } else {
           done++;
+          if (outcome.caveat) console.error(`  ${b.thought_id}: ${outcome.caveat}`);
         }
         progress();
       }
@@ -624,9 +754,10 @@ async function worker(n: number): Promise<void> {
 
 const stop = () => {
   if (stopping) {
-    // A second signal while a provider call hangs: the workers cannot reach
-    // their own finally, so return their leases from here, best effort and
-    // bounded, then leave.
+    // A second signal while a worker is inside a call it cannot leave — a
+    // provider call has OB1_LLM_TIMEOUT to answer, but a database call has
+    // nothing — so the workers may not reach their own finally: return their
+    // leases from here, best effort and bounded, then leave.
     console.error(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
     const hardStop = setTimeout(() => process.exit(130), 3000);
     void Promise.all(
@@ -652,13 +783,7 @@ const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass, in ${elapsed}s`);
 printCounts(after, "after");
 await printDuplicateGroups();
-if (headWindow > 0) {
-  console.error(
-    `\n  ${headWindow} long thought(s) stored with the head window's vector: the provider refuses input that long\n` +
-      `  (400 or 413), so this is the vector a capture would have stored too. They are recorded succeeded. A transient\n` +
-      `  failure of the whole-content call is recorded failed instead, and --retry-failed tries it again.`
-  );
-}
+if (after.fellBack > 0) await printFallbacks(after.fellBack);
 if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();
