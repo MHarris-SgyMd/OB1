@@ -1,0 +1,259 @@
+#!/usr/bin/env bun
+/**
+ * bench-plan.ts — does the unfiltered `match_thoughts` reach the HNSW index,
+ * at the width this fork actually ships, measured rather than argued.
+ *
+ * SMD-969 (upstream NateBJones-Projects/OB1#469) reports that even the plain
+ * `match_thoughts` shape gets `Seq Scan` + `Sort` at ~9,300 rows, and only
+ * `SET LOCAL enable_seqscan = off` makes the planner take the index — 5.9 s
+ * and ~30,000 buffers a call against 180 ms and ~3,200. This fork's function
+ * has the more indexable shape (the threshold applied after the `ORDER BY <=>
+ * LIMIT` candidate CTEs), which is an argument, and the fork's rule is that a
+ * plan is measured, not inferred (SMD-925). db/bench-hnsw.ts explains only
+ * the filtered branches, and at 64 dimensions; this explains the unfiltered
+ * one at the shipped width, where the answer turns out to be different.
+ *
+ * ── What is measured ─────────────────────────────────────────────────────────
+ *
+ * Per scale, the unfiltered branch's own statement — read from the catalog and
+ * rewritten as a prepared statement, as bench-hnsw.ts section C does — at
+ * match_count 10 (every first-party caller), 50 and 500 (the ceiling), under
+ * `EXPLAIN (ANALYZE, BUFFERS)`, in four arms:
+ *
+ *   before      the function as 014 plans it: its one SET clause, the
+ *               planner's own choice of scan.
+ *   seqscan off the same with `enable_seqscan = off` — the remedy 019 adopts.
+ *   rpc 1.1     the same with `random_page_cost = 1.1` — the cost-model remedy
+ *               the ticket asked to weigh, shown for what it does and does not
+ *               move.
+ *   after (019) the deployed function's statement under its own SET clauses,
+ *               custom and generic plan, which is what a call gets.
+ *
+ * For each: which node produced the `thoughts` CTE's rows and the chunk CTE's
+ * rows, shared buffers read, and execution time. The table prints TOAST size
+ * beside heap size, because that ratio is the mechanism: at the shipped width
+ * a vector is stored out of line, and the planner's seq-scan estimate counts
+ * heap pages and never the detoast reads.
+ *
+ * ── Running ──────────────────────────────────────────────────────────────────
+ *
+ *   ./with-postgres.sh bun bench-plan.ts                      # 1,000 / 10,000 / 100,000 rows at EMBEDDING_DIM
+ *   OB1_BENCH_SCALES=1000,10000 ./with-postgres.sh bun bench-plan.ts
+ *   OB1_BENCH_DIM=64 ./with-postgres.sh bun bench-plan.ts    # the width bench-hnsw.ts runs at, for contrast
+ *   ./with-postgres.sh bun bench-plan.ts --plans              # print the full plans
+ *
+ * The HNSW indexes are dropped for the load and built after it, as an operator
+ * is told to do after a bulk load; at 1,024 dimensions the 100,000-row build
+ * takes a few minutes. Vectors are random unit vectors; nothing here reads any
+ * corpus.
+ */
+
+import { SQL } from "bun";
+import { applyFunctionSettings, applyMigrations, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { EMBEDDING_DIM } from "./config.mjs";
+
+const URL_ = requireDatabaseUrl("bench-plan.ts");
+const PRINT_PLANS = process.argv.includes("--plans");
+
+const DIM = Number(process.env.OB1_BENCH_DIM ?? EMBEDDING_DIM);
+const OPTS = { dim: DIM, model: "stub-embed" };
+const SCALES = (process.env.OB1_BENCH_SCALES ?? "1000,10000,100000")
+  .split(",")
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isInteger(n) && n > 0);
+if (!Number.isInteger(DIM) || DIM < 1) {
+  console.error(`OB1_BENCH_DIM must be a positive integer (got ${JSON.stringify(process.env.OB1_BENCH_DIM)})`);
+  process.exit(2);
+}
+if (SCALES.length === 0) {
+  console.error(`OB1_BENCH_SCALES must name at least one positive row count (got ${JSON.stringify(process.env.OB1_BENCH_SCALES)})`);
+  process.exit(2);
+}
+/** match_count asked for: the default, a page, the function's ceiling. */
+const COUNTS = [10, 50, 500];
+/** One thought in five carries a chunk row, so the chunk CTE has rows to scan. */
+const CHUNK_EVERY = 5;
+/** Queries per cell; the median is reported. Plans are read from the last. */
+const REPEATS = Number(process.env.OB1_BENCH_REPEATS ?? 5);
+
+const lit = (v: number[]) => `[${v.join(",")}]`;
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+const fmtMs = (ms: number) => (ms < 10 ? `${ms.toFixed(2)} ms` : `${ms.toFixed(1)} ms`);
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+
+/** The two HNSW indexes the schema declares, by name; their definitions are read from the catalog. */
+const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"];
+
+async function load(sql: SQL, n: number): Promise<{ loadMs: number; buildMs: number; queries: number[][] }> {
+  const { unitVector } = seededRandom(20260908 + n);
+  // Drop the HNSW indexes for the load and build them after it, with the
+  // schema's own definitions. Inserting 1,024-wide vectors into a live HNSW
+  // index runs at tens of rows a second by 40,000 rows — the first run of this
+  // bench was at 38,000 of 100,000 after ten minutes — where a bulk build takes
+  // a few. It is also what db/README.md tells an operator to do after a bulk
+  // load, so the index measured is the one a migrated brain has.
+  const defs = (await sql.unsafe(`SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN (${HNSW_INDEXES.map((n) => `'${n}'`).join(", ")})`)) as { indexname: string; indexdef: string }[];
+  if (defs.length !== HNSW_INDEXES.length) throw new Error(`expected ${HNSW_INDEXES.join(" and ")} in pg_indexes, found ${defs.map((d) => d.indexname).join(", ") || "none"}`);
+  for (const d of defs) await sql.unsafe(`DROP INDEX ${d.indexname}`);
+  const t0 = performance.now();
+  const B = 200;
+  for (let i = 0; i < n; i += B) {
+    const values = Array.from({ length: Math.min(B, n - i) }, (_, k) => `('row ${i + k}', '{}'::jsonb, '${lit(unitVector(DIM))}'::vector)`).join(",");
+    await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  // The parent's own vector: the point is a chunk table with rows in it, not
+  // a chunk that out-scores its parent.
+  await sql.unsafe(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
+                    SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % ${CHUNK_EVERY} = 0`);
+  const loadMs = performance.now() - t0;
+  const t1 = performance.now();
+  for (const d of defs) await sql.unsafe(d.indexdef);
+  const buildMs = performance.now() - t1;
+  await sql.unsafe(`VACUUM ANALYZE thoughts`);
+  await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
+  const queries = Array.from({ length: REPEATS }, () => unitVector(DIM));
+  return { loadMs, buildMs, queries };
+}
+
+async function sizes(sql: SQL): Promise<{ storage: string; heap: string; toast: string; index: string; chunkHeap: string; chunkToast: string }> {
+  const [r] = await sql.unsafe(`
+    SELECT (SELECT typstorage FROM pg_type WHERE typname = 'vector') AS storage,
+           pg_size_pretty(pg_relation_size('thoughts')) AS heap,
+           pg_size_pretty(pg_total_relation_size('thoughts') - pg_relation_size('thoughts') - pg_indexes_size('thoughts')) AS toast,
+           pg_size_pretty(pg_relation_size('thoughts_embedding_idx')) AS index,
+           pg_size_pretty(pg_relation_size('thought_chunks')) AS chunk_heap,
+           pg_size_pretty(pg_total_relation_size('thought_chunks') - pg_relation_size('thought_chunks') - pg_indexes_size('thought_chunks')) AS chunk_toast`);
+  return { storage: r.storage, heap: r.heap, toast: r.toast, index: r.index, chunkHeap: r.chunk_heap, chunkToast: r.chunk_toast };
+}
+
+// ── The measurement ──────────────────────────────────────────────────────────
+
+type Arm = "before (014)" | "seqscan off" | "rpc 1.1" | "after (019) custom" | "after (019) generic";
+type Cell = { scale: number; count: number; arm: Arm; thoughts: string; chunks: string; buffers: number; ms: number; rows: number; text: string };
+
+/** Which node produced a CTE's rows, by table. The chunk CTE's alias is `c`, the direct one's `t`. */
+function nodeFor(plan: string, table: "thoughts" | "thought_chunks"): string {
+  const alias = table === "thoughts" ? "t" : "c";
+  const idx = table === "thoughts" ? "thoughts_embedding_idx" : "thought_chunks_embedding_idx";
+  if (new RegExp(`Index Scan using ${idx} on ${table} ${alias}(?:_\\d+)?\\b`).test(plan)) return "Index Scan";
+  if (new RegExp(`Seq Scan on ${table} ${alias}(?:_\\d+)?\\b`).test(plan)) return "Seq Scan";
+  return "?";
+}
+
+async function explain(sql: SQL, body: string, q: number[], count: number, arm: Arm): Promise<Cell> {
+  const text = await sql.begin(async (tx: SQL) => {
+    if (arm.startsWith("after")) {
+      await applyFunctionSettings(tx);
+    } else {
+      // 014's one SET clause — the function before 019 — and the arm's variable.
+      await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+      if (arm === "seqscan off") await tx.unsafe(`SET LOCAL enable_seqscan = off`);
+      if (arm === "rpc 1.1") await tx.unsafe(`SET LOCAL random_page_cost = 1.1`);
+    }
+    await tx.unsafe(`SET LOCAL plan_cache_mode = ${arm === "after (019) generic" ? "force_generic_plan" : "force_custom_plan"}`);
+    await tx.unsafe(`PREPARE bench_plan(vector(${DIM}), float, int, jsonb) AS ${body}`);
+    await tx.unsafe(`EXECUTE bench_plan('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`); // warm the buffers
+    const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE bench_plan('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`);
+    await tx.unsafe(`DEALLOCATE bench_plan`);
+    return rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
+  });
+  return {
+    scale: 0,
+    count,
+    arm,
+    thoughts: nodeFor(text, "thoughts"),
+    chunks: nodeFor(text, "thought_chunks"),
+    buffers: Number(/Buffers: shared hit=(\d+)/.exec(text)?.[1] ?? 0),
+    ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN),
+    rows: Number(/^\s*Limit .*rows=(\d+)/m.exec(text)?.[1] ?? 0),
+    text,
+  };
+}
+
+async function measure(sql: SQL, body: string, queries: number[][], count: number, arm: Arm, scale: number): Promise<Cell> {
+  const cells: Cell[] = [];
+  for (const q of queries) cells.push(await explain(sql, body, q, count, arm));
+  const ms = median(cells.map((c) => c.ms));
+  const last = cells[cells.length - 1];
+  // Plans are read from every repeat; a cell whose node changed between
+  // queries is reported as such rather than as whichever came last.
+  const same = (k: "thoughts" | "chunks") => (cells.every((c) => c[k] === last[k]) ? last[k] : `${cells.map((c) => c[k]).join("/")}`);
+  return { ...last, scale, ms, thoughts: same("thoughts"), chunks: same("chunks"), buffers: Math.round(median(cells.map((c) => c.buffers))) };
+}
+
+// ── Run ──────────────────────────────────────────────────────────────────────
+
+const results: Cell[] = [];
+const loads: { scale: number; loadMs: number; buildMs: number; sizes: Awaited<ReturnType<typeof sizes>> }[] = [];
+let banner = false;
+
+for (const n of SCALES) {
+  console.log(`▸ ${n.toLocaleString()} rows at ${DIM} dimensions — loading`);
+  await resetSchema(URL_, { ...OPTS, only: (f) => f < "019" });
+  let sql = new SQL({ url: URL_, max: 1 });
+  if (!banner) {
+    const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+    const [{ v }] = await sql`SELECT version() AS v`;
+    const [{ rpc }] = await sql`SELECT current_setting('random_page_cost') AS rpc`;
+    console.log(`  ${String(v).split(" on ")[0]}, pgvector ${extversion}, random_page_cost ${rpc}, ${REPEATS} queries per cell`);
+    banner = true;
+  }
+  const { loadMs, buildMs, queries } = await load(sql, n);
+  const sz = await sizes(sql);
+  loads.push({ scale: n, loadMs, buildMs, sizes: sz });
+  console.log(`  loaded in ${fmtMs(loadMs)}, HNSW built in ${fmtMs(buildMs)}; thoughts heap ${sz.heap}, TOAST ${sz.toast}, HNSW ${sz.index}; chunk heap ${sz.chunkHeap}, TOAST ${sz.chunkToast}; vector storage '${sz.storage}'`);
+
+  // The function 014 shipped, explained as it plans, then the two remedies.
+  const body014 = await extractBody(sql, "unfiltered", DIM);
+  for (const arm of ["before (014)", "seqscan off", "rpc 1.1"] as Arm[]) {
+    process.stdout.write(`  ${arm.padEnd(20)}`);
+    for (const count of COUNTS) {
+      results.push(await measure(sql, body014, queries, count, arm, n));
+      process.stdout.write(".");
+    }
+    console.log(" done");
+  }
+
+  // 019, onto the same rows. Its statement is read from the catalog again: it
+  // should be 014's byte for byte (db/test-schema.ts [20] asserts it), and the
+  // bench refuses to assume so.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "019" });
+  await sql.close();
+  sql = new SQL({ url: URL_, max: 1 });
+  const body019 = await extractBody(sql, "unfiltered", DIM);
+  if (body019 !== body014) throw new Error("019's unfiltered statement differs from 014's; the before/after comparison is not of the same text");
+  for (const arm of ["after (019) custom", "after (019) generic"] as Arm[]) {
+    process.stdout.write(`  ${arm.padEnd(20)}`);
+    for (const count of COUNTS) {
+      results.push(await measure(sql, body019, queries, count, arm, n));
+      process.stdout.write(".");
+    }
+    console.log(" done");
+  }
+  await sql.close();
+}
+
+// ── Report ───────────────────────────────────────────────────────────────────
+
+console.log(`\n### The unfiltered branch of match_thoughts, ${DIM} dimensions, ${REPEATS} random queries per cell (median)\n`);
+console.log("Node is the one that produced each candidate CTE's rows. Buffers are shared buffers read by the whole statement, warm.\n");
+console.log("| rows | heap / TOAST | count | arm | thoughts CTE | chunk CTE | buffers | exec |");
+console.log("| ---: | --- | ---: | --- | --- | --- | ---: | ---: |");
+for (const r of results) {
+  const l = loads.find((x) => x.scale === r.scale)!;
+  console.log(`| ${r.scale.toLocaleString()} | ${l.sizes.heap} / ${l.sizes.toast} | ${r.count} | ${r.arm} | ${r.thoughts} | ${r.chunks} | ${r.buffers.toLocaleString()} | ${fmtMs(r.ms)} |`);
+}
+console.log("\n| rows | load | HNSW build | thoughts heap | thoughts TOAST | HNSW | chunk heap | chunk TOAST |");
+console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+for (const l of loads) {
+  console.log(`| ${l.scale.toLocaleString()} | ${fmtMs(l.loadMs)} | ${fmtMs(l.buildMs)} | ${l.sizes.heap} | ${l.sizes.toast} | ${l.sizes.index} | ${l.sizes.chunkHeap} | ${l.sizes.chunkToast} |`);
+}
+
+if (PRINT_PLANS) {
+  for (const r of results) {
+    console.log(`\n#### ${r.scale.toLocaleString()} rows, count ${r.count}, ${r.arm}\n`);
+    console.log(r.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
+  }
+}
+console.log();

@@ -31,6 +31,12 @@ services:
   # Thin filters never walk (they are answered exactly), so this is a ceiling
   # for broad filters on large tables; lower the multiplier with ALTER DATABASE
   # where memory is tighter than latency (deploy/.env.example has the form).
+  #
+  # No random_page_cost here. It was measured as the cost-model remedy for the
+  # planner preferring a sequential scan over the HNSW index at the shipped
+  # width (upstream #469): the estimate omits the detoast reads a vector table
+  # pays, so no constant fixes it. Migration 019 puts the setting on the
+  # function instead, where it travels with the schema; its header has the numbers.
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
     environment:

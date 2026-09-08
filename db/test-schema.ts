@@ -469,12 +469,15 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
     `match_thoughts carries hnsw.iterative_scan=relaxed_order (proconfig: ${cfg.rows[0]?.cfg ?? "none"})`
   );
-  // The scan mode is the ONLY function-level SET: the two walk bounds are
-  // deliberately not on the function, because a function-level value would
-  // override the database-level one that is the operator's tuning knob, and
-  // the plan mode an earlier draft forced is unnecessary once the filter is a
-  // plain predicate in its own branch.
+  // Two function-level SETs and no other: the scan mode (014) and the plan
+  // setting 019 added after measuring the unfiltered branch at the shipped
+  // width ([20] holds the rest of 019). The two walk bounds are deliberately
+  // not on the function, because a function-level value would override the
+  // database-level one that is the operator's tuning knob, and the plan mode
+  // an earlier draft forced is unnecessary once the filter is a plain
+  // predicate in its own branch.
   const proconfig = cfg.rows[0]?.cfg ?? "";
+  assert(/(^|,)enable_seqscan=off(,|$)/.test(proconfig), `…and enable_seqscan=off, 019's plan setting (proconfig: ${proconfig})`);
   assert(!/hnsw\.max_scan_tuples|hnsw\.scan_mem_multiplier|plan_cache_mode/.test(proconfig), "…and nothing else — neither walk bound nor a forced plan mode");
 
   // The branches must be the same function: the filtered answer for kind "a"
@@ -522,6 +525,10 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     "a value set only for this role/session does not stop 014 seeding the database-level default for everyone else");
   await db.exec(`RESET hnsw.max_scan_tuples`);
   await alterDb(`hnsw.max_scan_tuples = ${HNSW_SEED_MAX_SCAN_TUPLES}`);
+  // Re-applying 014 also put 014's match_thoughts back — CREATE OR REPLACE
+  // rewrites the whole definition, clauses included, which is the trap [20]
+  // reproduces on purpose. Restore the shipped function for the sections after.
+  await db.exec(subst(readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("019"))!), "utf8")));
 }
 
 // ── 8c. The walk branch, held to the exact answer ────────────────────────────
@@ -1620,6 +1627,80 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
   assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 20. Migration 019 — the plan setting, and the row estimates ──────────────
+//
+// Two things the planner could not know. At the shipped width a vector is
+// TOASTed and the sequential-scan estimate never counts the detoast reads, so
+// the planner chose a seq scan of the chunk table at every size measured and
+// of `thoughts` above the default count; and a plpgsql set-returning function
+// is assumed to yield 1,000 rows, which is how 017's fused query came to be
+// JIT-compiled on every call. 019 redefines match_thoughts with `SET
+// enable_seqscan = off` and `ROWS 10`, and search_thoughts_keyword with `ROWS
+// 25`, with both bodies carried verbatim. The plan itself is a real-server
+// question (db/test-live.ts [5c]); this section holds what the catalog says,
+// that the bodies did not move, and the trap that put the clauses in the
+// defining statements rather than an ALTER.
+
+console.log("\n[20] Migration 019: the plan setting and the row estimates, and the bodies unchanged");
+{
+  const proc = async (sig: string) =>
+    (await db.query<{ prorows: number; provolatile: string; prosrc: string; cfg: string | null }>(
+      `SELECT prorows, provolatile, prosrc, array_to_string(proconfig, ',') AS cfg FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0];
+  const MT = "match_thoughts(vector, float, int, jsonb)";
+  const KW = "search_thoughts_keyword(text, int, int, jsonb)";
+
+  const mt = await proc(MT);
+  const kw = await proc(KW);
+  assert(Number(mt.prorows) === 10, `match_thoughts declares ROWS 10 (prorows ${mt.prorows})`);
+  assert(Number(kw.prorows) === 25, `search_thoughts_keyword declares ROWS 25 (prorows ${kw.prorows})`);
+  assert(mt.provolatile === "s" && kw.provolatile === "s", "both are still STABLE");
+  const settings = (mt.cfg ?? "").split(",").filter(Boolean).sort();
+  assert(settings.join(",") === "enable_seqscan=off,hnsw.iterative_scan=relaxed_order",
+         `match_thoughts carries exactly the scan mode and the plan setting (${mt.cfg ?? "none"})`);
+  assert((kw.cfg ?? "") === "", `search_thoughts_keyword carries no SET clause (${kw.cfg ?? "none"})`);
+  assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in 019's body");
+
+  // The estimate the clause exists for: a query composing either function is
+  // planned against the declared count, not PostgreSQL's 1,000.
+  const plan = async (q: string) =>
+    (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN ${q}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
+  const mtPlan = await plan(`SELECT * FROM match_thoughts('${unit(0)}'::vector, 0.0, 10, '{}'::jsonb)`);
+  assert(/Function Scan on match_thoughts\s+\(cost=[^)]*rows=10\b/.test(mtPlan), `a caller's plan estimates 10 rows from match_thoughts (${mtPlan.split("\n")[0]})`);
+  const kwPlan = await plan(`SELECT * FROM search_thoughts_keyword('zylotrope', 25, 0, '{}'::jsonb)`);
+  assert(/Function Scan on search_thoughts_keyword\s+\(cost=[^)]*rows=25\b/.test(kwPlan), `…and 25 from search_thoughts_keyword (${kwPlan.split("\n")[0]})`);
+
+  // The bodies are 014's and 012's byte for byte: re-apply each and compare
+  // prosrc. This is what "carried verbatim" means, held rather than claimed —
+  // and it is the trap SMD-1041's ticket recorded: CREATE OR REPLACE resets
+  // prorows and drops the SET clauses, so a hint set from another migration or
+  // by ALTER FUNCTION would be undone by exactly this re-apply.
+  const reapply = async (prefix: string) =>
+    db.exec(subst(readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith(prefix))!), "utf8")));
+  await reapply("014");
+  const mt014 = await proc(MT);
+  assert(mt014.prosrc === mt.prosrc, "019's match_thoughts body is 014's, byte for byte");
+  assert(Number(mt014.prorows) === 1000 && !/enable_seqscan/.test(mt014.cfg ?? ""),
+         `re-applying 014 alone resets the estimate to 1,000 and drops the plan setting (prorows ${mt014.prorows}, proconfig ${mt014.cfg}) — the trap that puts both in the defining statement`);
+  await reapply("012");
+  const kw012 = await proc(KW);
+  assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
+  assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate too (prorows ${kw012.prorows})`);
+  await reapply("019");
+  const back = await proc(MT);
+  assert(Number(back.prorows) === 10 && /enable_seqscan=off/.test(back.cfg ?? "") && Number((await proc(KW)).prorows) === 25,
+         "re-applying 019 restores both — the shipped state, for whatever runs after");
+
+  // The migrator's floor line, since this file redefines the function with the
+  // hnsw.* clause 014 needed pgvector 0.8 for.
+  const text019 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("019"))!), "utf8");
+  assert(/^--\s*requires:\s*pgvector\s*>=\s*0\.8\.0\s*$/m.test(text019), "019 declares `requires: pgvector >= 0.8.0` for migrate.ts");
+  const count = async (name: string) =>
+    (await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_keyword")) === 1, "one match_thoughts, one search_thoughts_keyword — redefined, not duplicated");
 }
 
 report();

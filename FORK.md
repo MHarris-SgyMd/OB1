@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-five numbered changes on top of the pin. Seven fix defects found in an
+Thirty-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–35 are the numbered `###` sections** further down, which is
+sections. Changes **18–36 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -165,6 +165,8 @@ db/bench-hybrid.ts               # fix 32  (new file — both indexes reached th
 evals/eval-hybrid.ts             # fix 32  (new file — four query sets, the arms and the variants)
 evals/identifiers.ts             # fix 32  (new file — the identifier rule eval-keyword and eval-hybrid share)
 db/migrations/018_*.sql          # fix 33  (new file — update_thought: an unchanged edit is never a duplicate)
+db/migrations/019_*.sql          # fix 36  (new file — match_thoughts reaches the index at the shipped width; ROWS on both search functions)
+db/bench-plan.ts                 # fix 36  (new file — the unfiltered plan at the real width)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1610,7 +1612,8 @@ a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
 
 **Not done here.** SMD-969 asks whether the *unfiltered* candidate scan reaches
 the HNSW index at scale; this bench explains only the filtered case, and only at
-1%. SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
+1% — measured in change 36, at the shipped width, where the answer was no.
+SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
 body so they do not reintroduce the post-filter.
 
 ### 29. A lease per thought, and the re-embed that proves it
@@ -2220,7 +2223,7 @@ definition. Tickets: SMD-1040 (`PostgrestStore.matchThoughts` is still a bare
 cast, so `created_at` differs in format between stores on the vector path) and
 SMD-1041 (declare `ROWS` on `match_thoughts` and `search_thoughts_keyword` in
 their own migrations — a hint set from 017 would be reset by the next
-re-apply of 014). Declined: rewriting the CTEs as a FULL OUTER JOIN, moving
+re-apply of 014; done in change 36). Declined: rewriting the CTEs as a FULL OUTER JOIN, moving
 `eval-graphrag.ts` onto the shared vector cache in this PR, and de-duplicating
 the standalone benches' helpers. The numbers above did not move.
 
@@ -2246,7 +2249,8 @@ store gained the `hybridThoughts` conformance test it lacked — which
 immediately found that the SQL-backed compat client hands an `int[]` back as a
 typed array, for which `Array.isArray` is false, so `needleCounts` was empty
 on that path until the normaliser accepted array-likes. Declined: `ALTER
-FUNCTION … ROWS` inside 017 (SMD-1041; a re-apply of 014 would reset it),
+FUNCTION … ROWS` inside 017 (SMD-1041; a re-apply of 014 would reset it — done
+in change 36),
 and three cosmetic duplications.
 
 **A third pass, triaged: ten fixes, and the stop.** Three were behaviour.
@@ -2771,6 +2775,121 @@ record moved, which has the old model's vector and no claim row, and is
 indistinguishable from a new-model capture once the pass is finished — the run
 says so at its end, and the operator's step is to switch the server first;
 recording the model per row, which would make the check exact (SMD-1068).
+
+### 36. `match_thoughts` reaches the index at the shipped width — and both search functions say how many rows they return
+
+Migration 019 and `db/bench-plan.ts` (Linear SMD-969 and SMD-1041; upstream
+[#469](https://github.com/NateBJones-Projects/OB1/issues/469)). The upstream
+issue reports that even the plain `match_thoughts` shape gets `Seq Scan` +
+`Sort` at ~9,300 rows and only `SET LOCAL enable_seqscan = off` makes the
+planner take `thoughts_embedding_idx` — 5.9 s and ~30,000 buffers a call
+against 180 ms and ~3,200. Its headline is about `match_thoughts_recency`,
+which this fork does not ship (SMD-945 already plans the candidate-then-rerank
+shape the issue arrives at). The half that applied here had never been
+measured: change 28's bench explains only the filtered branches, at 64
+dimensions, and `db/test-live.ts` [5] asserted the index is *reachable* with
+sequential scans disabled, which is a different question from whether it is
+*chosen*. The fork's rule is that a plan is measured, not inferred (change
+24), so it was measured, at 1,024 dimensions.
+
+**The planner does not choose it where the heap is small — which is every
+brain up to some tens of thousands of thoughts — and the chunk table is the
+half that matters.** `db/bench-plan.ts`: random unit vectors, one thought in
+five with a chunk row, the unfiltered branch's own statement read from the
+catalog and explained under `EXPLAIN (ANALYZE, BUFFERS)` at 1,000, 10,000 and
+100,000 rows. At 10,000 rows and the default count the `thoughts` CTE is an
+index scan and the chunk CTE a **sequential scan** of 2,000 rows that reads
+13,353 buffers — the whole statement 6.4 ms against 2.6 with the index. Above
+the default count both sides scan: 31.5 ms and 80,247 buffers at match_count
+50, against 8.8 ms and 11,113. At 1,000 rows everything seq-scans at every
+count. At 100,000 rows the heap alone is 1,225 pages, the estimate turns, and
+the planner takes the index at the counts callers send on its own — and still
+seq-scans at the ceiling, 932,017 buffers and 319 ms for 500 rows against 196.
+Upstream's report is a 9,300-row table: the band the estimate gets wrong is
+the band real brains occupy. At 64 dimensions the planner is right at every
+size, which is why the earlier bench could not have seen it.
+
+**The mechanism, which is why no cost knob fixes it.** `pg_type.typstorage`
+for `vector` is `e`: a 1,024-wide vector is ~4 KB, past the TOAST threshold,
+and is stored out of line. At 10,000 rows the heap is 912 kB and the TOAST
+relation 53 MB. The planner prices a sequential scan by heap pages plus
+per-tuple CPU and never counts the detoast reads — it estimated 114 pages and
+the scan read 66,780 buffers. The estimate is wrong in kind, not by a factor.
+`random_page_cost = 1.1`, the cost-model remedy the ticket asked to weigh, was
+measured as an arm of the bench: at 10,000 rows it wins both sides at
+match_count 10 and the `thoughts` side at 50, and still scans the chunk table
+at 50 and both tables at 500; at 1,000 rows it wins one cell of six; at
+100,000 it still scans the chunk table at the ceiling. The chunk table loses
+first because it is "small" in heap pages while every one of its rows is a
+vector — the wider the model, the longer every table stays small. Upstream's own
+shape, the threshold inside the WHERE, was measured too and is worse still:
+with the index forced and no row passing, the iterative scan walks to its
+bound, 49 ms for zero rows. The threshold after the LIMIT is what makes the
+index scan a LIMIT, and it stays.
+
+**The decision: `SET enable_seqscan = off` on the function**, beside 014's scan
+mode — upstream's remedy, taken for a stated reason: no cost constant can
+express a cost the estimator omits, and the omission grows with width and row
+count. It is a penalty (a disabled path costs 10^10), not a prohibition — a
+relation with no usable index still seq-scans — and every statement in the
+body has an index the schema guarantees: both HNSW indexes for the candidate
+CTEs, GIN for the routing statement, primary-key and `thought_id` probes for
+the exact branch, HNSW plus a primary-key join for the walk, a primary-key
+join for the merge. Not chosen, and why, in 019's header: `random_page_cost`
+in `deploy/compose.yaml` (measured insufficient; and a server setting a hosted
+Postgres may not expose, where the clause travels with the schema); raising the
+distance function's `COST` (it would work — the index scan pays it only for
+the rows it returns — but it edits a catalog row pgvector owns); `set_config`
+inside the body (transaction-scoped, and a second mechanism). After: both
+sides are an index scan at every count and scale, under both plan modes. At
+the counts callers send the index wins by three to four times where the
+planner was choosing the scan; at the ceiling the two plans cost the same up
+to 10,000 rows and the index wins by 1.6x at 100,000; at 100,000 rows and the
+counts callers send the setting changes nothing, since the planner already
+chose the index.
+
+**SMD-1041, folded in because it needs the same migration.** PostgreSQL
+assumes 1,000 rows from a plpgsql set-returning function; `match_thoughts`
+returns ten by default and `search_thoughts_keyword` twenty-five, and change 32
+found the consequence — a fused query whose estimate crossed `jit_above_cost`
+and was JIT-compiled on every call. 017 fixed that locally and the estimate
+stayed wrong for every other caller. 019 declares `ROWS 10` and `ROWS 25` in
+the functions' own `CREATE` statements — not an `ALTER FUNCTION` from 017,
+which the SMD-958 passes declined because `CREATE OR REPLACE` resets `prorows`,
+and `db/test-schema.ts` re-applies 014 on purpose. Both bodies are carried
+verbatim, and the schema test proves it rather than saying it: [20] re-applies
+014 and 012 and compares `prosrc` byte for byte, asserts the re-apply reset the
+estimate to 1,000 and dropped the setting (the trap, reproduced), then
+re-applies 019 and asserts both are back; a composing `EXPLAIN` estimates 10
+and 25 rows. `bench-hybrid.ts`'s numbers do not move: 017's `SET jit = off`
+stays, since its own argument still holds.
+
+**Wired into CI at the smallest scale that reproduces the decision.**
+`test-live.ts` [5c], over [5b]'s 2,000 rows and 400 chunk rows at the
+configured width: the control first — the same statement without 019's setting
+seq-scans at least one side, asserted so the section cannot pass vacuously —
+then the statement under the function's own SET clauses is an `Index Scan
+using thoughts_embedding_idx` and an `Index Scan using
+thought_chunks_embedding_idx` at match_count 10 and 50 under both plan modes.
+The extraction (`extractBody`) and the settings loop (`applyFunctionSettings`)
+moved from `bench-hnsw.ts` into `db/test-support.ts`, so the three explainers
+rewrite the same text the same way; `bench-hnsw.ts`'s after arm applies 014
+and every later migration, since its plans are read from the catalog and 019
+redefines the function. Live suite 218, schema 365.
+
+**Handed to SMD-945.** The recency blend's plan to graft onto the existing
+structure assumed that structure gets an index scan. It does now, *because of*
+the function-level setting: a redefinition must carry `SET enable_seqscan =
+off`, `SET hnsw.iterative_scan = relaxed_order`, `ROWS 10`, the `requires`
+line and the `ob1:filter-inside-scan` sentinel — 019's header lists the five —
+and [5c] fails without the first at 2,000 rows.
+
+**Not done here.** The recency half of #469 (SMD-945); the walk branch's plan
+above the exact threshold at the shipped width, which change 28 measured at 64
+dimensions and which the same setting now governs but this bench does not
+explain; `ROWS` on `search_thoughts_hybrid` itself, which returns at most
+`match_count` rows and is composed by nothing in the repo; a per-width run of
+`bench-hnsw.ts`, whose published tables stay at 64 dimensions.
 
 ## Detached from the fork network
 
