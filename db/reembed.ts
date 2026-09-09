@@ -397,10 +397,10 @@ if (recorded.embedding_model === undefined) {
   console.log(`  model change: ob1_config records ${recorded.embedding_model}; this pass embeds with ${embedConfig.embeddingModel}`);
 } else if (poolModelFor(JOB) === null) {
   console.log(`  same model as ob1_config records — a backfill under ${JOB}: every thought without a row under it is pooled`);
-} else if (poolModelFor(JOB) !== embedConfig.embeddingModel) {
+} else if (parseReembedKey(JOB) !== null && parseReembedKey(JOB)!.model !== embedConfig.embeddingModel) {
   // --status for a key naming another model (a run is refused below): the
   // counts are the key's, not this shell's, and say so.
-  console.log(`  --job ${JOB} names ${poolModelFor(JOB)}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
+  console.log(`  --job ${JOB} names ${parseReembedKey(JOB)!.model}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
 } else {
   console.log(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
 }
@@ -487,7 +487,11 @@ const staleUnderThisJob = () =>
  */
 const POOL_MODEL = poolModelFor(JOB);
 const BACKFILL = POOL_MODEL === null;
-const TARGET = POOL_MODEL ?? embedConfig.embeddingModel;
+// The key's model wherever it names one — an own-shape key or a suffixed one
+// (`reembed:y@1024:ctx` is a pass to y, as 021's backfill reads it) — so
+// --status for any foreign key is judged against that key's model; this shell's
+// otherwise. A run under a foreign key is refused above.
+const TARGET = parseReembedKey(JOB)?.model ?? embedConfig.embeddingModel;
 
 /**
  * "Not at the target": the row has no vector, or its label differs from the
@@ -516,9 +520,19 @@ const poolable = () => (BACKFILL ? sql`true` : notAtTarget());
  * finished row is wrong. Under the model's own key NULL is not at the target —
  * 021 labelled what it had evidence for, and what is left has none.
  */
-const movedFromTarget = () => (BACKFILL ? sql`(embedding IS NULL OR (embedding_model IS NOT NULL AND embedding_model <> ${TARGET}))` : notAtTarget());
-const doneButNotAtTarget = () => sql`status = 'succeeded' AND thought_id IN (SELECT id FROM thoughts WHERE ${movedFromTarget()})`;
-const caveatsAtTarget = () => sql`${withCaveat()} AND thought_id NOT IN (SELECT id FROM thoughts WHERE ${movedFromTarget()})`;
+const doneButNotAtTarget = () =>
+  BACKFILL
+    ? // The trust is bounded by 021's own evidence rule: a finished row vouches
+      // for an unlabelled thought only while nothing has written the row since
+      // (updated_at <= finished_at) — a NULL beside a row written since is a
+      // later foreign write, not a pre-021 pass (fifth review pass).
+      sql`status = 'succeeded' AND EXISTS (
+            SELECT 1 FROM thoughts x WHERE x.id = thought_id
+              AND (x.embedding IS NULL
+                   OR (x.embedding_model IS NOT NULL AND x.embedding_model <> ${TARGET})
+                   OR (x.embedding_model IS NULL AND x.updated_at > finished_at)))`
+    : sql`status = 'succeeded' AND thought_id IN (SELECT id FROM thoughts WHERE ${notAtTarget()})`;
+const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget()})`;
 
 /**
  * Return this job's rows a predicate selects to the pool as if never tried:
@@ -642,6 +656,8 @@ async function unlabelledPooled(pooled: boolean): Promise<number> {
  * and at the end of a run; a --dry-run describes a run, not the state, and
  * says nothing here.
  */
+/** Whether the rows here are judged against the model preflight judges by — the record, as it stands (after this run recorded it, or as found). */
+const judgedAsPreflight = (afterRecord: boolean) => TARGET === (afterRecord ? embedConfig.embeddingModel : recorded.embedding_model);
 function printPreflightNote(c: PassCounts, others: number, recordAgrees: boolean): void {
   if (passUnfinished(c)) {
     if (PREFLIGHT_SEES) console.error(`  preflight will warn until this finishes: ${JOB} — ${formatPassCounts(c)}`);
@@ -724,7 +740,7 @@ if (STATUS_ONLY || DRY_RUN) {
   const c = await counts();
   printCounts(c, STATUS_ONLY ? "status" : "before");
   const { others } = await printCorpusByModel();
-  if (STATUS_ONLY) printPreflightNote(c, others, !modelChange);
+  if (STATUS_ONLY) printPreflightNote(c, others, judgedAsPreflight(false));
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
@@ -757,7 +773,9 @@ if (STATUS_ONLY || DRY_RUN) {
     const notAt = recordModel
       ? await countWhere(sql`(${doneButNotAtTarget()}) AND NOT (${staleUnderThisJob()})`)
       : await countWhere(doneButNotAtTarget());
-    const fallbacks = retryFallbacks ? await countWhere(caveatsAtTarget()) : 0;
+    const fallbacks = retryFallbacks
+      ? await countWhere(recordModel ? sql`(${caveatsAtTarget()}) AND NOT (${staleUnderThisJob()})` : caveatsAtTarget())
+      : 0;
     const unlabelled = await unlabelledPooled(false);
     // Said as what a run WITH the flag would do when the flag is missing: the
     // run itself refuses, and this line must not read as its plan.
@@ -871,7 +889,7 @@ if (total === 0) {
   if (before.failed > 0) {
     console.error(`  ${before.failed} failed row(s) remain from an earlier run — pass --retry-failed to try them again:`);
     await printFailures();
-    printPreflightNote(before, othersBefore, recordModel || !modelChange);
+    printPreflightNote(before, othersBefore, judgedAsPreflight(recordModel));
     await sql.close();
     process.exit(1);
   }
@@ -1164,10 +1182,11 @@ if (after.unpooled > 0) {
     BACKFILL
       ? `\n  ${after.unpooled} thought(s) captured while the pass ran have no row under this job; re-run to pool them.`
       : `\n  ${after.unpooled} thought(s) are not at ${TARGET} and have no row under this job — captured or edited while the pass ran\n` +
-          `  by a server still embedding with another model. Switch the server if it is not, then re-run: the pool takes exactly them.`
+          `  by a server on another model, by one older than 021 (no label), or through a fallback that stores no vector. Switch or upgrade the\n` +
+          `  server if that is what it was, then re-run: the pool takes exactly them.`
   );
 }
-printPreflightNote(after, othersAfter, recordModel || !modelChange);
+printPreflightNote(after, othersAfter, judgedAsPreflight(recordModel));
 if (after.claimed > 0) {
   console.error(
     `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +

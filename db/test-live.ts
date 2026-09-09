@@ -1110,6 +1110,23 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const noop2 = await reembedDefault();
   assert(noop2.code === 0 && /Nothing to do/.test(noop2.out), "a further run under the model's own key has nothing to do");
 
+  // The model's own key on a model change: the start-over returns failed rows
+  // and expired leases only, and the data rule the finished rows whose
+  // thought is not at the target — here two rows relabelled to the old model
+  // with the record moved back, as a real switch back leaves them. Under the
+  // suite's backfill key (below) every terminal row returns instead; without
+  // this block the narrow rule was never exercised (fifth review pass).
+  await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
+  await sql`UPDATE thoughts SET embedding_model = ${recordedModel} WHERE content = ANY(${sql.array([shorts[0], stale], "TEXT")})`;
+  const ownDry = await reembedDefault("--dry-run");
+  assert(/would: refuse without --switch-model; with it: record stub-embed in ob1_config; return 2 succeeded row\(s\) whose thought is not at stub-embed to the pool; add 0 thoughts to the pool/.test(ownDry.out) && !/start this pass over/.test(ownDry.out) && /over 2 rows/.test(ownDry.out),
+    `under the model's own key a switch back returns only the finished rows whose thought is not at the model — no start-over of the rest (${ownDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  const own = await reembedDefault("--switch-model");
+  assert(own.code === 0 && /2 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(own.out) && !/starts over/.test(own.out) && /2 re-embedded, 0 failed/.test(own.out),
+    `…and the run re-embeds exactly those two (exit ${own.code}: ${own.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  const [{ m: ownLabel }] = await sql`SELECT embedding_model AS m FROM thoughts WHERE content = ${stale}`;
+  assert(ownLabel === "stub-embed", "…which carry the target's label again");
+
   // Switching back to a model used before. The key holds a finished pass's
   // terminal row for every thought, and enqueue_thoughts skips them by primary
   // key — so until SMD-1024 a --switch-model to this model enqueued nothing and

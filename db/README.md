@@ -764,7 +764,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 462 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 249 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 252 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs

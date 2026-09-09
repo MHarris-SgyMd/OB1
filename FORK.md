@@ -3401,6 +3401,36 @@ threaded beside the vector rather than on `EmbeddedCapture`, and the
 corpus-by-model query and reduction duplicated between `reembed.ts` and
 preflight. Suites unchanged in count.
 
+**A fifth pass.** Seven fixed, three declined with the reason. The backfill
+key's trust in a finished row was unbounded: a NULL label beside one was
+"still at the target" for ever, although after 021 every row the tool finishes
+is labelled, so a NULL there is a later foreign write — an un-upgraded server's
+re-capture that a recurring backfill would then never re-embed. The trust is
+bounded by 021's own evidence rule: `updated_at <= finished_at`, or the row
+returns. The `--dry-run` caveat count under a backfill key on a model change
+counted rows the start-over takes first; every count is now an exact
+complement of the requeue predicates it stands beside. The `--status` note
+about preflight's line was gated on the record agreeing with the *shell*
+while the rows were judged against the *key's* model; both tools now judge
+against one target, and a suffixed foreign key (`reembed:y@d:ctx`) is judged
+against y as an own-shape one is. The own key's model change — the narrow
+start-over and the data rule together — was never exercised, since every
+`--switch-model` in the live suite runs under its backfill key; [9] now
+switches back under the model's own key too, and asserts that only the two
+relabelled rows return. The end-of-run paragraph blamed "a server on another
+model" for rows that had no vector or no label; it names the three causes.
+And the Edge Function server's label, a knob since the fourth pass, is checked
+against the column's width once per vector, with the two named. Declined: the
+backfill's `updated_at` rule treats a metadata-only edit as a write that
+invalidates the pass's vector — it could be refined from the audit log, but a
+raw vector write leaves no audit row either, and a rule that re-embeds a row it
+need not is the right side of that line; the two-step fallback's retry without
+the label also fires for a stale PostgREST schema cache and stores an
+unlabelled vector — a defined state the pass re-embeds; and the in-repo
+integrations (`enhanced-mcp` as well as `update-thought-mcp`) replace a vector
+with a raw update and leave the label stale — outside this change, named
+below. Suites after: live 252; `server/` 47, 30, 38.
+
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
 Postgres resolves the relation when it parses the statement, whatever the `AND`
@@ -3442,9 +3472,9 @@ update-delete 39 (before the pass below).
 
 **Not done here.** Chunk rows left by a chunkless re-capture through the
 3-argument `upsert_thought`, which predate this change (SMD-1175); the
-community `integrations/update-thought-mcp`, which writes content and vector
-with a raw update around `update_thought` and so leaves a stale label as it
-leaves a stale fingerprint. A label for the rows no finished pass
+community integrations `update-thought-mcp` and `enhanced-mcp`, which write
+content and vector with a raw update around `update_thought` and so leave a
+stale label as they leave a stale fingerprint. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
 labels them, and says how many before it runs. `--accept-failed` and
 `--retire` (SMD-1067) — with the column, accepting a row means "it stays at

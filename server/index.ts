@@ -58,6 +58,10 @@ function thoughtUrl(id: string): string {
 // must be that spelling: OB1_EMBEDDING_MODEL when set, as server-portable
 // reads it, else the id this server has always used.
 const EMBEDDING_MODEL = Deno.env.get("OB1_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
+// The column's width (the guide's 1536). A model set through the variable above
+// that returns another width would fail every capture at the column with a
+// Postgres error naming neither; checked here, once per vector.
+const EMBEDDING_DIM = Number(Deno.env.get("OB1_EMBEDDING_DIM") ?? 1536);
 
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
@@ -76,7 +80,13 @@ async function getEmbedding(text: string): Promise<number[]> {
     throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
   }
   const d = await r.json();
-  return d.data[0].embedding;
+  const embedding: number[] = d.data[0].embedding;
+  if (embedding.length !== EMBEDDING_DIM) {
+    throw new Error(
+      `Embedding width mismatch: model ${EMBEDDING_MODEL} returned ${embedding.length} dimensions but the column is vector(${EMBEDDING_DIM}). Set OB1_EMBEDDING_MODEL to a model of that width, or OB1_EMBEDDING_DIM to the column's.`
+    );
+  }
+  return embedding;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
