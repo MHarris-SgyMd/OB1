@@ -27,7 +27,7 @@ export type ThoughtMatch = {
   created_at: string;
   /**
    * What the rows are ordered by (migration 020): `similarity` blended with
-   * exp(-age_days / half_life_days) at the call's recency weight; equal to
+   * 0.5 ^ (age_days / half_life_days) at the call's recency weight; equal to
    * `similarity` at weight 0. Not for display — the tools show `similarity`.
    */
   score: number;

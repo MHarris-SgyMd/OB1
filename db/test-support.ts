@@ -65,6 +65,7 @@ const FUNCTIONS = [
   // re-creates the old forms, and a reset that left one behind would hand the
   // next section an ambiguous 4-argument call.
   MATCH_THOUGHTS_SIGNATURE,
+  "recency_score(float, timestamptz, float, float)",
   ...SUPERSEDED_SIGNATURES,
   "search_thoughts_keyword(text, int, int, jsonb)",
   "update_updated_at()",

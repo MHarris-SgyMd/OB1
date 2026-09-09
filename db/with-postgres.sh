@@ -43,7 +43,11 @@ else
   exit 2
 fi
 
-cleanup() { "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true; }
+# -v: the postgres image declares a VOLUME for its data directory, so `rm`
+# alone leaves an anonymous volume behind every run — 776 of them, 79 GB, had
+# accumulated on one machine before the podman VM ran out of disk mid-bench
+# (SMD-945 review pass). Both runtimes take -v.
+cleanup() { "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
 echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME"))"

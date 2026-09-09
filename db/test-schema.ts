@@ -1840,7 +1840,11 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   let same = true;
   let scoreIsSim = true;
   for (const [th, n, filter] of [[-1.0, 10, "{}"], [0.0, 50, "{}"], [0.5, 10, "{}"], [-1.0, 10, '{"kind":"a"}'], [0.3, 50, '{"kind":"b"}'], [-1.0, 500, "{}"]] as const) {
-    for (const q of [Q, at(0.5, 5), unit(3)]) {
+    // Three queries whose similarities are distinct over the fixture: `unit(3)`
+    // would tie every row off axis 3 at 0, and 020 breaks ties by id where
+    // 019 left them to the plan — a difference in the tiebreak, not the ranking,
+    // and one [21] asserts separately below.
+    for (const q of [Q, at(0.5, 5), at(0.3, 2)]) {
       const now = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
       const was = (await db.query<Row>(`SELECT id, similarity FROM match_thoughts_019($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
       compared++;
@@ -1867,8 +1871,14 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(chunkRow !== undefined && Math.abs(chunkRow.similarity - 0.99) < 1e-6, `the chunk-only thought is still found through the recency path, scored by its chunk (${chunkRow?.similarity})`);
   // Every score is the formula, from the raw similarity and the row's age.
   const ages = new Map((await db.query<{ id: string; d: number }>(`SELECT id, extract(epoch FROM (now() - created_at)) / 86400.0 AS d FROM thoughts`)).rows.map((r) => [r.id, Number(r.d)]));
-  const formula = (sim: number, days: number, w: number, h: number) => sim * (1 - w) + Math.exp(-Math.max(days, 0) / h) * w;
-  assert(weighted.every((r) => Math.abs((r.score as number) - formula(r.similarity, ages.get(r.id)!, 0.5, 90)) < 1e-6), "every score is similarity * (1 - w) + exp(-age_days / half_life) * w");
+  // Written out here, independently of recency_score(): a true half-life, so
+  // the factor at age = half_life is 0.5 (the first draft — and upstream's
+  // schema — wrote exp(-age / half_life), an e-folding time, 0.37 at the
+  // half-life; first review pass).
+  const formula = (sim: number, days: number, w: number, h: number) => sim * (1 - w) + Math.pow(0.5, Math.max(days, 0) / h) * w;
+  assert(weighted.every((r) => Math.abs((r.score as number) - formula(r.similarity, ages.get(r.id)!, 0.5, 90)) < 1e-6), "every score is similarity * (1 - w) + 0.5 ^ (age_days / half_life) * w");
+  const [{ half }] = (await db.query<{ half: number }>(`SELECT recency_score(0.0, now() - interval '90 days', 1.0, 90.0) AS half`)).rows;
+  assert(Math.abs(Number(half) - 0.5) < 1e-6, `at age = half_life the recency factor is 0.5 — the name is true (${half})`);
 
   // ── The crossover. Two rows: A older and more similar by δ, B newer. The
   // formula says they swap at w* = δ / (δ + r_B - r_A); asserted on both sides
@@ -1876,21 +1886,21 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // half-lives give opposite orders.
   await db.exec(`DELETE FROM thoughts`);
   const A = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('A: older, closer', $1::vector, now() - interval '365 days') RETURNING id`, [at(0.90, 1)])).rows[0].id;
-  const B = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('B: newer, farther', $1::vector, now() - interval '5 days') RETURNING id`, [at(0.80, 2)])).rows[0].id;
+  const B = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('B: newer, farther', $1::vector, now() - interval '40 days') RETURNING id`, [at(0.80, 2)])).rows[0].id;
   await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('C: orthogonal, brand new', $1::vector, now())`, [unit(3)]);
   const order = async (w: number | null, h: number | null, th = -1.0) =>
     (await db.query<{ content: string; score: number }>(`SELECT content, score FROM match_thoughts($1::vector, $2, 10, '{}'::jsonb, $3, $4)`, [Q, th, w, h])).rows;
   const sims = Object.fromEntries((await db.query<{ id: string; s: number }>(`SELECT id, 1 - (embedding <=> $1::vector) AS s FROM thoughts`, [Q])).rows.map((r) => [r.id, Number(r.s)]));
   const wStar = (h: number) => {
     const delta = sims[A] - sims[B];
-    const rA = Math.exp(-365 / h), rB = Math.exp(-5 / h);
+    const rA = Math.pow(0.5, 365 / h), rB = Math.pow(0.5, 40 / h);
     return delta / (delta + rB - rA);
   };
   const w90 = wStar(90), w30 = wStar(30);
   assert((await order(0, 90))[0].content.startsWith("A"), "at weight 0 the closer row A leads");
   assert((await order(w90 - 0.02, 90))[0].content.startsWith("A"), `just below w* = ${w90.toFixed(4)} (half-life 90) A still leads`);
   assert((await order(w90 + 0.02, 90))[0].content.startsWith("B"), `just above it the newer row B leads`);
-  assert(w30 > w90 + 0.005, `a 30-day half-life moves the crossover to w* = ${w30.toFixed(4)}, later than ${w90.toFixed(4)}: with a short half-life B's five days already cost it something`);
+  assert(w30 > w90 + 0.005, `a 30-day half-life moves the crossover to w* = ${w30.toFixed(4)}, later than ${w90.toFixed(4)}: with a short half-life B's forty days already cost it something`);
   const between = (w90 + w30) / 2;
   assert((await order(between, 90))[0].content.startsWith("B") && (await order(between, 30))[0].content.startsWith("A"),
          `at weight ${between.toFixed(4)} the two half-lives give opposite orders — the half-life moves the crossover where the formula says`);
@@ -1915,6 +1925,29 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const nullAge = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('no date', $1::vector, NULL) RETURNING id`, [at(0.85, 4)])).rows[0].id;
   const dated = (await db.query<{ id: string; similarity: number; score: number }>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows.find((r) => r.id === nullAge)!;
   assert(dated !== undefined && Math.abs(dated.score - dated.similarity * 0.5) < 1e-9, `a row with no created_at scores as infinitely old (${dated?.score} = ${dated?.similarity} * 0.5)`);
+  // Infinite timestamps (the column accepts them): -infinity is infinitely old,
+  // +infinity brand new — and at weight 0 the age is never computed, which is
+  // what keeps PostgreSQL 16 (the pinned server; PGlite here is 17) from
+  // raising "cannot subtract infinite timestamps" on a call 019 answered fine.
+  const [past, future] = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, embedding, created_at) VALUES ('from -infinity', $1::vector, '-infinity'), ('from +infinity', $2::vector, 'infinity') RETURNING id`,
+    [at(0.84, 5), at(0.83, 6)])).rows.map((r) => r.id);
+  const inf0 = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q])).rows;
+  assert(inf0.some((r) => r.id === past && r.score === r.similarity) && inf0.some((r) => r.id === future && r.score === r.similarity), "rows with infinite created_at are returned at weight 0 with score = similarity");
+  const inf1 = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows;
+  const pastRow = inf1.find((r) => r.id === past)!, futureRow = inf1.find((r) => r.id === future)!;
+  assert(Math.abs((pastRow.score as number) - pastRow.similarity * 0.5) < 1e-9 && Math.abs((futureRow.score as number) - (futureRow.similarity * 0.5 + 0.5)) < 1e-9,
+         `-infinity scores as infinitely old and +infinity as brand new (${pastRow.score}, ${futureRow.score})`);
+  // Ties are broken by id: three rows captured in one statement share a
+  // created_at and a similarity, so at weight 1 their scores are equal and
+  // 019's ORDER BY would have left their order — and which survive a LIMIT —
+  // to the plan (first review pass).
+  const tied = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, embedding) VALUES ('tie a', $1::vector), ('tie b', $1::vector), ('tie c', $1::vector) RETURNING id`, [at(0.7, 7)])).rows.map((r) => r.id).sort();
+  const tiedOut = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 20, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows.filter((r) => tied.includes(r.id));
+  assert(tiedOut.length === 3 && new Set(tiedOut.map((r) => r.score)).size === 1 && tiedOut.map((r) => r.id).join() === tied.join(), `three rows with equal scores come back in id order (${tiedOut.map((r) => r.id.slice(0, 8)).join(", ")})`);
+  const tiedTwo = (await db.query<Row>(`SELECT id FROM match_thoughts($1::vector, 0.65, 2, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows.map((r) => r.id).filter((id) => tied.includes(id));
+  assert(tiedTwo.length <= 2 && tiedTwo.every((id, i) => id === tied[i]), "…and a LIMIT that cuts through the tie keeps the lowest ids, not whichever the sort emitted");
 
   // ── The hybrid inherits the order through the vector arm and keeps the raw
   // similarity (017's probe compares like with like — 020's header says why
@@ -1927,6 +1960,47 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(hy.every((r) => Math.abs(r.similarity - rawSims[r.id]) < 1e-9), "…and every fused row's similarity is its raw cosine, not the blended score");
   const hy0 = (await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, 'what was I doing lately', -1.0, 10, '{}'::jsonb)`, [Q])).rows;
   assert(hy0.map((r) => r.content).join("|") === (await order(0, 90)).map((r) => r.content).join("|"), "…and the 5-argument hybrid call — every caller before 020 — still resolves, to the unweighted order");
+  // Under a weight the hybrid passes the caller's threshold to match_thoughts.
+  // With -1 (017's call) the one slot here would go to the newest row — C,
+  // orthogonal, brand new — which the threshold then drops, and the fused
+  // search would answer "nothing" for a query the unweighted call answers
+  // (first review pass). The slot must go to the newest row ABOVE 0.5.
+  const one = (await db.query<{ content: string; similarity: number }>(
+    `SELECT content, similarity FROM search_thoughts_hybrid($1::vector, 'what was I doing lately', 0.5, 1, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows;
+  assert(one.length === 1 && one[0].similarity > 0.5, `with a weight, threshold 0.5 and one slot, the fused search returns one row above the threshold (${one.map((r) => `${r.content} ${r.similarity.toFixed(2)}`).join(", ") || "none"})`);
+  const mtOne = await order(1, 90, 0.5);
+  assert(one[0].content === mtOne[0].content, `…the newest row above the threshold, as the weighted semantic tool would show it (${one[0].content})`);
+  // A literal-only query gives the vector arm no vote (017's gate), so the
+  // fused score is 0 for every row not containing the needle and the tiebreak
+  // is the whole order. It is the blended score, not the raw similarity, so the
+  // weight the caller sent orders the rows it chose (first review pass).
+  const literal = (await db.query<{ content: string }>(
+    `SELECT content FROM search_thoughts_hybrid($1::vector, 'ZZQX_9450', -1.0, 10, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows;
+  // Compared where the blend decides: the rows scoring 0 (no date, -infinity)
+  // tie, and 017's tiebreak after the blend is created_at then id where
+  // match_thoughts' is id alone.
+  const decided = mt1.filter((r) => r.score > 0).map((r) => r.content);
+  assert(literal.slice(0, decided.length).map((r) => r.content).join("|") === decided.join("|"), `a literal-only query under a weight is ordered by the blend, not by raw similarity (${literal.map((r) => r.content.split(":")[0]).join(", ")})`);
+
+  // ── The ACL survives the DROP. 020 drops the 4-argument function and a
+  // CREATE gives the new one default privileges — on Supabase, EXECUTE for
+  // anon and authenticated — so an operator's REVOKE on the old form would
+  // have been silently undone (first review pass). 020 reads the old ACL
+  // before the DROP and replays it. Here: 019's 4-argument form back beside
+  // 020's, PUBLIC revoked on it, 020 re-applied, the new form's ACL read.
+  const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
+  const before = await acl(MT);
+  assert(before === "", `the shipped function has default privileges — a NULL ACL (${before || "NULL"})`);
+  await reapply("019");
+  await db.exec(`REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb) FROM PUBLIC`);
+  await restoreShipped("match_thoughts");
+  const after = await acl(MT);
+  assert(after !== "" && !/(^\{|,)=X\//.test(after), `after re-applying 020 over a revoked 4-argument form, PUBLIC has no EXECUTE on the new form (${after})`);
+  assert((await count("match_thoughts")) === 1, "…and the 4-argument form is gone again");
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
+  await reapply("019");
+  await restoreShipped("match_thoughts");
+  assert(/(^\{|,)=X\//.test(await acl(MT)), "…while a 4-argument form with PUBLIC granted replays that grant, so the defaults come back as the defaults");
 }
 
 report();

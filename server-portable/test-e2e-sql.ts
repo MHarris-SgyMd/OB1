@@ -169,10 +169,14 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   const dated = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, recency_weight: 1 });
   const first = dated.split("--- Result ")[1] ?? "";
   assert(!/alpha thought about migrations/.test(first), `at recency_weight 1 the two-year-old exact match is not first (${first.split("\n")[0]})`);
-  assert(/100\.0% match\) ---\n[^\n]*\n[^\n]*\n\n?[\s\S]*?alpha thought about migrations/.test(dated) || /alpha thought about migrations/.test(dated) && /100\.0% match/.test(dated),
-         "…and it is still reported at 100% match — the blend orders, the similarity shown is the cosine");
+  // The block that holds the alpha row, and its own header line: the first
+  // draft's regex accepted any "100.0% match" anywhere in the output (first
+  // review pass), which a formatter printing the blended score would satisfy.
+  const alphaBlock = dated.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
+  assert(/^\d+ \(100\.0% match\) ---/.test(alphaBlock), `…and its own header still reads 100.0% match — the blend orders, the similarity shown is the cosine (${alphaBlock.split("\n")[0]})`);
   const unweighted = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
-  assert(/^--- Result 1 \(100\.0% match\)/m.test(unweighted.split("Found")[1] ?? "") || /Result 1 \(100\.0% match\)/.test(unweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
+  const firstUnweighted = unweighted.split("--- Result ")[1] ?? "";
+  assert(/^1 \(100\.0% match\) ---/.test(firstUnweighted) && /alpha thought about migrations/.test(firstUnweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
   await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
   await sql.close();
 }

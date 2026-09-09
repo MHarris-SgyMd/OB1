@@ -16,10 +16,15 @@
 --
 --   The idea is upstream's (schemas/recency-boosted-match-thoughts):
 --
---     recency = exp(-age_days / half_life_days)
+--     recency = 0.5 ^ (age_days / half_life_days)
 --     score   = similarity * (1 - recency_weight) + recency * recency_weight
 --
 --   with recency_weight defaulting to 0, so the default ranking is today's.
+--   (Upstream writes exp(-age / half_life), which is an e-folding time — at
+--   age = half_life the factor is 0.37, not 0.5 — under a parameter named
+--   half_life. Here the name is true: power(0.5, age / half_life), so a
+--   thought's recency halves every half_life days. First review pass.)
+--
 --   The code is not usable as written, and this fork's match_thoughts is why:
 --   upstream's variant reads `public.thoughts` alone, which drops the chunk
 --   retrieval 007 added (a long capture findable by any part of it), and it
@@ -40,6 +45,25 @@
 --   * The exact branch scores every matching row, so under a filter it
 --     answers exactly the blend is exact too.
 --
+-- One function owns the formula
+--   `recency_score(similarity, created_at, weight, half_life)` below, a SQL
+--   function the planner inlines (LANGUAGE sql, STABLE, no SET), so calling
+--   it from the three final SELECTs costs what the expression would. It is
+--   the ONE copy of the rule: search_thoughts_hybrid calls it for the keyword
+--   hits it scores itself, evals/eval-recency.ts's oracle calls it, and
+--   db/test-schema.ts [21] checks it against the formula written out in
+--   TypeScript. An earlier draft inlined the expression three times in this
+--   body and twice more in the harnesses; a NULL-created_at fix had to land
+--   in every one (first review pass). What it does at the edges: weight 0
+--   returns the similarity exactly (the CASE never evaluates the age, so
+--   `now() - created_at` is never computed for a row with an infinite
+--   created_at — PostgreSQL 16, the pinned server, raises "cannot subtract
+--   infinite timestamps" on it, and 019 never did the subtraction); a NULL or
+--   -infinity created_at is infinitely old (recency 0), +infinity brand new
+--   (1); the weight is clamped to [0, 1] and NULL is 0; a NULL half-life is
+--   90; a non-positive half-life is the caller's error, refused by
+--   match_thoughts before the formula sees it.
+--
 -- The window
 --   The blend can only reorder the candidate set, and the candidate set is the
 --   v_fetch nearest by similarity. A row just outside it can be the right
@@ -49,23 +73,32 @@
 --   over-fetch widens fourfold — GREATEST(4 * count, 20) becomes 16 * count,
 --   at least 80 — and the cost of a weighted call is that of an unweighted one
 --   at four times the count (db/bench-plan.ts times it; at the default count
---   and 10,000 rows, both candidate CTEs stay Index Scans and the call goes from 1.8 ms and
---   3,434 buffers to 5.1 ms and 9,558; at count 50 from 6.3 to 16.9 ms, at the
---   ceiling from 33 to 79 ms; at 100,000 rows from 2–3 ms to 8, from 12–14 to
---   84, and from 170 to 365 at the ceiling). That factor is a heuristic, and it is
---   measured: evals/eval-recency.ts compares the function's top N against an
---   exact blended ranking of the whole corpus (a sequential scan), and the
---   top N the un-widened window would have given — on 486 queries at every
---   weight and half-life below, the function's top N was the oracle's in
---   every cell (100.0% overlap at 10 and at 100 results), where the 4 * count
---   window fell to 95% at weight 0.2 over 30 days, 92% at 0.3 and 85% at
---   weight 1. The adaptive
---   alternative — fetch, check the bound above, widen and fetch again — was
---   weighed and declined: it runs the index scan twice on the calls that need
---   it, or moves the candidate CTEs out of the RETURN QUERY blocks that
---   db/test-live.ts [5c] and both benches read from the catalog to prove the
---   plan. v_exact derives from v_fetch and widens with it: more filters are
---   answered exactly under a weight, which is correct and bounded.
+--   and 10,000 rows, both candidate CTEs stay Index Scans and the call goes
+--   from 1.8 ms and 3,434 buffers to 5.1 ms and 9,558; at count 50 from 6.3 to
+--   16.9 ms, at the ceiling from 33 to 79 ms; at 100,000 rows from 2–3 ms to
+--   8, from 12–14 to 84, and from 170 to 365 at the ceiling). That factor is a
+--   heuristic, and evals/eval-recency.ts measures what it recovers: the
+--   function's top N against an exact blended ranking of the whole corpus (a
+--   sequential scan), and against the top N the un-widened 4 * count window
+--   would have given. On 486 queries at every weight and half-life, the
+--   function's top N was the oracle's in every cell, where the 4 * count
+--   window fell to 96% at weight 0.2 over 30 days, 93% at 0.3 and 85% at
+--   weight 1. Read that for what it is: the corpus has 486
+--   rows, so at 10 results the widened window is a third of the table and at
+--   100 results it IS the table — the 100-result cell can only agree with the
+--   oracle, and says nothing about the factor. What the corpus can show is
+--   that 4 * count loses rows the formula ranks first and 16 * count did not,
+--   at its size; on a brain of tens of thousands of thoughts the window is a
+--   fraction of a percent of the table, and a thought the formula would rank
+--   first that is not among the 16 * count nearest by similarity is not
+--   found. That is the contract: a re-ranking of the nearest candidates, not
+--   an exact blended ranking of the table. The adaptive alternative — fetch,
+--   check the bound above, widen and fetch again — was weighed and declined:
+--   it runs the index scan twice on the calls that need it, or moves the
+--   candidate CTEs out of the RETURN QUERY blocks that db/test-live.ts [5c]
+--   and both benches read from the catalog to prove the plan. v_exact
+--   derives from v_fetch and widens with it: more filters are answered
+--   exactly under a weight, which is correct and bounded.
 --
 -- The signature, and why the old one is dropped
 --   Two parameters, both defaulted — `recency_weight float DEFAULT 0.0`,
@@ -79,10 +112,24 @@
 --   re-apply of an earlier migration (007, 014, 019) would put the 4-argument
 --   form back beside this one and break every 4-argument caller; preflight's
 --   `search signatures` check reports two overloads as a failure with the DROP
---   as the remedy, and a database whose functions predate this file as one
---   with this file as the remedy. The same is done for search_thoughts_hybrid, which passes the
---   two parameters through and gets two of its own; its 5-argument form is
---   dropped. Both COMMENT ON FUNCTION are re-issued, since a DROP loses them.
+--   as the remedy (over PostgREST it probes with four named arguments, which
+--   only two overloads make ambiguous), and a database whose functions
+--   predate this file as one with this file as the remedy. The same is done
+--   for search_thoughts_hybrid, which passes the two parameters through and
+--   gets two of its own; its 5-argument form is dropped. Both COMMENT ON
+--   FUNCTION are re-issued, since a DROP loses them.
+--
+--   A DROP loses the function's privileges too, and CREATE gives the new one
+--   the defaults — on Supabase, EXECUTE for anon and authenticated. An
+--   operator who had REVOKEd that on the old function (012's header names the
+--   exposure) would have had it silently granted back by this migration, where
+--   every earlier redefinition used CREATE OR REPLACE and kept the ACL (first
+--   review pass). So each old function's ACL is read before its DROP and
+--   replayed onto the new one after its CREATE: REVOKE ALL FROM PUBLIC, then
+--   GRANT to exactly the grantees the old ACL held. A NULL ACL (the defaults,
+--   never touched) replays nothing, and the new function gets the same
+--   defaults. db/test-schema.ts [21] revokes PUBLIC on the old form, re-applies
+--   this file, and reads the new form's ACL.
 --
 -- `score` beside `similarity`
 --   The return shape gains a sixth column, `score`: the blended value the rows
@@ -94,19 +141,45 @@
 --   keyword hit outside the vector window — 017's header marks that probe as
 --   the one copy of match_thoughts' scoring rule that a change must mirror;
 --   with `similarity` unchanged there is nothing to mirror, and the tiebreak
---   among exact hits still compares one quantity. The hybrid's vector arm
---   ranks on `score` — 017 ranked it by `similarity` inside the function,
---   which would have undone the blend for every first-party search — and
---   everything else in 017's body is verbatim.
+--   among exact hits still compares one quantity. The final ORDER BY is
+--   `score DESC, id` — 019's had no second key, so rows sharing a created_at
+--   (one import, one transaction) would tie exactly at weight 1 and the LIMIT
+--   would keep whichever the sort emitted; now the order is total, and it is
+--   the order search_thoughts_hybrid breaks ties in (first review pass).
+--
+-- What the hybrid does with the weight
+--   Three things changed in 017's body, and nothing else:
+--   * Its vector arm ranks on match_thoughts' `score` — 017 ranked it by
+--     `similarity` inside the function, which would have undone the blend for
+--     every first-party search.
+--   * Under a weight it passes the caller's threshold to match_thoughts
+--     instead of -1. 017 asked for -1 so a sub-threshold row that contains a
+--     needle still carries a rank; that was safe because at weight 0 the
+--     sub-threshold rows are the tail of the window and the N above it are the
+--     N the semantic tool shows. Under a weight the tail is wherever age puts
+--     it: recent rows below the threshold can fill the N slots, be dropped by
+--     the threshold below, and leave older rows above the threshold that never
+--     entered the window — search_thoughts answering "nothing" for a query the
+--     unweighted call answers (first review pass). With the threshold passed,
+--     the window is the N rows the weighted semantic tool would show; a
+--     keyword hit below the threshold is still returned, by presence, and at
+--     weight 0 the call is 017's exactly.
+--   * Its tiebreak among equal fused scores is the blended value, not the raw
+--     similarity — for a row in the window match_thoughts' `score`, for a
+--     keyword hit outside it recency_score() over the probe's similarity. At
+--     weight 0 that is the similarity, as before. It matters for a query that
+--     is only literals: 017's gate gives the vector arm no vote there, every
+--     row not containing the needle has fused 0, and the tiebreak IS the
+--     order — by raw similarity the weight would have chosen the rows and
+--     then not ordered them (first review pass). `similarity` in the output
+--     stays raw, and the threshold still reads it.
 --
 -- Inputs
 --   recency_weight NULL is 0; outside [0, 1] it is clamped, with a NOTICE, as
 --   014 clamps match_count — an over-eager 5.0 ranks by age alone rather than
 --   failing the call. half_life_days NULL is 90; a non-positive half-life has
---   no meaning and raises invalid_parameter_value. A thought with no
---   created_at (the column has a default; a hand-written row can NULL it)
---   scores as infinitely old. now() is what the function sees for the whole
---   call; it is STABLE, as before.
+--   no meaning and raises invalid_parameter_value. now() is what the function
+--   sees for the whole call; it is STABLE, as before.
 --
 -- Measured (evals/eval-recency.ts, the 486-issue corpus rebuilt on 2026-09-08
 -- with each issue's creation date, qwen3-embedding:4b @ 1024)
@@ -119,21 +192,22 @@
 --
 --     weight  half-life     R@1    MRR   top-1 changed (of 486)
 --        0       —          84%   0.899      0
---       0.1    365 d        83%   0.890     15
---       0.1     90 d        80%   0.870     36
---       0.2    365 d        81%   0.878     34
---       0.2     90 d        69%   0.775    113
---       0.3     90 d        45%   0.576    238
---       0.5     90 d        27%   0.366    335
+--       0.1    365 d        83%   0.894      9
+--       0.1     90 d        81%   0.879     28
+--       0.2    365 d        82%   0.883     25
+--       0.2     90 d        74%   0.811     83
+--       0.3     90 d        57%   0.667    178
+--       0.5     90 d        30%   0.394    319
 --       1        any         6%   0.158    450
 --
 --   Every weight lowers MRR here — gently over a long half-life, steeply over
 --   a short one — because the corpus is time-ordered engineering work and the
---   query names one issue. At 0.2 over 90 days, 9 answers moved up and 113
---   down. So the default stays 0, as the ticket said it should if this was
---   the result, and a caller who knows their brain is a working log opts in.
---   The control passed on every query: at weight 0 the function returned
---   019's rows in 019's order, and score equalled similarity.
+--   query names one issue. At 0.2 over 90 days, 8 answers moved up and 88
+--   down. So the default stays 0, as the
+--   ticket said it should if this was the result, and a caller who knows
+--   their brain is a working log opts in. The control passed on every query:
+--   at weight 0 the function returned 019's rows in 019's order, and score
+--   equalled similarity.
 --
 -- Exposure
 --   search_thoughts takes `recency_weight` (0–1, default 0; the half-life stays
@@ -145,15 +219,17 @@
 -- What a successor must carry
 --   The match_thoughts body below is 019's with the DECLARE, the two input
 --   checks and the three final SELECTs changed, and nothing else — the
---   candidate CTEs are 019's byte for byte, which db/test-schema.ts [21]
+--   candidate CTEs are 019's byte for byte, which db/test-schema.ts [20]
 --   holds. A later migration that redefines match_thoughts must keep 019's
 --   five items — the `-- requires: pgvector >= 0.8.0` header line, `SET
 --   hnsw.iterative_scan = relaxed_order`, `SET enable_seqscan = off`, `ROWS
 --   10`, the `-- ob1:filter-inside-scan` sentinel in the BODY, no other SET —
 --   and now also: the 6-argument signature (dropping it means dropping the
---   6-argument form, not adding a seventh overload), the `score` column, and
---   the raw `similarity`. search_thoughts_hybrid's body is 017's with the
---   signature, the match_thoughts call and the rank's ORDER BY changed; a
+--   6-argument form, not adding a seventh overload, and replaying the ACL as
+--   this file does), the `score` column, the raw `similarity`, the `id`
+--   tiebreak, and recency_score() as the one copy of the formula.
+--   search_thoughts_hybrid's body is 017's with the signature, the
+--   match_thoughts call, the rank's ORDER BY and the tiebreak changed; a
 --   successor keeps `SET jit = off` and the 7-argument signature. 014's DO
 --   block — the database-level seeds — is not repeated here, as 019 did not.
 --
@@ -165,16 +241,54 @@
 -- Expected outcome
 --   One match_thoughts, `match_thoughts(vector, float, int, jsonb, float,
 --   float)`, ROWS 10, proconfig with both settings; one search_thoughts_hybrid
---   with seven arguments. `SELECT * FROM match_thoughts(q)` returns six
---   columns and the same rows in the same order as before. With a weight, the
---   same candidate scan (db/test-live.ts [5c] explains it with 0.3) and a
---   different order.
+--   with seven arguments; recency_score(float, timestamptz, float, float).
+--   `SELECT * FROM match_thoughts(q)` returns six columns and the same rows in
+--   the same order as before. With a weight, the same candidate scan
+--   (db/test-live.ts [5c] explains it with 0.3) and a different order.
 -- ============================================================================
 
 -- Load pgvector's library into THIS session before the CREATE below — 014
 -- explains why: the SET clause names an hnsw.* setting, which a non-superuser
 -- may set only once the library that owns the prefix is loaded. One cast.
 SELECT '[1]'::vector;
+
+-- The formula, once. LANGUAGE sql and STABLE with no SET clause, so the planner
+-- inlines it into the callers' final SELECTs. The weight is clamped and the
+-- half-life defaulted here too, so a direct caller and the hybrid's probe get
+-- match_thoughts' arithmetic exactly. At weight 0 the age is never computed,
+-- which is what keeps an infinite created_at from raising on PostgreSQL 16.
+CREATE OR REPLACE FUNCTION recency_score(
+  similarity   float,
+  created_at   timestamptz,
+  weight       float,
+  half_life    float
+)
+RETURNS float
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT similarity * (1 - LEAST(GREATEST(COALESCE(weight, 0.0), 0.0), 1.0))
+       + CASE
+           WHEN LEAST(GREATEST(COALESCE(weight, 0.0), 0.0), 1.0) = 0 THEN 0
+           WHEN created_at IS NULL OR created_at = '-infinity'::timestamptz THEN 0
+           WHEN created_at = 'infinity'::timestamptz THEN 1
+           ELSE power(0.5, GREATEST(extract(epoch FROM (now() - created_at)), 0) / 86400.0 / COALESCE(half_life, 90.0))
+         END * LEAST(GREATEST(COALESCE(weight, 0.0), 0.0), 1.0)
+$$;
+
+COMMENT ON FUNCTION recency_score(float, timestamptz, float, float) IS
+  'The recency blend (020): similarity * (1 - weight) + 0.5 ^ (age_days / half_life) * weight, the weight clamped to [0, 1] (NULL is 0), a NULL half-life 90 days, a NULL or -infinity created_at infinitely old, +infinity brand new. Equal to the similarity at weight 0. The one copy of the rule: match_thoughts, search_thoughts_hybrid and the evals call it.';
+
+-- The old functions' privileges, read before the DROPs below so the CREATEs
+-- can be given the same ones (see the header). Session-scoped settings hold
+-- the aclitem[] as text; empty when the function does not exist or its ACL is
+-- NULL (the defaults), and the replay does nothing.
+SELECT set_config('ob1.acl_match_thoughts',
+                  COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('match_thoughts(vector, float, int, jsonb)')), ''),
+                  false);
+SELECT set_config('ob1.acl_search_thoughts_hybrid',
+                  COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('search_thoughts_hybrid(vector, text, float, int, jsonb)')), ''),
+                  false);
 
 -- The 4-argument function goes first. Beside the 6-argument one it would make
 -- every 4-argument call ambiguous (see the header); IF EXISTS keeps this file
@@ -339,16 +453,15 @@ BEGIN
       GROUP BY u.tid
     )
     SELECT t.id, t.content, t.metadata, b.sim, t.created_at,
-           -- The blend (020): raw similarity weighted against exp(-age / half-life),
-           -- over the candidates above. A NULL created_at is infinitely old — said
-           -- with a CASE, since GREATEST would drop the NULL and call it brand new.
-           b.sim * (1 - v_weight)
-             + CASE WHEN t.created_at IS NULL THEN 0
-                    ELSE exp(-GREATEST(extract(epoch FROM (now() - t.created_at)), 0) / 86400.0 / v_half) END * v_weight
+           -- The blend (020), over the candidates above: recency_score() is the
+           -- one copy of the formula, inlined by the planner. Ordered by position
+           -- (a bare `score` here would be the OUT parameter), then by id so the
+           -- order is total when rows share a created_at.
+           recency_score(b.sim, t.created_at, v_weight, v_half)
     FROM best b
     JOIN thoughts t ON t.id = b.tid
     WHERE b.sim > match_threshold
-    ORDER BY 6 DESC
+    ORDER BY 6 DESC, t.id
     LIMIT v_count;
   ELSE
     -- Only rows a branch can SCORE count towards the threshold: a thought
@@ -396,16 +509,15 @@ BEGIN
         GROUP BY u.tid
       )
       SELECT t.id, t.content, t.metadata, b.sim, t.created_at,
-             -- The blend (020): raw similarity weighted against exp(-age / half-life),
-             -- over the candidates above. A NULL created_at is infinitely old — said
-             -- with a CASE, since GREATEST would drop the NULL and call it brand new.
-             b.sim * (1 - v_weight)
-               + CASE WHEN t.created_at IS NULL THEN 0
-                      ELSE exp(-GREATEST(extract(epoch FROM (now() - t.created_at)), 0) / 86400.0 / v_half) END * v_weight
+             -- The blend (020), over the candidates above: recency_score() is the
+             -- one copy of the formula, inlined by the planner. Ordered by position
+             -- (a bare `score` here would be the OUT parameter), then by id so the
+             -- order is total when rows share a created_at.
+             recency_score(b.sim, t.created_at, v_weight, v_half)
       FROM best b
       JOIN thoughts t ON t.id = b.tid
       WHERE b.sim > match_threshold
-      ORDER BY 6 DESC
+      ORDER BY 6 DESC, t.id
       LIMIT v_count;
     ELSE
       -- Broad filter: the walk. The predicate sits INSIDE each candidate CTE,
@@ -438,21 +550,41 @@ BEGIN
         GROUP BY u.tid
       )
       SELECT t.id, t.content, t.metadata, b.sim, t.created_at,
-             -- The blend (020): raw similarity weighted against exp(-age / half-life),
-             -- over the candidates above. A NULL created_at is infinitely old — said
-             -- with a CASE, since GREATEST would drop the NULL and call it brand new.
-             b.sim * (1 - v_weight)
-               + CASE WHEN t.created_at IS NULL THEN 0
-                      ELSE exp(-GREATEST(extract(epoch FROM (now() - t.created_at)), 0) / 86400.0 / v_half) END * v_weight
+             -- The blend (020), over the candidates above: recency_score() is the
+             -- one copy of the formula, inlined by the planner. Ordered by position
+             -- (a bare `score` here would be the OUT parameter), then by id so the
+             -- order is total when rows share a created_at.
+             recency_score(b.sim, t.created_at, v_weight, v_half)
       FROM best b
       JOIN thoughts t ON t.id = b.tid
       WHERE b.sim > match_threshold
-      ORDER BY 6 DESC
+      ORDER BY 6 DESC, t.id
       LIMIT v_count;
     END IF;
   END IF;
 END;
 $$;
+
+-- Replay the old function's privileges onto the new one (see the header). The
+-- setting is empty when there was no old function or its ACL was NULL — the
+-- defaults — and then nothing is done, so the new function has the defaults too.
+DO $acl$
+DECLARE
+  v_acl  text := current_setting('ob1.acl_match_thoughts', true);
+  v_item record;
+BEGIN
+  IF v_acl IS NULL OR v_acl = '' THEN
+    RETURN;
+  END IF;
+  EXECUTE 'REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) FROM PUBLIC';
+  FOR v_item IN SELECT grantee, privilege_type FROM aclexplode(v_acl::aclitem[]) LOOP
+    IF v_item.privilege_type = 'EXECUTE' THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) TO %s',
+                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+    END IF;
+  END LOOP;
+END
+$acl$;
 
 -- The 5-argument fused function goes the same way, for the same reason.
 DROP FUNCTION IF EXISTS search_thoughts_hybrid(vector, text, float, int, jsonb);
@@ -579,17 +711,23 @@ BEGIN
     JOIN kw_needles kn ON kn.needle = k3.needle AND NOT kn.common AND kn.fetched = kn.total
     GROUP BY k3.hit_id
   ),
-  -- Vector arm: ranks over the N rows match_thoughts would return, whatever
-  -- their similarity — the threshold is applied below, after the exact hits
-  -- have been exempted from it. Ranked by match_thoughts' own `score` (020:
-  -- the recency blend, equal to the similarity at weight 0), so the order the
-  -- semantic tool would show is the order that counts here; `vsim` stays the
-  -- raw similarity, which is what the threshold and the tiebreak read.
+  -- Vector arm: ranks over the N rows match_thoughts would return. At weight 0
+  -- that is the call at threshold -1 — every scoreable row ranked, the
+  -- threshold applied below after the exact hits are exempted, sub-threshold
+  -- rows at the tail where the LIMIT never reaches them. Under a weight (020)
+  -- the tail is wherever age puts it, so the caller's threshold is passed:
+  -- the window is then the N rows the weighted semantic tool would show, and
+  -- a sub-threshold keyword hit is still returned below, by presence. Ranked
+  -- by match_thoughts' own `score` (the blend; the similarity at weight 0);
+  -- `vsim` stays the raw similarity, which is what the threshold reads, and
+  -- `vscore` is the tiebreak.
   vec AS (
     SELECT m.id AS vid, m.content AS vcontent, m.metadata AS vmetadata, m.created_at AS vcreated_at,
-           m.similarity AS vsim,
+           m.similarity AS vsim, m.score AS vscore,
            row_number() OVER (ORDER BY m.score DESC, m.id) AS rnk
-    FROM match_thoughts(query_embedding, -1.0, v_count, v_filter, recency_weight, half_life_days) AS m
+    FROM match_thoughts(query_embedding,
+                        CASE WHEN COALESCE(recency_weight, 0.0) > 0 THEN v_threshold ELSE -1.0 END,
+                        v_count, v_filter, recency_weight, half_life_days) AS m
   ),
   cand AS (
     SELECT v.vid AS cid FROM vec v
@@ -619,11 +757,22 @@ BEGIN
                SELECT ch.embedding FROM thought_chunks ch WHERE ch.thought_id = c.cid) AS x)
       ) AS sim,
       h.matched,
+      v.vscore,
       (CASE WHEN v.rnk IS NOT NULL AND NOT v_literal_only THEN 1.0 / (k + v.rnk) ELSE 0.0 END)
         + coalesce(cardinality(h.matched), 0) * (1.0 / (k + 1)) AS fused
     FROM cand c
     LEFT JOIN vec  v ON v.vid    = c.cid
     LEFT JOIN hits h ON h.hit_id = c.cid
+  ),
+  -- The tiebreak among equal fused scores is the BLENDED value (020): a row in
+  -- the window carries match_thoughts' `score`; a keyword hit outside it gets
+  -- the same formula over the probe's similarity, from the one function that
+  -- owns it. At weight 0 both are the similarity, and this is 017's order. It
+  -- decides the whole order for a literal-only query, where the gate gives the
+  -- vector arm no vote and every row not containing the needle has fused 0.
+  blended AS (
+    SELECT s.*, coalesce(s.vscore, recency_score(s.sim, s.created_at, recency_weight, half_life_days)) AS rscore
+    FROM scored s
   )
   SELECT
     s.cid, s.content, s.metadata, s.created_at,
@@ -634,18 +783,39 @@ BEGIN
     u.common,
     v_literal_only,
     s.fused::float
-  FROM scored s
+  FROM blended s
   CROSS JOIN used u
   WHERE s.matched IS NOT NULL OR s.sim > v_threshold
-  ORDER BY s.fused DESC, s.sim DESC NULLS LAST, s.created_at DESC, s.cid
+  ORDER BY s.fused DESC, s.rscore DESC NULLS LAST, s.created_at DESC, s.cid
   LIMIT v_count;
 END;
 $$;
 
+-- Replay the old function's privileges onto the new one (see the header). The
+-- setting is empty when there was no old function or its ACL was NULL — the
+-- defaults — and then nothing is done, so the new function has the defaults too.
+DO $acl$
+DECLARE
+  v_acl  text := current_setting('ob1.acl_search_thoughts_hybrid', true);
+  v_item record;
+BEGIN
+  IF v_acl IS NULL OR v_acl = '' THEN
+    RETURN;
+  END IF;
+  EXECUTE 'REVOKE ALL ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) FROM PUBLIC';
+  FOR v_item IN SELECT grantee, privilege_type FROM aclexplode(v_acl::aclitem[]) LOOP
+    IF v_item.privilege_type = 'EXECUTE' THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) TO %s',
+                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+    END IF;
+  END LOOP;
+END
+$acl$;
+
 -- Re-issued: a DROP loses the COMMENT (007's and 017's), and the description
 -- below is a description, not a marker — the sentinel in the body is that.
 COMMENT ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) IS
-  'Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence; ordered by `score`, which blends the raw `similarity` with exp(-age_days / half_life_days) at recency_weight (0 by default: similarity alone). The threshold gates the raw similarity. See the 020 header.';
+  'Semantic search over whole-thought vectors and chunk vectors, deduplicated to one row per thought scored by its best evidence; ordered by `score` (recency_score: the raw `similarity` blended with 0.5 ^ (age_days / half_life_days) at recency_weight, 0 by default — similarity alone), then id. The threshold gates the raw similarity. See the 020 header.';
 
 COMMENT ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) IS
-  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm (in match_thoughts'' own order — its `score`, the recency blend at recency_weight, similarity alone at 0), presence per matched needle on the keyword arm, each hit''s own cosine similarity as the tiebreak. Needles come from extract_search_needles(query_text). Fixed top-N (no paging); a query with no needle returns match_thoughts'' rows in match_thoughts'' order, ties in score broken by id. See the 017 and 020 headers.';
+  'match_thoughts and search_thoughts_keyword fused: reciprocal rank on the vector arm (in match_thoughts'' own order — its `score`, the recency blend at recency_weight, similarity alone at 0), presence per matched needle on the keyword arm, each hit''s own blended score (its cosine similarity at weight 0) as the tiebreak. Needles come from extract_search_needles(query_text). Fixed top-N (no paging); a query with no needle returns match_thoughts'' rows in match_thoughts'' order, ties broken by id. See the 017 and 020 headers.';

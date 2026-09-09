@@ -2964,8 +2964,10 @@ ranked on cosine similarity alone, so two thoughts of equal fit ranked
 identically whether one was captured yesterday or two years ago — right for a
 reference brain, wrong for a working one, and quiet either way. Upstream's
 `schemas/recency-boosted-match-thoughts` has the formula — `score = similarity ·
-(1 − w) + exp(−age_days / half_life) · w`, `w` defaulting to 0 — and, as written,
-two regressions against this fork's function: it reads `thoughts` alone (change
+(1 − w) + 0.5^(age_days / half_life) · w`, `w` defaulting to 0 (upstream writes
+`exp(−age / half_life)`, an e-folding time under a parameter named half-life;
+here the name is true) — and, as written, two regressions against this fork's
+function: it reads `thoughts` alone (change
 18's chunk retrieval gone) and puts the threshold and the blend into the scan
 (no `ORDER BY <=> LIMIT`, so no HNSW index — the cost change 36 measured). So
 the blend is grafted onto the body changes 28 and 36 built, and the access path
@@ -3004,8 +3006,14 @@ at least 80), and the factor is measured rather than assumed: `eval-recency.ts`
 compares the function's top N against an exact blended ranking of the whole
 table, and against the top N the un-widened window would have given. On 486
 queries at every weight and half-life the function matched the oracle in
-every cell — 100.0% at 10 and at 100 results — where the 4N window fell to 95%
-at 0.2 over 30 days, 92% at 0.3 and 85% at weight 1. The adaptive alternative
+every cell, where the 4N window fell to 96% at 0.2 over 30 days, 93% at 0.3
+and 85% at weight 1. Read with the corpus's size: at 10 results the widened
+window is a third of the 486-row table, and at 100 results it *is* the table,
+so that cell can only agree with the oracle. What the corpus shows is that 4N
+loses rows the formula ranks first and 16N did not, at its size; on a brain of
+tens of thousands the window is a fraction of a percent of the table, and the
+contract is a re-ranking of the nearest candidates, not an exact blended
+ranking of the table — the header says so. The adaptive alternative
 (fetch, check the bound, widen, fetch again) was declined: it either runs the
 index scan twice or moves the candidate CTEs out of the `RETURN QUERY` blocks
 that [5c] and both benches read from the catalog. What a weighted call costs
@@ -3023,8 +3031,8 @@ finds body — so the right answer is the issue whatever its age, and the number
 is what a weight *costs* on a relevance task; this corpus has no ground truth
 for "what was I doing about X" and cannot show a weight helping. At the tools'
 setting (10 results, threshold 0.5) every weight lowered MRR: 0.899 at 0 →
-0.890 at 0.1 over 365 days, 0.870 at 0.1 over 90, 0.775 at 0.2 over 90 (9
-answers moved up, 113 down), 0.576 at 0.3, 0.158 at 1. The ticket said what to
+0.894 at 0.1 over 365 days, 0.879 at 0.1 over 90, 0.811 at 0.2 over 90 (8
+answers moved up, 88 down), 0.667 at 0.3, 0.158 at 1. The ticket said what to
 do with that result, and it is done: the default stays 0, `search_thoughts`
 takes `recency_weight` (0–1; the half-life stays 90 days for the tool) for a
 caller who knows their brain is a working log, and the ChatGPT `search`, which
@@ -3047,7 +3055,11 @@ NULL `created_at` infinitely old (the first draft's `GREATEST` swallowed the
 NULL and called the row brand new — the test caught it); the widened window
 observable, a recent row ranked 61st by similarity coming first under a
 weight; the hybrid following the weighted order with its `similarity` still
-the cosine. [20] keeps 019's expectations for the keyword function and adds
+the cosine; infinite timestamps scored at both ends and never subtracted at
+weight 0; ties broken by id through a LIMIT; the fused search under a weight
+and a threshold returning the newest row *above* the threshold; a literal-only
+query ordered by the blend; and the ACL replayed across the DROP. [20] keeps
+019's expectations for the keyword function and adds
 the new trap: re-applying 014 puts the 4-argument form back beside 020's, and a
 4-argument call is then `function is not unique`. Preflight gains a `search
 signatures` check that fails a database whose functions predate 020 (the
@@ -3055,8 +3067,50 @@ server sends the new arguments) and one with an earlier form re-created beside
 020's, with the `DROP` as the remedy; its 014 and 019 checks read whichever
 form is there and name it in their `ALTER FUNCTION`. Both stores send all the
 arguments on every call and map `score`; `test-store-sql`, `test-store-postgrest`
-and the e2e suite each age a row and watch it drop. Suites: schema 403 (both
+and the e2e suite each age a row and watch it drop. Suites: schema 415 (both
 widths), live 230, preflight 102, sql 56, e2e 62.
+
+**A first pass, triaged: eight fixes and two corrections to what the docs
+claimed.** The parameter was named `half_life_days` and the formula was
+`exp(−age / half_life)` — an e-folding time, 0.37 at the half-life, upstream's
+mistake carried over; it is `0.5^(age / half_life)` now, the tool text ("halves
+every 90 days") is true, and every number above was re-measured (the slower
+decay costs a little less: 0.811 rather than 0.775 at 0.2 over 90 days). The
+formula was inlined three times in the body and twice more in the harnesses;
+`recency_score()` — a SQL function the planner inlines — is the one copy, called
+by `match_thoughts`, by the hybrid for the keyword hits it scores itself, and by
+the eval's oracle (which therefore measures the window, not the arithmetic;
+[21] holds the arithmetic against the formula written out in TypeScript). It
+also carries the fix for a row with an infinite `created_at`: the first draft
+computed `now() − created_at` for every candidate at every weight, which
+PostgreSQL 16 — the pinned server, though not PGlite — refuses for `±infinity`,
+so a hand-written row would have broken `match_thoughts` at weight 0 where 019
+answered fine; the CASE now never evaluates the age at weight 0. Three more in
+the hybrid: under a weight it passes the caller's threshold to `match_thoughts`
+instead of −1, because recent sub-threshold rows could fill the N slots and be
+dropped by the threshold below, leaving older above-threshold rows that never
+entered the window — `search_thoughts` answering "nothing" for a query the
+unweighted call answers; its tiebreak among equal fused scores is the blended
+value rather than the raw similarity, which for a literal-only query (the gate
+gives the vector arm no vote) was the whole order, so the weight chose the rows
+and then did not order them; and `match_thoughts`' own `ORDER BY` gained `id`
+as a second key, since rows sharing a `created_at` tie exactly at weight 1 and
+019 left which survive the LIMIT to the plan. Two on the deployment path: a
+`DROP FUNCTION` loses the function's ACL, so an operator's `REVOKE EXECUTE
+FROM anon` on the old form would have been silently undone on Supabase — 020
+reads each old ACL before its DROP and replays it after the CREATE, and [21]
+proves it; and the `search signatures` check ran only on the SQL store, so on
+the default PostgREST store two overloads went undetected while every
+4-argument caller failed — preflight now probes PostgREST as such a caller
+would, with four named arguments, which only two overloads make ambiguous. The
+e2e assertion that the aged row still shows "100.0% match" had an operator
+precedence that made it always true; it reads the row's own header line now.
+And the window claim above was stated as support at both settings when at 100
+results the window was the whole 486-row table; it is stated for what it is.
+And one thing the pass did not find but the run did: `db/with-postgres.sh`
+removed its container and not the anonymous volume the postgres image declares,
+so 776 of them — 79 GB — had accumulated and the podman VM ran out of disk
+mid-bench; it removes both now.
 
 **Not done here.** A default weight for the ChatGPT `search` other than 0 —
 the measurement above is the reason, and an operator who wants one has no knob;

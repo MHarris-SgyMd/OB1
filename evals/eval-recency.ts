@@ -4,7 +4,7 @@
  * corpus this fork measures everything against?
  *
  * SMD-945 (migration 020) lets a caller weight cosine similarity against
- * exp(-age_days / half_life_days). The default weight is 0 and the ticket says
+ * 0.5 ^ (age_days / half_life_days). The default weight is 0 and the ticket says
  * what to do if a weight hurts here: say so and keep it at 0. This harness is
  * that measurement, plus the two things the migration's header claims and
  * cannot prove on its own:
@@ -19,7 +19,9 @@
  *     the whole table (a sequential scan, the oracle), and so is the top N a
  *     4 * N window would have given — the un-widened alternative, computed in
  *     TypeScript from the nearest 4 * N — so the factor is priced by what it
- *     recovers, not assumed.
+ *     recovers, not assumed. Read the corpus's size into it: 486 rows, so at
+ *     10 results the widened window is a third of the table and at 100 results
+ *     it is the table — that cell can only agree with the oracle.
  *
  * The task is eval-real's: each issue's TITLE is the query, its body the
  * document, so no one labelled anything. Every thought's created_at is the
@@ -134,8 +136,11 @@ type Raw = {
   age: Map<string, number>;                         // issue id → age in days, for the narrow window
 };
 
-const blendExpr = (w: number, h: number) =>
-  `(1 - (embedding <=> $1::vector)) * (1 - ${w}) + CASE WHEN created_at IS NULL THEN 0 ELSE exp(-GREATEST(extract(epoch FROM (now() - created_at)), 0) / 86400.0 / ${h}) END * ${w}`;
+// The oracle ranks by the same function the migration ranks by — recency_score
+// is the one copy of the formula — so what this measures is the WINDOW, not
+// the arithmetic; db/test-schema.ts [21] holds the arithmetic against the
+// formula written out independently (first review pass).
+const blendExpr = (w: number, h: number) => `recency_score(1 - (embedding <=> $1::vector), created_at, ${w}, ${h})`;
 
 async function raw(q: Query): Promise<Raw> {
   const qv = lit(titleVectors[q.want]);
@@ -166,7 +171,7 @@ async function raw(q: Query): Promise<Raw> {
     for (const r of near as { id: string; days: number }[]) out.age.set(idOf.get(r.id)!, Number(r.days));
     for (const c of cells) {
       const ranked = (near as { id: string; sim: number; days: number }[])
-        .map((r) => ({ id: idOf.get(r.id)!, sim: Number(r.sim), score: Number(r.sim) * (1 - c.w) + Math.exp(-Math.max(Number(r.days), 0) / c.h) * c.w }))
+        .map((r) => ({ id: idOf.get(r.id)!, sim: Number(r.sim), score: Number(r.sim) * (1 - c.w) + Math.pow(0.5, Math.max(Number(r.days), 0) / c.h) * c.w }))
         .filter((r) => r.sim > s.threshold)
         .sort((a, b) => b.score - a.score || (linearThoughtId(a.id) < linearThoughtId(b.id) ? -1 : 1));
       out.narrow[s.name][key(c)] = ranked.slice(0, s.n).map((r) => r.id);

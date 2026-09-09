@@ -1788,7 +1788,7 @@ Postgres. Bodies and titles are cached in `/tmp` by text hash; a fresh run
 embeds for about two minutes and then spends a minute in the database.
 
 Migration 020 lets a caller weight cosine similarity against
-`exp(−age_days / half_life_days)`, after the candidate scan and with the
+`0.5^(age_days / half_life_days)`, after the candidate scan and with the
 threshold still on the raw similarity. The ticket said what to do if a weight
 hurts on this corpus: say so and keep the default at 0. This is that
 measurement, and two things the migration's header claims that only a run can
@@ -1804,7 +1804,11 @@ hold:
   top N is compared with an exact blended ranking of the whole table (a
   sequential scan, the oracle), and so is the top N a 4 · N window would have
   given, blended in TypeScript from the nearest 4 · N. The factor is priced by
-  what it recovers.
+  what it recovers — read with the corpus's size: at 10 results the widened
+  window is a third of the 486-row table, and at 100 results it *is* the
+  table, so that cell can only agree with the oracle. The oracle ranks by
+  `recency_score()`, the migration's own function, so this measures the window
+  and not the arithmetic; `db/test-schema.ts` [21] holds the arithmetic.
 
 **What the task can and cannot show.** It is `eval-real`'s: each issue's title
 is the query, its body the document, so the right answer is the issue itself
@@ -1822,38 +1826,44 @@ the un-widened window.
 | weight | half-life | R@1 | R@5 | not in top-10 | MRR | top-1 changed | window | 4N |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | — | 84% | 97% | 9 | **0.899** | 0 | 100.0% | 100.0% |
-| 0.1 | 30 d | 80% | 95% | 9 | 0.866 | 40 | 100.0% | 99.5% |
-| 0.1 | 90 d | 80% | 96% | 10 | 0.870 | 36 | 100.0% | 100.0% |
-| 0.1 | 365 d | 83% | 97% | 9 | 0.890 | 15 | 100.0% | 100.0% |
-| 0.2 | 30 d | 59% | 85% | 38 | 0.694 | 164 | 100.0% | 95.0% |
-| 0.2 | 90 d | 69% | 88% | 28 | 0.775 | 113 | 100.0% | 98.2% |
-| 0.2 | 365 d | 81% | 96% | 10 | 0.878 | 34 | 100.0% | 100.0% |
-| 0.3 | 30 d | 32% | 61% | 124 | 0.447 | 307 | 100.0% | 92.0% |
-| 0.3 | 90 d | 45% | 72% | 75 | 0.576 | 238 | 100.0% | 95.1% |
-| 0.3 | 365 d | 76% | 92% | 16 | 0.835 | 65 | 100.0% | 99.7% |
-| 0.5 | 30 d | 24% | 50% | 170 | 0.357 | 348 | 100.0% | 89.8% |
-| 0.5 | 90 d | 27% | 48% | 187 | 0.366 | 335 | 100.0% | 91.5% |
-| 0.5 | 365 d | 54% | 76% | 65 | 0.637 | 195 | 100.0% | 96.9% |
+| 0.1 | 30 d | 79% | 95% | 10 | 0.865 | 41 | 100.0% | 99.7% |
+| 0.1 | 90 d | 81% | 96% | 10 | 0.879 | 28 | 100.0% | 100.0% |
+| 0.1 | 365 d | 83% | 97% | 8 | 0.894 | 9 | 100.0% | 100.0% |
+| 0.2 | 30 d | 61% | 85% | 37 | 0.713 | 151 | 100.0% | 95.9% |
+| 0.2 | 90 d | 74% | 90% | 24 | 0.811 | 83 | 100.0% | 99.1% |
+| 0.2 | 365 d | 82% | 96% | 9 | 0.883 | 25 | 100.0% | 100.0% |
+| 0.3 | 30 d | 32% | 61% | 117 | 0.452 | 303 | 100.0% | 92.8% |
+| 0.3 | 90 d | 57% | 79% | 51 | 0.667 | 178 | 100.0% | 96.7% |
+| 0.3 | 365 d | 80% | 95% | 10 | 0.865 | 41 | 100.0% | 100.0% |
+| 0.5 | 30 d | 24% | 48% | 189 | 0.346 | 349 | 100.0% | 90.3% |
+| 0.5 | 90 d | 30% | 51% | 175 | 0.394 | 319 | 100.0% | 92.3% |
+| 0.5 | 365 d | 65% | 85% | 38 | 0.740 | 135 | 100.0% | 98.6% |
 | 1 | any | 6% | 28% | 259 | 0.158 | 450 | 100.0% | 85.0% |
 
 At 100 results and no threshold the picture is the same (0.902 at weight 0,
-0.892 at 0.1 over 365 days, 0.756 at 0.2 over 90, 0.011 at 1), and the window
-column is 100.0% in every cell there too.
+0.896 at 0.1 over 365 days, 0.801 at 0.2 over 90, 0.011 at 1), and the window
+column is 100.0% in every cell there — where it can only be, since 16 · 100
+candidates is the whole table. (These are the numbers with the true half-life,
+`0.5^(age / half_life)`; the first draft's `exp(−age / half_life)` decayed
+faster and cost a little more — 0.775 rather than 0.811 at 0.2 over 90 days.)
 
 **Every weight lowers MRR here.** Gently over a long half-life — 365 days is
 twice the corpus's span, so it barely decays — and steeply over a short one. At
-0.2 over 90 days, 9 answers moved up and 113 down; the ones that moved are the
+0.2 over 90 days, 8 answers moved up and 88 down; the ones that moved are the
 oldest issues in the tracker, displaced by newer issues on the same subject.
 That is the blend doing exactly what it says, on a task where it is the wrong
 thing to do. So the default stays 0, `search_thoughts` takes `recency_weight`
 for a caller who knows their brain is a working log, and the ChatGPT `search`
 tool, which cannot take a parameter, sends 0.
 
-**The window factor is supported.** The function's top N was the oracle's in
-every cell at both settings; the un-widened 4 · N window would have lost up to
-5% of the oracle's rows at a gentle weight and 15% at weight 1. That is what
-the fourfold widening buys, and what an opted-in caller pays for is in
-`db/bench-plan.ts`'s recency arm.
+**The window factor, at this corpus's size.** The function's top N was the
+oracle's in every cell at 10 results — a window of 160 over 486 rows — where
+the un-widened 4 · N window would have lost up to 4% of the oracle's rows at a
+gentle weight and 15% at weight 1. That is what the fourfold widening buys
+here; on a brain of tens of thousands of thoughts the window is a fraction of a
+percent of the table, and the migration's contract is a re-ranking of the
+nearest candidates, not an exact blended ranking. What an opted-in caller pays
+is in `db/bench-plan.ts`'s recency arm.
 
 ## Related
 

@@ -24,6 +24,7 @@
  */
 
 import { createStore, type StoreEnv } from "./store.ts";
+import { createClient } from "@supabase/supabase-js";
 import { parseKeyRecords } from "./auth.ts";
 import type { PassCounts } from "../db/config.mjs";
 
@@ -309,6 +310,7 @@ if (configFailed) {
       if (rowCount === null) {
         add("keyword search", "skip", "not probed — the schema check above failed first");
         add("hybrid search", "skip", "not probed — the schema check above failed first");
+        add("search signatures", "skip", "not probed — the schema check above failed first");
       } else {
         // 012 first, because 017 calls it: a missing search_thoughts_keyword
         // surfaces inside search_thoughts_hybrid with the same "does not
@@ -346,13 +348,41 @@ if (configFailed) {
             add("hybrid search", "fail",
                 "search_thoughts_hybrid is missing, or is the form from before migration 020 (the server sends recency_weight and half_life_days, which only 020's takes) — either way search and search_thoughts, which call it, would fail on every call",
                 "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
-          } else if (/could not choose the best candidate/i.test(msg)) {
-            add("hybrid search", "fail",
-                "search_thoughts_hybrid has more than one overload — an earlier migration re-applied by hand beside 020's — and PostgREST cannot choose between them, so every search would fail",
-                "DROP FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb); against the project's direct connection — the form 020 drops.");
           } else {
             add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
           }
+        }
+        /**
+         * Migration 020's other failure state, over PostgREST. The store's own
+         * calls send every argument by name and resolve uniquely whatever else
+         * is defined, so the probes above cannot see a 4-argument match_thoughts
+         * re-created BESIDE 020's by a hand re-apply of 007/014/019 — while every
+         * PostgREST caller that sends the four arguments the old form took (the
+         * community integrations, a dashboard) fails with PGRST203 on every
+         * call. So probe as such a caller would: four named arguments, count 1.
+         * One function resolves it through its defaults; two make PostgREST
+         * refuse to choose. The SQL branch reads pg_proc instead (first review
+         * pass of 020 — this check lived only there).
+         */
+        try {
+          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
+          const probe = new Array(embDim).fill(0);
+          probe[0] = 1;
+          const { error } = await legacy.rpc("match_thoughts", { query_embedding: probe, match_threshold: -1, match_count: 1, filter: {} });
+          if (!error) {
+            add("search signatures", "ok", "a 4-argument match_thoughts call resolves to one function over PostgREST — no earlier form beside 020's");
+          } else if (/could not choose|PGRST203|not unique/i.test(error.message)) {
+            add("search signatures", "fail",
+                "match_thoughts has more than one form — an earlier migration re-applied by hand beside 020's — and PostgREST cannot choose between them for a 4-argument call, so every caller sending four arguments fails",
+                "DROP FUNCTION match_thoughts(vector, float, int, jsonb); against the project's direct connection — the form 020 drops.");
+          } else if (missing(error.message)) {
+            add("search signatures", "fail", "match_thoughts is missing over PostgREST — every search would fail",
+                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+          } else {
+            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${error.message}); ${CATALOG_HINT}`);
+          }
+        } catch (e) {
+          add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
       }
     }
