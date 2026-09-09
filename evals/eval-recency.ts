@@ -133,7 +133,6 @@ type Raw = {
   was: Record<string, string[]>;                    // setting name → 019's rows (control)
   oracle: Record<string, Record<string, string[]>>; // setting name → cell key → exact blended top-N over the whole table
   narrow: Record<string, Record<string, string[]>>; // setting name → cell key → top-N a 4N window would give
-  age: Map<string, number>;                         // issue id → age in days, for the narrow window
 };
 
 // The oracle ranks by the same function the migration ranks by — recency_score
@@ -141,10 +140,11 @@ type Raw = {
 // the arithmetic; db/test-schema.ts [21] holds the arithmetic against the
 // formula written out independently (first review pass).
 const blendExpr = (w: number, h: number) => `recency_score(1 - (embedding <=> $1::vector), created_at, ${w}, ${h})`;
+// (The narrow-window arm below uses the same function over the nearest 4N.)
 
 async function raw(q: Query): Promise<Raw> {
   const qv = lit(titleVectors[q.want]);
-  const out: Raw = { fn: {}, was: {}, oracle: {}, narrow: {}, age: new Map() };
+  const out: Raw = { fn: {}, was: {}, oracle: {}, narrow: {} };
   for (const s of SETTINGS) {
     out.fn[s.name] = {};
     out.oracle[s.name] = {};
@@ -163,18 +163,16 @@ async function raw(q: Query): Promise<Raw> {
     const was = await sql.unsafe(`SELECT id FROM match_thoughts_019($1::vector, $2::float, $3::int, '{}'::jsonb)`, [qv, s.threshold, s.n]);
     out.was[s.name] = was.map((r: { id: string }) => idOf.get(r.id)!);
     // The narrow window: the nearest 4N by similarity (019's window), blended
-    // in TypeScript with the same formula and cut to N. What the function
-    // would have returned had 020 not widened the window.
-    const near = await sql.unsafe(
-      `SELECT id, 1 - (embedding <=> $1::vector) AS sim, extract(epoch FROM (now() - created_at)) / 86400.0 AS days
-       FROM thoughts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector LIMIT $2::int`, [qv, Math.max(s.n * 4, 20)]);
-    for (const r of near as { id: string; days: number }[]) out.age.set(idOf.get(r.id)!, Number(r.days));
+    // by the same recency_score() and cut to N — what the function would have
+    // returned had 020 not widened the window. In SQL, so the formula has one
+    // site (the second review pass found a TypeScript copy of it here).
     for (const c of cells) {
-      const ranked = (near as { id: string; sim: number; days: number }[])
-        .map((r) => ({ id: idOf.get(r.id)!, sim: Number(r.sim), score: Number(r.sim) * (1 - c.w) + Math.pow(0.5, Math.max(Number(r.days), 0) / c.h) * c.w }))
-        .filter((r) => r.sim > s.threshold)
-        .sort((a, b) => b.score - a.score || (linearThoughtId(a.id) < linearThoughtId(b.id) ? -1 : 1));
-      out.narrow[s.name][key(c)] = ranked.slice(0, s.n).map((r) => r.id);
+      const narrow = await sql.unsafe(
+        `SELECT n.id FROM (SELECT id, embedding, created_at FROM thoughts WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector LIMIT $2::int) n
+         WHERE 1 - (n.embedding <=> $1::vector) > $3::float
+         ORDER BY recency_score(1 - (n.embedding <=> $1::vector), n.created_at, ${c.w}, ${c.h}) DESC, n.id LIMIT $4::int`,
+        [qv, Math.max(s.n * 4, 20), s.threshold, s.n]);
+      out.narrow[s.name][key(c)] = narrow.map((r: { id: string }) => idOf.get(r.id)!);
     }
   }
   return out;
@@ -212,7 +210,7 @@ if (disagreements.length) {
 const rankOf = (list: string[], want: string) => { const i = list.indexOf(want); return i < 0 ? Infinity : i + 1; };
 const overlap = (a: string[], b: string[]) => { const B = new Set(b); return a.length ? a.filter((x) => B.has(x)).length / Math.max(a.length, b.length) : 1; };
 console.log(`\n  ${results.size} queries; the control passed on every one (at weight 0 the shipped function returns 019's rows in 019's order, and score equals similarity, at both settings).`);
-console.log(`  "window" is the share of the exact blended top-N the function's top-N contains (16N candidates under a weight); "4N" the same for the window 019 had, blended in TypeScript.`);
+console.log(`  "window" is the share of the exact blended top-N the function's top-N contains (16N candidates under a weight); "4N" the same for the window 019 had, blended by the same function.`);
 
 for (const s of SETTINGS) {
   console.log(`\n  ${s.name}\n`);

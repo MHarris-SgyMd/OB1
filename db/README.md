@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `415 assertions: 415 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `423 assertions: 423 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty migrations applied, and
 `\d thoughts` shows seven columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -592,8 +592,9 @@ own statement — read from the catalog, as section C above does — at
 `EMBEDDING_DIM`, under `EXPLAIN (ANALYZE, BUFFERS)`, at match_count 10, 50 and
 500, in five arms: the function as 014 plans it, the same with `enable_seqscan
 = off`, the same with `random_page_cost = 1.1` (the cost-model remedy the
-ticket asked to weigh), the deployed function under its own SET clauses, and
-the deployed function with `recency_weight = 0.3` (migration 020) — the same
+ticket asked to weigh), the deployed function under its own SET clauses at
+weight 0, and the deployed function with `recency_weight = 0.3` (migration
+020) — the same
 scan over a window four times wider, which is what a caller who opts into the
 blend pays: at 10,000 rows and the default count,
 1.8 ms and 3,434 buffers become 5.1 ms and 9,558, both candidate CTEs still
@@ -724,7 +725,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 415 assertions, PGlite, no container
+bun test-schema.ts                    # 423 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 230 assertions, real server, throwaway container
 ```
 
@@ -811,7 +812,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 415 properties, including:
+asserts 423 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -926,9 +927,13 @@ asserts 415 properties, including:
   allows; rows with equal scores come back in id order, through a LIMIT too;
   the fused function follows the weighted order with its `similarity` still
   the cosine, returns the newest row *above* the threshold when given a weight
-  and a threshold, orders a literal-only query by the blend; and 020 replays
-  the old function's ACL across its DROP — PUBLIC revoked on the 4-argument
-  form stays revoked on the 6-argument one
+  and a threshold, puts a keyword hit below the threshold first under a
+  weight, ranks an unembedded hit captured today above an old embedded one at
+  weight 1, orders a literal-only query by the blend; `v_exact` is sized from
+  the unweighted window; and 020 replays the old function's ACL across its
+  DROP — a revoke and a grant on the 4-argument form both carried to the
+  6-argument one, a role the defaults grant to stripped when the old form had
+  revoked it, and a hardened 6-argument form left alone on a re-run
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

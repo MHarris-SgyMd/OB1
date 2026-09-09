@@ -1803,7 +1803,7 @@ hold:
   16 · N under a weight, 4 · N without. For every query and cell the function's
   top N is compared with an exact blended ranking of the whole table (a
   sequential scan, the oracle), and so is the top N a 4 · N window would have
-  given, blended in TypeScript from the nearest 4 · N. The factor is priced by
+  given — the same `recency_score()` over the nearest 4 · N, in SQL. The factor is priced by
   what it recovers — read with the corpus's size: at 10 results the widened
   window is a third of the 486-row table, and at 100 results it *is* the
   table, so that cell can only agree with the oracle. The oracle ranks by

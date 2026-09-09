@@ -3013,7 +3013,9 @@ so that cell can only agree with the oracle. What the corpus shows is that 4N
 loses rows the formula ranks first and 16N did not, at its size; on a brain of
 tens of thousands the window is a fraction of a percent of the table, and the
 contract is a re-ranking of the nearest candidates, not an exact blended
-ranking of the table — the header says so. The adaptive alternative
+ranking of the table — the header says so. The exact/walk threshold does not
+widen with the window: `v_exact` is sized from the unweighted 4N, so a filter
+routes the same way at every weight. The adaptive alternative
 (fetch, check the bound, widen, fetch again) was declined: it either runs the
 index scan twice or moves the candidate CTEs out of the `RETURN QUERY` blocks
 that [5c] and both benches read from the catalog. What a weighted call costs
@@ -3067,8 +3069,8 @@ server sends the new arguments) and one with an earlier form re-created beside
 020's, with the `DROP` as the remedy; its 014 and 019 checks read whichever
 form is there and name it in their `ALTER FUNCTION`. Both stores send all the
 arguments on every call and map `score`; `test-store-sql`, `test-store-postgrest`
-and the e2e suite each age a row and watch it drop. Suites: schema 415 (both
-widths), live 230, preflight 102, sql 56, e2e 62.
+and the e2e suite each age a row and watch it drop. Suites: schema 423 (both
+widths), live 230, preflight 101, sql 56, e2e 62.
 
 **A first pass, triaged: eight fixes and two corrections to what the docs
 claimed.** The parameter was named `half_life_days` and the formula was
@@ -3111,6 +3113,36 @@ And one thing the pass did not find but the run did: `db/with-postgres.sh`
 removed its container and not the anonymous volume the postgres image declares,
 so 776 of them — 79 GB — had accumulated and the podman VM ran out of disk
 mid-bench; it removes both now.
+
+**A second pass, and the stop.** Every one of its ten findings was about the
+first pass's own additions, which is the signal this fork stops reviewing on;
+all ten were fixed. The ACL replay revoked only PUBLIC before re-granting, so
+the grants `ALTER DEFAULT PRIVILEGES` puts on a fresh function — on Supabase,
+anon, authenticated, service_role — survived, and an operator's `REVOKE` on
+anon came back: the regression the block exists to prevent. It revokes every
+grantee the CREATE handed out now, then grants exactly the old ACL, grant
+option included; and it runs only on the run that *creates* the new form,
+because a re-run over the two-form state read the 4-argument form's ACL and
+stamped it over a hardened 6-argument one. [21] holds four cases with a test
+role and default privileges (PGlite has both). Under a weight the hybrid passes
+the threshold, so a keyword hit below it left the window at any rank, tied a
+rank-1 vector-only row at exactly 1/(k+1) and lost on similarity — "exact hits
+first" broken by the threshold; such a hit now carries the rank just past the
+window, ahead of every vector-only row and behind a hit the window holds, and
+nothing changes at weight 0. A hit with no vector and no chunks had a NULL
+blended tiebreak and sorted last at every weight, so at weight 1 a thought
+captured today through the 2-arg fallback ranked below a three-year-old hit;
+under a weight it is scored by age alone. The PostgREST signature probe said ok
+on a database whose only `match_thoughts` predated 020 (a 4-argument call
+resolves against the old form too); it probes with 020's arguments first.
+`v_exact` inherited the fourfold widening — 32,000 parents scored exactly at
+the ceiling under a weight, and the exact/walk boundary moving with the weight
+— and is sized from the unweighted window now. The rest: [21]'s second ACL
+assertion observed the test's own grant; the eval's narrow-window arm
+re-implemented the blend in TypeScript and is the same `recency_score()` over
+the nearest 4N in SQL; a cache variant outside its helper's type; the bench's
+"after (019)" arms measure the deployed function and are named so; the tool
+comment's pre-half-life numbers; a hedged preflight assertion.
 
 **Not done here.** A default weight for the ChatGPT `search` other than 0 —
 the measurement above is the reason, and an operator who wants one has no knob;

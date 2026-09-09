@@ -200,8 +200,7 @@ else {
   const pre014 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(pre014.code === 1 && /search signatures.*match_thoughts\(vector,double precision,integer,jsonb\) is the form from before migration 020/s.test(pre014.out),
          "a 4-argument match_thoughts under a 020 server does not start, named by its signature");
-  assert(/filtered search.*!|filtered search[^\n]*warn/i.test(pre014.out) || /does not carry hnsw\.iterative_scan/.test(pre014.out), "…while 014's check is still a warning about the body it found");
-  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…saying the filtered scan is not iterative");
+  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…while 014's check still reads the body it found and says the filtered scan is not iterative");
   assert(/migration 014 is not applied/.test(pre014.out), "…and, with no ledger, calls it not applied");
   assert(/014_filtered_match_thoughts\.sql/.test(pre014.out), "…with the migration to apply");
 

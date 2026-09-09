@@ -365,12 +365,29 @@ if (configFailed) {
          * pass of 020 — this check lived only there).
          */
         try {
-          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
           const probe = new Array(embDim).fill(0);
           probe[0] = 1;
-          const { error } = await legacy.rpc("match_thoughts", { query_embedding: probe, match_threshold: -1, match_count: 1, filter: {} });
-          if (!error) {
-            add("search signatures", "ok", "a 4-argument match_thoughts call resolves to one function over PostgREST — no earlier form beside 020's");
+          // 020's form first, with every argument by name — the store's own
+          // call — so a database whose only match_thoughts predates 020 is
+          // reported as such rather than passing the 4-argument probe below
+          // (second review pass). Then the 4-argument call, which only two
+          // overloads make ambiguous.
+          let current = "";
+          try {
+            await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
+          } catch (e) {
+            current = (e as Error).message;
+          }
+          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
+          const { error } = current ? { error: null } : await legacy.rpc("match_thoughts", { query_embedding: probe, match_threshold: -1, match_count: 1, filter: {} });
+          if (current && missing(current)) {
+            add("search signatures", "fail",
+                "match_thoughts does not take recency_weight and half_life_days over PostgREST — it is missing or is the form from before migration 020 — and the server sends them on every search, so every search would fail",
+                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+          } else if (current) {
+            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${current}); ${CATALOG_HINT}`);
+          } else if (!error) {
+            add("search signatures", "ok", "match_thoughts takes 020's arguments over PostgREST, and a 4-argument call resolves to one function — no earlier form beside it");
           } else if (/could not choose|PGRST203|not unique/i.test(error.message)) {
             add("search signatures", "fail",
                 "match_thoughts has more than one form — an earlier migration re-applied by hand beside 020's — and PostgREST cannot choose between them for a 4-argument call, so every caller sending four arguments fails",

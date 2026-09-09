@@ -1970,6 +1970,36 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(one.length === 1 && one[0].similarity > 0.5, `with a weight, threshold 0.5 and one slot, the fused search returns one row above the threshold (${one.map((r) => `${r.content} ${r.similarity.toFixed(2)}`).join(", ") || "none"})`);
   const mtOne = await order(1, 90, 0.5);
   assert(one[0].content === mtOne[0].content, `…the newest row above the threshold, as the weighted semantic tool would show it (${one[0].content})`);
+  // With the threshold passed, a keyword hit BELOW the threshold is not in the
+  // window at any rank. It must still come first — "exact hits first" — so it
+  // carries the rank just past the window; without that it tied a rank-1
+  // vector-only row at exactly 1/(k + 1) and lost on similarity (second review
+  // pass). Row N: contains the needle, similarity 0.45, brand new.
+  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('N: names SMD-9450, below the threshold', $1::vector, now())`, [at(0.45, 5)]);
+  const needleBelow = (await db.query<{ content: string; similarity: number; matched_needles: string[] }>(
+    `SELECT content, similarity, matched_needles FROM search_thoughts_hybrid($1::vector, 'the scheduler work on SMD-9450', 0.5, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows;
+  assert(needleBelow[0].content.startsWith("N:") && needleBelow[0].matched_needles.join() === "SMD-9450" && needleBelow[0].similarity < 0.5,
+         `under a weight and a threshold, a keyword hit below the threshold is still first (${needleBelow.map((r) => r.content.split(":")[0]).join(", ")})`);
+  const needleBelow0 = (await db.query<{ content: string }>(
+    `SELECT content FROM search_thoughts_hybrid($1::vector, 'the scheduler work on SMD-9450', 0.5, 10, '{}'::jsonb)`, [Q])).rows;
+  assert(needleBelow0[0].content.startsWith("N:"), "…as it is at weight 0, where the window held it with a rank of its own");
+  // A hit with no vector and no chunks: at weight 1 a thought captured today
+  // through the 2-arg fallback outranks a three-year-old embedded hit — its
+  // NULL similarity is scored as 0 into the same formula under a weight, where
+  // the first draft sorted its NULL blend last (second review pass).
+  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('O: old embedded, names SMD-9450', $1::vector, now() - interval '3 years'), ('P: unembedded today, names SMD-9450', NULL, now())`, [at(0.9, 6)]);
+  const byAge = (await db.query<{ content: string; similarity: number | null }>(
+    `SELECT content, similarity FROM search_thoughts_hybrid($1::vector, 'SMD-9450', -1.0, 10, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows;
+  const posP = byAge.findIndex((r) => r.content.startsWith("P:")), posO = byAge.findIndex((r) => r.content.startsWith("O:"));
+  assert(posP >= 0 && posO >= 0 && posP < posO && byAge[posP].similarity === null, `at weight 1 an unembedded hit captured today ranks above a three-year-old embedded hit, its similarity still NULL (${byAge.map((r) => r.content.split(":")[0]).join(", ")})`);
+  const byAge0 = (await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, 'SMD-9450', -1.0, 10, '{}'::jsonb)`, [Q])).rows;
+  const p0 = byAge0.findIndex((r) => r.content.startsWith("P:")), o0 = byAge0.findIndex((r) => r.content.startsWith("O:"));
+  assert(p0 > o0, "…and at weight 0 the unembedded hit still sorts after it, as 017 had it");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE 'N:%' OR content LIKE 'O:%' OR content LIKE 'P:%'`);
+  // The exact/walk boundary does not move with the weight: v_exact is sized
+  // from the unweighted window (second review pass).
+  assert(/v_exact\s+int\s+:= GREATEST\(v_base \* 4, 1000\);/.test(proc.prosrc) && /v_fetch\s+int\s+:= v_base \* CASE WHEN v_weight > 0 THEN 4 ELSE 1 END;/.test(proc.prosrc),
+         "v_exact is sized from the unweighted window, v_fetch widens from it");
   // A literal-only query gives the vector arm no vote (017's gate), so the
   // fused score is 0 for every row not containing the needle and the tiebreak
   // is the whole order. It is the blended score, not the raw similarity, so the
@@ -1989,18 +2019,51 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   // before the DROP and replays it. Here: 019's 4-argument form back beside
   // 020's, PUBLIC revoked on it, 020 re-applied, the new form's ACL read.
   const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
-  const before = await acl(MT);
-  assert(before === "", `the shipped function has default privileges — a NULL ACL (${before || "NULL"})`);
-  await reapply("019");
-  await db.exec(`REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb) FROM PUBLIC`);
+  const MT_4 = "match_thoughts(vector, float, int, jsonb)";
+  const hasPublic = (a: string) => /(^\{|,)=X\//.test(a);
+  assert((await acl(MT)) === "", "the shipped function has default privileges — a NULL ACL");
+  // A database from before 020: the 6-argument form dropped, 019's 4-argument
+  // form installed and hardened, then 020 applied for the first time.
+  const pre020 = async () => { await db.exec(`DROP FUNCTION ${MT}`); await reapply("019"); };
+  await pre020();
+  await db.exec(`REVOKE ALL ON FUNCTION ${MT_4} FROM PUBLIC`);
   await restoreShipped("match_thoughts");
-  const after = await acl(MT);
-  assert(after !== "" && !/(^\{|,)=X\//.test(after), `after re-applying 020 over a revoked 4-argument form, PUBLIC has no EXECUTE on the new form (${after})`);
-  assert((await count("match_thoughts")) === 1, "…and the 4-argument form is gone again");
+  const revoked = await acl(MT);
+  assert(revoked !== "" && !hasPublic(revoked) && (await count("match_thoughts")) === 1, `a REVOKE FROM PUBLIC on the 4-argument form is carried to the new one (${revoked})`);
+  // The other direction, and a grant that is not PUBLIC's: an explicit grant on
+  // the old form appears on the new one — the second review pass found the
+  // first draft of this case observing its own GRANT on the 6-argument form.
+  await db.exec(`CREATE ROLE ob1_test_reader`);
+  await pre020();
+  await db.exec(`REVOKE ALL ON FUNCTION ${MT_4} FROM PUBLIC`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${MT_4} TO ob1_test_reader WITH GRANT OPTION`);
+  await restoreShipped("match_thoughts");
+  const granted = await acl(MT);
+  assert(!hasPublic(granted) && /ob1_test_reader=X\*\//.test(granted), `a grant on the old form — here to a role, with grant option — is carried to the new one, PUBLIC still revoked (${granted})`);
+  // Default privileges: what a Supabase project gives every new function (anon,
+  // authenticated, service_role). Revoking PUBLIC alone would leave them, and
+  // an operator's REVOKE on such a role would come back with the CREATE. The
+  // replay revokes every grantee the CREATE handed out before it grants.
+  await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ob1_test_reader`);
+  await pre020();
+  const fresh4 = await acl(MT_4);
+  assert(/ob1_test_reader=X\//.test(fresh4), `default privileges give a re-created 4-argument form EXECUTE for the role (${fresh4})`);
+  await db.exec(`REVOKE ALL ON FUNCTION ${MT_4} FROM ob1_test_reader`);
+  await restoreShipped("match_thoughts");
+  const stripped = await acl(MT);
+  assert(!/ob1_test_reader/.test(stripped) && hasPublic(stripped), `a role the defaults grant to but the old form had revoked is revoked on the new form too, PUBLIC kept as the old form had it (${stripped})`);
+  await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM ob1_test_reader`);
+  // A re-run over a database that already has the 6-argument form — the
+  // hand-re-apply state, the 4-argument form back beside it — must not stamp
+  // the 4-argument form's ACL over a hardened 6-argument one.
+  await db.exec(`REVOKE ALL ON FUNCTION ${MT} FROM PUBLIC`);
+  await reapply("019");
+  assert(hasPublic(await acl(MT_4)) || (await acl(MT_4)) === "", "the re-created 4-argument form has the defaults");
+  await restoreShipped("match_thoughts");
+  const kept = await acl(MT);
+  assert(!hasPublic(kept) && (await count("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
-  await reapply("019");
-  await restoreShipped("match_thoughts");
-  assert(/(^\{|,)=X\//.test(await acl(MT)), "…while a 4-argument form with PUBLIC granted replays that grant, so the defaults come back as the defaults");
+  await db.exec(`DROP ROLE ob1_test_reader`);
 }
 
 report();

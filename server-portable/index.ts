@@ -301,7 +301,7 @@ function buildServer(principal: Principal): McpServer {
   //
   // Nor can it grow `recency_weight` (migration 020, SMD-945), so it sends a
   // fixed one — 0, by measurement: on the 486-issue corpus a weight lowered
-  // MRR at every setting tried (0.899 → 0.890 at 0.1 over 365 days, 0.775 at
+  // MRR at every setting tried (0.899 → 0.894 at 0.1 over 365 days, 0.811 at
   // 0.2 over 90; evals/eval-recency.ts), and this surface has no caller who
   // can turn it off. An operator whose brain is a working log rather than a
   // reference can ask search_thoughts for a weight; this tool stays where

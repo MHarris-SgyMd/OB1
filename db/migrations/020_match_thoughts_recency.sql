@@ -96,9 +96,15 @@
 --   check the bound above, widen and fetch again — was weighed and declined:
 --   it runs the index scan twice on the calls that need it, or moves the
 --   candidate CTEs out of the RETURN QUERY blocks that db/test-live.ts [5c]
---   and both benches read from the catalog to prove the plan. v_exact
---   derives from v_fetch and widens with it: more filters are answered
---   exactly under a weight, which is correct and bounded.
+--   and both benches read from the catalog to prove the plan. v_exact — the
+--   most matching thoughts a filter may have and still be answered exactly —
+--   is sized from the UNWEIGHTED window and does not widen: the first draft
+--   derived it from v_fetch, which at the ceiling under a weight made the
+--   routing statement collect 32,001 ids and the exact branch score 32,000
+--   parents, and moved the exact/walk boundary with the weight, so a weighted
+--   and an unweighted call could differ by the walk's recall rather than by
+--   the blend (second review pass). The exact branch's blend is exact over
+--   every matching row either way.
 --
 -- The signature, and why the old one is dropped
 --   Two parameters, both defaulted — `recency_weight float DEFAULT 0.0`,
@@ -125,11 +131,23 @@
 --   exposure) would have had it silently granted back by this migration, where
 --   every earlier redefinition used CREATE OR REPLACE and kept the ACL (first
 --   review pass). So each old function's ACL is read before its DROP and
---   replayed onto the new one after its CREATE: REVOKE ALL FROM PUBLIC, then
---   GRANT to exactly the grantees the old ACL held. A NULL ACL (the defaults,
---   never touched) replays nothing, and the new function gets the same
---   defaults. db/test-schema.ts [21] revokes PUBLIC on the old form, re-applies
---   this file, and reads the new form's ACL.
+--   replayed onto the new one after its CREATE: every privilege the CREATE
+--   handed out is revoked first — PUBLIC's, and every grantee ALTER DEFAULT
+--   PRIVILEGES gave the new function (on Supabase anon, authenticated and
+--   service_role; revoking PUBLIC alone would have left those, and the
+--   operator's REVOKE on anon undone anyway — second review pass) — then
+--   EXECUTE is granted to exactly the grantees the old ACL held, grant option
+--   included. A NULL old ACL (the defaults, never touched) replays nothing,
+--   and the new function gets the same defaults. And the replay runs only on
+--   the run that CREATES the new form: on a re-run over a database that
+--   already has it (this file is re-runnable, and a hand re-apply of an old
+--   migration can put the 4-argument form back beside it), CREATE OR REPLACE
+--   keeps the 6-argument form's own ACL, and stamping the 4-argument form's
+--   over it would have undone a REVOKE placed on the form that matters
+--   (second review pass). db/test-schema.ts [21] holds all three: a revoke
+--   carried across, a grant the defaults did not have carried across, a
+--   default-privileges grantee stripped, and a hardened form left alone on a
+--   re-run.
 --
 -- `score` beside `similarity`
 --   The return shape gains a sixth column, `score`: the blended value the rows
@@ -162,7 +180,11 @@
 --     entered the window — search_thoughts answering "nothing" for a query the
 --     unweighted call answers (first review pass). With the threshold passed,
 --     the window is the N rows the weighted semantic tool would show; a
---     keyword hit below the threshold is still returned, by presence, and at
+--     keyword hit below the threshold is still returned, by presence — and
+--     carries the rank just past the window, 1/(k + N + 1), so it stays ahead
+--     of every vector-only row as it did at weight 0 when the window held it
+--     (without that it tied a rank-1 vector-only row at exactly 1/(k + 1) and
+--     lost the tiebreak to that row's similarity — second review pass). At
 --     weight 0 the call is 017's exactly.
 --   * Its tiebreak among equal fused scores is the blended value, not the raw
 --     similarity — for a row in the window match_thoughts' `score`, for a
@@ -171,8 +193,13 @@
 --     is only literals: 017's gate gives the vector arm no vote there, every
 --     row not containing the needle has fused 0, and the tiebreak IS the
 --     order — by raw similarity the weight would have chosen the rows and
---     then not ordered them (first review pass). `similarity` in the output
---     stays raw, and the threshold still reads it.
+--     then not ordered them (first review pass). A hit with no vector and no
+--     chunks (captured through the 2-arg fallback, not yet re-embedded) has a
+--     NULL similarity and at weight 0 sorts last among ties, as 017 had it;
+--     under a weight it is scored by age alone — a similarity of 0 into the
+--     same formula — so a thought captured today ranks by its day, not last
+--     (second review pass). `similarity` in the output stays raw, and the
+--     threshold still reads it.
 --
 -- Inputs
 --   recency_weight NULL is 0; outside [0, 1] it is clamped, with a NOTICE, as
@@ -281,13 +308,16 @@ COMMENT ON FUNCTION recency_score(float, timestamptz, float, float) IS
 
 -- The old functions' privileges, read before the DROPs below so the CREATEs
 -- can be given the same ones (see the header). Session-scoped settings hold
--- the aclitem[] as text; empty when the function does not exist or its ACL is
--- NULL (the defaults), and the replay does nothing.
+-- the aclitem[] as text; empty — and the replay does nothing — when the new
+-- form already exists (a re-run: CREATE OR REPLACE keeps its ACL), when the
+-- old form does not exist, or when its ACL is NULL (the defaults).
 SELECT set_config('ob1.acl_match_thoughts',
-                  COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('match_thoughts(vector, float, int, jsonb)')), ''),
+                  CASE WHEN to_regprocedure('match_thoughts(vector, float, int, jsonb, float, float)') IS NOT NULL THEN ''
+                       ELSE COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('match_thoughts(vector, float, int, jsonb)')), '') END,
                   false);
 SELECT set_config('ob1.acl_search_thoughts_hybrid',
-                  COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('search_thoughts_hybrid(vector, text, float, int, jsonb)')), ''),
+                  CASE WHEN to_regprocedure('search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)') IS NOT NULL THEN ''
+                       ELSE COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('search_thoughts_hybrid(vector, text, float, int, jsonb)')), '') END,
                   false);
 
 -- The 4-argument function goes first. Beside the 6-argument one it would make
@@ -367,15 +397,18 @@ DECLARE
   -- The candidate window. Under a weight it widens fourfold: the blend can
   -- only reorder the candidates the scan produced, and a recent row just
   -- outside the nearest 4 * count can be the right answer once age counts.
-  -- The header prices the factor and says how it was measured.
-  v_fetch      int     := GREATEST(v_count * 4, 20) * CASE WHEN v_weight > 0 THEN 4 ELSE 1 END;
+  -- The header prices the factor and says how it was measured. v_base is the
+  -- unweighted window, which v_exact below is sized from: the exact/walk
+  -- boundary does not move with the weight (second review pass).
+  v_base       int     := GREATEST(v_count * 4, 20);
+  v_fetch      int     := v_base * CASE WHEN v_weight > 0 THEN 4 ELSE 1 END;
   -- Filters matching at most this many thoughts are answered EXACTLY, from the
   -- matching rows and their chunks, with no index walk at all (see the
   -- filtered branches below). v_fetch * 4 for the counts where the walk would
   -- have to find nearly every matching row anyway; 1,000 as a floor because a
   -- thousand parents and their chunks are a few thousand distance
   -- computations — milliseconds at any width — and no walk is cheaper.
-  v_exact      int     := GREATEST(v_fetch * 4, 1000);
+  v_exact      int     := GREATEST(v_base * 4, 1000);
   -- The matching thoughts' ids, at most v_exact + 1 of them — collected once,
   -- through the GIN index, and used both to ROUTE (more than v_exact means the
   -- walk) and to DRIVE the exact branch by primary key. One pass over the
@@ -566,8 +599,13 @@ END;
 $$;
 
 -- Replay the old function's privileges onto the new one (see the header). The
--- setting is empty when there was no old function or its ACL was NULL — the
--- defaults — and then nothing is done, so the new function has the defaults too.
+-- setting is empty when the new form already existed before this run (a
+-- re-run: CREATE OR REPLACE kept its ACL and there is nothing to replay), when
+-- there was no old function, or when the old ACL was NULL — the defaults — and
+-- then nothing is done. Otherwise: revoke from EVERY grantee the CREATE gave
+-- the new function (PUBLIC, and whatever ALTER DEFAULT PRIVILEGES added — on
+-- Supabase anon, authenticated, service_role), then grant exactly what the
+-- old ACL held, grant option included.
 DO $acl$
 DECLARE
   v_acl  text := current_setting('ob1.acl_match_thoughts', true);
@@ -577,10 +615,17 @@ BEGIN
     RETURN;
   END IF;
   EXECUTE 'REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) FROM PUBLIC';
-  FOR v_item IN SELECT grantee, privilege_type FROM aclexplode(v_acl::aclitem[]) LOOP
+  FOR v_item IN
+    SELECT DISTINCT a.grantee FROM pg_proc p, aclexplode(p.proacl) AS a
+    WHERE p.oid = to_regprocedure('match_thoughts(vector, float, int, jsonb, float, float)') AND a.grantee <> 0
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) FROM %s', quote_ident(pg_get_userbyid(v_item.grantee)));
+  END LOOP;
+  FOR v_item IN SELECT grantee, privilege_type, is_grantable FROM aclexplode(v_acl::aclitem[]) LOOP
     IF v_item.privilege_type = 'EXECUTE' THEN
-      EXECUTE format('GRANT EXECUTE ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) TO %s',
-                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION match_thoughts(vector, float, int, jsonb, float, float) TO %s%s',
+                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END,
+                     CASE WHEN v_item.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
     END IF;
   END LOOP;
 END
@@ -758,7 +803,19 @@ BEGIN
       ) AS sim,
       h.matched,
       v.vscore,
-      (CASE WHEN v.rnk IS NOT NULL AND NOT v_literal_only THEN 1.0 / (k + v.rnk) ELSE 0.0 END)
+      -- The rank term. A row in the window: 1/(k + rank), as 017. Under a
+      -- weight (020) the window is the N rows ABOVE the threshold, so a
+      -- keyword hit below it is not in the window at any rank — where at
+      -- weight 0 it sat in the tail with a rank of its own. Without a rank term
+      -- it would tie a rank-1 vector-only row at exactly 1/(k + 1) and lose the
+      -- tiebreak to that row's higher similarity: "exact hits first" broken by
+      -- the threshold, not by age. So under a weight a keyword hit outside the
+      -- window carries the rank just past it, 1/(k + N + 1): still ahead of
+      -- every vector-only row, still behind a hit the window holds. At weight 0
+      -- nothing here changes (second review pass).
+      (CASE WHEN v.rnk IS NOT NULL AND NOT v_literal_only THEN 1.0 / (k + v.rnk)
+            WHEN h.matched IS NOT NULL AND NOT v_literal_only AND COALESCE(recency_weight, 0.0) > 0 THEN 1.0 / (k + v_count + 1)
+            ELSE 0.0 END)
         + coalesce(cardinality(h.matched), 0) * (1.0 / (k + 1)) AS fused
     FROM cand c
     LEFT JOIN vec  v ON v.vid    = c.cid
@@ -770,8 +827,15 @@ BEGIN
   -- owns it. At weight 0 both are the similarity, and this is 017's order. It
   -- decides the whole order for a literal-only query, where the gate gives the
   -- vector arm no vote and every row not containing the needle has fused 0.
+  -- A hit with no vector and no chunks has no similarity: at weight 0 it sorts
+  -- last among ties, as 017 had it; under a weight it is scored by age alone —
+  -- a similarity of 0 into the same formula — so "newest first" holds for a
+  -- thought captured today through the 2-arg fallback too (second review pass).
   blended AS (
-    SELECT s.*, coalesce(s.vscore, recency_score(s.sim, s.created_at, recency_weight, half_life_days)) AS rscore
+    SELECT s.*,
+           coalesce(s.vscore,
+                    recency_score(CASE WHEN s.sim IS NULL AND COALESCE(recency_weight, 0.0) > 0 THEN 0.0 ELSE s.sim END,
+                                  s.created_at, recency_weight, half_life_days)) AS rscore
     FROM scored s
   )
   SELECT
@@ -792,8 +856,13 @@ END;
 $$;
 
 -- Replay the old function's privileges onto the new one (see the header). The
--- setting is empty when there was no old function or its ACL was NULL — the
--- defaults — and then nothing is done, so the new function has the defaults too.
+-- setting is empty when the new form already existed before this run (a
+-- re-run: CREATE OR REPLACE kept its ACL and there is nothing to replay), when
+-- there was no old function, or when the old ACL was NULL — the defaults — and
+-- then nothing is done. Otherwise: revoke from EVERY grantee the CREATE gave
+-- the new function (PUBLIC, and whatever ALTER DEFAULT PRIVILEGES added — on
+-- Supabase anon, authenticated, service_role), then grant exactly what the
+-- old ACL held, grant option included.
 DO $acl$
 DECLARE
   v_acl  text := current_setting('ob1.acl_search_thoughts_hybrid', true);
@@ -803,10 +872,17 @@ BEGIN
     RETURN;
   END IF;
   EXECUTE 'REVOKE ALL ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) FROM PUBLIC';
-  FOR v_item IN SELECT grantee, privilege_type FROM aclexplode(v_acl::aclitem[]) LOOP
+  FOR v_item IN
+    SELECT DISTINCT a.grantee FROM pg_proc p, aclexplode(p.proacl) AS a
+    WHERE p.oid = to_regprocedure('search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)') AND a.grantee <> 0
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) FROM %s', quote_ident(pg_get_userbyid(v_item.grantee)));
+  END LOOP;
+  FOR v_item IN SELECT grantee, privilege_type, is_grantable FROM aclexplode(v_acl::aclitem[]) LOOP
     IF v_item.privilege_type = 'EXECUTE' THEN
-      EXECUTE format('GRANT EXECUTE ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) TO %s',
-                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb, float, float) TO %s%s',
+                     CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END,
+                     CASE WHEN v_item.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
     END IF;
   END LOOP;
 END
