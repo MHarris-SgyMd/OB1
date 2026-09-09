@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-eight numbered changes on top of the pin. Seven fix defects found in an
+Thirty-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–38 are the numbered `###` sections** further down, which is
+sections. Changes **18–39 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -2704,7 +2704,7 @@ names a model or width other than the configured one (`parseReembedKey`, one
 parser for both files), and preflight tells a pass to a model that is no longer
 the recorded one — "a switch that was abandoned or reverted" — with its two real
 remedies, completing that switch in its own environment or retiring its record
-(the hand `DELETE` that 015 documents; a flag for it is SMD-1067). The
+(the hand `DELETE` that 015 documents; change 39 gives it a flag, `--retire`). The
 configured key's remedy now carries `--switch-model` when the record disagrees
 with the configuration, which is the only case where the tool would have
 refused the command preflight printed. The restart was scoped to this job and
@@ -2773,8 +2773,8 @@ it is a scan.
 cannot read anything else the schema checks read; per-row lease renewal
 (SMD-1023); extraction passes; an acknowledgement path for a row the provider
 refuses permanently, which otherwise keeps the warning alive on every start
-(SMD-1067 — `--accept-failed` under the caveat rule, and `--retire` for a
-superseded key); a thought captured by a not-yet-switched server after the
+(SMD-1067 — done in change 39: `--accept-failed` under the caveat rule, and
+`--retire` for a superseded key); a thought captured by a not-yet-switched server after the
 record moved, which has the old model's vector and no claim row, and is
 indistinguishable from a new-model capture once the pass is finished — the run
 says so at its end, and the operator's step is to switch the server first;
@@ -3490,8 +3490,126 @@ content and vector with a raw update around `update_thought` and so leave a
 stale label as they leave a stale fingerprint. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
 labels them, and says how many before it runs. `--accept-failed` and
-`--retire` (SMD-1067) — with the column, accepting a row means "it stays at
-the old model, and the caveat says so".
+`--retire` (SMD-1067) — done in change 39, where accepting a row means exactly
+that: it stays at the old model, the caveat says so, and both readers of the
+row honour it while nothing has written the thought since.
+
+### 39. The operator's way to say "I know" — `--accept-failed` under the caveat rule, `--retire` for a superseded key, and preflight names both
+
+`db/reembed.ts` and `server-portable/preflight.ts` (Linear SMD-1067, filed by
+change 35's first review pass). No migration. Since change 35 preflight reports
+a re-embed pass unfinished while any row under its key is pending, leased or
+**failed**, and the container runs preflight on every start. Right for a row a
+retry can fix; endless for one the provider refuses permanently — a content
+filter that rejects one thought on every attempt — where `--retry-failed`
+re-fails it every time and the row keeps the vector it had. Change 34 covered
+the permanent *over-length* refusal (a 413 → succeeded, the head window stored,
+the refusal on the row as a caveat); a permanent *content* refusal has no
+partial result to store, and the only silencers were deleting the thought or
+clearing its claim row by hand — the "permanent warning nobody can clear" that
+preflight's own filtered-search check refuses to be. The same shape once more: a
+key whose model is no longer the recorded one (a switch abandoned or reverted)
+was reported with a hand `DELETE FROM thought_work_claims WHERE work_type = …`
+as one of its two remedies.
+
+**`--accept-failed <thought-id…>`, under change 34's rule.** The failed row
+becomes succeeded with the caveat `kept the vector it had; accepted by the
+operator: <the failure>` — `ACCEPTED_CAVEAT_PREFIX` in `db/config.mjs`, the one
+spelling both tools read — and `finished_at` is the moment of acceptance. The
+rule is unchanged: a succeeded row's `last_error` is what the worker could not
+do, here what the operator has accepted it will not do. No fifth status (015's
+CHECK would need a migration for four lines of value), no column. Per row, by
+id; `--all` exists and is explicit, and says that a provider outage accepted
+that way hides itself. An id that is not a *failed* row under the job —
+succeeded, pending, leased, or no row — refuses the whole command with each
+id's state, and nothing is written; so does a shell whose model is not the
+recorded one (the failed rows under its key are a pass that has not recorded
+itself: run it with `--switch-model`, and accept what it leaves). `--status`
+counts them inside the caveat parenthesis ("37 succeeded (2 with a caveat, 1
+accepted by the operator)") and lists them among the caveats; every list of
+failed rows names the flag; `--retry-fallbacks` returns them like any caveat,
+which spends the acceptance — `requeue` clears `last_error`, a second refusal
+fails the row again, and the operator accepts again or not.
+
+**What acceptance means to the two readers, and its bound.** This is where the
+ticket met change 38. Since 021 the rows say which model they are at, and
+`reembed.ts`'s data rule returns any succeeded row whose thought is not at the
+target to the pool on every run — which an accepted row's thought is, by
+decision; and preflight's `vector models` warns about every vector at another
+model. Left alone, the next plain run would have un-accepted the row and the
+label would have kept the warning alive by another route. So both readers
+honour the acceptance: the data rule leaves an accepted row (`NOT (accepted AND
+updated_at <= finished_at)`, under either key shape), and `vector models` counts
+its vector as detail — "41 at stub-embed, 1 at another model accepted by the
+operator (old-model: 1)", an ok — a warning counting only the un-accepted. Each
+ONLY WHILE NOTHING HAS WRITTEN THE THOUGHT SINCE: `updated_at <= finished_at`,
+the bound 021 gave its backfill and change 38's fifth review pass gave the data
+rule under a backfill key. An edit, or a re-capture, is a new question, and the
+row returns to the pool as any moved row does (a metadata-only edit reopens it
+too: one evidence rule, not two). Preflight counts an acceptance only under a
+`reembed:` key naming the model it judges against, the recorded one
+(`ACCEPTED_BY_MODEL_SQL`, with 021's own regex over the key): an acceptance
+under B's key says "stays where it is while the corpus moves to B", and after a
+move to C it says nothing — C's own pass has no row for the thought, pools it,
+and it is accepted under C's key or not. The claim table may lower that warning
+because the acceptance *is* the operator's word about exactly those vectors;
+clear the table and the warning returns, which is right — the acknowledgement
+was deleted. Everything else sees the succeeded row it is: `enqueue_thoughts`
+skips it by primary key, `--retry-failed` does not see it, a model change under
+the model's own key restarts failed rows and expired leases and leaves it;
+under a backfill key every terminal row restarts, accepted included, as before.
+
+**`--retire <key>`.** One qualified `DELETE`, in TypeScript, of a *superseded*
+pass's rows — a key whose `reembed:<model>@<dim>` is not the recorded model,
+the recorded model at another width (which nothing can complete), or a
+`reembed:` key naming no model (an abandoned backfill) — printed by preflight
+as the remedy in place of the hand statement. Refused, with nothing written: a
+key without the prefix (another tool's pass), a key naming the recorded model
+at the recorded width — suffix or not — whose pass can be finished or its
+failed rows accepted, a key with a live lease (a pass under it is running), and
+a key with no rows (a typo is the likelier cause). It prints what it removed and
+then the corpus by model: the vectors the retired pass wrote are still at its
+model, and `vector models` reports them until they are re-embedded — the truth
+the rows keep once the record is gone. Both flags are maintenance modes like
+`--status`: the claim table and nothing else, no provider, no model recorded;
+they combine with `--dry-run` and with nothing else. Preflight's `re-embed
+pass` remedies name both: `--accept-failed <thought-id…> for one the provider
+refuses permanently` beside `--retry-failed` wherever a key has failed rows,
+and `--retire <key>` in the superseded and other-width branches.
+
+**Verify, as the ticket asked.** `test-live.ts` [9]: the poisoned row that never
+recovers — `--accept-failed` with no ids refuses listing the three failed rows
+and both forms, an id whose row is succeeded refuses the whole command, a run
+flag beside it refuses, `--dry-run` says what it would accept; accepted, the row
+is succeeded with the caveat naming the failure, keeps its vector, is counted
+inside the caveat count and listed by `--status`, refuses a second acceptance,
+`--retry-failed` re-embeds the other two and does not see it, and
+`--retry-fallbacks` returns it with the head-window row and re-embeds both.
+Then the seam with 021, under the model's own key: one of the two rows the old
+server wrote is the poisoned text, so the plain run re-embeds one and is
+refused the other, which keeps the old server's vector and label; preflight
+warns from the claim row (naming `--accept-failed`) and from the label;
+accepted, preflight says `none unfinished` and `41 at stub-embed, 1 at another
+model accepted by the operator (old-model: 1)` as an ok; a plain run has
+nothing to do — the data rule stops at the operator's word; the old server
+saves metadata on it, and `--dry-run` says the row returns and preflight warns
+again; once the provider relents the run re-embeds it. `--retire`: an abandoned
+switch's key is reported with `--retire` and no DELETE; the recorded model's
+key, another tool's key, an empty key and a key with a live lease are refused;
+`--dry-run --retire` of the suite's key says what it would remove; the
+superseded key's two rows are removed and preflight has nothing left.
+`test-preflight.ts` [5]: the configured key's remedy names `--accept-failed`;
+the superseded and other-width remedies name `--retire` and no DELETE; an
+accepted row's vector is detail beside the recorded model's, a second
+un-accepted row at that model warns counting only itself, and an edit since the
+acceptance is no longer spoken for. Suites: live 286, preflight 123; schema 462
+at both widths, upgrade 27; the rest unchanged.
+
+**Not done here.** An acceptance under a backfill key is spent by a model change
+(every terminal row restarts there, as before 021), so a corpus whose history is
+under `reembed:nightly` re-asks every accepted row on a switch. The extraction
+worker has no acknowledgement path of its own — its failed rows are 016's, and
+preflight does not read them.
 
 ## Detached from the fork network
 

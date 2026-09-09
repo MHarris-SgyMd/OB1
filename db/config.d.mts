@@ -137,7 +137,7 @@ export function embeddingConfigWarnings(
 ): string[];
 
 /** A bulk pass's counts in one phrase — printed by db/reembed.ts, embedded by preflight (SMD-1024). */
-export type PassCounts = { thoughts: number; succeeded: number; fellBack: number; failed: number; claimed: number; pending: number; unpooled: number };
+export type PassCounts = { thoughts: number; succeeded: number; fellBack: number; accepted: number; failed: number; claimed: number; pending: number; unpooled: number };
 export function formatPassCounts(c: PassCounts): string;
 /** The shared rule for "this pass has not finished": a row is pending, leased or failed. */
 export function passUnfinished(c: Pick<PassCounts, "pending" | "claimed" | "failed">): boolean;
@@ -152,7 +152,15 @@ export function poolModelFor(key: string): string | null;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */
-export function summariseCorpusByModel(rows: { model: string | null; c: number }[], atModel: string): { at: number; unlabelled: number; others: { model: string; c: number }[]; otherCount: number };
+export function summariseCorpusByModel(
+  rows: { model: string | null; c: number }[],
+  atModel: string,
+  acceptedRows?: { model: string | null; accepted: number }[],
+): { at: number; unlabelled: number; others: { model: string; c: number; accepted: number }[]; otherCount: number; acceptedCount: number; unaccepted: number };
+/** The caveat `reembed.ts --accept-failed` writes on a failed row it marks succeeded (SMD-1067); both readers recognise an accepted row by it. */
+export const ACCEPTED_CAVEAT_PREFIX: string;
+/** Per embedding_model, the rows with a vector whose thought has an accepted row, unchanged since, under a `reembed:` key naming $1; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
+export const ACCEPTED_BY_MODEL_SQL: string;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

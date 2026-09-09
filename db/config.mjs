@@ -643,12 +643,15 @@ export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_M
  * embeds when it reports a re-embed pass unfinished. Defined once so the two
  * cannot describe the same claim rows in two vocabularies (SMD-1024).
  *
- * @param {{thoughts:number, succeeded:number, fellBack:number, failed:number, claimed:number, pending:number, unpooled:number}} c
+ * A row the operator accepted (SMD-1067) is a succeeded row with a caveat,
+ * and is counted inside that parenthesis so the two numbers cannot disagree.
+ *
+ * @param {{thoughts:number, succeeded:number, fellBack:number, accepted:number, failed:number, claimed:number, pending:number, unpooled:number}} c
  * @returns {string}
  */
 export function formatPassCounts(c) {
   return (
-    `${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with a caveat)` : ""}, ${c.failed} failed, ` +
+    `${c.thoughts} thoughts — ${c.succeeded} succeeded${c.fellBack ? ` (${c.fellBack} with a caveat${c.accepted ? `, ${c.accepted} accepted by the operator` : ""})` : ""}, ${c.failed} failed, ` +
     `${c.claimed} in flight, ${c.pending} pending, ${c.unpooled} not yet in the pool`
   );
 }
@@ -731,16 +734,57 @@ export const CORPUS_BY_MODEL_SQL =
  * tools, so they cannot describe one corpus two ways (SMD-1068's review
  * passes found the query and this arithmetic written twice).
  *
+ * The third argument is ACCEPTED_BY_MODEL_SQL's rows, when the caller has
+ * them: `unaccepted` is what a warning counts, the rest is detail (SMD-1067).
+ *
  * @param {{model: string | null, c: number}[]} rows
  * @param {string} atModel
- * @returns {{at: number, unlabelled: number, others: {model: string, c: number}[], otherCount: number}}
+ * @param {{model: string | null, accepted: number}[]} [acceptedRows]
+ * @returns {{at: number, unlabelled: number, others: {model: string, c: number, accepted: number}[], otherCount: number, acceptedCount: number, unaccepted: number}}
  */
-export function summariseCorpusByModel(rows, atModel) {
+export function summariseCorpusByModel(rows, atModel, acceptedRows = []) {
   const at = Number(rows.find((r) => r.model === atModel)?.c ?? 0);
   const unlabelled = Number(rows.find((r) => r.model === null)?.c ?? 0);
-  const others = rows.filter((r) => r.model !== null && r.model !== atModel).map((r) => ({ model: /** @type {string} */ (r.model), c: Number(r.c) }));
-  return { at, unlabelled, others, otherCount: others.reduce((a, r) => a + r.c, 0) };
+  const acceptedFor = (model) => Number(acceptedRows.find((r) => r.model === model)?.accepted ?? 0);
+  const others = rows
+    .filter((r) => r.model !== null && r.model !== atModel)
+    .map((r) => ({ model: /** @type {string} */ (r.model), c: Number(r.c), accepted: acceptedFor(r.model) }));
+  const otherCount = others.reduce((a, r) => a + r.c, 0);
+  const acceptedCount = others.reduce((a, r) => a + r.accepted, 0);
+  return { at, unlabelled, others, otherCount, acceptedCount, unaccepted: otherCount - acceptedCount };
 }
+
+/**
+ * The caveat an accepted failure carries (SMD-1067). A row the provider
+ * refuses permanently — a content filter that rejects one thought on every
+ * attempt — has no partial result to store and no retry that will change it;
+ * `reembed.ts --accept-failed` marks it succeeded with this prefix and the
+ * failure after it, under SMD-1021's rule that a succeeded row's last_error is
+ * what the worker could not do — here, what the operator has accepted it will
+ * not do. Both readers recognise an accepted row by this prefix: reembed.ts's
+ * data rule leaves it in place, and preflight's `vector models` counts its
+ * vector as detail rather than as a warning — each only while nothing has
+ * written the thought since (`updated_at <= finished_at`, 021's own evidence
+ * rule): an edit is a new question. `--retry-fallbacks` returns it like any
+ * caveat, which spends the acceptance.
+ */
+export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the operator: ";
+
+/**
+ * The accepted vectors by label, for the same reduction: per embedding_model,
+ * how many rows with a vector have an accepted row — unchanged since — under
+ * a `reembed:` key naming $1, the model the corpus is judged against. An
+ * acceptance under B's key says "stays where it is while the corpus moves to
+ * B"; judged against C it says nothing, and C's own pass asks the thought
+ * again. Parameters: $1 the model, $2 ACCEPTED_CAVEAT_PREFIX. Needs
+ * thought_work_claims (015) — run it only where that exists.
+ */
+export const ACCEPTED_BY_MODEL_SQL =
+  "SELECT t.embedding_model AS model, count(*)::int AS accepted FROM thoughts t " +
+  "WHERE t.embedding IS NOT NULL AND EXISTS (" +
+  "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.status = 'succeeded' AND starts_with(k.last_error, $2) " +
+  "AND COALESCE(t.updated_at, t.created_at) <= k.finished_at " +
+  "AND substring(k.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') = $1) GROUP BY 1";
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's

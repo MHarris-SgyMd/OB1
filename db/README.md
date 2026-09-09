@@ -309,8 +309,15 @@ warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
 it. A key whose model is no longer the recorded one — a switch abandoned or
 reverted — is reported as such, with its two remedies: finish that switch in
-its own environment, or retire its record (a flag for that, and for accepting a
-row the provider refuses permanently, is SMD-1067).
+its own environment, or retire its record with `--retire <key>`, which refuses
+the recorded model's keys, another tool's, an empty one and one with a live
+lease. A row the provider refuses permanently — a content filter, say — is the
+operator's to accept: `--accept-failed <thought-id…>` marks it succeeded with
+the caveat `kept the vector it had; accepted by the operator: <the failure>`,
+and both readers of the row honour that while nothing has written the thought
+since — the data rule leaves the row, and `vector models` counts its vector as
+detail rather than as a warning; an edit reopens it, and `--retry-fallbacks`
+returns it like any caveat (SMD-1067, FORK.md change 39).
 
 **What the audit log records: almost nothing, on purpose.** Migration 008's
 trigger diffs the embedding's *presence*, not its value, so a vector replaced
@@ -364,9 +371,14 @@ vector is the provider's final answer and is what a capture would have stored,
 length is not known to be about this input and is treated as transient; the
 row says what it got. The rule is general: a succeeded row's `last_error`, when set, is
 what the worker could not do — the write stands, and this is what it fell short
-of. `--status` and the end of a run count them ("35 succeeded (1 with the head
-window)") and list them; `--retry-fallbacks` returns them to the pool for the
-day the provider or its input limit changes. For that to be a fact about the
+of. `--status` and the end of a run count them ("35 succeeded (1 with a
+caveat)") and list them; `--retry-fallbacks` returns them to the pool for the
+day the provider or its input limit changes. The second caveat written today is
+the operator's: `--accept-failed` marks a failed row the provider refuses
+permanently succeeded with `kept the vector it had; accepted by the operator:
+<the failure>`, counted inside the same parenthesis ("37 succeeded (2 with a
+caveat, 1 accepted by the operator)") and returned by the same flag — see
+"What preflight sees" below. For that to be a fact about the
 row, the pass asks every long thought itself: its embedder does not remember a
 refusal the way the server's does (one probe per process on the interactive
 path), because a 413 is about *that* input's length and a shorter long thought
@@ -764,7 +776,7 @@ Two suites, because one of them cannot reach everything.
 
 ```bash
 bun test-schema.ts                    # 462 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 252 assertions, real server, throwaway container
+./with-postgres.sh bun test-live.ts   # 286 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -825,10 +837,14 @@ container.
   `--status`, the refused thought listed under `--status` and the timed-out one
   failed with the setting named, a `--ttl` the batch could outlive refused with
   exit 2 before the pool exists, `ob1_config`, a re-run that processes only a
-  later capture, `--retry-failed` resetting the attempt count and giving the
-  throttled thought its whole-content vector, `--retry-fallbacks` giving the
-  refused one its whole-content vector once the stub relents and clearing the
-  caveat, and exit 1 while another process holds a lease. Preflight runs as a
+  later capture, the poisoned row accepted with `--accept-failed` (refused
+  first without ids, for an id whose row is not failed, and beside a run flag;
+  then succeeded with the caveat, its vector kept, counted and listed under
+  `--status`, refused a second time), `--retry-failed` resetting the attempt
+  count and giving the throttled thought its whole-content vector without
+  touching the accepted row, `--retry-fallbacks` giving the refused one and the
+  accepted one their whole-content vectors once the stub relents and clearing
+  both caveats, and exit 1 while another process holds a lease. Preflight runs as a
   subprocess at four points — after a run killed just after it recorded the
   new model (the stub freezes every request but the probe, so the whole pool
   and nothing else is left for it to report), after the first run, while the
@@ -842,8 +858,14 @@ container.
   nothing, `--status` prints the corpus by model, a plain run under the model's
   own key re-embeds exactly those two while the suite's backfill key would pool
   every thought without a row, and a capture the switched server made is never
-  pooled; the switch-back at the end moves the rows too, and a record moved by
-  hand alone re-embeds no finished row.
+  pooled; one of the two rows the old server wrote is the poisoned text, so it
+  keeps the old model's vector and label until the operator accepts it under
+  the model's own key — preflight then says none unfinished and counts the
+  vector as detail, a plain run leaves it, and a metadata edit since reopens
+  it; `--retire` removes an abandoned switch's key as preflight's remedy names
+  it, and refuses the recorded model's key, another tool's, an empty one and
+  one with a live lease; the switch-back at the end moves the rows too, and a
+  record moved by hand alone re-embeds no finished row.
 - **Entity extraction, end to end.** [10] runs `extract-entities.ts` against a
   stub model that answers from a table, so the expected graph is known exactly:
   seven entities, fourteen mentions, five edges from ten thoughts, one of which

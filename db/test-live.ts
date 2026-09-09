@@ -993,19 +993,55 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const [{ e: lateVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${late}`;
   assert(axisOf(lateVec) === axisFor(late), "…the new capture carries the new vector");
 
+  // The operator says "I know" about the poisoned row (SMD-1067): the provider
+  // refuses it on every attempt, no retry will change that, and until now its
+  // failed row kept preflight warning on every start for ever. --accept-failed
+  // marks it succeeded with the caveat, the row keeps the vector it had,
+  // --status lists it among the caveats, and --retry-fallbacks is the way back.
+  // The refusals first: no ids, an id whose row is not failed, a flag
+  // combination — each writes nothing.
+  const [{ id: poisonId }] = await sql`SELECT id::text AS id FROM thoughts WHERE content = ${poisonText}`;
+  const [{ id: lateId }] = await sql`SELECT id::text AS id FROM thoughts WHERE content = ${late}`;
+  const noIds = await reembed("--accept-failed");
+  assert(noIds.code === 2 && /needs the rows to accept, by id/.test(noIds.out) && /--all/.test(noIds.out) && noIds.out.includes(poisonId) && /3 failed row\(s\) under reembed:test/.test(noIds.out),
+    `--accept-failed with no ids refuses, listing the failed rows and both forms (exit ${noIds.code})`);
+  const notFailed = await reembed("--accept-failed", poisonId, lateId);
+  assert(notFailed.code === 2 && notFailed.out.includes(`not a failed row under reembed:test: ${lateId} (succeeded)`) && (await claimCounts()).failed === 3,
+    `…an id whose row is not failed refuses the whole command, and nothing is written (exit ${notFailed.code})`);
+  const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
+  assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
+  const acceptDry = await reembed("--dry-run", "--accept-failed", poisonId);
+  assert(acceptDry.code === 0 && /would: accept 1 failed row\(s\) under reembed:test/.test(acceptDry.out) && /Nothing was written/.test(acceptDry.out) && (await claimCounts()).failed === 3,
+    `--dry-run --accept-failed says what it would accept and writes nothing (exit ${acceptDry.code})`);
+  const accepted = await reembed("--accept-failed", poisonId);
+  assert(accepted.code === 0 && /1 failed row\(s\) accepted under reembed:test/.test(accepted.out) && /kept the vector it had; accepted by the operator: .*stub: refused this text/.test(accepted.out),
+    `--accept-failed marks the poisoned row succeeded with the caveat naming the failure (exit ${accepted.code})`);
+  assert(/37 succeeded \(2 with a caveat, 1 accepted by the operator\), 2 failed/.test(accepted.out), `…and the counts say so, the accepted row inside the caveat count (${accepted.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
+  const [acceptedRow] = await sql`SELECT status, last_error AS err FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = ${poisonId}::uuid`;
+  assert(acceptedRow?.status === "succeeded" && /^kept the vector it had; accepted by the operator: .*stub: refused this text/.test(acceptedRow?.err ?? ""), `…on the row itself (${acceptedRow?.status}: ${acceptedRow?.err})`);
+  const [{ e: keptVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${poisonText}`;
+  assert(axisOf(keptVec) === 0, "…which keeps the vector it had");
+  const acceptedStatus = await reembed("--status");
+  assert(/2 succeeded row\(s\) carry a caveat/.test(acceptedStatus.out) && /accepted by the operator/.test(acceptedStatus.out) && /--retry-fallbacks/.test(acceptedStatus.out),
+    "--status lists the accepted row among the caveats, with --retry-fallbacks as the way back");
+  const acceptedAgain = await reembed("--accept-failed", poisonId);
+  assert(acceptedAgain.code === 2 && /\(succeeded\)/.test(acceptedAgain.out), "accepting it twice refuses: it is no longer a failed row");
+  const dryFallbacks2 = await reembed("--dry-run", "--retry-fallbacks");
+  assert(/return 2 rows succeeded with a caveat to the pool/.test(dryFallbacks2.out) && /over 2 rows/.test(dryFallbacks2.out), "…and --dry-run --retry-fallbacks counts it as a caveat it would return");
+
   poison = false;
   const retried = await reembed("--retry-failed");
-  assert(retried.code === 0 && /3 re-embedded, 0 failed/.test(retried.out), `--retry-failed re-embeds all three failed rows once the provider recovers (exit ${retried.code})`);
+  assert(retried.code === 0 && /2 re-embedded, 0 failed/.test(retried.out), `--retry-failed re-embeds the two failed rows once the provider recovers, and does not see the accepted one (exit ${retried.code})`);
   const [{ e: throttledVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${throttledDoc}`;
   assert(axisOf(throttledVec) === axisFor(throttledDoc), "…and the throttled long thought now carries its whole-content vector");
   const [{ e: tarpitVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${tarpitText}`;
   assert(axisOf(tarpitVec) === axisFor(tarpitText), "…as does the tarpit, answered this time");
-  assert(/1 succeeded row\(s\) carry a caveat/.test(retried.out), "…while the refused one is still listed — --retry-failed does not touch a succeeded row");
-  const [{ e: poisonVec, attempts: poisonAttempts }] = await sql`
-    SELECT t.embedding::text AS e, c.attempt_count AS attempts FROM thoughts t
-    JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${poisonText}`;
-  assert(axisOf(poisonVec) === axisFor(poisonText), "…and it now carries the new vector");
-  assert(Number(poisonAttempts) === 1, `…on what counts as its first attempt: --retry-failed reset the count (${poisonAttempts})`);
+  assert(/2 succeeded row\(s\) carry a caveat/.test(retried.out), "…while the refused one and the accepted one are still listed — --retry-failed does not touch a succeeded row");
+  const [{ e: poisonVec, attempts: throttledAttempts }] = await sql`
+    SELECT (SELECT embedding::text FROM thoughts WHERE content = ${poisonText}) AS e, c.attempt_count AS attempts FROM thoughts t
+    JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${throttledDoc}`;
+  assert(axisOf(poisonVec) === 0, "…and the accepted row keeps the vector it had");
+  assert(Number(throttledAttempts) === 1, `…while a retried row is on what counts as its first attempt: --retry-failed reset the count (${throttledAttempts})`);
   const final = await claimCounts();
   assert(final.succeeded === 39 && !final.failed, `every row is succeeded (${JSON.stringify(final)})`);
 
@@ -1014,8 +1050,13 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // goes with it. A run without the flag would have had nothing to do.
   refusing = false;
   const fallbacks = await reembed("--retry-fallbacks");
-  assert(fallbacks.code === 0 && /--retry-fallbacks: 1 row\(s\)/.test(fallbacks.out) && /1 re-embedded, 0 failed/.test(fallbacks.out),
-    `--retry-fallbacks returns the refused row to the pool and re-embeds it (exit ${fallbacks.code})`);
+  assert(fallbacks.code === 0 && /--retry-fallbacks: 2 row\(s\)/.test(fallbacks.out) && /2 re-embedded, 0 failed/.test(fallbacks.out),
+    `--retry-fallbacks returns the refused row and the accepted one to the pool and re-embeds both (exit ${fallbacks.code})`);
+  const [{ e: poisonNow, attempts: poisonAttempts, err: poisonErr }] = await sql`
+    SELECT t.embedding::text AS e, c.attempt_count AS attempts, c.last_error AS err FROM thoughts t
+    JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${poisonText}`;
+  assert(axisOf(poisonNow) === axisFor(poisonText) && poisonErr === null, `…the accepted row, asked again once the provider relented, carries its own vector and no caveat (${poisonErr})`);
+  assert(Number(poisonAttempts) === 1, `…on what counts as its first attempt: the acceptance is spent (${poisonAttempts})`);
   const [{ e: long3Vec, err: long3Err, status: long3Status }] = await sql`
     SELECT t.embedding::text AS e, c.last_error AS err, c.status FROM thoughts t
     JOIN thought_work_claims c ON c.thought_id = t.id AND c.work_type = ${REEMBED_JOB} WHERE t.content = ${long3}`;
@@ -1064,7 +1105,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const reembedDefault = (...extra: string[]) => reembedIn({}, "--job", DEFAULT_KEY, ...extra);
   const labels = (await sql`SELECT embedding_model AS m FROM thoughts`) as { m: string | null }[];
   assert(labels.length === 40 && labels.every((r) => r.m === "stub-embed"), `every re-embedded row carries the model that produced its vector (${[...new Set(labels.map((r) => r.m))].join(", ")})`);
-  const stale = "captured by a server still on the old model";
+  // "hemlock": the stub refuses it while `poison` is set, below.
+  const stale = "captured by a server still on the old model — the hemlock note, again";
   const fresh = "captured by the switched server";
   await sql`SELECT upsert_thought(${shorts[0]}, ${{ metadata: {}, embedding_model: "old-model" }}::jsonb, ${unit(0)}::vector)`;
   await sql`SELECT upsert_thought(${stale}, ${{ metadata: {}, embedding_model: "old-model" }}::jsonb, ${unit(0)}::vector)`;
@@ -1092,23 +1134,105 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const dryData = await reembedDefault("--dry-run");
   assert(!/succeeded row\(s\) whose thought/.test(dryData.out) && /add 2 thoughts to the pool/.test(dryData.out) && /over 2 rows/.test(dryData.out),
     `--dry-run under the model's own key pools exactly the two rows not at it (${dryData.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  // One of the two is the poisoned text: the pass takes exactly the two rows
+  // the old server wrote, re-embeds one and is refused the other — which then
+  // keeps the old server's vector AND its label, since the label follows the
+  // vector. That is the ticket's row under the model's own key (SMD-1067):
+  // preflight warns from the claim row and from the label; the operator
+  // accepts it; both readers treat the acceptance as the operator's word — the
+  // data rule, which returns a finished row whose thought is not at the model,
+  // stops at it, and `vector models` counts the vector as detail — until the
+  // thought is written again, which reopens the question (021's evidence rule,
+  // one rule for both readers).
+  poison = true;
   const caught = await reembedDefault();
-  assert(caught.code === 0 && /2 thought\(s\) added/.test(caught.out) && /2 re-embedded, 0 failed/.test(caught.out),
-    `a plain run under the model's own key re-embeds exactly the two rows the old server wrote (exit ${caught.code}: ${caught.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(caught.code === 1 && /2 thought\(s\) added/.test(caught.out) && /1 re-embedded, 1 failed/.test(caught.out),
+    `a plain run under the model's own key takes exactly the two rows the old server wrote — one re-embedded, one the provider refuses (exit ${caught.code}: ${caught.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/nothing here can tell/.test(caught.out) && !/captured while the pass ran/.test(caught.out), "…and nothing is left to guess about");
   const moved = (await sql`SELECT content, embedding::text AS e, embedding_model AS m FROM thoughts WHERE content = ANY(${sql.array([shorts[0], stale, fresh], "TEXT")})`) as { content: string; e: string; m: string }[];
   const rowNamed = (c: string) => moved.find((r) => r.content === c)!;
-  assert(axisOf(rowNamed(shorts[0]).e) === axisFor(shorts[0]) && rowNamed(shorts[0]).m === "stub-embed" && axisOf(rowNamed(stale).e) === axisFor(stale) && rowNamed(stale).m === "stub-embed",
-    "…both carry the stub's vector for their own text and the target's label");
-  assert(axisOf(rowNamed(fresh).e) === 0 && rowNamed(fresh).m === "stub-embed", "…while the switched server's capture, already at the target, was not touched");
+  assert(axisOf(rowNamed(shorts[0]).e) === axisFor(shorts[0]) && rowNamed(shorts[0]).m === "stub-embed", "…the re-captured one carries the stub's vector for its own text and the target's label");
+  assert(axisOf(rowNamed(stale).e) === 0 && rowNamed(stale).m === "old-model", "…while the refused one keeps the old server's vector and its label — the label follows the vector");
+  assert(axisOf(rowNamed(fresh).e) === 0 && rowNamed(fresh).m === "stub-embed", "…and the switched server's capture, already at the target, was not touched");
   const [{ c: freshRows }] = await sql`SELECT count(*)::int AS c FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE t.content = ${fresh}`;
   assert(Number(freshRows) === 0, "…and never entered the pool");
+  {
+    const pf = await preflight();
+    assert(new RegExp(`re-embed pass\\s+the pass to stub-embed @ ${DIM} has not finished: 42 thoughts — 1 succeeded, 1 failed, 0 in flight, 0 pending, 0 not yet in the pool`).test(pf.out) && /--accept-failed <thought-id…> for one the provider refuses permanently/.test(pf.out),
+      `preflight reports the failed row under the model's own key, naming --accept-failed beside --retry-failed (${pf.out.split("\n").find((l) => /re-embed pass/.test(l))?.trim()})`);
+    assert(/vector models\s+1 vector\(s\) at another model \(old-model: 1\) beside 41 at stub-embed/.test(pf.out), "…and the rows say one vector is still at the old model");
+  }
+  const [{ id: staleId }] = await sql`SELECT id::text AS id FROM thoughts WHERE content = ${stale}`;
+  const acceptOwn = await reembedDefault("--accept-failed", staleId);
+  assert(acceptOwn.code === 0 && /1 failed row\(s\) accepted under reembed:stub-embed@/.test(acceptOwn.out) && !/preflight will warn/.test(acceptOwn.out),
+    `the operator accepts it under the model's own key, and the tool says preflight has nothing left to warn about (exit ${acceptOwn.code})`);
+  assert(/corpus:\s+41 at stub-embed, 1 at another model \(old-model: 1\), 1 of them accepted by the operator/.test(acceptOwn.out),
+    `…printing the corpus with the acceptance (${acceptOwn.out.split("\n").find((l) => /corpus:/.test(l))?.trim()})`);
+  {
+    const pf = await preflight();
+    assert(pf.code === 0 && /re-embed pass\s+none unfinished/.test(pf.out), "preflight reports no unfinished pass — the row is succeeded, with the caveat");
+    assert(/vector models\s+41 at stub-embed, 1 at another model accepted by the operator \(old-model: 1\)\s*$/m.test(pf.out) && !/vector\(s\) at another model/.test(pf.out),
+      `…and the vector at the old model is detail, not a warning: the operator has spoken for it (${pf.out.split("\n").find((l) => /vector models/.test(l))?.trim()})`);
+  }
+  const leaves = await reembedDefault();
+  assert(leaves.code === 0 && /Nothing to do/.test(leaves.out) && !/succeeded row\(s\) whose thought/.test(leaves.out),
+    `a plain run under the model's own key leaves the accepted row — the data rule stops at the operator's word (exit ${leaves.code})`);
+  // The old server saves metadata on it: an edit since the acceptance, and
+  // the acceptance held only while nothing wrote the thought.
+  await sql`SELECT update_thought((SELECT id FROM thoughts WHERE content = ${stale}), NULL::text, ${{ edited: true }}::jsonb)`;
+  const reopened = await reembedDefault("--dry-run");
+  assert(/return 1 succeeded row\(s\) whose thought is not at stub-embed to the pool/.test(reopened.out) && /over 1 rows/.test(reopened.out),
+    `…until the thought is written again: an edit since the acceptance is a new question, and the row returns to the pool (${reopened.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  {
+    const pf = await preflight();
+    assert(/vector models\s+1 vector\(s\) at another model \(old-model: 1\) beside 41 at stub-embed/.test(pf.out), "…and preflight no longer counts the acceptance either — one evidence rule for both readers");
+  }
+  poison = false;
+  const relented = await reembedDefault();
+  assert(relented.code === 0 && /1 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(relented.out) && /1 re-embedded, 0 failed/.test(relented.out),
+    `…and a run once the provider relents re-embeds it (exit ${relented.code})`);
+  const [{ m: staleLabel, e: staleVec }] = await sql`SELECT embedding_model AS m, embedding::text AS e FROM thoughts WHERE content = ${stale}`;
+  assert(staleLabel === "stub-embed" && axisOf(staleVec) === axisFor(stale), "…which then carries the stub's vector for its own text and the target's label");
   {
     const pf = await preflight();
     assert(/vector models\s+42 at stub-embed\s*$/m.test(pf.out) && !/at another model/.test(pf.out), "preflight then sees the whole corpus at the model");
   }
   const noop2 = await reembedDefault();
   assert(noop2.code === 0 && /Nothing to do/.test(noop2.out), "a further run under the model's own key has nothing to do");
+
+  // --retire (SMD-1067): the record of a superseded pass — a switch to
+  // other-model that was abandoned — is removed by the tool, as the remedy
+  // preflight now prints in place of the hand DELETE; the recorded model's
+  // key, another tool's key, an empty key and a running pass are refused.
+  const OTHER_KEY = `reembed:other-model@${DIM}`;
+  await sql`SELECT enqueue_thoughts(${OTHER_KEY}, (SELECT array_agg(id) FROM (SELECT id FROM thoughts ORDER BY created_at LIMIT 2) s))`;
+  {
+    const pf = await preflight();
+    assert(new RegExp(`re-embed pass\\s+${OTHER_KEY}: 42 thoughts — 0 succeeded, 0 failed, 0 in flight, 2 pending, 40 not yet in the pool — a pass to other-model @ ${DIM}, which is no longer the recorded model`).test(pf.out) && pf.out.includes(`retire its record: cd db && bun reembed.ts --url $DATABASE_URL --retire ${OTHER_KEY}`) && !/DELETE FROM/.test(pf.out),
+      `preflight reports the abandoned switch with --retire as its remedy, not a hand DELETE (${pf.out.split("\n").find((l) => /re-embed pass/.test(l))?.trim()})`);
+  }
+  const retireOwn = await reembed("--retire", DEFAULT_KEY);
+  assert(retireOwn.code === 2 && /names the recorded model/.test(retireOwn.out) && /--accept-failed/.test(retireOwn.out), `--retire refuses the recorded model's own key: its pass can be finished, or its failed rows accepted (exit ${retireOwn.code})`);
+  const retireForeign = await reembed("--retire", "extract:entities");
+  assert(retireForeign.code === 2 && /another tool's pass/.test(retireForeign.out), "…a key without the reembed: prefix, which is another tool's");
+  const retireEmpty = await reembed("--retire", `reembed:nobody@${DIM}`);
+  assert(retireEmpty.code === 2 && /nothing to retire/.test(retireEmpty.out), "…and a key with no rows — a typo is the likelier cause");
+  const retireDry = await reembed("--dry-run", "--retire", REEMBED_JOB);
+  assert(retireDry.code === 0 && /would: retire reembed:test — remove its \d+ row\(s\) \(\d+ succeeded\)/.test(retireDry.out) && (await claimCounts()).succeeded > 0,
+    `--dry-run --retire says what it would remove — a key naming no model is retireable — and removes nothing (exit ${retireDry.code})`);
+  await sql`SELECT claim_thoughts(${OTHER_KEY}, 'other-worker', 1)`;
+  const retireLive = await reembed("--retire", OTHER_KEY);
+  assert(retireLive.code === 2 && /leased right now/.test(retireLive.out), `…and a key with a live lease: a pass under it is running (exit ${retireLive.code})`);
+  await sql`SELECT release_claims_for_worker(${OTHER_KEY}, 'other-worker')`;
+  const retired = await reembed("--retire", OTHER_KEY);
+  assert(retired.code === 0 && new RegExp(`retired ${OTHER_KEY}: 2 row\\(s\\) removed \\(2 pending\\)`).test(retired.out) && /still at other-model/.test(retired.out),
+    `--retire removes the superseded key's rows and says what its vectors still are (exit ${retired.code}: ${retired.out.split("\n").find((l) => /retired/.test(l))?.trim()})`);
+  const [{ c: otherLeft }] = await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${OTHER_KEY}`;
+  assert(Number(otherLeft) === 0, "…leaving nothing under it");
+  {
+    const pf = await preflight();
+    assert(/re-embed pass\s+none unfinished/.test(pf.out), "…and preflight has nothing left to report");
+  }
 
   // The model's own key on a model change: the start-over returns failed rows
   // and expired leases only, and the data rule the finished rows whose
