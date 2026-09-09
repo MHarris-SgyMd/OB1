@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,7 +51,7 @@ const TABLES = [
  * matches on, so one entry covers every width the column has ever been.
  */
 const FUNCTIONS = [
-  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
+  UPDATE_THOUGHT_SIGNATURE,
   "delete_thought(uuid, jsonb)",
   "thought_audit_refuse_mutation()",
   "thoughts_write_audit()",
@@ -61,9 +61,9 @@ const FUNCTIONS = [
   "upsert_thought(text, jsonb)",
   "upsert_thought(text, jsonb, vector)",
   "upsert_thought(text, jsonb, vector, jsonb)",
-  // The shipped signatures and the ones 020 dropped: a bench's "before" arm
-  // re-creates the old forms, and a reset that left one behind would hand the
-  // next section an ambiguous 4-argument call.
+  // The shipped signatures and the ones 020 and 021 dropped: a bench's "before"
+  // arm re-creates the old search forms and test-schema [22] re-applies 018, and
+  // a reset that left one behind would hand the next section an ambiguous call.
   MATCH_THOUGHTS_SIGNATURE,
   "recency_score(float, timestamptz, float, float)",
   ...SUPERSEDED_SIGNATURES,

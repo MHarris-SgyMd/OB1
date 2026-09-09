@@ -101,9 +101,10 @@ console.log("\n[3] Editing content moves the fingerprint with it");
   const [row] = await sql`SELECT id, content_fingerprint AS fp FROM thoughts`;
 
   await writer.call("update_thought", { id: row.id, content: "the corrected text" });
-  const [after] = await sql`SELECT content, content_fingerprint AS fp FROM thoughts WHERE id = ${row.id}`;
+  const [after] = await sql`SELECT content, content_fingerprint AS fp, embedding_model AS m FROM thoughts WHERE id = ${row.id}`;
   assert(after.content === "the corrected text", "the text changed");
   assert(after.fp !== row.fp, "…and the fingerprint changed with it");
+  assert(after.m === EMB_MODEL, `…and the new vector carries the model the server embedded with (${after.m})`);
 
   // The consequence, which is the actual reason it matters: capturing the OLD
   // text must create a NEW thought, not merge into the edited one.

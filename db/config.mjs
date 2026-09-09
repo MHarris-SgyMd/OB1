@@ -700,6 +700,49 @@ export function parseReembedKey(key) {
 }
 
 /**
+ * How a pass under `key` builds its pool (migration 021): a model's OWN key —
+ * exactly `reembed:<model>@<dim>`, nothing after — pools the thoughts not at
+ * that model (no vector, or another or no label), and this returns the model;
+ * any other key (a suffix, or no model named) is a backfill whose reason is
+ * not the model, pools every thought, and this returns null. Read by
+ * reembed.ts for its pool and by preflight for "not yet in the pool", so the
+ * two cannot count one key two ways (second review pass of SMD-1068).
+ *
+ * @param {string} key
+ * @returns {string | null}
+ */
+export function poolModelFor(key) {
+  const named = parseReembedKey(key);
+  return named !== null && key === reembedKey(named.model, named.dim) ? named.model : null;
+}
+
+/**
+ * The corpus by the model its vectors carry (migration 021): one row per
+ * label, NULL for unknown, vectorless rows left out — what preflight's
+ * `vector models` check and reembed.ts's corpus line both read. Plain SQL with
+ * no parameters, so either client runs it with `unsafe`.
+ */
+export const CORPUS_BY_MODEL_SQL =
+  "SELECT embedding_model AS model, count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1";
+
+/**
+ * Those rows read against one model: how many are at it, how many carry no
+ * label, and the other models with their counts. One reduction for both
+ * tools, so they cannot describe one corpus two ways (SMD-1068's review
+ * passes found the query and this arithmetic written twice).
+ *
+ * @param {{model: string | null, c: number}[]} rows
+ * @param {string} atModel
+ * @returns {{at: number, unlabelled: number, others: {model: string, c: number}[], otherCount: number}}
+ */
+export function summariseCorpusByModel(rows, atModel) {
+  const at = Number(rows.find((r) => r.model === atModel)?.c ?? 0);
+  const unlabelled = Number(rows.find((r) => r.model === null)?.c ?? 0);
+  const others = rows.filter((r) => r.model !== null && r.model !== atModel).map((r) => ({ model: /** @type {string} */ (r.model), c: Number(r.c) }));
+  return { at, unlabelled, others, otherCount: others.reduce((a, r) => a + r.c, 0) };
+}
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot
@@ -815,12 +858,24 @@ export const MATCH_COUNT_CEILING = 500;
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
 /**
- * The forms 020 dropped. Still owned: a bench's "before" arm re-applies 014 or
- * 017 and re-creates them, so a schema reset must drop them too.
+ * update_thought's signature since migration 021 (SMD-1068): an eighth,
+ * defaulted parameter, `p_embedding_model`, the model that produced the vector
+ * being written. 021 dropped the 7-argument form first, for the reason above:
+ * CREATE OR REPLACE with a new parameter leaves the old form beside it, and
+ * every call with seven arguments or fewer is then "function is not unique".
+ * reembed.ts resolves the body it will call by this text (for 018's sentinel),
+ * and preflight's `edit signature` check reads the forms beside it.
+ */
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)";
+/**
+ * The forms 020 and 021 dropped. Still owned: a bench's "before" arm re-applies
+ * 014 or 017, and a test re-applies 018, re-creating them, so a schema reset
+ * must drop them too.
  */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
   "search_thoughts_hybrid(vector, text, float, int, jsonb)",
+  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
 ]);
 
 /**

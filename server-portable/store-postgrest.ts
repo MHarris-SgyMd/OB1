@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -175,6 +175,7 @@ export class PostgrestStore implements ThoughtStore {
     embedding: number[];
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -187,7 +188,9 @@ export class PostgrestStore implements ThoughtStore {
     // reads it into the ob1.actor setting so the audit trigger can attribute
     // this write. Without it, every audit row on this store would have recorded
     // a NULL actor: present, plausible, and wrong.
-    const envelope = opts.actor ? { ...opts.payload, actor: actorPayload(opts.actor) } : opts.payload;
+    // The model rides the same way (021); an envelope without the key leaves
+    // the row's label unknown.
+    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel);
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
@@ -226,10 +229,19 @@ export class PostgrestStore implements ThoughtStore {
     const id = (upserted as { id?: string } | null)?.id;
     if (!id) throw new Error("upsert_thought returned no id, so the embedding could not be attached.");
 
-    const { error: embError } = await this.client
+    // The label travels with the vector here too (021): a re-capture of a
+    // labelled row through this path would otherwise leave the old label
+    // beside a vector from another model — the one state nothing can see. A
+    // schema without the column (this path exists for one without 004) refuses
+    // the unknown column; the vector is then attached alone, unlabelled, as
+    // before 021 (third review pass).
+    let { error: embError } = await this.client
       .from("thoughts")
-      .update({ embedding: opts.embedding })
+      .update({ embedding: opts.embedding, embedding_model: opts.embeddingModel ?? null })
       .eq("id", id);
+    if (embError && /embedding_model|PGRST204/i.test(`${embError.code} ${embError.message}`)) {
+      ({ error: embError } = await this.client.from("thoughts").update({ embedding: opts.embedding }).eq("id", id));
+    }
 
     // The row is committed but unsearchable. Report it as such rather than as a
     // total failure — the content is not lost, only the vector.
@@ -246,12 +258,16 @@ export class PostgrestStore implements ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: `[${c.embedding.join(",")}]`,
       context: c.context ?? null,
     }));
+    // Eight named arguments since migration 021: the model beside the vector.
+    // Against a database whose update_thought predates 021 this is PGRST202,
+    // which preflight's `edit signature` check reports before the server serves.
     const { data, error } = await this.client.rpc("update_thought", {
       p_id: opts.id,
       p_content: opts.content ?? null,
@@ -260,6 +276,7 @@ export class PostgrestStore implements ThoughtStore {
       p_chunks: chunks.length ? chunks : null,
       p_if_unchanged_since: opts.ifUnchangedSince ?? null,
       p_actor: actorPayload(opts.actor),
+      p_embedding_model: opts.embeddingModel ?? null,
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);

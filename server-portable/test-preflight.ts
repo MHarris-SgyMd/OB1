@@ -14,7 +14,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
-import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE } from "../db/config.mjs";
+import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -32,6 +32,8 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 const { assert, skip: skipRaw, report } = createAssert();
+/** A literal for a RegExp source — model names carry dots and colons. */
+const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
 const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub" };
@@ -453,7 +455,7 @@ else {
   const CTX = `${KEY}:ctx`;
   await claims.unsafe(`SELECT enqueue_thoughts('${CTX}', ARRAY['${ids[0]}']::uuid[])`);
   const other = await run(SQL_ENV);
-  assert(other.code === 0 && new RegExp(`re-embed pass\\s+${CTX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 5 not yet in the pool — a pass under this key stopped before it finished`).test(other.out),
+  assert(other.code === 0 && new RegExp(`re-embed pass\\s+${rx(CTX)}: 6 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 5 not yet in the pool — a pass under this key stopped before it finished`).test(other.out),
          "a backfill under --job that stopped is reported by its key, with its counts");
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
@@ -471,7 +473,7 @@ else {
   const OTHER = `reembed:other-model@${EMBEDDING_DIM}`;
   await claims.unsafe(`SELECT enqueue_thoughts('${OTHER}', ARRAY['${ids[0]}']::uuid[])`);
   const superseded = await run(SQL_ENV);
-  assert(superseded.code === 0 && new RegExp(`${OTHER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
+  assert(superseded.code === 0 && new RegExp(`${rx(OTHER)}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
          "a pass to a model that is no longer the recorded one is described as an abandoned switch");
   assert(/OB1_EMBEDDING_MODEL=other-model OB1_EMBEDDING_DIM=\d+ bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(superseded.out) && superseded.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${OTHER}';`),
          "…with the two remedies: finish that switch in its own environment, or retire its record");
@@ -528,11 +530,83 @@ else {
   const WIDE = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM + 1}`;
   await claims.unsafe(`SELECT enqueue_thoughts('${WIDE}', ARRAY['${ids[0]}']::uuid[])`);
   const wide = await run(SQL_ENV);
-  assert(new RegExp(`${WIDE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
+  assert(new RegExp(`${rx(WIDE)}: 6 thoughts — .* — a pass to ${rx(EMBEDDING_MODEL)} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
          "a key at another width is described as one no run can finish");
   assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
          "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
+
+  /**
+   * The rows say which model they are at (migration 021, SMD-1068). The claim
+   * table is a record of passes and vanishes when an operator clears it; the
+   * column is a fact about each vector. Every fixture below has an EMPTY claim
+   * table for the key, so `re-embed pass` says none unfinished throughout and
+   * only the rows can speak: a corpus at two models warns with the counts and
+   * the pass as the remedy; one wholly at the recorded model is ok, unlabelled
+   * rows as detail; the record disagreeing with the configuration puts
+   * --switch-model in the remedy; the column missing under this server fails;
+   * and the eight-argument update_thought is checked alone — 018 re-applied by
+   * hand beside it, or in its place, fails with the DROP or the migration.
+   */
+  const noVec = await run(SQL_ENV);
+  assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\\): the form the servers and reembed\\.ts call since migration 021 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
+         "the eight-argument update_thought is the only form");
+  const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = NULL WHERE id = '${ids[3]}'`);
+  const twoModels = await run(SQL_ENV);
+  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${rx(EMBEDDING_MODEL)}, 1 unlabelled \\(model unknown\\) — searches rank across the two`).test(twoModels.out),
+         "rows at two models, with an empty claim table, warn from the rows alone — with the counts by model");
+  assert(/re-embed pass\s+none unfinished/.test(twoModels.out), "…while the claim table, empty, still says no pass is unfinished — the state SMD-1068 was filed for");
+  assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${rx(EMBEDDING_MODEL)}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
+         "…with the pass as the remedy, and no --switch-model while the record and the configuration agree");
+  const twoJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
+  await claims.unsafe(`UPDATE thoughts SET embedding_model = '${EMBEDDING_MODEL}' WHERE id = '${ids[2]}'`);
+  const atModel = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+3 at ${rx(EMBEDDING_MODEL)}, 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
+         "a corpus wholly at the recorded model is ok, the unlabelled row reported as detail rather than as wrong");
+  await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
+  const recordMoved = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${rx(EMBEDDING_MODEL)}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${rx(EMBEDDING_MODEL)}`).test(recordMoved.out),
+         "with the record on another model, the rows at the configured one are the ones out of place against the record");
+  assert(/Finish the switch to other-model: cd db && OB1_EMBEDDING_MODEL=other-model bun reembed\.ts --url \$DATABASE_URL, and configure the server for it; or, if .* stands: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model, which re-embeds the rows at other-model instead\./.test(recordMoved.out),
+         "…and the remedy gives both directions rather than a --switch-model from this shell that would revert the switch");
+  await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
+  await claims.unsafe("ALTER TABLE thoughts DROP COLUMN embedding_model");
+  const noColumn = await run(SQL_ENV);
+  assert(noColumn.code === 1 && /vector models\s+thoughts\.embedding_model does not exist/.test(noColumn.out) && /021_embedding_model_per_row\.sql/.test(noColumn.out),
+         "the column missing under this server does not start, naming 021");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  const restored = await run(SQL_ENV);
+  assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
+         "021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok");
+  // 021's backfill holds the updated_at trigger off for one statement; a
+  // hand run that stopped between DISABLE and ENABLE leaves it off.
+  await claims.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
+  const trgOff = await run(SQL_ENV);
+  assert(trgOff.code === 1 && /updated_at trigger\s+thoughts_updated_at is disabled/.test(trgOff.out) && /ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;/.test(trgOff.out),
+         "the updated_at trigger left disabled does not start, with the one-line remedy");
+  await claims.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
+  assert(/updated_at trigger\s+thoughts_updated_at enabled/.test((await run(SQL_ENV)).out), "…and enabled again it is ok");
+  // 018 re-applied by hand puts the 7-argument form back BESIDE 021's.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
+  const twoEdits = await run(SQL_ENV);
+  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\)/.test(twoEdits.out),
+         "018 re-applied over 021 leaves two update_thought forms, and the start is refused naming the extra one");
+  assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  assert((await run(SQL_ENV)).code === 0, "…which 021 re-applied performs");
+  // A database whose update_thought predates 021.
+  await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
+  const pre021 = await run(SQL_ENV);
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 021; the server sends p_embedding_model/.test(pre021.out) && /Apply db\/migrations\/021_embedding_model_per_row\.sql\./.test(pre021.out),
+         "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);

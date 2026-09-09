@@ -54,6 +54,12 @@ assert(
   "index.ts calls the 3-arg upsert_thought first"
 );
 assert(/PGRST202/.test(INDEX_TS), "index.ts detects PGRST202 (function not found)");
+// Migration 021: the payload names the model the vector came from, and the
+// two-step fallback writes it beside the vector — with a retry without it for a
+// schema that has no such column.
+assert(/embedding_model: EMBEDDING_MODEL \}/.test(INDEX_TS), "index.ts names the embedding model in the payload envelope (021)");
+assert(/\.update\(\{ embedding, embedding_model: EMBEDDING_MODEL \}\)/.test(INDEX_TS) && /PGRST204/.test(INDEX_TS),
+       "…and the two-step fallback writes the label with the vector, retrying without it on a schema without the column");
 assert(
   /will NOT appear in semantic search until re-captured/.test(INDEX_TS),
   "index.ts reports a committed-but-unsearchable row explicitly"
@@ -133,7 +139,10 @@ function makeStub({ hasAtomic = true, atomicError = null, upsertError = null, em
               calls.update++;
               if (embeddingError) return Promise.resolve({ error: embeddingError });
               const row = rows.find((r) => r.id === id);
-              if (row) row.embedding = patch.embedding;
+              if (row) {
+                row.embedding = patch.embedding;
+                row.embedding_model = patch.embedding_model;
+              }
               return Promise.resolve({ error: null });
             },
           };
@@ -144,6 +153,9 @@ function makeStub({ hasAtomic = true, atomicError = null, upsertError = null, em
 }
 
 // Mirrors the write path in index.ts (see drift guard above).
+// The mirror's label, as index.ts's EMBEDDING_MODEL (021).
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
+
 async function captureThought(supabase, { content, embedding, metadata }) {
   const payload = { metadata: { ...metadata, source: "mcp" } };
 
@@ -176,7 +188,12 @@ async function captureThought(supabase, { content, embedding, metadata }) {
       };
     }
 
-    const { error: embError } = await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
+    // As index.ts does since 021: the label beside the vector, a retry without
+    // it for a schema without the column.
+    let { error: embError } = await supabase.from("thoughts").update({ embedding, embedding_model: EMBEDDING_MODEL }).eq("id", thoughtId);
+    if (embError && /embedding_model|PGRST204/i.test(`${embError.code} ${embError.message}`)) {
+      ({ error: embError } = await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId));
+    }
     if (embError) {
       return {
         isError: true,

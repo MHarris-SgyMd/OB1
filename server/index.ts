@@ -50,6 +50,19 @@ function thoughtUrl(id: string): string {
   return `${CITATION_BASE_URL.replace(/\/$/, "")}/${id}`;
 }
 
+// The model every vector this server stores comes from — sent to the provider,
+// and written beside the vector as thoughts.embedding_model (migration 021)
+// through the payload envelope upsert_thought has read since 004; a schema
+// from before 021 ignores the key. Preflight and reembed.ts judge "at the
+// recorded model" by string equality with ob1_config.embedding_model, so this
+// must be that spelling: OB1_EMBEDDING_MODEL when set, as server-portable
+// reads it, else the id this server has always used.
+const EMBEDDING_MODEL = Deno.env.get("OB1_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
+// The column's width (the guide's 1536). A model set through the variable above
+// that returns another width would fail every capture at the column with a
+// Postgres error naming neither; checked here, once per vector.
+const EMBEDDING_DIM = Number(Deno.env.get("OB1_EMBEDDING_DIM") ?? 1536);
+
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
@@ -58,7 +71,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBEDDING_MODEL,
       input: text,
     }),
   });
@@ -67,7 +80,13 @@ async function getEmbedding(text: string): Promise<number[]> {
     throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
   }
   const d = await r.json();
-  return d.data[0].embedding;
+  const embedding: number[] = d.data[0].embedding;
+  if (embedding.length !== EMBEDDING_DIM) {
+    throw new Error(
+      `Embedding width mismatch: model ${EMBEDDING_MODEL} returned ${embedding.length} dimensions but the column is vector(${EMBEDDING_DIM}). Set OB1_EMBEDDING_MODEL to a model of that width, or OB1_EMBEDDING_DIM to the column's.`
+    );
+  }
+  return embedding;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
@@ -553,7 +572,7 @@ function buildServer(): McpServer {
           extractMetadata(content),
         ]);
 
-        const payload = { metadata: { ...metadata, source: "mcp" } };
+        const payload = { metadata: { ...metadata, source: "mcp" }, embedding_model: EMBEDDING_MODEL };
 
         // Single round-trip: content, metadata and embedding land in one
         // statement. The two-step version below could leave a row committed with
@@ -610,10 +629,15 @@ function buildServer(): McpServer {
             };
           }
 
-          const { error: embError } = await supabase
+          // The label rides with the vector (021); a schema without the column
+          // refuses it, and the vector is then attached alone, as before.
+          let { error: embError } = await supabase
             .from("thoughts")
-            .update({ embedding })
+            .update({ embedding, embedding_model: EMBEDDING_MODEL })
             .eq("id", thoughtId);
+          if (embError && /embedding_model|PGRST204/i.test(`${embError.code} ${embError.message}`)) {
+            ({ error: embError } = await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId));
+          }
 
           if (embError) {
             // The row is committed but unsearchable. Say so plainly — the old code

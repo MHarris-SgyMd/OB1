@@ -44,28 +44,71 @@
  * When the configured model differs from the one ob1_config records, the run
  * needs --switch-model, and the FIRST thing it does is record the new model in
  * ob1_config. From that moment preflight accepts a server configured for the
- * new model, and the server should be switched: a capture made with the old
- * model after the switch is re-embedded by this pass only if it lands in the
- * pool — which a re-run adds — while a capture made with the new model is
- * re-embedded harmlessly. Until the pass finishes, searches mix vectors from
- * two models, and rank accordingly. That is inherent to changing model on a
- * live corpus; the alternative, stopping the server for the duration, is the
- * operator's call. `--status` says how far along the pass is, and so does
- * preflight (below).
+ * new model, and the server should be switched. Until the pass finishes,
+ * searches mix vectors from two models, and rank accordingly. That is inherent
+ * to changing model on a live corpus; the alternative, stopping the server for
+ * the duration, is the operator's call. `--status` says how far along the pass
+ * is, and so does preflight (below).
+ *
+ * ── The row says which model it is at (migration 021) ───────────────────────
+ * Every vector carries the model that produced it, `thoughts.embedding_model`,
+ * written by the same statement as the vector: the server's from its
+ * configuration, this tool's from OB1_EMBEDDING_MODEL, passed to update_thought
+ * as its eighth argument. NULL is a vector of unknown model — a row from before
+ * 021 that no finished pass vouched for (021 labels the rows it has evidence
+ * for), a raw INSERT, a capture from an older server — and counts as not at any
+ * model; so does a row with no vector, whatever its label says. Under the
+ * model's own key (`reembed:<model>@<dim>`, the default; poolModelFor in
+ * config.mjs is the rule, shared with preflight) the pool is built from that
+ * fact rather than from every thought: enqueue_thoughts is given the ids
+ * not at the target, so a thought already at it with no row under the key is
+ * finished and is never re-embedded "harmlessly" (one provider call each), and
+ * "not yet in the pool" in the counts below means exactly what a run would add.
+ * A --job key is a BACKFILL — a pass whose reason is not the model (a chunk
+ * setting flipped, a suffix of the operator's) — and pools every thought under
+ * its key, as every pass did before 021. The unlabelled rows a pool holds are
+ * counted before a run: re-embedding is what labels a row nothing vouched for,
+ * and on a brain that never ran a pass through 015 that is the whole corpus,
+ * once. And on EVERY run, under any key, a succeeded row under this job whose
+ * thought is not at the target returns to the pool — the row says done, the
+ * thought says otherwise, and the data wins. Under a backfill key that means a
+ * label naming another model, or no vector: an unlabelled row is left to its
+ * finished row there, since 021 could label nothing from a key naming no
+ * model and the first run after upgrading would otherwise return the corpus. That is what finds a thought captured or edited by a
+ * server still on the old model, before or after the pass finished: until 021
+ * such a row had the old vector and either no claim row or a finished one, and
+ * the run could only say at its end that some rows were captured meanwhile
+ * "and nothing here can tell". Failed rows are not returned by the data rule
+ * (they are terminal until --retry-failed — see Failure policy) and a row
+ * succeeded with a caveat is at the target (the head window is the target
+ * model's vector), so neither is touched. `--status` and a run print the corpus
+ * by model. A run requires 021: it writes the eighth argument and reads the
+ * column; --status and --dry-run answer on an older schema and say so.
  *
  * That record and the pool are written in ONE transaction — the ob1_config row,
- * the rows --retry-failed and --retry-fallbacks return, and enqueue_thoughts —
- * so a run that dies between them leaves either both or neither: never a
- * database whose record names the new model with no pool to say the corpus is
- * not at it, which nothing could tell from a fresh install (SMD-1024). And a
- * model change STARTS THIS PASS OVER: the key names the target, and when the
- * recorded model has just become that target the corpus is not at it, whatever
- * an earlier pass under the key recorded — switching back to a model used
- * before otherwise found every thought's terminal row under the key, enqueued
- * nothing, and reported nothing to do while every vector was the other
- * model's. Every terminal row, and every lease that has expired with no live
- * holder, under THIS job returns to the pool, as if never tried; a lease still
- * running is left to its holder. Other keys of the same model are left as they
+ * the rows the data rule and --retry-failed and --retry-fallbacks return, and
+ * enqueue_thoughts — so a run that dies between them leaves either both or
+ * neither: never a database whose record names the new model with no pool to
+ * say the corpus is not at it, which nothing could tell from a fresh install
+ * (SMD-1024). And a model change STARTS THIS PASS OVER: the key names the
+ * target, and when the recorded model has just become that target the corpus
+ * is not at it, whatever an earlier pass under the key recorded — switching
+ * back to a model used before otherwise found every thought's terminal row
+ * under the key, enqueued nothing, and reported nothing to do while every
+ * vector was the other model's. Every FAILED row, and every lease that has
+ * expired with no live holder, under THIS job returns to the pool, as if never
+ * tried; a lease still running is left to its holder; the succeeded rows are
+ * the data rule's — returned when, and only when, their thought is not at the
+ * target, so a row already re-embedded to it is not re-embedded again on a
+ * switch back (since 021; before it every terminal row returned, since nothing
+ * said which rows were at the model). Under a BACKFILL key every terminal row
+ * still returns on a model change, as before 021: that key's data rule trusts
+ * a finished row whatever its label (021 could label nothing from a key naming
+ * no model), so nothing else would re-embed a corpus whose history is under
+ * `reembed:nightly` when the model changes (fourth review pass). --retry-failed
+ * is therefore subsumed by a model change and --retry-fallbacks is not: a
+ * caveat row is neither failed nor a lease, and is returned only when asked
+ * for, on any run. Other keys of the same model are left as they
  * are: their rows are the record of their own passes, and once this pass has
  * finished the corpus is at the model again, which is what a finished row
  * under them says — returning them too would only demand a second pass over a
@@ -91,10 +134,12 @@
  * record of the pass is the claim table and nothing else: no marker to clear,
  * so two processes finishing together or an operator clearing rows by hand
  * cannot leave a stale one. Succeeded rows with a caveat are finished; thoughts
- * with no row under the key are reported as detail while a pass is unfinished
- * and are no signal on their own — after a completed switch every new capture
- * is one. --status and the end of a run say when preflight will warn, so the
- * two never disagree. A --job key without the reembed: prefix is accepted and
+ * with no row under the key and not at the key's model are reported as detail
+ * while a pass is unfinished, and are what the next run adds. The rows' own
+ * labels are preflight's `vector models` check, beside the claim counts: a
+ * vector at another model is a warning whether or not any claim row says so.
+ * --status and the end of a run say when preflight will warn, so the two never
+ * disagree. A --job key without the reembed: prefix is accepted and
  * noted: preflight attributes a pass to this tool by the prefix and will not
  * report it (extraction keys are excluded on purpose — 016's trigger keeps that
  * pool fed).
@@ -193,6 +238,7 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
+  CORPUS_BY_MODEL_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
   embeddingConfigWarnings,
@@ -200,8 +246,11 @@ import {
   parseReembedKey,
   type PassCounts,
   passUnfinished,
+  poolModelFor,
   REEMBED_KEY_PREFIX,
   reembedKey,
+  summariseCorpusByModel,
+  UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
@@ -338,14 +387,24 @@ const modelChange = recorded.embedding_model !== undefined && recorded.embedding
 /** The run records the model — a change, or no record to compare with — and starts every pass to it over. */
 const recordModel = modelChange || recorded.embedding_model === undefined;
 // The retry flags select subsets of the rows recording the model returns anyway.
+// --retry-failed selects a subset of the rows the start-over returns on a
+// model change; --retry-fallbacks does not (since 021 the start-over returns
+// failed rows and expired leases, and a caveat row is neither — second review
+// pass), so it is honoured on every run.
 const retryFailed = RETRY_FAILED && !recordModel;
-const retryFallbacks = RETRY_FALLBACKS && !recordModel;
+const retryFallbacks = RETRY_FALLBACKS;
 if (recorded.embedding_model === undefined) {
   console.log(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
 } else if (modelChange) {
   console.log(`  model change: ob1_config records ${recorded.embedding_model}; this pass embeds with ${embedConfig.embeddingModel}`);
+} else if (poolModelFor(JOB) === null) {
+  console.log(`  same model as ob1_config records — a backfill under ${JOB}: every thought without a row under it is pooled`);
+} else if (parseReembedKey(JOB) !== null && parseReembedKey(JOB)!.model !== embedConfig.embeddingModel) {
+  // --status for a key naming another model (a run is refused below): the
+  // counts are the key's, not this shell's, and say so.
+  console.log(`  --job ${JOB} names ${parseReembedKey(JOB)!.model}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
 } else {
-  console.log(`  same model as ob1_config records — a backfill, not a model change`);
+  console.log(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
 }
 // The --job refusal first: a key naming another model is refused before the
 // model-change refusal below can ask for --switch-model on its behalf.
@@ -366,29 +425,39 @@ if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN) {
   process.exit(2);
 }
 
-// A pass against 013's update_thought fails every legacy twin for ever (see the
-// header). The body the pass will CALL — the exact 7-argument signature, as
-// preflight resolves match_thoughts, not any function of that name — is asked
-// for 018's contract sentinel: a marker in pg_proc.prosrc, which every CREATE
-// OR REPLACE rewrites, rather than a field name a comment could carry. The
-// ledger decides the remedy: a brain adopted with --baseline records 018 as
-// applied while the body is 013's, and "apply 018" would be a no-op there.
-// Read here so --dry-run can report the refusal a run would make; --status is
-// answered whatever the body, since it never calls update_thought.
+// The schema the pass writes to. The body the pass will CALL — the exact
+// eight-argument signature (021), as preflight resolves match_thoughts, not any
+// function of that name — is asked for 018's contract sentinel: a marker in
+// pg_proc.prosrc, which every CREATE OR REPLACE rewrites, rather than a field
+// name a comment could carry (a pass against 013's update_thought fails every
+// legacy twin for ever — see the header). And the column the pass reads and
+// writes, thoughts.embedding_model (021). The ledger decides the remedy: a
+// brain adopted with --baseline records 021 as applied while the body is
+// older, and "apply 021" would be a no-op there. Read here so --dry-run can
+// report the refusal a run would make; --status is answered whatever the
+// schema, since it never calls update_thought.
 const [fn] = await sql`
   SELECT
     EXISTS (SELECT 1 FROM pg_proc
-            WHERE oid = to_regprocedure('public.update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)')
+            WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
               AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS present,
-    (to_regclass('schema_migrations') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE '018%')) AS ledgered`;
-const refusal018: string | null = fn.present
+    EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'thoughts' AND column_name = 'embedding_model') AS labelled,
+    to_regclass('schema_migrations') IS NOT NULL AS has_ledger`;
+// Asked separately: a relation named in a statement is resolved when the
+// statement is parsed, whatever the AND before it would have short-circuited,
+// so a schema applied by hand — no ledger — must not be asked about its ledger.
+fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE '021%') AS l`)[0].l : false;
+/** Whether thoughts.embedding_model exists — the read-only modes answer without it. */
+const HAS_LABEL: boolean = Boolean(fn.labelled);
+const refusal021: string | null = fn.present && fn.labelled
   ? null
-  : " update_thought predates migration 018: a thought whose text another thought also holds — a pair from before\n" +
-    "  the fingerprint — would fail this pass on every run. " +
+  : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration 021: this pass writes the model beside every vector it stores and builds\n` +
+    "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
+    "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 018 as applied (--baseline?) but the body\n  installed is older: re-run the body of db/migrations/018_update_thought_unchanged_content.sql (the migrator will\n  skip it as applied), substituting {{EMBEDDING_DIM}}."
-      : "Apply migration 018 first:\n    cd db && bun migrate.ts --url …");
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}}."
+      : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
@@ -404,7 +473,68 @@ const withCaveat = () => sql`status = 'succeeded' AND last_error IS NOT NULL`;
  * header: every terminal row, and every lease expired with no live holder,
  * under this job. One definition for --dry-run's count and the run's UPDATE.
  */
-const staleUnderThisJob = () => sql`status IN ('succeeded', 'failed') OR (status = 'claimed' AND ttl_expires_at < now())`;
+const staleUnderThisJob = () =>
+  BACKFILL
+    ? sql`status IN ('succeeded', 'failed') OR (status = 'claimed' AND ttl_expires_at < now())`
+    : sql`status = 'failed' OR (status = 'claimed' AND ttl_expires_at < now())`;
+
+/**
+ * How this key pools — see "The row says which model it is at" in the header.
+ * poolModelFor (config.mjs, shared with preflight) names the model a model's
+ * own key pools against and null for a backfill key, which pools every
+ * thought. The target the rows are judged against is the KEY's model where it
+ * names one — for a run that is the configured model, since a --job naming
+ * another model is refused; --status answers for any key, and counts as
+ * preflight does for it — and this shell's model otherwise.
+ */
+const POOL_MODEL = poolModelFor(JOB);
+const BACKFILL = POOL_MODEL === null;
+// The key's model wherever it names one — an own-shape key or a suffixed one
+// (`reembed:y@1024:ctx` is a pass to y, as 021's backfill reads it) — so
+// --status for any foreign key is judged against that key's model; this shell's
+// otherwise. A run under a foreign key is refused above.
+const TARGET = parseReembedKey(JOB)?.model ?? embedConfig.embeddingModel;
+
+/**
+ * "Not at the target": the row has no vector, or its label differs from the
+ * target, NULL (unknown) included — see "The row says which model it is at"
+ * in the header. One definition for the pool, the data rule and the counts.
+ */
+const notAtTarget = () => sql`(embedding IS NULL OR embedding_model IS DISTINCT FROM ${TARGET})`;
+/** What the pool is built from: every thought for a backfill, the rows not at the target otherwise. */
+const poolable = () => (BACKFILL ? sql`true` : notAtTarget());
+
+/**
+ * The data rule — a succeeded row under this job whose thought is not at the
+ * target. Returned to the pool on every run: the row says done, the thought
+ * says otherwise. Failed rows are left to --retry-failed. A row succeeded with
+ * a caveat is at the target unless its thought has since moved, in which case
+ * this rule takes it and --retry-fallbacks has nothing left to return — the
+ * run requeues in that order, and --dry-run counts the caveats it would still
+ * find (caveatsAtTarget) rather than every caveat.
+ */
+/**
+ * Under a backfill key an UNLABELLED thought is left to its finished row: 021
+ * could label nothing from a key naming no model, so after upgrading every
+ * such row is NULL, and treating NULL as "moved" there would return the whole
+ * corpus on the first run (third review pass). A backfill's reason is not the
+ * model; only a label that names another model, or no vector, says its
+ * finished row is wrong. Under the model's own key NULL is not at the target —
+ * 021 labelled what it had evidence for, and what is left has none.
+ */
+const doneButNotAtTarget = () =>
+  BACKFILL
+    ? // The trust is bounded by 021's own evidence rule: a finished row vouches
+      // for an unlabelled thought only while nothing has written the row since
+      // (updated_at <= finished_at) — a NULL beside a row written since is a
+      // later foreign write, not a pre-021 pass (fifth review pass).
+      sql`status = 'succeeded' AND EXISTS (
+            SELECT 1 FROM thoughts x WHERE x.id = thought_id
+              AND (x.embedding IS NULL
+                   OR (x.embedding_model IS NOT NULL AND x.embedding_model <> ${TARGET})
+                   OR (x.embedding_model IS NULL AND x.updated_at > finished_at)))`
+    : sql`status = 'succeeded' AND thought_id IN (SELECT id FROM thoughts WHERE ${notAtTarget()})`;
+const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget()})`;
 
 /**
  * Return this job's rows a predicate selects to the pool as if never tried:
@@ -433,9 +563,12 @@ async function counts(): Promise<PassCounts> {
     FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number; noted: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
   const fellBack = Number(rows.find((r) => r.status === "succeeded")?.noted ?? 0);
+  // "Not yet in the pool" is what a run would add: with 021's column and the
+  // model's own key, the thoughts not at the target with no row under the key;
+  // under a backfill key, or before 021, every thought with no row.
   const [{ unpooled, thoughts }] = await sql`
     SELECT count(*)::int AS thoughts,
-           count(*) FILTER (WHERE NOT EXISTS (
+           count(*) FILTER (WHERE ${HAS_LABEL ? poolable() : sql`true`} AND NOT EXISTS (
              SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}))::int AS unpooled
     FROM thoughts t`;
   return {
@@ -454,15 +587,81 @@ function printCounts(c: PassCounts, label: string): void {
 }
 
 /**
- * What preflight will say about this key until the pass finishes — the same
- * rule and the same phrase (config.mjs), so an operator reading either sees
- * one account. Printed under --status and at the end of a run; a --dry-run
- * describes a run, not the state, and says nothing here.
+ * The corpus by the model its vectors carry (021) — the fact preflight's
+ * `vector models` check reads, printed where the claim counts are so an
+ * operator sees the rows and the record of the pass side by side. Rows with no
+ * vector are counted apart: they are not at any model and the pass gives them
+ * one. Before 021 there is nothing to read, and the line says so.
  */
-function printPreflightNote(c: PassCounts): void {
-  if (!passUnfinished(c)) return;
-  if (PREFLIGHT_SEES) console.error(`  preflight will warn until this finishes: ${JOB} — ${formatPassCounts(c)}`);
-  else console.error(`  unfinished, and preflight cannot see this key: ${JOB} — ${formatPassCounts(c)}`);
+async function printCorpusByModel(): Promise<{ others: number }> {
+  if (!HAS_LABEL) {
+    console.log("  corpus:    the rows carry no model (migration 021 not applied)");
+    return { others: 0 };
+  }
+  // The query and the arithmetic are config.mjs's, shared with preflight.
+  // Against the target the counts are judged against — the key's model where
+  // it names one (--status for a foreign key), this shell's otherwise.
+  const { at, unlabelled, others, otherCount } = summariseCorpusByModel(
+    (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[], TARGET);
+  const [{ n: noVector }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`;
+  console.log(
+    `  corpus:    ${at} at ${TARGET}` +
+      (others.length ? `, ${otherCount} at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")})` : "") +
+      (unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : "") +
+      (Number(noVector) ? `, ${noVector} without a vector` : "")
+  );
+  return { others: otherCount };
+}
+
+/**
+ * The unlabelled rows this run pools — no evidence of their model, so the
+ * pass is what labels them, and on a brain that never ran a pass through 015
+ * that is the whole corpus. Said before the workers start so the cost is not a
+ * surprise. Once the start transaction has built the pool the count is read
+ * from it (the pending rows); before it (--dry-run) it is what the start would
+ * pool, by the start's own predicates — a thought with no row that the pool
+ * takes, or a row one of the requeue rules returns (second and fourth review
+ * passes: two hand-inverted copies of those rules each counted rows the run
+ * never touched).
+ */
+async function unlabelledPooled(pooled: boolean): Promise<number> {
+  if (!HAS_LABEL) return 0;
+  const [{ n }] = await sql`
+    SELECT count(*)::int AS n FROM thoughts t
+    WHERE t.embedding IS NOT NULL AND t.embedding_model IS NULL
+      AND ${pooled
+        ? sql`EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB} AND c.status = 'pending')`
+        : sql`((${poolable()} AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}))
+               OR EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}
+                          AND (c.status = 'pending'
+                               OR (${doneButNotAtTarget()})
+                               OR (${recordModel} AND (${staleUnderThisJob()}))
+                               OR (${retryFailed} AND c.status = 'failed')
+                               OR (${retryFallbacks} AND (${withCaveat()})))))`}`;
+  return Number(n);
+}
+
+/**
+ * What preflight will say until the pass finishes — the same rule and the same
+ * phrase (config.mjs) for the claim counts, so an operator reading either sees
+ * one account — and, since 021, what its `vector models` line will say about
+ * the rows: vectors at another model are a warning there whether or not any
+ * claim row remembers them. Preflight judges the rows against the RECORDED
+ * model, this tool against its own, so the second note is given only when the
+ * two agree AS THEY STAND — after a run that recorded the model they do,
+ * whatever they did before it (second review pass); when they do not,
+ * preflight's embedding-contract line already says so. Printed under --status
+ * and at the end of a run; a --dry-run describes a run, not the state, and
+ * says nothing here.
+ */
+/** Whether the rows here are judged against the model preflight judges by — the record, as it stands (after this run recorded it, or as found). */
+const judgedAsPreflight = (afterRecord: boolean) => TARGET === (afterRecord ? embedConfig.embeddingModel : recorded.embedding_model);
+function printPreflightNote(c: PassCounts, others: number, recordAgrees: boolean): void {
+  if (passUnfinished(c)) {
+    if (PREFLIGHT_SEES) console.error(`  preflight will warn until this finishes: ${JOB} — ${formatPassCounts(c)}`);
+    else console.error(`  unfinished, and preflight cannot see this key: ${JOB} — ${formatPassCounts(c)}`);
+  }
+  if (others > 0 && recordAgrees) console.error(`  preflight will warn until they are re-embedded: ${others} vector(s) at another model (its vector models check)`);
 }
 
 /**
@@ -538,7 +737,8 @@ async function printFailures(limit = 10): Promise<void> {
 if (STATUS_ONLY || DRY_RUN) {
   const c = await counts();
   printCounts(c, STATUS_ONLY ? "status" : "before");
-  if (STATUS_ONLY) printPreflightNote(c);
+  const { others } = await printCorpusByModel();
+  if (STATUS_ONLY) printPreflightNote(c, others, judgedAsPreflight(false));
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
@@ -553,27 +753,40 @@ if (STATUS_ONLY || DRY_RUN) {
   if (c.fellBack > 0) await printFallbacks(c.fellBack);
   await printDuplicateGroups();
   if (DRY_RUN) {
-    const refusal = refusalJob ?? refusalTtl ?? refusal018;
+    const refusal = refusalJob ?? refusalTtl ?? refusal021;
     if (refusal) {
       console.error(`\n  would: refuse.${refusal}`);
       await sql.close();
       process.exit(2);
     }
-    // Recording the model starts this pass over (see the header), so the stale
-    // rows count towards the run and the retry flags add nothing.
-    const restart = recordModel
-      ? Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${JOB} AND (${staleUnderThisJob()})`)[0].n)
+    // Recording the model starts this pass over (see the header) — the failed
+    // rows and the expired leases count towards the run, and --retry-failed
+    // adds nothing; the data rule's rows count on every run, and the caveats
+    // --retry-fallbacks would return are those the data rule leaves.
+    const countWhere = async (where: ReturnType<typeof withCaveat>) =>
+      Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${JOB} AND (${where})`)[0].n);
+    const restart = recordModel ? await countWhere(staleUnderThisJob()) : 0;
+    // The rows the start-over takes first are not the data rule's to count
+    // again (under a backfill key the start-over takes every terminal row).
+    const notAt = recordModel
+      ? await countWhere(sql`(${doneButNotAtTarget()}) AND NOT (${staleUnderThisJob()})`)
+      : await countWhere(doneButNotAtTarget());
+    const fallbacks = retryFallbacks
+      ? await countWhere(recordModel ? sql`(${caveatsAtTarget()}) AND NOT (${staleUnderThisJob()})` : caveatsAtTarget())
       : 0;
+    const unlabelled = await unlabelledPooled(false);
     // Said as what a run WITH the flag would do when the flag is missing: the
     // run itself refuses, and this line must not read as its plan.
     console.log(
       `\n  would: ${modelChange && !SWITCH_MODEL ? "refuse without --switch-model; with it: " : ""}` +
         `${recordModel ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
-        `${restart ? `start this pass over (${restart} row(s) from before the change return to the pool); ` : ""}` +
+        `${restart ? `start this pass over (${restart} ${BACKFILL ? "terminal" : "failed"} row(s) or expired lease(s) from before the change return to the pool); ` : ""}` +
+        `${notAt ? `return ${notAt} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} to the pool; ` : ""}` +
         `${retryFailed ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-        `${retryFallbacks ? `return ${c.fellBack} rows succeeded with a caveat to the pool; ` : ""}` +
+        `${retryFallbacks ? `return ${fallbacks} rows succeeded with a caveat to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; run ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ` +
-        `over ${c.pending + c.unpooled + restart + (retryFailed ? c.failed : 0) + (retryFallbacks ? c.fellBack : 0)} rows. Nothing was written.`
+        `over ${c.pending + c.unpooled + restart + notAt + (retryFailed ? c.failed : 0) + fallbacks} rows` +
+        `${unlabelled ? ` — ${unlabelled} of them unlabelled (nothing vouches for their model; re-embedding is what labels them)` : ""}. Nothing was written.`
     );
   }
   await sql.close();
@@ -583,7 +796,7 @@ if (STATUS_ONLY || DRY_RUN) {
 // ── The run ─────────────────────────────────────────────────────────────────
 
 {
-  const refusal = refusalJob ?? refusalTtl ?? refusal018;
+  const refusal = refusalJob ?? refusalTtl ?? refusal021;
   if (refusal) {
     console.error(`\n ${refusal}`);
     await sql.close();
@@ -604,7 +817,7 @@ try {
 // The record and the pool, in one transaction — see "Changing model" in the
 // header. Nothing below is printed until it has committed, so what the
 // operator reads is what the database holds.
-type Start = { restarted: number; retriedFailed: number; retriedFallbacks: number; added: number };
+type Start = { restarted: number; movedSinceDone: number; retriedFailed: number; retriedFallbacks: number; added: number };
 let start: Start;
 try {
   start = await sql.begin(async (tx: SQL) => {
@@ -613,18 +826,26 @@ try {
         INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${embedConfig.embeddingModel})
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
     }
-    // Recording the model starts this pass over, whatever an earlier pass
-    // under the key recorded. The retry flags are subsumed — they select
-    // subsets of the same rows.
+    // Recording the model starts this pass over — its failed rows and expired
+    // leases, whatever an earlier pass under the key recorded; --retry-failed
+    // is subsumed. The succeeded rows are the data rule's, on every run: back
+    // to the pool when their thought is not at the target, and only then.
     const restarted = recordModel ? await requeue(tx, staleUnderThisJob()) : 0;
+    const movedSinceDone = await requeue(tx, doneButNotAtTarget());
     const retriedFailed = retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
+    // After the data rule, so a caveat row whose thought moved is counted once.
     const retriedFallbacks = retryFallbacks ? await requeue(tx, withCaveat()) : 0;
-    const [{ added }] = await tx`SELECT enqueue_thoughts(${JOB}) AS added`;
+    // The pool (021): under the model's own key the rows not at the target — a
+    // thought already at it with no row under the key needs nothing; under a
+    // backfill key every thought, through 015's set-based branch, as before.
+    const [{ added }] = BACKFILL
+      ? await tx`SELECT enqueue_thoughts(${JOB}) AS added`
+      : await tx`SELECT enqueue_thoughts(${JOB}, ARRAY(SELECT id FROM thoughts WHERE ${notAtTarget()})) AS added`;
     // enqueue_thoughts analyses only when it added rows; a requeue moves as
     // many into the pending index and would otherwise leave the statistics
     // describing the finished pass (migration 015, "Cost of a claim").
-    if (restarted + retriedFailed + retriedFallbacks > 0 && Number(added) === 0) await tx`ANALYZE thought_work_claims`;
-    return { restarted, retriedFailed, retriedFallbacks, added: Number(added) };
+    if (restarted + movedSinceDone + retriedFailed + retriedFallbacks > 0 && Number(added) === 0) await tx`ANALYZE thought_work_claims`;
+    return { restarted, movedSinceDone, retriedFailed, retriedFallbacks, added: Number(added) };
   });
 } catch (e) {
   // Rolled back whole: the record still names the previous model and the pool
@@ -644,14 +865,21 @@ if (recordModel) {
   console.log(`  ob1_config.embedding_model = ${embedConfig.embeddingModel} — a server configured for it now passes preflight; switch it.`);
 }
 if (start.restarted > 0) {
-  console.log(`  ${modelChange ? "model change" : "no model was recorded"}: this pass starts over — ${start.restarted} row(s) from before the change returned to the pool`);
+  console.log(`  ${modelChange ? "model change" : "no model was recorded"}: this pass starts over — ${start.restarted} ${BACKFILL ? "terminal" : "failed"} row(s) or expired lease(s) from before the change returned to the pool`);
 }
-const subsumed = "nothing to do separately — recording the model returned every terminal row under this job to the pool";
-if (RETRY_FAILED) console.log(`  --retry-failed: ${recordModel ? subsumed : `${start.retriedFailed} failed row(s) returned to the pool`}`);
-if (RETRY_FALLBACKS) console.log(`  --retry-fallbacks: ${recordModel ? subsumed : `${start.retriedFallbacks} row(s) succeeded with a caveat returned to the pool`}`);
+if (start.movedSinceDone > 0) {
+  console.log(`  ${start.movedSinceDone} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} returned to the pool — captured or edited since by a server on another model`);
+}
+if (RETRY_FAILED) console.log(`  --retry-failed: ${recordModel ? "nothing to do separately — recording the model returned every failed row under this job to the pool" : `${start.retriedFailed} failed row(s) returned to the pool`}`);
+if (RETRY_FALLBACKS) console.log(`  --retry-fallbacks: ${start.retriedFallbacks} row(s) succeeded with a caveat returned to the pool`);
 const before = await counts();
 console.log(`  pool: ${start.added} thought(s) added`);
 printCounts(before, "before");
+const { others: othersBefore } = await printCorpusByModel();
+{
+  const unlabelled = await unlabelledPooled(true);
+  if (unlabelled > 0) console.error(`  ${unlabelled} of the rows to re-embed are unlabelled — nothing vouches for their model — and this pass is what labels them`);
+}
 
 const total = before.pending + before.claimed;
 if (total === 0) {
@@ -659,7 +887,7 @@ if (total === 0) {
   if (before.failed > 0) {
     console.error(`  ${before.failed} failed row(s) remain from an earlier run — pass --retry-failed to try them again:`);
     await printFailures();
-    printPreflightNote(before);
+    printPreflightNote(before, othersBefore, judgedAsPreflight(recordModel));
     await sql.close();
     process.exit(1);
   }
@@ -722,7 +950,8 @@ async function processRow(row: Row): Promise<Outcome> {
         ${toVector(embedded.embedding)}::vector,
         ${chunks.length ? chunks : null}::jsonb,
         ${current.updated_at}::timestamptz,
-        ${actor}::jsonb
+        ${actor}::jsonb,
+        ${embedded.model}::text
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {
@@ -941,17 +1170,21 @@ if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();
 }
-if (recordModel && after.unpooled > 0) {
-  // Captured while the pass ran, by a server that may not have been switched
-  // yet — then on the previous model's vectors, with no row here to say so.
-  // Nothing can tell the two apart afterwards; a re-run brings them over.
+const { others: othersAfter } = await printCorpusByModel();
+if (after.unpooled > 0) {
+  // Under the model's own key: captured or edited while the pass ran, by a
+  // server on another model — the rows say so (021), and a re-run takes exactly
+  // them. Under a backfill key every capture made meanwhile is unpooled,
+  // whatever model it is at, and nothing about the server follows from it.
   console.error(
-    `\n  ${after.unpooled} thought(s) were captured while the pass ran and are not in the pool. A server still embedding with\n` +
-      `  ${recorded.embedding_model ?? "the previous model"} when it captured them left them on that model's vectors, and nothing here can tell; once the\n` +
-      `  server is switched, re-run — the pool takes them.`
+    BACKFILL
+      ? `\n  ${after.unpooled} thought(s) captured while the pass ran have no row under this job; re-run to pool them.`
+      : `\n  ${after.unpooled} thought(s) are not at ${TARGET} and have no row under this job — captured or edited while the pass ran\n` +
+          `  by a server on another model, by one older than 021 (no label), or through a fallback that stores no vector. Switch or upgrade the\n` +
+          `  server if that is what it was, then re-run: the pool takes exactly them.`
   );
 }
-printPreflightNote(after);
+printPreflightNote(after, othersAfter, judgedAsPreflight(recordModel));
 if (after.claimed > 0) {
   console.error(
     `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +

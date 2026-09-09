@@ -23,6 +23,7 @@ import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -173,6 +174,83 @@ console.log("\n[3] Re-applying is a no-op, not a second copy");
     SELECT count(*)::int AS c FROM information_schema.columns
      WHERE table_name = 'thought_audit' AND column_name = 'canonical_agent_id'`;
   assert(dupCol.c === 1, "the added column exists exactly once");
+  await sql.close();
+}
+
+console.log("\n[4] Migration 021 onto a populated 020 — the column, and the function it replaces");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+
+  // A corpus written before 021: through the writers and around them, and
+  // what the claim table remembers of it — the one evidence 021 labels from.
+  const [{ r: viaUpsert }] = await sql`SELECT upsert_thought('captured before 021', '{"metadata":{}}'::jsonb, ${vec}::vector) AS r`;
+  const viaUpsertId = (viaUpsert as { id: string }).id;
+  await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('inserted before 021', '{}'::jsonb, ${vec}::vector)`;
+  const [{ id: editedId }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('re-embedded, then edited', '{}'::jsonb, ${vec}::vector) RETURNING id`;
+  const [{ id: nightlyId }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('re-embedded under a key naming no model', '{}'::jsonb, ${vec}::vector) RETURNING id`;
+  const [{ id: vectorlessId }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('re-embedded, vector since removed', '{}'::jsonb) RETURNING id`;
+  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
+  // Finished passes: the model's own key over four rows (an earlier pass to
+  // another model over one of them, so the LATEST claim must win), a key that
+  // names no model over one row. Every claim finished after its row was written.
+  await sql.unsafe(`SELECT enqueue_thoughts('reembed:earlier-model@${OPTS.dim}', ARRAY['${viaUpsertId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${"reembed:earlier-model@" + OPTS.dim}`;
+  await sql.unsafe(`SELECT enqueue_thoughts('${KEY}', ARRAY['${viaUpsertId}', '${editedId}', '${vectorlessId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY}`;
+  await sql.unsafe(`SELECT enqueue_thoughts('reembed:nightly', ARRAY['${nightlyId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = 'reembed:nightly'`;
+  // Written since its pass: the updated_at trigger moves it past finished_at.
+  await sql`UPDATE thoughts SET content = 're-embedded, then edited (edited)' WHERE id = ${editedId}::uuid`;
+  const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  assert(absent.c === 0, "at migration 020 there is no embedding_model column");
+  const [seven] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought' AND pronargs = 7`;
+  assert(seven.c === 1, "…and update_thought takes seven arguments");
+
+  const stampsBefore = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
+
+  const stampsAfter = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "labelling moves no row's updated_at — the label is a fact about a vector already there, not an edit");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
+  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
+
+  const models = Object.fromEntries(
+    ((await sql`SELECT content, embedding_model AS m FROM thoughts`) as { content: string; m: string | null }[]).map((r) => [r.content, r.m])
+  );
+  assert(models["captured before 021"] === OPTS.model, `a row a finished pass wrote, and nothing wrote since, is labelled from its latest succeeded claim (${models["captured before 021"]})`);
+  assert(models["inserted before 021"] === null, "a row no pass touched reads NULL — unknown, not stamped with the recorded model");
+  assert(models["re-embedded, then edited (edited)"] === null, "a row written since its pass reads NULL — the claim no longer vouches for its vector");
+  assert(models["re-embedded under a key naming no model"] === null, "a claim under a key naming no model is no evidence");
+  assert(models["re-embedded, vector since removed"] === null, "a row with no vector takes no label, whatever its claim says");
+  const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
+  assert(forms.length === 1 && Number(forms[0].n) === 8, `the 7-argument form is gone and the eight-argument one is the only update_thought (${forms.map((f) => f.n).join(",")})`);
+
+  // The mirror: a write after the upgrade carries the label, on both writers.
+  const [{ r: after }] = await sql`SELECT upsert_thought('captured after 021', ${{ metadata: {}, embedding_model: OPTS.model }}::jsonb, ${vec}::vector) AS r`;
+  const [labelled] = await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${(after as { id: string }).id}::uuid`;
+  assert(labelled.m === OPTS.model, `a capture after the upgrade carries the label (${labelled.m})`);
+  const [{ r: edited }] = await sql`SELECT ${sql.unsafe(`update_thought('${(viaUpsert as { id: string }).id}'::uuid, 'captured before 021', NULL::jsonb, '${vec}'::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, '${OPTS.model}'::text)`)} AS r`;
+  const [relabelled] = await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${(viaUpsert as { id: string }).id}::uuid`;
+  assert((edited as { ok: boolean }).ok === true && relabelled.m === OPTS.model, `a re-embed of a pre-021 row through update_thought labels it (${relabelled.m})`);
+  const [still] = await sql`SELECT embedding_model AS m FROM thoughts WHERE content = 'inserted before 021'`;
+  assert(still.m === null, "…while the row nothing re-embedded stays unknown");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
+  const [dupCol] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  const [dupFn] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`;
+  assert(dupCol.c === 1 && dupFn.c === 1 && (await sql`SELECT to_regprocedure(${UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS p`)[0].p === true,
+         "re-applying 021 is a no-op: the column once, the function once, at the shipped signature");
   await sql.close();
 }
 
