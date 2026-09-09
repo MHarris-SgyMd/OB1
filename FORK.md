@@ -3429,7 +3429,20 @@ the label also fires for a stale PostgREST schema cache and stores an
 unlabelled vector — a defined state the pass re-embeds; and the in-repo
 integrations (`enhanced-mcp` as well as `update-thought-mcp`) replace a vector
 with a raw update and leave the label stale — outside this change, named
-below. Suites after: live 252; `server/` 47, 30, 38.
+below. Suites after: live 252; `server/` 47, 30, 38. Then the tidy-ups the
+passes had cut for space, while the files were open: the `p_payload` envelope
+was built identically in both stores — `captureEnvelope` in `store.ts` beside
+`actorPayload` is the one copy — and the model was re-read from the
+configuration at every call site beside a vector the embedder had just
+produced; `EmbeddedCapture` carries `model`, and the server and `reembed.ts`
+pass that. The corpus-by-model query and its arithmetic were written in
+`reembed.ts` and in preflight; `CORPUS_BY_MODEL_SQL` and
+`summariseCorpusByModel` in `db/config.mjs` are the one copy. Preflight's two
+PostgREST probes each created a client, and one remedy string was written
+where `APPLY_021` was; `test-preflight.ts` wrote the regex-escape idiom nine
+times, and has `rx()`. The ACL replay block's third copy stays: a migration
+file cannot share text with another, and a SQL helper for it would be a fourth
+thing to carry.
 
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and

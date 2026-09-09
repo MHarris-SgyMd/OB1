@@ -149,6 +149,10 @@ export function reembedKey(model: string, dim: number): string;
 export function parseReembedKey(key: string): { model: string; dim: number } | null;
 /** The model a pass under `key` pools against — its own key's model — or null for a backfill key, which pools every thought (021). */
 export function poolModelFor(key: string): string | null;
+/** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
+export const CORPUS_BY_MODEL_SQL: string;
+/** Those rows read against one model: at it, unlabelled, and the other models with counts. */
+export function summariseCorpusByModel(rows: { model: string | null; c: number }[], atModel: string): { at: number; unlabelled: number; others: { model: string; c: number }[]; otherCount: number };
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

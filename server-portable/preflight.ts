@@ -381,6 +381,10 @@ if (configFailed) {
          * refuse to choose. The SQL branch reads pg_proc instead (first review
          * pass of 020 — this check lived only there).
          */
+        // A client of its own for the probes below, which call as an outside
+        // caller would — by name, with the arguments an older form took — rather
+        // than through the store's own shape.
+        const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
         try {
           const probe = new Array(embDim).fill(0);
           probe[0] = 1;
@@ -395,7 +399,6 @@ if (configFailed) {
           } catch (e) {
             current = (e as Error).message;
           }
-          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
           const { error } = current ? { error: null } : await legacy.rpc("match_thoughts", { query_embedding: probe, match_threshold: -1, match_count: 1, filter: {} });
           if (current && missing(current)) {
             add("search signatures", "fail",
@@ -431,7 +434,6 @@ if (configFailed) {
          * every PostgREST caller by name that predates this change.
          */
         try {
-          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
           const nobody = "00000000-0000-4000-8000-000000000000";
           const seven = { p_id: nobody, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
           const { data: eight, error: eightErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null });
@@ -697,7 +699,7 @@ if (configFailed) {
           const current = ut.filter((r) => Number(r.nargs) === 8);
           const extra = ut.filter((r) => Number(r.nargs) !== 8).map((r) => r.sig);
           if (!ut.length) {
-            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", "Apply the migrations through db/migrations/021_embedding_model_per_row.sql.");
+            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", APPLY_021);
           } else if (current.length && extra.length === 0) {
             add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 021 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
           } else if (current.length) {
@@ -1048,14 +1050,11 @@ if (configFailed) {
                 "thoughts.embedding_model does not exist — the server records the model on every vector it stores, and the writers before migration 021 cannot hold it: captures would silently lose the label and edits would fail",
                 APPLY_021);
           } else {
-            const byModel = (await sql`
-              SELECT embedding_model AS model, count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1`) as
-              { model: string | null; c: number }[];
+            // The query and the arithmetic are config.mjs's, shared with reembed.ts.
+            const { CORPUS_BY_MODEL_SQL, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
-            const at = Number(byModel.find((r) => r.model === atModel)?.c ?? 0);
-            const unlabelled = Number(byModel.find((r) => r.model === null)?.c ?? 0);
-            const others = byModel.filter((r) => r.model !== null && r.model !== atModel);
-            const otherCount = others.reduce((a, r) => a + Number(r.c), 0);
+            const { at, unlabelled, others, otherCount } = summariseCorpusByModel(
+              (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[], atModel);
             const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : ""}`;
             if (otherCount > 0) {
               // Judged against the RECORD — what the corpus is meant to be at.

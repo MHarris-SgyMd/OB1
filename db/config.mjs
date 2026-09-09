@@ -717,6 +717,32 @@ export function poolModelFor(key) {
 }
 
 /**
+ * The corpus by the model its vectors carry (migration 021): one row per
+ * label, NULL for unknown, vectorless rows left out — what preflight's
+ * `vector models` check and reembed.ts's corpus line both read. Plain SQL with
+ * no parameters, so either client runs it with `unsafe`.
+ */
+export const CORPUS_BY_MODEL_SQL =
+  "SELECT embedding_model AS model, count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1";
+
+/**
+ * Those rows read against one model: how many are at it, how many carry no
+ * label, and the other models with their counts. One reduction for both
+ * tools, so they cannot describe one corpus two ways (SMD-1068's review
+ * passes found the query and this arithmetic written twice).
+ *
+ * @param {{model: string | null, c: number}[]} rows
+ * @param {string} atModel
+ * @returns {{at: number, unlabelled: number, others: {model: string, c: number}[], otherCount: number}}
+ */
+export function summariseCorpusByModel(rows, atModel) {
+  const at = Number(rows.find((r) => r.model === atModel)?.c ?? 0);
+  const unlabelled = Number(rows.find((r) => r.model === null)?.c ?? 0);
+  const others = rows.filter((r) => r.model !== null && r.model !== atModel).map((r) => ({ model: /** @type {string} */ (r.model), c: Number(r.c) }));
+  return { at, unlabelled, others, otherCount: others.reduce((a, r) => a + r.c, 0) };
+}
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot
@@ -831,10 +857,6 @@ export const MATCH_COUNT_CEILING = 500;
  */
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
-/**
- * The forms 020 dropped. Still owned: a bench's "before" arm re-applies 014 or
- * 017 and re-creates them, so a schema reset must drop them too.
- */
 /**
  * update_thought's signature since migration 021 (SMD-1068): an eighth,
  * defaulted parameter, `p_embedding_model`, the model that produced the vector

@@ -238,6 +238,7 @@ import { SQL } from "bun";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
+  CORPUS_BY_MODEL_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
   embeddingConfigWarnings,
@@ -248,6 +249,7 @@ import {
   poolModelFor,
   REEMBED_KEY_PREFIX,
   reembedKey,
+  summariseCorpusByModel,
   UPDATE_THOUGHT_SIGNATURE,
   validateEmbeddingConfig,
 } from "./config.mjs";
@@ -596,16 +598,12 @@ async function printCorpusByModel(): Promise<{ others: number }> {
     console.log("  corpus:    the rows carry no model (migration 021 not applied)");
     return { others: 0 };
   }
-  const rows = (await sql`
-    SELECT embedding_model AS model, count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1`) as
-    { model: string | null; c: number }[];
-  const [{ n: noVector }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`;
+  // The query and the arithmetic are config.mjs's, shared with preflight.
   // Against the target the counts are judged against — the key's model where
   // it names one (--status for a foreign key), this shell's otherwise.
-  const at = rows.find((r) => r.model === TARGET)?.c ?? 0;
-  const others = rows.filter((r) => r.model !== null && r.model !== TARGET);
-  const unlabelled = rows.find((r) => r.model === null)?.c ?? 0;
-  const otherCount = others.reduce((a, r) => a + Number(r.c), 0);
+  const { at, unlabelled, others, otherCount } = summariseCorpusByModel(
+    (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[], TARGET);
+  const [{ n: noVector }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`;
   console.log(
     `  corpus:    ${at} at ${TARGET}` +
       (others.length ? `, ${otherCount} at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")})` : "") +
@@ -953,7 +951,7 @@ async function processRow(row: Row): Promise<Outcome> {
         ${chunks.length ? chunks : null}::jsonb,
         ${current.updated_at}::timestamptz,
         ${actor}::jsonb,
-        ${embedConfig.embeddingModel}::text
+        ${embedded.model}::text
       ) AS r`;
     const result = r.r as { ok: boolean; error?: string; duplicate_of?: string; fingerprint_held_by?: string };
     if (result.ok) {

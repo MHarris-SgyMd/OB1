@@ -294,6 +294,12 @@ export type EmbedKind = "query" | "document";
 
 export type EmbeddedCapture = {
   embedding: number[];
+  /**
+   * The model that produced `embedding` and the chunks' vectors — the one
+   * value that belongs beside them, so a writer records it (021) rather than
+   * re-reading the configuration at each call site.
+   */
+  model: string;
   chunks: { content: string; embedding: number[]; context?: string }[];
   /** Windows that were meant to carry a blurb and went in bare instead. */
   contextFailures: number;
@@ -541,7 +547,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content), chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
+      return { embedding: await getEmbedding(content), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
     }
 
     const wantContext = cfg.chunkContext;
@@ -590,6 +596,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
 
     return {
       embedding: whole ?? windowVectors[0],
+      model: cfg.embeddingModel,
       chunks: windows.map((w, i) => ({
         content: w.content,
         embedding: windowVectors[i],

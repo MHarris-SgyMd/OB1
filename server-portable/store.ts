@@ -254,6 +254,24 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
 }
 
 /**
+ * The `p_payload` envelope `upsert_thought` has read since migration 004:
+ * `metadata`, plus `actor` (008, the audit trail) and `embedding_model` (021,
+ * the label beside the vector) when given. Built here for both stores, so a
+ * key one of them forgot is a compile error rather than a NULL label.
+ */
+export function captureEnvelope(
+  payload: { metadata: Record<string, unknown> },
+  actor: Actor | undefined,
+  embeddingModel: string | undefined
+): Record<string, unknown> {
+  return {
+    ...payload,
+    ...(actor ? { actor: actorPayload(actor) } : {}),
+    ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
+  };
+}
+
+/**
  * What resolve_agent() answered. See migration 010 and agents.ts.
  *
  * The failure arm is two literal variants rather than one with `error: string`,

@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -189,12 +189,8 @@ export class PostgrestStore implements ThoughtStore {
     // this write. Without it, every audit row on this store would have recorded
     // a NULL actor: present, plausible, and wrong.
     // The model rides the same way (021); an envelope without the key leaves
-    // the row's label unknown, as the two-step fallback below always does.
-    const envelope = {
-      ...opts.payload,
-      ...(opts.actor ? { actor: actorPayload(opts.actor) } : {}),
-      ...(opts.embeddingModel !== undefined ? { embedding_model: opts.embeddingModel } : {}),
-    };
+    // the row's label unknown.
+    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel);
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,

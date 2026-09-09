@@ -32,6 +32,8 @@ process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
 
 const { assert, skip: skipRaw, report } = createAssert();
+/** A literal for a RegExp source — model names carry dots and colons. */
+const rx = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const skip = (l: string) => skipRaw(l, "no DATABASE_URL");
 
 const BASE_OK = { MCP_ACCESS_KEY: "x".repeat(64), OPENROUTER_API_KEY: "sk-stub" };
@@ -453,7 +455,7 @@ else {
   const CTX = `${KEY}:ctx`;
   await claims.unsafe(`SELECT enqueue_thoughts('${CTX}', ARRAY['${ids[0]}']::uuid[])`);
   const other = await run(SQL_ENV);
-  assert(other.code === 0 && new RegExp(`re-embed pass\\s+${CTX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 5 not yet in the pool — a pass under this key stopped before it finished`).test(other.out),
+  assert(other.code === 0 && new RegExp(`re-embed pass\\s+${rx(CTX)}: 6 thoughts — 0 succeeded, 0 failed, 0 in flight, 1 pending, 5 not yet in the pool — a pass under this key stopped before it finished`).test(other.out),
          "a backfill under --job that stopped is reported by its key, with its counts");
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
@@ -471,7 +473,7 @@ else {
   const OTHER = `reembed:other-model@${EMBEDDING_DIM}`;
   await claims.unsafe(`SELECT enqueue_thoughts('${OTHER}', ARRAY['${ids[0]}']::uuid[])`);
   const superseded = await run(SQL_ENV);
-  assert(superseded.code === 0 && new RegExp(`${OTHER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
+  assert(superseded.code === 0 && new RegExp(`${rx(OTHER)}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
          "a pass to a model that is no longer the recorded one is described as an abandoned switch");
   assert(/OB1_EMBEDDING_MODEL=other-model OB1_EMBEDDING_DIM=\d+ bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(superseded.out) && superseded.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${OTHER}';`),
          "…with the two remedies: finish that switch in its own environment, or retire its record");
@@ -528,7 +530,7 @@ else {
   const WIDE = `reembed:${EMBEDDING_MODEL}@${EMBEDDING_DIM + 1}`;
   await claims.unsafe(`SELECT enqueue_thoughts('${WIDE}', ARRAY['${ids[0]}']::uuid[])`);
   const wide = await run(SQL_ENV);
-  assert(new RegExp(`${WIDE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 6 thoughts — .* — a pass to ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
+  assert(new RegExp(`${rx(WIDE)}: 6 thoughts — .* — a pass to ${rx(EMBEDDING_MODEL)} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
          "a key at another width is described as one no run can finish");
   assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
          "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
@@ -548,27 +550,27 @@ else {
    */
   const noVec = await run(SQL_ENV);
   assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
-  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\\): the form the servers and reembed\\.ts call since migration 021 \\(${UPDATE_THOUGHT_SIGNATURE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\), alone`).test(noVec.out),
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\\): the form the servers and reembed\\.ts call since migration 021 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
          "the eight-argument update_thought is the only form");
   const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = NULL WHERE id = '${ids[3]}'`);
   const twoModels = await run(SQL_ENV);
-  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(model unknown\\) — searches rank across the two`).test(twoModels.out),
+  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${rx(EMBEDDING_MODEL)}, 1 unlabelled \\(model unknown\\) — searches rank across the two`).test(twoModels.out),
          "rows at two models, with an empty claim table, warn from the rows alone — with the counts by model");
   assert(/re-embed pass\s+none unfinished/.test(twoModels.out), "…while the claim table, empty, still says no pass is unfinished — the state SMD-1068 was filed for");
-  assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
+  assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${rx(EMBEDDING_MODEL)}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
          "…with the pass as the remedy, and no --switch-model while the record and the configuration agree");
   const twoJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   await claims.unsafe(`UPDATE thoughts SET embedding_model = '${EMBEDDING_MODEL}' WHERE id = '${ids[2]}'`);
   const atModel = await run(SQL_ENV);
-  assert(new RegExp(`vector models\\s+3 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
+  assert(new RegExp(`vector models\\s+3 at ${rx(EMBEDDING_MODEL)}, 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
          "a corpus wholly at the recorded model is ok, the unlabelled row reported as detail rather than as wrong");
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const recordMoved = await run(SQL_ENV);
-  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(recordMoved.out),
+  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${rx(EMBEDDING_MODEL)}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${rx(EMBEDDING_MODEL)}`).test(recordMoved.out),
          "with the record on another model, the rows at the configured one are the ones out of place against the record");
   assert(/Finish the switch to other-model: cd db && OB1_EMBEDDING_MODEL=other-model bun reembed\.ts --url \$DATABASE_URL, and configure the server for it; or, if .* stands: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model, which re-embeds the rows at other-model instead\./.test(recordMoved.out),
          "…and the remedy gives both directions rather than a --switch-model from this shell that would revert the switch");
@@ -579,7 +581,7 @@ else {
          "the column missing under this server does not start, naming 021");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const restored = await run(SQL_ENV);
-  assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
+  assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          "021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok");
   // 021's backfill holds the updated_at trigger off for one statement; a
   // hand run that stopped between DISABLE and ENABLE leaves it off.

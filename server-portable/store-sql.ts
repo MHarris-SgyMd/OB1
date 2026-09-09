@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -238,11 +238,7 @@ export class SqlStore implements ThoughtStore {
     // The model rides the same way (021): upsert_thought writes
     // p_payload.embedding_model beside the vector, and an envelope without the
     // key leaves the row's label unknown.
-    const envelope = {
-      ...opts.payload,
-      ...(opts.actor ? { actor: actorPayload(opts.actor) } : {}),
-      ...(opts.embeddingModel !== undefined ? { embedding_model: opts.embeddingModel } : {}),
-    };
+    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel);
 
     const rows = chunks.length
       ? await this.sql`
