@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,12 @@ const FUNCTIONS = [
   "upsert_thought(text, jsonb)",
   "upsert_thought(text, jsonb, vector)",
   "upsert_thought(text, jsonb, vector, jsonb)",
-  "match_thoughts(vector, float, int, jsonb)",
+  // The shipped signatures and the ones 020 dropped: a bench's "before" arm
+  // re-creates the old forms, and a reset that left one behind would hand the
+  // next section an ambiguous 4-argument call.
+  MATCH_THOUGHTS_SIGNATURE,
+  "recency_score(float, timestamptz, float, float)",
+  ...SUPERSEDED_SIGNATURES,
   "search_thoughts_keyword(text, int, int, jsonb)",
   "update_updated_at()",
   "enqueue_thoughts(text, uuid[])",
@@ -75,7 +80,7 @@ const FUNCTIONS = [
   "prune_orphan_entities()",
   "requeue_thought_work(text, uuid)",
   "thoughts_enqueue_entity_extraction()",
-  "search_thoughts_hybrid(vector, text, float, int, jsonb)",
+  SEARCH_THOUGHTS_HYBRID_SIGNATURE,
   "extract_search_needles(text)",
 ];
 
@@ -300,7 +305,7 @@ export function requireDatabaseUrl(script: string): string {
  * match_thoughts' own statements, as parameterised SQL. Read from the catalog so
  * it is the DEPLOYED text — EXPLAIN cannot see inside a plpgsql function, and
  * a copy of the body kept here would be the body as someone remembered it. The
- * rewrite is deliberately narrow — the four parameters and the DECLAREd locals
+ * rewrite is deliberately narrow — the six parameters (four before 020) and the DECLAREd locals
  * — and refuses anything it does not recognise rather than explaining a
  * statement that is not the function's.
  *
@@ -314,10 +319,22 @@ export function requireDatabaseUrl(script: string): string {
  */
 export type Branch = "unfiltered" | "walk" | "exact" | "route";
 
-export async function extractBody(sql: SQL, branch: Branch, dim: number): Promise<string> {
-  const [{ def }] = await sql.unsafe(
-    `SELECT pg_get_functiondef('match_thoughts(vector, float, int, jsonb)'::regprocedure) AS def`
+/**
+ * The one match_thoughts in `public`, whatever its signature: the benches'
+ * "before" arms hold 014's 4-argument function and the shipped schema 020's
+ * 6-argument one. Two of them is the ambiguity 020 exists to avoid, and is
+ * refused here rather than explained.
+ */
+export async function matchThoughtsOid(sql: SQL): Promise<number> {
+  const rows = await sql.unsafe(
+    `SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'`
   );
+  if (rows.length !== 1) throw new Error(`${rows.length} match_thoughts functions in public; expected exactly one`);
+  return Number(rows[0].oid);
+}
+
+export async function extractBody(sql: SQL, branch: Branch, dim: number): Promise<string> {
+  const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
   let block: string | undefined;
   if (branch === "route") {
     // `SELECT array_agg(s.id) INTO v_ids FROM (...) s;` — minus the INTO.
@@ -360,11 +377,16 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
   for (let pass = 0; pass < locals.length + 1; pass++) {
     for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${expr})`);
   }
+  // 020's two parameters are $5 and $6; a body from before 020 (a bench's
+  // "before" arm) reads neither, and a PREPARE that declares them is still
+  // valid, so every explainer passes six arguments.
   body = body
     .replace(/\bquery_embedding\b/g, () => `$1::vector(${dim})`)
     .replace(/\bmatch_threshold\b/g, () => "$2::float")
     .replace(/\bmatch_count\b/g, () => "$3::int")
-    .replace(/\bfilter\b/g, () => "$4::jsonb");
+    .replace(/\bfilter\b/g, () => "$4::jsonb")
+    .replace(/\brecency_weight\b/g, () => "$5::float")
+    .replace(/\bhalf_life_days\b/g, () => "$6::float");
   const leftover = /\b(v_\w+)\b/.exec(body);
   if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
   return body;
@@ -381,9 +403,7 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
  * and a successor that forced one would otherwise hide the other.
  */
 export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transaction" | "session" } = {}): Promise<string[]> {
-  const entries = await tx.unsafe(
-    `SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
-  );
+  const entries = await tx.unsafe(`SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(tx)]);
   const applied: string[] = [];
   for (const { kv } of entries as { kv: string }[]) {
     const eq = kv.indexOf("=");
@@ -405,14 +425,17 @@ export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transactio
  * caller has applied the settings it wants on `tx` (applyFunctionSettings, or
  * SET LOCAL for an arm the function does not have) and chooses the plan mode.
  * One body for the four explainers (second review pass), so a change to the
- * EXPLAIN form or the parameter list has one place to land.
+ * EXPLAIN form or the parameter list has one place to land. `args` is the
+ * function's six arguments as SQL text — `query, threshold, count, filter,
+ * recency_weight, half_life_days` (020); a pre-020 body simply reads the last
+ * two of them nowhere.
  */
 export async function explainPrepared(
   tx: SQL,
   opts: { body: string; dim: number; args: string; mode: "force_custom_plan" | "force_generic_plan"; warm?: boolean }
 ): Promise<{ text: string; ms: number; buffers: number }> {
   await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
-  await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb) AS ${opts.body}`);
+  await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb, float, float) AS ${opts.body}`);
   if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
   const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE ob1_explain(${opts.args})`);
   await tx.unsafe(`DEALLOCATE ob1_explain`);

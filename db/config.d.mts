@@ -166,6 +166,12 @@ export function quoteIdent(name: unknown): string;
 export const BOUNDS_IN_FORCE_SQL: string;
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
+/** The signature the servers call, as regprocedure text (020: six arguments). */
+export const MATCH_THOUGHTS_SIGNATURE: string;
+/** The signature the servers call, as regprocedure text (020: seven arguments). */
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
+/** The 4- and 5-argument forms 020 dropped; a schema reset drops them too. */
+export const SUPERSEDED_SIGNATURES: readonly string[];
 /** pg_settings.source values that reach every role: server configuration or the database. */
 export const SHARED_SETTING_SOURCES: string[];
 /** SELECT of the current database's pg_db_role_setting row as `cfg` (setconfig). */

@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -35,6 +35,7 @@ import type {
   ThoughtKeywordMatch,
   ThoughtListItem,
   ThoughtMatch,
+  RecencyOpts,
   ThoughtMeta,
   ThoughtRecord,
   ThoughtStore,
@@ -62,16 +63,19 @@ export class SqlStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
-  }): Promise<ThoughtMatch[]> {
+  } & RecencyOpts): Promise<ThoughtMatch[]> {
     // Call the stored function rather than inlining the ranking, so the strict
     // threshold comparison and the ordering stay defined in exactly one place.
+    // All six arguments, always — store.ts's RecencyOpts says why.
     const rows = await this.sql`
-      SELECT id, content, metadata, similarity, created_at
+      SELECT id, content, metadata, similarity, created_at, score
       FROM match_thoughts(
         ${toVector(opts.embedding)}::vector,
         ${opts.threshold}::float,
         ${opts.limit}::int,
-        ${opts.filter}::jsonb
+        ${opts.filter}::jsonb,
+        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
+        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
     return rows.map((r: Record<string, unknown>) => ({
       id: String(r.id),
@@ -79,6 +83,7 @@ export class SqlStore implements ThoughtStore {
       metadata: (r.metadata ?? {}) as Record<string, unknown>,
       similarity: Number(r.similarity),
       created_at: new Date(r.created_at as string).toISOString(),
+      score: Number(r.score),
     }));
   }
 
@@ -117,7 +122,7 @@ export class SqlStore implements ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
-  }): Promise<ThoughtHybridMatch[]> {
+  } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
     // The function extracts the needles and does the fusion, so neither store
     // has a copy of either rule to get out of step — the same reason the two
     // methods above call their functions rather than inlining them.
@@ -129,7 +134,9 @@ export class SqlStore implements ThoughtStore {
         ${opts.query}::text,
         ${opts.threshold}::float,
         ${opts.limit}::int,
-        ${opts.filter}::jsonb
+        ${opts.filter}::jsonb,
+        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
+        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }

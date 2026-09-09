@@ -14,6 +14,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
+import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -157,15 +158,24 @@ else {
    * be exercised here; this holds the SQL branch's message and remedy.
    */
   const noHybrid = new SQL({ url: LIVE, max: 1 });
-  await noHybrid.unsafe("DROP FUNCTION IF EXISTS search_thoughts_hybrid(vector, text, float, int, jsonb)");
+  await noHybrid.unsafe(`DROP FUNCTION IF EXISTS ${SEARCH_THOUGHTS_HYBRID_SIGNATURE}`);
   await noHybrid.close();
   const missingHy = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(missingHy.code === 1, "a database missing migration 017 does not start");
   assert(/search_thoughts_hybrid is missing/.test(missingHy.out), "…and names the function search and search_thoughts depend on");
-  assert(/017_search_thoughts_hybrid\.sql/.test(missingHy.out), "…with the migration to apply");
+  assert(/017_search_thoughts_hybrid\.sql/.test(missingHy.out) && /020_match_thoughts_recency\.sql/.test(missingHy.out), "…with the migration that defines it and the one that redefines it");
+  assert(/search signatures.*not checked — a search function is missing/s.test(missingHy.out), "…and the signature check stands aside rather than repeating it");
+  // 017 alone puts back the 5-argument form: present by name, and not the form
+  // the server calls since 020 — which is its own failure, with 020 as the remedy.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("017") });
   const withHy = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/hybrid search.*present/s.test(withHy.out), "…and reports it present once applied");
+  assert(withHy.code === 1 && /search signatures.*search_thoughts_hybrid\(vector,text,double precision,integer,jsonb\) is the form from before migration 020/s.test(withHy.out),
+         "a 017-era search_thoughts_hybrid under a 020 server does not start, and is named by its signature");
+  assert(/every search would fail/.test(withHy.out) && /Apply db\/migrations\/020_match_thoughts_recency\.sql/.test(withHy.out), "…with 020 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
+  const sigsOk = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(sigsOk.code === 0 && /search signatures.*the forms the servers call since migration 020, one of each/s.test(sigsOk.out), "with 020 re-applied both signatures are the ones the servers call, one of each");
 
   /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
@@ -178,10 +188,19 @@ else {
   // CREATE OR REPLACE reset search_thoughts_keyword's estimate to 1,000 while
   // match_thoughts still carries its clause and ROWS 10. The check says exactly that.
   assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25/s.test(withKw.out), "…while 019's check reports the keyword estimate that re-applying 012 alone reset");
+  // A database that predates 020 as well as 014: 020's function dropped first
+  // (re-applying 007 over 020 would otherwise CREATE a second overload, the
+  // state tested at the end), then 007's 4-argument body. The 014 check reads
+  // the one function there is, whatever its arity, and still says what is
+  // wrong with its body; the signature check separately fails the start.
+  const pre020 = new SQL({ url: LIVE, max: 1 });
+  await pre020.unsafe(`DROP FUNCTION ${MATCH_THOUGHTS_SIGNATURE}`);
+  await pre020.close();
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("007") });
   const pre014 = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(pre014.code === 0, "a match_thoughts without 014's SET clause still starts");
-  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…while saying the filtered scan is not iterative");
+  assert(pre014.code === 1 && /search signatures.*match_thoughts\(vector,double precision,integer,jsonb\) is the form from before migration 020/s.test(pre014.out),
+         "a 4-argument match_thoughts under a 020 server does not start, named by its signature");
+  assert(/does not carry hnsw\.iterative_scan/.test(pre014.out), "…while 014's check still reads the body it found and says the filtered scan is not iterative");
   assert(/migration 014 is not applied/.test(pre014.out), "…and, with no ledger, calls it not applied");
   assert(/014_filtered_match_thoughts\.sql/.test(pre014.out), "…with the migration to apply");
 
@@ -198,7 +217,7 @@ else {
   await ledger.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('014_filtered_match_thoughts.sql', 'test')`);
   await ledger.close();
   const dropped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(dropped.code === 0, "a recorded 014 whose function was replaced still starts");
+  assert(/search signatures.*before migration 020/s.test(dropped.out), "a recorded 014 whose function was replaced by 007's is still the pre-020 form (the signature check says so)");
   // Re-applying 007 replaces the BODY as well as the clause, so this is the
   // "replaced its body" wording with the body re-run as the remedy.
   assert(/recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (--baseline or a redefinition), not a missing migration");
@@ -209,12 +228,12 @@ else {
   // singular the check prints, on a fixture that never reached the branch.)
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
   const reset = new SQL({ url: LIVE, max: 1 });
-  await reset.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RESET ALL`);
+  await reset.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET ALL`);
   await reset.close();
   const noClause = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(noClause.code === 0, "a recorded 014 whose function lost only its SET clause still starts");
   assert(/has 014's body but no iterative scan in force although migration 014 is recorded as applied — a later redefinition dropped its SET clause/.test(noClause.out), "…is described as 014's body without its clause");
-  assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy");
+  assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET hnsw\.iterative_scan = relaxed_order/.test(noClause.out), "…with the ALTER FUNCTION that puts the clause back as the remedy, naming the signature the catalog holds");
   // RESET ALL took 019's clause with it, and CREATE OR REPLACE would have
   // reset the row estimate too: the second check names both, as a warning, with
   // the migration as the remedy since this ledger does not record 019.
@@ -225,17 +244,17 @@ else {
   await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test')`);
   // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would —
   // and reset the keyword function's too, as re-applying 012 alone does.
-  await led019.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order ROWS 1000`);
+  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order ROWS 1000`);
   await led019.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
   await led019.close();
   const noSeq = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(noSeq.code === 0, "a recorded 019 whose function lost only its plan setting still starts");
   assert(/filtered search.*scans iteratively/s.test(noSeq.out) && /candidate scan.*although migration 019 is recorded as applied — a later redefinition dropped its SET clause, and match_thoughts' row estimate is 1000 rather than 10, and search_thoughts_keyword's row estimate is 1000 rather than 25/s.test(noSeq.out),
          "…014's check is satisfied while 019's names the dropped clause and both reset estimates");
-  assert(/ALTER FUNCTION match_thoughts\(vector, float, int, jsonb\) SET enable_seqscan = off ROWS 10; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(noSeq.out), "…with one ALTER FUNCTION per function as the remedy, after any body re-apply");
+  assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET enable_seqscan = off ROWS 10; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(noSeq.out), "…with one ALTER FUNCTION per function as the remedy, after any body re-apply");
   // Only the keyword estimate gone: the clause is fine, one ALTER, the other function not named.
   const kwOnly = new SQL({ url: LIVE, max: 1 });
-  await kwOnly.unsafe(`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET enable_seqscan = off ROWS 10`);
+  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off ROWS 10`);
   await kwOnly.close();
   const kwReset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared/s.test(kwReset.out), "a reset keyword estimate alone is named alone");
@@ -249,6 +268,24 @@ else {
   // Everything shipped again: both estimates and the clause, reported as ok.
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause and both row estimates");
+  assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
+
+  /**
+   * The other state 020's header names: an earlier migration re-applied by hand
+   * OVER 020 re-creates the 4-argument form BESIDE the 6-argument one. The
+   * server's own calls still resolve, so nothing above notices; every
+   * 4-argument call is now "function is not unique". Failed, with the DROP 020
+   * runs as the remedy, spelled with the signature the catalog holds.
+   */
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("014") });
+  const twoForms = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(twoForms.code === 1 && /search signatures.*beside the forms the servers call there is an earlier one: match_thoughts\(vector,double precision,integer,jsonb\)/s.test(twoForms.out),
+         "a 4-argument match_thoughts re-created beside 020's does not start, and the earlier form is named");
+  assert(/function is not unique/.test(twoForms.out) && /DROP FUNCTION match_thoughts\(vector,double precision,integer,jsonb\);/.test(twoForms.out), "…with the DROP as the remedy");
+  assert(/filtered search.*scans iteratively/s.test(twoForms.out), "…while the 014 check reads 020's function, the one the servers call, not the re-created one");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "019" });
+  const oneForm = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(oneForm.code === 0 && /search signatures.*one of each/s.test(oneForm.out), "re-applying 019 and 020 leaves one form again");
 
   /**
    * The trigram flag is read only when 011 APPLIES. Migrations run once, so a

@@ -128,6 +128,7 @@ type Node = {
   identifier: string;
   title: string;
   description: string | null;
+  createdAt: string;
   completedAt: string | null;
   labels: { nodes: { name: string }[] };
   comments: { nodes: Comment[]; pageInfo: { hasNextPage: boolean } };
@@ -145,6 +146,7 @@ query Corpus($after: String, $team: String!, $state: String!) {
       identifier
       title
       description
+      createdAt
       completedAt
       labels { nodes { name } }
       comments(first: 100) {
@@ -252,6 +254,9 @@ const items = nodes
     description: (n.description ?? "").trim(),
     comments: WITH_COMMENTS ? n.comments.nodes.map((c) => c.body.trim()).filter(Boolean) : [],
     labels: n.labels.nodes.map((l) => l.name),
+    // When the issue was opened, for the recency eval (SMD-945): a thought's
+    // created_at is set from it, so age means what it means in the tracker.
+    createdAt: n.createdAt,
     completedAt: n.completedAt,
   }))
   .filter((it) => it.text.length > 0 && it.text.length >= MIN_CHARS)

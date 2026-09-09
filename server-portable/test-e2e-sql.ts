@@ -160,6 +160,25 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   assert(/alpha thought about migrations/.test(out), "the matching thought is present");
   assert(/100\.0% match/.test(out), "the exact match scores 100%");
   assert(!/beta thought/.test(out), "an orthogonal thought is excluded by the threshold");
+
+  // Migration 020 over MCP: `recency_weight` reaches the function. Age the
+  // alpha thought two years; at weight 1 and no threshold the newest thought
+  // leads and the alpha row, wherever it lands, still shows its raw similarity.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`UPDATE thoughts SET created_at = now() - interval '2 years' WHERE content LIKE 'alpha%'`;
+  const dated = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, recency_weight: 1 });
+  const first = dated.split("--- Result ")[1] ?? "";
+  assert(!/alpha thought about migrations/.test(first), `at recency_weight 1 the two-year-old exact match is not first (${first.split("\n")[0]})`);
+  // The block that holds the alpha row, and its own header line: the first
+  // draft's regex accepted any "100.0% match" anywhere in the output (first
+  // review pass), which a formatter printing the blended score would satisfy.
+  const alphaBlock = dated.split("--- Result ").find((b) => /alpha thought about migrations/.test(b)) ?? "";
+  assert(/^\d+ \(100\.0% match\) ---/.test(alphaBlock), `…and its own header still reads 100.0% match — the blend orders, the similarity shown is the cosine (${alphaBlock.split("\n")[0]})`);
+  const unweighted = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
+  const firstUnweighted = unweighted.split("--- Result ")[1] ?? "";
+  assert(/^1 \(100\.0% match\) ---/.test(firstUnweighted) && /alpha thought about migrations/.test(firstUnweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
+  await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
+  await sql.close();
 }
 
 console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");

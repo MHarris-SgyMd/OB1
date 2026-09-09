@@ -26,8 +26,12 @@
  *   rpc 1.1     the same with `random_page_cost = 1.1` — the cost-model remedy
  *               the ticket asked to weigh, shown for what it does and does not
  *               move.
- *   after (019) the deployed function's statement under its own SET clauses,
- *               custom and generic plan, which is what a call gets.
+ *   deployed    the deployed function's statement under its own SET clauses —
+ *               020's since SMD-945, at weight 0 — custom and generic plan,
+ *               which is what a call gets.
+ *   deployed (w 0.3)  the same with recency_weight 0.3 — the candidate window
+ *               is four times wider (16 * count), so this is what a caller who
+ *               opts into the blend pays.
  *
  * For each: which node produced the `thoughts` CTE's rows and the chunk CTE's
  * rows, shared buffers touched, and execution time. The table prints TOAST
@@ -56,7 +60,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -139,18 +143,21 @@ async function sizes(sql: SQL): Promise<{ storage: string; heap: string; toast: 
 
 // ── The measurement ──────────────────────────────────────────────────────────
 
-type Arm = "before (014)" | "seqscan off" | "rpc 1.1" | "after (019) custom" | "after (019) generic";
+type Arm = "before (014)" | "seqscan off" | "rpc 1.1" | "deployed (w 0) custom" | "deployed (w 0) generic" | "deployed (w 0.3)";
 /**
  * What each arm sets before the statement is explained. The "before" arms
  * carry 014's one SET clause — the function before 019 — plus the arm's own
  * variable; the "after" arms carry whatever the deployed function declares.
+ * The recency arm (020) is the same statement with a weight, which widens the
+ * candidate window fourfold: what an opted-in caller pays, at each scale.
  */
-const ARMS: Record<Arm, { settings: "014" | "function"; extra?: string; mode: "force_custom_plan" | "force_generic_plan" }> = {
+const ARMS: Record<Arm, { settings: "014" | "function"; extra?: string; mode: "force_custom_plan" | "force_generic_plan"; weight?: number }> = {
   "before (014)": { settings: "014", mode: "force_custom_plan" },
   "seqscan off": { settings: "014", extra: "SET LOCAL enable_seqscan = off", mode: "force_custom_plan" },
   "rpc 1.1": { settings: "014", extra: "SET LOCAL random_page_cost = 1.1", mode: "force_custom_plan" },
-  "after (019) custom": { settings: "function", mode: "force_custom_plan" },
-  "after (019) generic": { settings: "function", mode: "force_generic_plan" },
+  "deployed (w 0) custom": { settings: "function", mode: "force_custom_plan" },
+  "deployed (w 0) generic": { settings: "function", mode: "force_generic_plan" },
+  "deployed (w 0.3)": { settings: "function", mode: "force_custom_plan", weight: 0.3 },
 };
 type Cell = { scale: number; count: number; arm: Arm; thoughts: string; chunks: string; buffers: number; ms: number; text: string };
 
@@ -169,7 +176,7 @@ async function explain(sql: SQL, body: string, q: number[], count: number, arm: 
     if (a.settings === "function") await applyFunctionSettings(tx);
     else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
     if (a.extra) await tx.unsafe(a.extra);
-    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb`, mode: a.mode, warm: true });
+    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb, ${a.weight ?? 0}, 90.0`, mode: a.mode, warm: true });
   });
   return { scale, count, arm, thoughts: nodeFor(r.text, "thoughts"), chunks: nodeFor(r.text, "thought_chunks"), buffers: r.buffers, ms: r.ms, text: r.text };
 }
@@ -187,7 +194,7 @@ async function measure(sql: SQL, body: string, queries: number[][], count: numbe
 
 // ── The filtered statements ──────────────────────────────────────────────────
 
-type FilteredCell = { scale: number; branch: Branch; filter: string; matches: number; arm: "before (014)" | "after (019)"; mode: "custom" | "generic"; scans: string; buffers: number; ms: number };
+type FilteredCell = { scale: number; branch: Branch; filter: string; matches: number; arm: "before (014)" | "deployed"; mode: "custom" | "generic"; scans: string; buffers: number; ms: number };
 
 /** Every scan node in the plan, in order, deduplicated — the answer to "what did the setting change". */
 function scansOf(plan: string): string {
@@ -200,9 +207,9 @@ function scansOf(plan: string): string {
 
 async function explainFiltered(sql: SQL, body: string, branch: Branch, filter: string, matches: number, q: number[], arm: FilteredCell["arm"], mode: FilteredCell["mode"], scale: number): Promise<FilteredCell> {
   const r = await sql.begin(async (tx: SQL) => {
-    if (arm === "after (019)") await applyFunctionSettings(tx);
+    if (arm === "deployed") await applyFunctionSettings(tx);
     else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`);
-    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb`, mode: `force_${mode}_plan`, warm: true });
+    return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, 10, '${filter}'::jsonb, 0.0, 90.0`, mode: `force_${mode}_plan`, warm: true });
   });
   return { scale, branch, filter, matches, arm, mode, scans: scansOf(r.text), buffers: r.buffers, ms: r.ms };
 }
@@ -232,8 +239,18 @@ for (const n of SCALES) {
 
   // The function 014 shipped, explained as it plans, then the two remedies.
   const body014 = await extractBody(sql, "unfiltered", DIM);
+  // The candidate CTEs, from prosrc BEFORE the locals are inlined: 020 widens
+  // v_fetch under a weight and changed the final SELECT, so the substituted
+  // statements differ where the scan does not. What must be the same text is
+  // the three `WITH direct … GROUP BY u.tid` blocks (db/test-schema.ts [20]
+  // holds the same comparison).
+  const cteBlocks = async () => {
+    const [{ src }] = await sql.unsafe(`SELECT prosrc AS src FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(sql)]);
+    return [...String(src).matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]).join("\n---\n");
+  };
+  const ctes014 = await cteBlocks();
   for (const arm of ["before (014)", "seqscan off", "rpc 1.1"] as Arm[]) {
-    process.stdout.write(`  ${arm.padEnd(20)}`);
+    process.stdout.write(`  ${arm.padEnd(24)}`);
     for (const count of COUNTS) {
       results.push(await measure(sql, body014, queries, count, arm, n));
       process.stdout.write(".");
@@ -277,22 +294,24 @@ for (const n of SCALES) {
   await runFiltered("before (014)");
 
   // 019, onto the same rows. Its statement is read from the catalog again: it
-  // should be 014's byte for byte (db/test-schema.ts [20] asserts it), and the
-  // bench refuses to assume so.
+  // candidate CTEs should be 014's byte for byte (db/test-schema.ts [20]
+  // asserts it), and the bench refuses to assume so; the final SELECT differs
+  // since 020 (the blend, the id tiebreak), which is not what this bench times
+  // the cost of.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "019" });
   await sql.close();
   sql = new SQL({ url: URL_, max: 1 });
   const body019 = await extractBody(sql, "unfiltered", DIM);
-  if (body019 !== body014) throw new Error("019's unfiltered statement differs from 014's; the before/after comparison is not of the same text");
-  for (const arm of ["after (019) custom", "after (019) generic"] as Arm[]) {
-    process.stdout.write(`  ${arm.padEnd(20)}`);
+  if (!ctes014 || (await cteBlocks()) !== ctes014) throw new Error("the deployed candidate CTEs differ from 014's; the before/after comparison is not of the same scan");
+  for (const arm of ["deployed (w 0) custom", "deployed (w 0) generic", "deployed (w 0.3)"] as Arm[]) {
+    process.stdout.write(`  ${arm.padEnd(24)}`);
     for (const count of COUNTS) {
       results.push(await measure(sql, body019, queries, count, arm, n));
       process.stdout.write(".");
     }
     console.log(" done");
   }
-  await runFiltered("after (019)");
+  await runFiltered("deployed");
   await sql.close();
 }
 

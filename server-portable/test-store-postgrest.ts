@@ -186,6 +186,12 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   const plain = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
   const vector = await store.matchThoughts({ embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
   assert(plain.map((r) => r.id).join() === vector.map((r) => r.id).join(), "with no needle the fused order is matchThoughts' order over this store too");
+  // Migration 020's two named arguments reach the function by name over this
+  // client too, and the new column comes back — the RPC argument shape is what
+  // this suite exists to hold.
+  assert(vector.every((r) => typeof r.score === "number" && r.score === r.similarity), "match_thoughts' score column comes back through the RPC, equal to similarity at weight 0");
+  const weighted = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {}, recencyWeight: 0.5, halfLifeDays: 30 });
+  assert(weighted.length === plain.length && weighted.every((r) => typeof r.score === "number"), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
 }

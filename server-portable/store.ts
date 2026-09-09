@@ -22,9 +22,33 @@ export type ThoughtMatch = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
+  /** The raw cosine similarity — what the threshold gates. Unchanged by a recency weight. */
   similarity: number;
   created_at: string;
+  /**
+   * What the rows are ordered by (migration 020): `similarity` blended with
+   * 0.5 ^ (age_days / half_life_days) at the call's recency weight; equal to
+   * `similarity` at weight 0. Not for display — the tools show `similarity`.
+   */
+  score: number;
 };
+
+/**
+ * The recency blend's two inputs (migration 020, SMD-945), on both search
+ * methods. Optional and defaulted by the store to the function's own defaults,
+ * 0 and 90 days, so a caller that never heard of them gets the ranking it
+ * always got. The store always sends them: the 4- and 5-argument function
+ * forms no longer exist, and a call that omitted them would be ambiguous the
+ * day someone re-applied an old migration by hand.
+ */
+export type RecencyOpts = {
+  /** 0–1. 0 ranks by similarity alone; 1 ranks the rows above the threshold by age alone. */
+  recencyWeight?: number;
+  /** Days for the recency factor to halve. */
+  halfLifeDays?: number;
+};
+/** What the store sends when the caller says nothing: the function's own DEFAULTs (migration 020), mirrored once for both stores. */
+export const RECENCY_DEFAULTS = { weight: 0, halfLifeDays: 90 } as const;
 
 /**
  * One hit from `search_thoughts_keyword` (migration 012).
@@ -287,7 +311,7 @@ export interface ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
-  }): Promise<ThoughtMatch[]>;
+  } & RecencyOpts): Promise<ThoughtMatch[]>;
 
   /**
    * Exact substring search over `content`, case-insensitive. Migration 012.
@@ -315,7 +339,7 @@ export interface ThoughtStore {
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
-  }): Promise<ThoughtHybridMatch[]>;
+  } & RecencyOpts): Promise<ThoughtHybridMatch[]>;
 
   getThought(id: string): Promise<ThoughtRecord | null>;
 

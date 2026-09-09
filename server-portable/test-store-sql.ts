@@ -14,6 +14,7 @@
 
 import { SqlStore } from "./store-sql.ts";
 import { createAssert, resetSchema } from "../db/test-support.ts";
+import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
 import { join, dirname } from "node:path";
@@ -180,6 +181,22 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   const vector = await store.matchThoughts({ embedding: unit(0), threshold: -1, limit: 10, filter: {} });
   assert(plain.map((r) => r.id).join() === vector.map((r) => r.id).join(), `with no needle the fused order is matchThoughts' order (${plain.map((r) => r.content).join(" | ")})`);
   assert(plain.every((r) => Array.isArray(r.needles) && r.needles.length === 0 && Array.isArray(r.matchedNeedles) && r.literalOnly === false), "arrays come back as arrays, empty, and literalOnly false");
+  // Migration 020: the store passes the recency blend's two inputs (defaults
+  // 0 and 90) and maps the new `score` column, which equals similarity at
+  // weight 0. Age the exact row two years and weight age fully: it drops from
+  // first, its reported similarity unchanged; both stores must reorder alike.
+  assert(vector.every((r) => typeof r.score === "number" && r.score === r.similarity), "matchThoughts maps score, equal to similarity at weight 0");
+  const exact = vector[0]; // the row nearest the query, "exact"
+  const aged = new SQL({ url: URL_, max: 1 });
+  await aged`UPDATE thoughts SET created_at = now() - interval '2 years' WHERE id = ${exact.id}::uuid`;
+  const byAge = await store.matchThoughts({ embedding: unit(0), threshold: -1, limit: 10, filter: {}, recencyWeight: 1 });
+  const agedRow = byAge.find((r) => r.id === exact.id);
+  assert(byAge[0].id !== exact.id && agedRow !== undefined && agedRow.similarity === exact.similarity && agedRow.score < agedRow.similarity,
+         `at recency weight 1 the two-year-old exact match is no longer first (${byAge[0].content}), its similarity is still the raw cosine and its score is below it`);
+  const fusedByAge = await store.hybridThoughts({ query: "the exact thing", embedding: unit(0), threshold: -1, limit: 10, filter: {}, recencyWeight: 1 });
+  assert(fusedByAge.map((r) => r.id).join() === byAge.map((r) => r.id).join(), "…and the fused search follows the weighted order through its vector arm");
+  await aged`UPDATE thoughts SET created_at = now() WHERE id = ${exact.id}::uuid`;
+  await aged.close();
 
   // An identifier: exact hits first, the unembedded one with a null similarity.
   const hits = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: 0.5, limit: 10, filter: {} });
@@ -264,7 +281,7 @@ console.log("\n[8] Errors surface rather than being swallowed");
 {
   const broken = new SqlStore(URL_, { max: 1 });
   const admin = new SQL({ url: URL_, max: 1 });
-  await admin`ALTER FUNCTION match_thoughts(vector, float, int, jsonb) RENAME TO match_thoughts_hidden`;
+  await admin.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RENAME TO match_thoughts_hidden`);
   let threw = false;
   try {
     await broken.matchThoughts({ embedding: unit(0), threshold: 0, limit: 1, filter: {} });
@@ -272,7 +289,7 @@ console.log("\n[8] Errors surface rather than being swallowed");
     threw = true;
   }
   assert(threw, "a missing RPC throws instead of returning an empty result set");
-  await admin`ALTER FUNCTION match_thoughts_hidden(vector, float, int, jsonb) RENAME TO match_thoughts`;
+  await admin.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE.replace("match_thoughts(", "match_thoughts_hidden(")} RENAME TO match_thoughts`);
   await admin.close();
   await broken.close();
 }

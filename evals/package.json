@@ -11,6 +11,7 @@
     "entities": "../db/with-postgres.sh bun eval-entities.ts qwen2.5:7b",
     "entities:corpus": "../db/with-postgres.sh bun eval-entities.ts --corpus",
     "graphrag": "../db/with-postgres.sh bun eval-graphrag.ts",
-    "hybrid": "../db/with-postgres.sh bun eval-hybrid.ts"
+    "hybrid": "../db/with-postgres.sh bun eval-hybrid.ts",
+    "recency": "../db/with-postgres.sh bun eval-recency.ts"
   }
 }

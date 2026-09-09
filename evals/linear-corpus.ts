@@ -15,7 +15,8 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { SQL } from "bun";
 
-export type LinearDoc = { id: string; title: string; text: string; labels?: string[] };
+/** `createdAt` — when the issue was opened — is in corpora built on or after 2026-09-08; eval-recency.ts needs it, nothing else reads it. */
+export type LinearDoc = { id: string; title: string; text: string; labels?: string[]; createdAt?: string };
 
 export const DEFAULT_CORPUS = "/tmp/linear-corpus-full.json";
 
@@ -48,30 +49,34 @@ export function entityAnswersPath(metadataModel: string): string {
  * One corpus document as a thought row: fixed id, the product's fingerprint
  * rule, and the collapse of duplicate texts onto the first — so "which
  * documents get a thought" is decided here, once. `embedding` is a pgvector
- * literal when the caller has one.
+ * literal when the caller has one. `createdAt` sets the row's created_at —
+ * opt-in, for the recency eval; every other harness leaves the column at its
+ * default, as before, so nothing they measure moves.
  */
-export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: string, text: string = linearThoughtText(d)): Promise<void> {
+export async function insertLinearThought(sql: SQL, d: LinearDoc, embedding?: string, text: string = linearThoughtText(d), createdAt?: string): Promise<void> {
   const meta = { source: "linear", issue: d.id };
+  const created = createdAt ?? null;
   if (embedding === undefined) {
-    await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint)
-              VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${meta}::jsonb, content_fingerprint_of(${text}))
+    await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, created_at)
+              VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${meta}::jsonb, content_fingerprint_of(${text}), COALESCE(${created}::timestamptz, now()))
               ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
   } else {
-    await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, embedding)
-              VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${meta}::jsonb, content_fingerprint_of(${text}), ${embedding}::vector)
+    await sql`INSERT INTO thoughts (id, content, metadata, content_fingerprint, embedding, created_at)
+              VALUES (${linearThoughtId(d.id)}::uuid, ${text}, ${meta}::jsonb, content_fingerprint_of(${text}), ${embedding}::vector, COALESCE(${created}::timestamptz, now()))
               ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO NOTHING`;
   }
 }
 
 /**
  * Where a harness caches the corpus's document vectors: per embedding spec and
- * per text rule (`thought` is linearThoughtText, `body` the issue text alone),
+ * per text rule (`thought` is linearThoughtText, `body` the issue text alone,
+ * `title` the title as a query — eval-recency.ts's 486 query vectors),
  * because a vector of one is wrong for the other. `OB1_EVAL_VECTORS` moves the
  * cache and is a PREFIX, not a file: the variant is always part of the name, so
  * two harnesses with different text rules cannot be pointed at one file and
  * re-embed the corpus on every alternation (review pass).
  */
-export function linearVectorCachePath(embedModel: string, variant: "thought" | "body" = "thought"): string {
+export function linearVectorCachePath(embedModel: string, variant: "thought" | "body" | "title" = "thought"): string {
   const prefix = process.env.OB1_EVAL_VECTORS ?? "/tmp/linear-vectors";
   return `${prefix}-${variant}-${embedModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
 }

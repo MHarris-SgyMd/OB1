@@ -87,6 +87,20 @@ with an explanation if a Workers deployment is somehow configured with
   jsonb parameter as `jsonb_typeof='string'`, and `p_payload->'metadata'` then
   returns NULL — silently storing `{}`. Migration 005 rejects that outright.
 
+### Ranking by recency, opt-in (migration 020)
+
+`search_thoughts` takes `recency_weight` (0–1, default 0). At 0 the ranking is
+by meaning alone, exactly as before; at 0.2 a thought's age counts gently
+against its similarity (half-life 90 days); at 1 the thoughts above the
+threshold come newest first. The threshold still gates the raw similarity, so a
+weight reorders relevant thoughts and cannot surface irrelevant recent ones, and
+the `% match` shown is always the cosine. Both stores send `recency_weight` and
+`half_life_days` on every call — the function forms from before 020 no longer
+exist, and preflight's `search signatures` check fails a database that still
+has them, or has an old form re-created beside 020's. The ChatGPT `search` tool
+cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
+`evals/eval-recency.ts` record how it was chosen.
+
 ## Steps
 
 ### 1. Install
