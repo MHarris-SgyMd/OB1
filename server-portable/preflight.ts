@@ -1072,10 +1072,33 @@ if (configFailed) {
                     : `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`);
             } else if (at + unlabelled === 0) {
               add("vector models", "ok", "no vectors stored yet");
+            } else if (at === 0) {
+              // The migration's own motivating corpus: a switch that died, its
+              // claim rows cleared, nothing labelled — every vector unknown and
+              // none known to be at the model the record names. Unknown is not
+              // wrong, but a corpus with NO vector known to be at its model is
+              // the state this column exists to make visible (third review pass).
+              const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
+              add("vector models", "warn",
+                  `no vector is known to be at ${atModel}: ${unlabelled} unlabelled (model unknown) — nothing vouches for them, and the corpus may be at any model the record was ever moved to`,
+                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it.`);
             } else {
               add("vector models", "ok", detail);
             }
           }
+
+          /**
+           * 021's backfill holds 001's updated_at trigger off for one statement.
+           * Under the migrator that is one transaction; run by hand under
+           * autocommit, a failure between the DISABLE and the ENABLE leaves the
+           * trigger off, and from then on no raw or community UPDATE moves
+           * updated_at — 009's if_unchanged_since guard and 021's own evidence
+           * rule degrade silently. Read once per start; the remedy is one line.
+           */
+          const trg = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+          if (!trg.length) add("updated_at trigger", "fail", "thoughts_updated_at is missing — updated_at would never move", "Apply db/migrations/001_core_schema.sql.");
+          else if (trg[0].e === "D") add("updated_at trigger", "fail", "thoughts_updated_at is disabled — a hand-run 021 stopped between DISABLE and ENABLE — so updated_at no longer moves on an update", "ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;");
+          else add("updated_at trigger", "ok", "thoughts_updated_at enabled");
         } catch (e) {
           add("vector models", "warn", `could not verify: ${(e as Error).message}`, "The check reads thoughts.embedding_model.");
         }
@@ -1143,8 +1166,10 @@ if (configFailed) {
             // model).
             if (haveLabel) {
               for (const [key, c] of byKey) {
+                // Only for the keys whose counts are printed: a finished key's
+                // count is never shown, and each is a scan of thoughts.
                 const poolModel = poolModelFor(key);
-                if (poolModel === null) continue;
+                if (poolModel === null || !passUnfinished(c)) continue;
                 const [{ n }] = await sql`
                   SELECT count(*)::int AS n FROM thoughts t
                   WHERE (t.embedding IS NULL OR t.embedding_model IS DISTINCT FROM ${poolModel})

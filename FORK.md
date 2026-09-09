@@ -3337,6 +3337,39 @@ rows from the previous vector (SMD-1175); 021's header no longer claims the
 parent's label is the chunks' on that path. Suites after: schema 462, live 249,
 upgrade 27, preflight 116; the three `server/` suites 47, 30, 36.
 
+**A third pass, asked for after the stop.** Its top finding was again in the
+first pass's additions — the data rule met the backfill's limit: 021 can label
+nothing from a key naming no model, so the first run under an existing bare
+`--job` key after upgrading found every succeeded row's thought unlabelled,
+"not at the target", and returned the whole corpus to the pool — the cost the
+backfill was added to avoid. Under a backfill key the data rule now returns a
+finished row only when its thought's label names another model or its vector
+is gone; an unlabelled row is left to its finished row there, since a
+backfill's reason is not the model. Nine more, all fixed: the `--baseline`
+remedy told an operator to re-run 021's body by hand, whose DISABLE/ENABLE
+TRIGGER pair a failure under autocommit would separate — it says one
+transaction, and preflight gained an `updated_at trigger` check with the
+one-line remedy; `vector models` said ok for the migration's own motivating
+corpus (a switch that died, its claim rows cleared, every vector unlabelled,
+none known to be at the model the record names) — it warns, with the pass as
+the remedy; 021's header claimed its trigger toggle held a lock only for the
+statement between, when the migrator runs the file as one transaction and
+every lock it takes is held to the commit — the header says so, and the
+backfill evaluates its key regex once rather than twice per claim row; the
+evidence rule trusted every succeeded claim under a model's key, but between
+changes 29 and 35 `reembed.ts` accepted a `--job` naming another model than
+the shell's — the header names the window and the step for a brain that ran
+such a job; the Edge Function server's two-step fallback replaced a vector
+without its label (the second pass had patched its capture and not its
+fallback), and the portable store's fallback had been made to fail outright on
+a schema without the column — both write the label and, refused the column,
+attach the vector alone as before; the same-model message still called every
+run "a backfill" when the model's own key pools only the rows not at it — it
+says what the run pools and names the suffix key; `--dry-run`'s unlabelled
+count omitted an expired lease a model change would return; and preflight
+scanned `thoughts` once per finished key for a number it never prints — only
+unfinished keys are counted. Suites after: preflight 118.
+
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
 Postgres resolves the relation when it parses the statement, whatever the `AND`

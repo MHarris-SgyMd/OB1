@@ -55,7 +55,12 @@
 --   its pool holds before it runs. The one imprecision: a pre-021 edit that
 --   began after the pass's write and before its release is stamped with the
 --   pass's model although its vector was the editing server's — a window of
---   a second or so, once, per row a pass touched.
+--   a second or so, once, per row a pass touched. And one caveat about the
+--   evidence itself: between change 29 and change 35 (PRs #10 to #16)
+--   reembed.ts accepted a --job naming a model other than the shell's, so a
+--   run in that window could have written model A's vectors under B's key;
+--   such rows are labelled B here and the label vouches for them. A brain that
+--   ran such a job should clear that key's rows before applying this.
 --
 --   thought_chunks gets no column. Chunk rows are written by the 4-argument
 --   upsert_thought and by update_thought, in the same statement as the
@@ -188,22 +193,27 @@ COMMENT ON COLUMN thoughts.embedding_model IS
 --
 -- 001's BEFORE UPDATE trigger would stamp updated_at = now() on every row
 -- labelled, and the label is not an edit (see the header); the trigger is held
--- off for this one statement. ALTER TABLE … TRIGGER changes no column and
--- takes the lock only for the statement between.
+-- off for this one statement. ALTER TABLE … TRIGGER changes no column. Under
+-- bun migrate.ts this file is one transaction, so the locks it takes — ADD
+-- COLUMN's included — are held until the migration commits, as every
+-- migration's DDL is, and the DISABLE and the ENABLE cannot be separated. Run
+-- by hand, run it as one transaction too (psql -1): a failure between the two
+-- under autocommit leaves the trigger off, which preflight's `updated_at
+-- trigger` check reports with the one-line remedy.
 -- ---------------------------------------------------------------------------
 ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 UPDATE thoughts t
    SET embedding_model = e.model
   FROM (
-    SELECT DISTINCT ON (c.thought_id)
-           c.thought_id,
-           substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model,
-           c.finished_at
-      FROM thought_work_claims c
-     WHERE c.status = 'succeeded'
-       AND c.finished_at IS NOT NULL
-       AND substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') IS NOT NULL
-     ORDER BY c.thought_id, c.finished_at DESC
+    SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.finished_at
+      FROM (
+        SELECT c.thought_id, c.finished_at,
+               substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model
+          FROM thought_work_claims c
+         WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL
+      ) k
+     WHERE k.model IS NOT NULL
+     ORDER BY k.thought_id, k.finished_at DESC
   ) e
  WHERE t.id = e.thought_id
    AND t.embedding_model IS NULL

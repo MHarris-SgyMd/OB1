@@ -235,13 +235,17 @@ export class PostgrestStore implements ThoughtStore {
 
     // The label travels with the vector here too (021): a re-capture of a
     // labelled row through this path would otherwise leave the old label
-    // beside a vector from another model — the one state nothing can see. On
-    // a database without the column the update fails and is reported below
-    // as the vector not attaching, which is what happened.
-    const { error: embError } = await this.client
+    // beside a vector from another model — the one state nothing can see. A
+    // schema without the column (this path exists for one without 004) refuses
+    // the unknown column; the vector is then attached alone, unlabelled, as
+    // before 021 (third review pass).
+    let { error: embError } = await this.client
       .from("thoughts")
       .update({ embedding: opts.embedding, embedding_model: opts.embeddingModel ?? null })
       .eq("id", id);
+    if (embError && /embedding_model|PGRST204/i.test(`${embError.code} ${embError.message}`)) {
+      ({ error: embError } = await this.client.from("thoughts").update({ embedding: opts.embedding }).eq("id", id));
+    }
 
     // The row is committed but unsearchable. Report it as such rather than as a
     // total failure — the content is not lost, only the vector.

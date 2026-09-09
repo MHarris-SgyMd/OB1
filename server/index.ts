@@ -616,10 +616,15 @@ function buildServer(): McpServer {
             };
           }
 
-          const { error: embError } = await supabase
+          // The label rides with the vector (021); a schema without the column
+          // refuses it, and the vector is then attached alone, as before.
+          let { error: embError } = await supabase
             .from("thoughts")
-            .update({ embedding })
+            .update({ embedding, embedding_model: EMBEDDING_MODEL })
             .eq("id", thoughtId);
+          if (embError && /embedding_model|PGRST204/i.test(`${embError.code} ${embError.message}`)) {
+            ({ error: embError } = await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId));
+          }
 
           if (embError) {
             // The row is committed but unsearchable. Say so plainly — the old code

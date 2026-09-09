@@ -71,7 +71,10 @@
  * and on a brain that never ran a pass through 015 that is the whole corpus,
  * once. And on EVERY run, under any key, a succeeded row under this job whose
  * thought is not at the target returns to the pool — the row says done, the
- * thought says otherwise, and the data wins. That is what finds a thought captured or edited by a
+ * thought says otherwise, and the data wins. Under a backfill key that means a
+ * label naming another model, or no vector: an unlabelled row is left to its
+ * finished row there, since 021 could label nothing from a key naming no
+ * model and the first run after upgrading would otherwise return the corpus. That is what finds a thought captured or edited by a
  * server still on the old model, before or after the pass finished: until 021
  * such a row had the old vector and either no claim row or a finished one, and
  * the run could only say at its end that some rows were captured meanwhile
@@ -387,8 +390,10 @@ if (recorded.embedding_model === undefined) {
   console.log(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
 } else if (modelChange) {
   console.log(`  model change: ob1_config records ${recorded.embedding_model}; this pass embeds with ${embedConfig.embeddingModel}`);
+} else if (poolModelFor(JOB) === null) {
+  console.log(`  same model as ob1_config records — a backfill under ${JOB}: every thought without a row under it is pooled`);
 } else {
-  console.log(`  same model as ob1_config records — a backfill, not a model change`);
+  console.log(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
 }
 // The --job refusal first: a key naming another model is refused before the
 // model-change refusal below can ask for --switch-model on its behalf.
@@ -440,7 +445,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}}."
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  AS ONE TRANSACTION (psql -1 -f …; the migrator will skip it as applied), substituting {{EMBEDDING_DIM}} — it disables and\n  re-enables a trigger, and a failure between the two would leave it off."
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────
@@ -490,7 +495,17 @@ const poolable = () => (BACKFILL ? sql`true` : notAtTarget());
  * run requeues in that order, and --dry-run counts the caveats it would still
  * find (caveatsAtTarget) rather than every caveat.
  */
-const doneButNotAtTarget = () => sql`status = 'succeeded' AND thought_id IN (SELECT id FROM thoughts WHERE ${notAtTarget()})`;
+/**
+ * Under a backfill key an UNLABELLED thought is left to its finished row: 021
+ * could label nothing from a key naming no model, so after upgrading every
+ * such row is NULL, and treating NULL as "moved" there would return the whole
+ * corpus on the first run (third review pass). A backfill's reason is not the
+ * model; only a label that names another model, or no vector, says its
+ * finished row is wrong. Under the model's own key NULL is not at the target —
+ * 021 labelled what it had evidence for, and what is left has none.
+ */
+const movedFromTarget = () => (BACKFILL ? sql`(embedding IS NULL OR (embedding_model IS NOT NULL AND embedding_model <> ${TARGET}))` : notAtTarget());
+const doneButNotAtTarget = () => sql`status = 'succeeded' AND thought_id IN (SELECT id FROM thoughts WHERE ${movedFromTarget()})`;
 const caveatsAtTarget = () => sql`${withCaveat()} AND thought_id NOT IN (SELECT id FROM thoughts WHERE ${notAtTarget()})`;
 
 /**
@@ -590,7 +605,7 @@ async function unlabelledPooled(pooled: boolean): Promise<number> {
       AND ${pooled
         ? sql`EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB} AND c.status = 'pending')`
         : sql`${poolable()} AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}
-                 AND (c.status = 'claimed' OR (c.status = 'failed' AND NOT ${retryFailed || recordModel})))`}`;
+                 AND ((c.status = 'claimed' AND NOT (${recordModel} AND c.ttl_expires_at < now())) OR (c.status = 'failed' AND NOT ${retryFailed || recordModel})))`}`;
   return Number(n);
 }
 

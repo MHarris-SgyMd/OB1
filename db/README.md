@@ -302,7 +302,8 @@ vector is at the recorded model (unlabelled rows as detail), a warning naming
 each other model and its count with the pass as the remedy — whether or not any
 claim row remembers the pass that left them — and a failure when the column is
 missing under a server that writes it. `edit signature` beside it checks that
-the eight-argument `update_thought` is present and alone. `--status` and the end of a run print `preflight will
+the eight-argument `update_thought` is present and alone, and `updated_at
+trigger` that 001's trigger is still enabled after 021's backfill held it off. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
 it. A key whose model is no longer the recorded one — a switch abandoned or

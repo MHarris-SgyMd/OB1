@@ -579,7 +579,16 @@ else {
          "the column missing under this server does not start, naming 021");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const restored = await run(SQL_ENV);
-  assert(restored.code === 0 && new RegExp(`vector models\\s+0 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 4 unlabelled`).test(restored.out), "021 re-applied: the column is back, its labels gone — unknown again, not stamped");
+  assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
+         "021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok");
+  // 021's backfill holds the updated_at trigger off for one statement; a
+  // hand run that stopped between DISABLE and ENABLE leaves it off.
+  await claims.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
+  const trgOff = await run(SQL_ENV);
+  assert(trgOff.code === 1 && /updated_at trigger\s+thoughts_updated_at is disabled/.test(trgOff.out) && /ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;/.test(trgOff.out),
+         "the updated_at trigger left disabled does not start, with the one-line remedy");
+  await claims.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
+  assert(/updated_at trigger\s+thoughts_updated_at enabled/.test((await run(SQL_ENV)).out), "…and enabled again it is ok");
   // 018 re-applied by hand puts the 7-argument form back BESIDE 021's.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const twoEdits = await run(SQL_ENV);
