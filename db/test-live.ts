@@ -851,7 +851,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const wrongKeyDry = await reembed("--dry-run", "--job", `reembed:other-model@${DIM}`);
   assert(wrongKeyDry.code === 2 && /would: refuse\. --job reembed:other-model@\d+ names a pass to other-model/.test(wrongKeyDry.out), `…--dry-run reports that refusal (exit ${wrongKeyDry.code})`);
   const wrongKeyStatus = await reembed("--status", "--job", `reembed:other-model@${DIM}`);
-  assert(wrongKeyStatus.code === 0 && /status: \d+ thoughts/.test(wrongKeyStatus.out), `…while --status answers for the key from any shell, since it writes nothing (exit ${wrongKeyStatus.code})`);
+  assert(wrongKeyStatus.code === 0 && /status: 38 thoughts — 0 succeeded, 0 failed, 0 in flight, 0 pending, 38 not yet in the pool/.test(wrongKeyStatus.out),
+    `…while --status answers for the key from any shell, since it writes nothing — counting the pool against the KEY's model, as preflight does for it (exit ${wrongKeyStatus.code}: ${wrongKeyStatus.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
   const bareKey = await reembed("--status", "--job", "test:bare");
   assert(bareKey.code === 0 && /preflight will not report this pass unfinished — its key does not start with reembed:/.test(bareKey.out) && !/preflight will warn/.test(bareKey.out),
     `a key without the prefix is accepted with a note, and is never said to be something preflight will warn about (exit ${bareKey.code})`);

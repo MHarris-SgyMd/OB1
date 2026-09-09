@@ -50,6 +50,12 @@ function thoughtUrl(id: string): string {
   return `${CITATION_BASE_URL.replace(/\/$/, "")}/${id}`;
 }
 
+// The model every vector this server stores comes from — sent to the provider,
+// and written beside the vector as thoughts.embedding_model (migration 021)
+// through the payload envelope upsert_thought has read since 004; a schema
+// from before 021 ignores the key.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
+
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
@@ -58,7 +64,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBEDDING_MODEL,
       input: text,
     }),
   });
@@ -553,7 +559,7 @@ function buildServer(): McpServer {
           extractMetadata(content),
         ]);
 
-        const payload = { metadata: { ...metadata, source: "mcp" } };
+        const payload = { metadata: { ...metadata, source: "mcp" }, embedding_model: EMBEDDING_MODEL };
 
         // Single round-trip: content, metadata and embedding land in one
         // statement. The two-step version below could leave a row committed with

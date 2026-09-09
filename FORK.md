@@ -3295,6 +3295,48 @@ and while its schema cache predates the migration, so the 020 and 021 PostgREST
 remedies carry the `NOTIFY pgrst, 'reload schema'` hint. Suites after: schema
 462, live 249, upgrade 24, preflight 116.
 
+**A second pass, and the stop.** Its top finding was in the first pass's own
+addition — the evidence-based backfill's `UPDATE` fired 001's `updated_at`
+trigger, so every row it labelled read as edited at the migration instant, and
+a client holding a pre-migration read would have been told `STALE_READ` on its
+next edit of a row nothing changed — which is the signal this fork stops
+reviewing on. Nine were fixed and one is a ticket. The trigger is held off for that one
+statement, and `test-upgrade.ts` [4] asserts no `updated_at` moved and no audit
+row was written. The first pass had narrowed the start-over to failed rows and
+expired leases but left `--retry-fallbacks` gated on "not a model change" with a
+message saying the change had returned every terminal row; a caveat row is
+neither failed nor a lease, so the flag was silently ignored under
+`--switch-model` — it is honoured on every run, and the message reports the
+count. Whether a key is a model's own or a backfill, and which model it pools
+against, was decided by two rules — `reembed.ts` against the configured model,
+preflight against the key's — so `--status` for a key naming another model
+printed a different "not yet in the pool" than preflight; `poolModelFor` in
+`db/config.mjs` is the one rule, and the tool judges the rows against the
+key's model, which for a run is the configured one since a foreign key is
+refused. The count of unlabelled rows a run would pool was read after the
+start had pooled them, so the run never printed it while `--dry-run` did; it
+is read from the pool's pending rows once they exist. The PostgREST two-step
+fallback replaced a vector without its label, which on a re-capture of a
+labelled row left the one state nothing can see — a label beside another
+model's vector; it writes both. The end-of-run paragraph told a backfill's
+operator to switch a server that was fine, because under a backfill key every
+capture made meanwhile is unpooled whatever model it is at; the two key shapes
+get two sentences. The `--status` note about preflight's `vector models` line
+was gated on the record and configuration agreeing *before* a run that then
+recorded the model, so a switch's end never printed it; agreement is judged as
+it stands. The Supabase Edge Function server under `server/` captured with no
+label, so every row it wrote after 021 was "unknown" and re-embedded by the
+next pass; it names its model in the envelope now (six lines), and the corpus
+lines in both tools say "model unknown" rather than dating the row. And the
+backfill's pool went through the id-array branch of `enqueue_thoughts`
+(materialising every id for a DISTINCT that primary keys never need); a
+backfill takes 015's set-based branch again. One finding was pre-existing and
+is a ticket, not a fix: a chunkless re-capture through the 3-argument
+`upsert_thought` replaces the parent's vector and label and leaves 007's chunk
+rows from the previous vector (SMD-1175); 021's header no longer claims the
+parent's label is the chunks' on that path. Suites after: schema 462, live 249,
+upgrade 27, preflight 116; the three `server/` suites 47, 30, 36.
+
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
 Postgres resolves the relation when it parses the statement, whatever the `AND`
@@ -3334,9 +3376,11 @@ label on capture and on an edit, on both stores. Suites after: schema 461 at
 both widths, live 245, upgrade 20, preflight 115, sql 59, e2e 63, postgrest 43,
 update-delete 39 (before the pass below).
 
-**Not done here.** The Supabase Edge Function server under `server/` still
-captures through the 3-argument RPC with no label, so its rows are unknown
-(this fork deploys `server-portable`). A label for the rows no finished pass
+**Not done here.** Chunk rows left by a chunkless re-capture through the
+3-argument `upsert_thought`, which predate this change (SMD-1175); the
+community `integrations/update-thought-mcp`, which writes content and vector
+with a raw update around `update_thought` and so leaves a stale label as it
+leaves a stale fingerprint. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
 labels them, and says how many before it runs. `--accept-failed` and
 `--retire` (SMD-1067) — with the column, accepting a row means "it stays at

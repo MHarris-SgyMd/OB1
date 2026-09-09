@@ -555,7 +555,7 @@ else {
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = NULL WHERE id = '${ids[3]}'`);
   const twoModels = await run(SQL_ENV);
-  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(from before migration 021\\) — searches rank across the two`).test(twoModels.out),
+  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(model unknown\\) — searches rank across the two`).test(twoModels.out),
          "rows at two models, with an empty claim table, warn from the rows alone — with the counts by model");
   assert(/re-embed pass\s+none unfinished/.test(twoModels.out), "…while the claim table, empty, still says no pass is unfinished — the state SMD-1068 was filed for");
   assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
@@ -564,7 +564,7 @@ else {
   assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   await claims.unsafe(`UPDATE thoughts SET embedding_model = '${EMBEDDING_MODEL}' WHERE id = '${ids[2]}'`);
   const atModel = await run(SQL_ENV);
-  assert(new RegExp(`vector models\\s+3 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(from before migration 021\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
+  assert(new RegExp(`vector models\\s+3 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
          "a corpus wholly at the recorded model is ok, the unlabelled row reported as detail rather than as wrong");
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const recordMoved = await run(SQL_ENV);

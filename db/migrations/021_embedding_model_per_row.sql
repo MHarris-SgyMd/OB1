@@ -27,10 +27,9 @@
 --   records — so "at the recorded model" is string equality and nothing else.
 --   The width is the column's (006 refuses any other) and needs no second
 --   label. NULL means UNKNOWN, not "the default": every row from before this
---   migration, every row a raw INSERT or the PostgREST store's two-step
---   fallback wrote, every capture from a server older than this change. A
---   row with no vector has no label either — there is nothing for it to be
---   the model of.
+--   migration, every row a raw INSERT wrote, every capture from a writer that
+--   names no model. A row with no vector has no label either — there is
+--   nothing for it to be the model of.
 --
 -- The one backfill there is evidence for
 --   Stamping the recorded model on every existing row would be exactly the
@@ -43,7 +42,11 @@
 --   later capture or edit puts it past finished_at and the row stays NULL).
 --   Those rows, and only those, are labelled below from the latest such
 --   claim; a key naming no model (`reembed:nightly`) is no evidence and a row
---   whose updated_at is NULL cannot be judged. Without this, the first plain
+--   whose updated_at is NULL cannot be judged. The label is a fact about a
+--   vector already there, not an edit: 001's updated_at trigger is held off
+--   for the statement, so no row's updated_at moves — a client holding a
+--   pre-migration read would otherwise be told STALE_READ on its next edit
+--   for a row nothing changed — and 008's audit trigger sees no event in it. Without this, the first plain
 --   run of reembed.ts after upgrading would re-embed a whole corpus a
 --   finished pass had already proved was at the model — NULL is "not at the
 --   target" to that tool, and rightly, since nothing else says otherwise.
@@ -54,9 +57,13 @@
 --   pass's model although its vector was the editing server's — a window of
 --   a second or so, once, per row a pass touched.
 --
---   thought_chunks gets no column. A chunk's vector is written in the same
---   statement as its parent's, from one embedCapture() with one model, so the
---   parent's label is the chunks'.
+--   thought_chunks gets no column. Chunk rows are written by the 4-argument
+--   upsert_thought and by update_thought, in the same statement as the
+--   parent's vector, from one embedCapture() with one model — so where they
+--   were written the parent's label is theirs. A re-capture through the
+--   3-argument form (a capture that produced no windows) replaces the parent's
+--   vector and label and leaves 007's chunk rows as they were, which predates
+--   this migration and is not changed by it.
 --
 --   No index. The two readers are a grouped count once per server start
 --   (preflight) and one scan per re-embed run; both are over a column with a
@@ -178,7 +185,13 @@ COMMENT ON COLUMN thoughts.embedding_model IS
 -- claim. Everything else stays NULL. Idempotent: a labelled row is not
 -- selected again. The key's shape is config.mjs's (reembedKey/parseReembedKey):
 -- `reembed:<model>@<dim>[:suffix]`, the model read up to the LAST "@".
+--
+-- 001's BEFORE UPDATE trigger would stamp updated_at = now() on every row
+-- labelled, and the label is not an edit (see the header); the trigger is held
+-- off for this one statement. ALTER TABLE … TRIGGER changes no column and
+-- takes the lock only for the statement between.
 -- ---------------------------------------------------------------------------
+ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 UPDATE thoughts t
    SET embedding_model = e.model
   FROM (
@@ -196,6 +209,7 @@ UPDATE thoughts t
    AND t.embedding_model IS NULL
    AND t.embedding IS NOT NULL
    AND t.updated_at <= e.finished_at;
+ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;
 
 -- ---------------------------------------------------------------------------
 -- upsert_thought(text, jsonb, vector) — the label rides in the envelope

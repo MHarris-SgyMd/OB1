@@ -233,9 +233,14 @@ export class PostgrestStore implements ThoughtStore {
     const id = (upserted as { id?: string } | null)?.id;
     if (!id) throw new Error("upsert_thought returned no id, so the embedding could not be attached.");
 
+    // The label travels with the vector here too (021): a re-capture of a
+    // labelled row through this path would otherwise leave the old label
+    // beside a vector from another model — the one state nothing can see. On
+    // a database without the column the update fails and is reported below
+    // as the vector not attaching, which is what happened.
     const { error: embError } = await this.client
       .from("thoughts")
-      .update({ embedding: opts.embedding })
+      .update({ embedding: opts.embedding, embedding_model: opts.embeddingModel ?? null })
       .eq("id", id);
 
     // The row is committed but unsearchable. Report it as such rather than as a

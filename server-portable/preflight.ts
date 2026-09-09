@@ -1030,8 +1030,9 @@ if (configFailed) {
          * recorded model (the configured one when 006 recorded none) is ok;
          * vectors at another model are a warning, whether or not any claim row
          * remembers the pass that left them — the remedy is the pass, which
-         * takes exactly those rows; unlabelled vectors (from before 021, a raw
-         * INSERT, an older server) are detail: unknown, not wrong. The column
+         * takes exactly those rows; unlabelled vectors (a row from before 021 no
+         * pass vouched for, a raw INSERT, a writer naming no model) are detail:
+         * unknown, not wrong. The column
          * absent under this server is a failure: every capture would drop the
          * label and every edit would fail (the 8-argument update_thought is
          * 021's too — `edit signature` above says so).
@@ -1055,7 +1056,7 @@ if (configFailed) {
             const unlabelled = Number(byModel.find((r) => r.model === null)?.c ?? 0);
             const others = byModel.filter((r) => r.model !== null && r.model !== atModel);
             const otherCount = others.reduce((a, r) => a + Number(r.c), 0);
-            const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (from before migration 021)` : ""}`;
+            const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : ""}`;
             if (otherCount > 0) {
               // Judged against the RECORD — what the corpus is meant to be at.
               // When the record and this server's configuration disagree the
@@ -1103,7 +1104,7 @@ if (configFailed) {
          * ranks across the old and the new vectors until the pass is finished.
          */
         try {
-          const { formatPassCounts, parseReembedKey, passUnfinished, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
+          const { formatPassCounts, parseReembedKey, passUnfinished, poolModelFor, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
           const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
@@ -1135,17 +1136,18 @@ if (configFailed) {
             // it, rather than every thought with no row, which after a finished
             // switch is every new capture; under any other key (a suffix, or no
             // model named) every thought with no row, as every pass did before
-            // 021 — a backfill's reason is not the model. The same rule here, or
-            // the two would print different numbers for one key (first review
-            // pass: a key naming no model was counted against the recorded model
-            // while the tool counts against its own).
+            // 021 — a backfill's reason is not the model. One rule, poolModelFor
+            // in db/config.mjs, read by both tools, or the two would print
+            // different numbers for one key (the first review pass found a key
+            // naming no model counted two ways; the second, a key naming another
+            // model).
             if (haveLabel) {
               for (const [key, c] of byKey) {
-                const named = parseReembedKey(key);
-                if (named === null || key !== reembedKey(named.model, named.dim)) continue;
+                const poolModel = poolModelFor(key);
+                if (poolModel === null) continue;
                 const [{ n }] = await sql`
                   SELECT count(*)::int AS n FROM thoughts t
-                  WHERE (t.embedding IS NULL OR t.embedding_model IS DISTINCT FROM ${named.model})
+                  WHERE (t.embedding IS NULL OR t.embedding_model IS DISTINCT FROM ${poolModel})
                     AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${key})`;
                 c.unpooled = Number(n);
               }

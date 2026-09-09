@@ -147,6 +147,8 @@ export const REEMBED_KEY_PREFIX: "reembed:";
 export function reembedKey(model: string, dim: number): string;
 /** `reembed:<model>@<dim>[:suffix]` → the model and width it names; null for any other shape. */
 export function parseReembedKey(key: string): { model: string; dim: number } | null;
+/** The model a pass under `key` pools against — its own key's model — or null for a backfill key, which pools every thought (021). */
+export function poolModelFor(key: string): string | null;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

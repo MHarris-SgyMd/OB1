@@ -209,7 +209,21 @@ console.log("\n[4] Migration 021 onto a populated 020 — the column, and the fu
   const [seven] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought' AND pronargs = 7`;
   assert(seven.c === 1, "…and update_thought takes seven arguments");
 
+  const stampsBefore = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
+
+  const stampsAfter = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "labelling moves no row's updated_at — the label is a fact about a vector already there, not an edit");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
+  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
 
   const models = Object.fromEntries(
     ((await sql`SELECT content, embedding_model AS m FROM thoughts`) as { content: string; m: string | null }[]).map((r) => [r.content, r.m])

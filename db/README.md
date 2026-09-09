@@ -275,8 +275,13 @@ after the pass finished; until 021 the run could only say at its end that some
 rows were captured meanwhile and nothing could tell. On a model change the
 start-over returns the failed rows and expired leases; the succeeded rows are
 the data rule's, so a switch back re-embeds only what the rows say moved.
-Failed rows are left to `--retry-failed`; a row succeeded with a caveat is at
-the target unless its thought moved, in which case the data rule takes it.
+Failed rows are left to `--retry-failed` (subsumed by a model change, which
+returns them anyway); `--retry-fallbacks` is honoured on every run, since a
+caveat row is neither failed nor a lease, and a row succeeded with a caveat is
+at the target unless its thought moved, in which case the data rule takes it.
+Which key pools how — a model's own key by the label, a `--job` key every
+thought — is `poolModelFor` in `config.mjs`, one rule for this tool and for
+preflight's "not yet in the pool".
 `--status` and a run print the corpus by model, and say what preflight's
 `vector models` line will say. A run requires 021 and says so; `--status` and
 `--dry-run` answer on an older schema.

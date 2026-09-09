@@ -700,6 +700,23 @@ export function parseReembedKey(key) {
 }
 
 /**
+ * How a pass under `key` builds its pool (migration 021): a model's OWN key —
+ * exactly `reembed:<model>@<dim>`, nothing after — pools the thoughts not at
+ * that model (no vector, or another or no label), and this returns the model;
+ * any other key (a suffix, or no model named) is a backfill whose reason is
+ * not the model, pools every thought, and this returns null. Read by
+ * reembed.ts for its pool and by preflight for "not yet in the pool", so the
+ * two cannot count one key two ways (second review pass of SMD-1068).
+ *
+ * @param {string} key
+ * @returns {string | null}
+ */
+export function poolModelFor(key) {
+  const named = parseReembedKey(key);
+  return named !== null && key === reembedKey(named.model, named.dim) ? named.model : null;
+}
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot
