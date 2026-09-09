@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -74,8 +74,8 @@ export class SqlStore implements ThoughtStore {
         ${opts.threshold}::float,
         ${opts.limit}::int,
         ${opts.filter}::jsonb,
-        ${opts.recencyWeight ?? 0}::float,
-        ${opts.halfLifeDays ?? 90}::float
+        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
+        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
     return rows.map((r: Record<string, unknown>) => ({
       id: String(r.id),
@@ -135,8 +135,8 @@ export class SqlStore implements ThoughtStore {
         ${opts.threshold}::float,
         ${opts.limit}::int,
         ${opts.filter}::jsonb,
-        ${opts.recencyWeight ?? 0}::float,
-        ${opts.halfLifeDays ?? 90}::float
+        ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
+        ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }

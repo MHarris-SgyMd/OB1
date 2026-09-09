@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation } from "./store.ts";
+import { actorPayload, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -57,8 +57,8 @@ export class PostgrestStore implements ThoughtStore {
       match_threshold: opts.threshold,
       match_count: opts.limit,
       filter: opts.filter,
-      recency_weight: opts.recencyWeight ?? 0,
-      half_life_days: opts.halfLifeDays ?? 90,
+      recency_weight: opts.recencyWeight ?? RECENCY_DEFAULTS.weight,
+      half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
     return (data ?? []) as ThoughtMatch[];
@@ -111,8 +111,8 @@ export class PostgrestStore implements ThoughtStore {
       match_threshold: opts.threshold,
       match_count: opts.limit,
       filter: opts.filter,
-      recency_weight: opts.recencyWeight ?? 0,
-      half_life_days: opts.halfLifeDays ?? 90,
+      recency_weight: opts.recencyWeight ?? RECENCY_DEFAULTS.weight,
+      half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
     // Mapped through the shared normaliser, not cast: PostgREST returns the

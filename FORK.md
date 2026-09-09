@@ -3142,7 +3142,16 @@ assertion observed the test's own grant; the eval's narrow-window arm
 re-implemented the blend in TypeScript and is the same `recency_score()` over
 the nearest 4N in SQL; a cache variant outside its helper's type; the bench's
 "after (019)" arms measure the deployed function and are named so; the tool
-comment's pre-half-life numbers; a hedged preflight assertion.
+comment's pre-half-life numbers; a hedged preflight assertion. Then the
+tidy-ups the passes had cut for space, while the files were open: preflight's
+020 remedy was one sentence written five times and its PostgREST `missing()`
+test was defined inside one block and needed by another — both live once now,
+and the filtered-search probe's skip line names the `search signatures` check
+when the function cannot be resolved at the shape the store sends, rather than
+the catalog hint; the two stores each wrote the function's defaults (0 and 90)
+twice — `RECENCY_DEFAULTS` in `store.ts` is the one copy; and `bench-plan.ts`
+had its own by-name lookup of `match_thoughts` beside `test-support.ts`'s, which
+is exported and used instead.
 
 **Not done here.** A default weight for the ChatGPT `search` other than 0 —
 the measurement above is the reason, and an operator who wants one has no knob;

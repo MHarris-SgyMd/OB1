@@ -60,7 +60,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -245,7 +245,7 @@ for (const n of SCALES) {
   // the three `WITH direct … GROUP BY u.tid` blocks (db/test-schema.ts [20]
   // holds the same comparison).
   const cteBlocks = async () => {
-    const [{ src }] = await sql.unsafe(`SELECT p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'`);
+    const [{ src }] = await sql.unsafe(`SELECT prosrc AS src FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(sql)]);
     return [...String(src).matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]).join("\n---\n");
   };
   const ctes014 = await cteBlocks();

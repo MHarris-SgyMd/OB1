@@ -325,7 +325,7 @@ export type Branch = "unfiltered" | "walk" | "exact" | "route";
  * 6-argument one. Two of them is the ambiguity 020 exists to avoid, and is
  * refused here rather than explained.
  */
-async function matchThoughtsOid(sql: SQL): Promise<number> {
+export async function matchThoughtsOid(sql: SQL): Promise<number> {
   const rows = await sql.unsafe(
     `SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'`
   );

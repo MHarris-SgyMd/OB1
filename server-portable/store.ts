@@ -47,6 +47,8 @@ export type RecencyOpts = {
   /** Days for the recency factor to halve. */
   halfLifeDays?: number;
 };
+/** What the store sends when the caller says nothing: the function's own DEFAULTs (migration 020), mirrored once for both stores. */
+export const RECENCY_DEFAULTS = { weight: 0, halfLifeDays: 90 } as const;
 
 /**
  * One hit from `search_thoughts_keyword` (migration 012).

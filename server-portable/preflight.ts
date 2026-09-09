@@ -85,6 +85,10 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
+const APPLY_020_POSTGREST = "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).";
+/** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
+const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -289,8 +293,13 @@ if (configFailed) {
           }
         } catch (e) {
           // A failed probe is not evidence either way — a width mismatch or a
-          // permission error says nothing about the body — so it is a skip.
-          add("filtered search", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
+          // permission error says nothing about the body — so it is a skip. A
+          // function PostgREST cannot resolve at the shape the store sends is
+          // the `search signatures` check's finding, and it says so.
+          const msg = (e as Error).message;
+          add("filtered search", "skip", missing(msg)
+            ? `match_thoughts does not take the arguments the server sends over PostgREST — the search signatures check below says whether it is missing or predates migration 020`
+            : `could not probe match_thoughts over PostgREST (${msg}); ${CATALOG_HINT}`);
         }
       }
     }
@@ -306,7 +315,6 @@ if (configFailed) {
      * first version of this check lived only on the SQL branch (review pass).
      */
     if (built.kind !== "sql") {
-      const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
       if (rowCount === null) {
         add("keyword search", "skip", "not probed — the schema check above failed first");
         add("hybrid search", "skip", "not probed — the schema check above failed first");
@@ -347,7 +355,7 @@ if (configFailed) {
             // function from before 020 reads exactly like a missing one.
             add("hybrid search", "fail",
                 "search_thoughts_hybrid is missing, or is the form from before migration 020 (the server sends recency_weight and half_life_days, which only 020's takes) — either way search and search_thoughts, which call it, would fail on every call",
-                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+                APPLY_020_POSTGREST);
           } else {
             add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
           }
@@ -383,7 +391,7 @@ if (configFailed) {
           if (current && missing(current)) {
             add("search signatures", "fail",
                 "match_thoughts does not take recency_weight and half_life_days over PostgREST — it is missing or is the form from before migration 020 — and the server sends them on every search, so every search would fail",
-                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+                APPLY_020_POSTGREST);
           } else if (current) {
             add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${current}); ${CATALOG_HINT}`);
           } else if (!error) {
@@ -394,7 +402,7 @@ if (configFailed) {
                 "DROP FUNCTION match_thoughts(vector, float, int, jsonb); against the project's direct connection — the form 020 drops.");
           } else if (missing(error.message)) {
             add("search signatures", "fail", "match_thoughts is missing over PostgREST — every search would fail",
-                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+                APPLY_020_POSTGREST);
           } else {
             add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${error.message}); ${CATALOG_HINT}`);
           }
@@ -612,7 +620,7 @@ if (configFailed) {
               const old = [...(mtNew ? [] : mt), ...(hyNew ? [] : hy)].map((r) => r.sig);
               add("search signatures", "fail",
                   `${old.join(" and ")} ${old.length === 1 ? "is the form" : "are the forms"} from before migration 020; the server sends recency_weight and half_life_days, which only 020's forms take — so every search would fail`,
-                  "Apply db/migrations/020_match_thoughts_recency.sql.");
+                  APPLY_020);
             }
           }
         } catch (e) {
