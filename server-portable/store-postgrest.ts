@@ -175,6 +175,7 @@ export class PostgrestStore implements ThoughtStore {
     embedding: number[];
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -187,7 +188,13 @@ export class PostgrestStore implements ThoughtStore {
     // reads it into the ob1.actor setting so the audit trigger can attribute
     // this write. Without it, every audit row on this store would have recorded
     // a NULL actor: present, plausible, and wrong.
-    const envelope = opts.actor ? { ...opts.payload, actor: actorPayload(opts.actor) } : opts.payload;
+    // The model rides the same way (021); an envelope without the key leaves
+    // the row's label unknown, as the two-step fallback below always does.
+    const envelope = {
+      ...opts.payload,
+      ...(opts.actor ? { actor: actorPayload(opts.actor) } : {}),
+      ...(opts.embeddingModel !== undefined ? { embedding_model: opts.embeddingModel } : {}),
+    };
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
@@ -246,12 +253,16 @@ export class PostgrestStore implements ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: `[${c.embedding.join(",")}]`,
       context: c.context ?? null,
     }));
+    // Eight named arguments since migration 021: the model beside the vector.
+    // Against a database whose update_thought predates 021 this is PGRST202,
+    // which preflight's `edit signature` check reports before the server serves.
     const { data, error } = await this.client.rpc("update_thought", {
       p_id: opts.id,
       p_content: opts.content ?? null,
@@ -260,6 +271,7 @@ export class PostgrestStore implements ThoughtStore {
       p_chunks: chunks.length ? chunks : null,
       p_if_unchanged_since: opts.ifUnchangedSince ?? null,
       p_actor: actorPayload(opts.actor),
+      p_embedding_model: opts.embeddingModel ?? null,
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);

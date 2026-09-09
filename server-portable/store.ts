@@ -376,6 +376,14 @@ export interface ThoughtStore {
      * were: one row, one vector, no chunk rows. See chunk.ts and migration 007.
      */
     chunks?: { content: string; embedding: number[]; context?: string }[];
+    /**
+     * The model that produced `embedding` (and the chunks'), as
+     * OB1_EMBEDDING_MODEL names it — recorded on the row since migration 021 so
+     * preflight and the re-embed can tell which model a vector is at. Absent
+     * leaves the row's label unknown, which is what an older server's capture
+     * is. Rides in the payload envelope on both stores, as the actor does.
+     */
+    embeddingModel?: string;
   }): Promise<CaptureResult>;
 
   /**
@@ -391,6 +399,8 @@ export interface ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
+    /** As on captureThought; read only when `content` is given, since the label follows the vector (021). */
+    embeddingModel?: string;
   }): Promise<UpdateResult>;
 
   /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */

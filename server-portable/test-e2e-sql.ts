@@ -142,9 +142,10 @@ console.log("\n[2] capture_thought writes through SQL");
   assert(!/NOT appear in semantic search/.test(out), "no degraded-write warning");
 
   const sql = new SQL({ url: URL_, max: 1 });
-  const [row] = await sql`SELECT content, metadata, embedding IS NOT NULL AS has FROM thoughts`;
+  const [row] = await sql`SELECT content, metadata, embedding IS NOT NULL AS has, embedding_model AS m FROM thoughts`;
   assert(row.content === "alpha thought about migrations", "the row is in Postgres");
   assert(row.has === true, "the embedding was stored in the same write");
+  assert(row.m === EMBEDDING_MODEL, `…labelled with the model the server embedded with (${row.m})`);
   assert(row.metadata?.source === "mcp", `metadata survived the jsonb binding (${JSON.stringify(row.metadata)})`);
   assert(row.metadata?.type === "idea", "…including the extracted fields");
   await sql.close();

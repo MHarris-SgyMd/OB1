@@ -170,7 +170,9 @@ export const MATCH_COUNT_CEILING: number;
 export const MATCH_THOUGHTS_SIGNATURE: string;
 /** The signature the servers call, as regprocedure text (020: seven arguments). */
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
-/** The 4- and 5-argument forms 020 dropped; a schema reset drops them too. */
+/** The signature the servers and reembed.ts call, as regprocedure text (021: eight arguments). */
+export const UPDATE_THOUGHT_SIGNATURE: string;
+/** The 4- and 5-argument search forms 020 dropped and the 7-argument update_thought 021 dropped; a schema reset drops them too. */
 export const SUPERSEDED_SIGNATURES: readonly string[];
 /** pg_settings.source values that reach every role: server configuration or the database. */
 export const SHARED_SETTING_SOURCES: string[];

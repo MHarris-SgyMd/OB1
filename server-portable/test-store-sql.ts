@@ -93,6 +93,7 @@ console.log("\n[2] captureThought writes content, metadata and vector atomically
     content: "exact",
     payload: { metadata: { kind: "a", source: "mcp" } },
     embedding: unit(0),
+    embeddingModel: "unit-test-model",
   });
   assert(typeof r.id === "string" && r.id.length === 36, `returns a uuid (${r.id?.slice(0, 8)}…)`);
   assert(r.embeddingFailed === undefined, "no degraded-write flag on the SQL path");
@@ -101,6 +102,17 @@ console.log("\n[2] captureThought writes content, metadata and vector atomically
   assert(back?.content === "exact", "the row reads back");
   assert(back?.metadata.kind === "a", `metadata survived binding (${JSON.stringify(back?.metadata)})`);
   assert(back?.metadata.source === "mcp", "…including every key, not just the first");
+
+  // The model rides in the envelope beside the actor (021), and follows the
+  // vector through an edit: relabelled with content, untouched without.
+  const admin = new SQL({ url: URL_, max: 1 });
+  const label = async () => (await admin`SELECT embedding_model AS m FROM thoughts WHERE id = ${r.id}`)[0].m as string | null;
+  assert((await label()) === "unit-test-model", `the row carries the model the store was told (${await label()})`);
+  await store.updateThought({ id: r.id, content: "exact", embedding: unit(0), embeddingModel: "unit-test-model-2" });
+  assert((await label()) === "unit-test-model-2", "an edit with content relabels the row");
+  await store.updateThought({ id: r.id, metadataPatch: { labelled: true } });
+  assert((await label()) === "unit-test-model-2", "…and a metadata-only edit leaves the label with the vector");
+  await admin.close();
 }
 
 console.log("\n[3] Search ranks and filters exactly as the RPC defines");

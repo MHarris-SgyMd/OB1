@@ -859,6 +859,10 @@ function buildServer(principal: Principal): McpServer {
             source: String(payload.metadata.source ?? "mcp"),
           },
           embedding,
+          // The model this vector came from, recorded on the row (021) — the
+          // one the embedder used, not the one ob1_config records: they differ
+          // exactly while a re-embed to another model is under way.
+          embeddingModel: embedConfig().embeddingModel,
         });
 
         if (captured.embeddingFailed) {
@@ -971,6 +975,8 @@ function buildServer(principal: Principal): McpServer {
           chunks: embedded?.chunks,
           ifUnchangedSince: if_unchanged_since,
           actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
+          // Read by update_thought only with content, when the vector moves (021).
+          embeddingModel: embedded ? embedConfig().embeddingModel : undefined,
         });
 
         if (!result.ok) return toolError(explainRefusal(result, id));

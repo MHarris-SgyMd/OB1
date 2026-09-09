@@ -818,9 +818,25 @@ export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, 
  * The forms 020 dropped. Still owned: a bench's "before" arm re-applies 014 or
  * 017 and re-creates them, so a schema reset must drop them too.
  */
+/**
+ * update_thought's signature since migration 021 (SMD-1068): an eighth,
+ * defaulted parameter, `p_embedding_model`, the model that produced the vector
+ * being written. 021 dropped the 7-argument form first, for the reason above:
+ * CREATE OR REPLACE with a new parameter leaves the old form beside it, and
+ * every call with seven arguments or fewer is then "function is not unique".
+ * reembed.ts resolves the body it will call by this text (for 018's sentinel),
+ * and preflight's `edit signature` check reads the forms beside it.
+ */
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)";
+/**
+ * The forms 020 and 021 dropped. Still owned: a bench's "before" arm re-applies
+ * 014 or 017, and a test re-applies 018, re-creating them, so a schema reset
+ * must drop them too.
+ */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
   "search_thoughts_hybrid(vector, text, float, int, jsonb)",
+  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
 ]);
 
 /**

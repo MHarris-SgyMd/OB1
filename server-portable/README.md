@@ -56,7 +56,13 @@ connection it also reads the claim table: a re-embed pass that has not finished 
 rows pending, leased or failed under a `reembed:` key — is a warning with the
 counts and the command that finishes it, because `ob1_config` records the new
 model from the pass's first moment while the rows say how far it got
-(`db/README.md`, "What preflight sees").
+(`db/README.md`, "What preflight sees"). And since migration 021 every vector
+carries the model that produced it, so `vector models` reads the corpus by
+that label: vectors at another model are a warning with the counts and the
+re-embed as the remedy, whether or not any claim row remembers the pass that
+left them; the column missing under this server is a failure, as is a database
+whose `update_thought` predates 021 or carries an older form beside it (`edit
+signature`) — the server sends the model on every capture and every edit.
 
 ## Choosing a data layer
 

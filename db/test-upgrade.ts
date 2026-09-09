@@ -23,6 +23,7 @@ import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -173,6 +174,46 @@ console.log("\n[3] Re-applying is a no-op, not a second copy");
     SELECT count(*)::int AS c FROM information_schema.columns
      WHERE table_name = 'thought_audit' AND column_name = 'canonical_agent_id'`;
   assert(dupCol.c === 1, "the added column exists exactly once");
+  await sql.close();
+}
+
+console.log("\n[4] Migration 021 onto a populated 020 — the column, and the function it replaces");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+
+  // A corpus written before 021: through the writers and around them.
+  const [{ r: viaUpsert }] = await sql`SELECT upsert_thought('captured before 021', '{"metadata":{}}'::jsonb, ${vec}::vector) AS r`;
+  await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('inserted before 021', '{}'::jsonb, ${vec}::vector)`;
+  const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  assert(absent.c === 0, "at migration 020 there is no embedding_model column");
+  const [seven] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought' AND pronargs = 7`;
+  assert(seven.c === 1, "…and update_thought takes seven arguments");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
+
+  const models = (await sql`SELECT content, embedding_model AS m FROM thoughts ORDER BY content`) as { content: string; m: string | null }[];
+  assert(models.length === 2 && models.every((r) => r.m === null), "every row written before 021 reads NULL — unknown, not stamped with the recorded model");
+  const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
+  assert(forms.length === 1 && Number(forms[0].n) === 8, `the 7-argument form is gone and the eight-argument one is the only update_thought (${forms.map((f) => f.n).join(",")})`);
+
+  // The mirror: a write after the upgrade carries the label, on both writers.
+  const [{ r: after }] = await sql`SELECT upsert_thought('captured after 021', ${{ metadata: {}, embedding_model: OPTS.model }}::jsonb, ${vec}::vector) AS r`;
+  const [labelled] = await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${(after as { id: string }).id}::uuid`;
+  assert(labelled.m === OPTS.model, `a capture after the upgrade carries the label (${labelled.m})`);
+  const [{ r: edited }] = await sql`SELECT ${sql.unsafe(`update_thought('${(viaUpsert as { id: string }).id}'::uuid, 'captured before 021', NULL::jsonb, '${vec}'::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, '${OPTS.model}'::text)`)} AS r`;
+  const [relabelled] = await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${(viaUpsert as { id: string }).id}::uuid`;
+  assert((edited as { ok: boolean }).ok === true && relabelled.m === OPTS.model, `a re-embed of a pre-021 row through update_thought labels it (${relabelled.m})`);
+  const [still] = await sql`SELECT embedding_model AS m FROM thoughts WHERE content = 'inserted before 021'`;
+  assert(still.m === null, "…while the row nothing re-embedded stays unknown");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
+  const [dupCol] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  const [dupFn] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`;
+  assert(dupCol.c === 1 && dupFn.c === 1 && (await sql`SELECT to_regprocedure(${UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS p`)[0].p === true,
+         "re-applying 021 is a no-op: the column once, the function once, at the shipped signature");
   await sql.close();
 }
 

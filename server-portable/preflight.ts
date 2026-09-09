@@ -87,6 +87,8 @@ const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 const APPLY_020_POSTGREST = "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).";
+const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
+const APPLY_021_POSTGREST = "Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4).";
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
 
@@ -409,6 +411,46 @@ if (configFailed) {
         } catch (e) {
           add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
+
+        /**
+         * Migration 021 gave update_thought an eighth parameter, the model
+         * beside the vector, by dropping the 7-argument form — and the store
+         * sends all eight by name on every edit. Probed as the store calls it,
+         * with an id no row has: update_thought answers {ok:false,
+         * error:'NOT_FOUND'} from its FOR UPDATE read and writes nothing, so
+         * the probe is free. PGRST202 is the form from before 021 (or no
+         * function). Then seven named arguments, which only two forms — 018
+         * re-applied by hand beside 021's — make ambiguous, and that breaks
+         * every PostgREST caller by name that predates this change.
+         */
+        try {
+          const legacy = createClient(env.SUPABASE_URL ?? "", env.SUPABASE_SERVICE_ROLE_KEY ?? "");
+          const nobody = "00000000-0000-4000-8000-000000000000";
+          const seven = { p_id: nobody, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
+          const { data: eight, error: eightErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null });
+          if (eightErr && missing(eightErr.message)) {
+            add("edit signature", "fail",
+                "update_thought does not take p_embedding_model over PostgREST — it is missing or is the form from before migration 021 — and the server sends it on every edit, so every update_thought call would fail",
+                APPLY_021_POSTGREST);
+          } else if (eightErr) {
+            add("edit signature", "skip", `could not probe update_thought over PostgREST (${eightErr.message}); ${CATALOG_HINT}`);
+          } else if ((eight as { error?: string } | null)?.error !== "NOT_FOUND") {
+            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(eight)} rather than NOT_FOUND; ${CATALOG_HINT}`);
+          } else {
+            const { error: sevenErr } = await legacy.rpc("update_thought", seven);
+            if (!sevenErr) {
+              add("edit signature", "ok", "update_thought takes 021's arguments over PostgREST, and a 7-argument call resolves to one function — no earlier form beside it");
+            } else if (/could not choose|PGRST203|not unique/i.test(sevenErr.message)) {
+              add("edit signature", "fail",
+                  "update_thought has more than one form — an earlier migration re-applied by hand beside 021's — and PostgREST cannot choose between them for a 7-argument call, so every caller sending seven arguments fails",
+                  "DROP FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb); against the project's direct connection — the form 021 drops.");
+            } else {
+              add("edit signature", "skip", `could not probe update_thought over PostgREST (${sevenErr.message}); ${CATALOG_HINT}`);
+            }
+          }
+        } catch (e) {
+          add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
+        }
       }
     }
 
@@ -625,6 +667,43 @@ if (configFailed) {
           }
         } catch (e) {
           add("search signatures", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
+        }
+
+        /**
+         * Migration 021 changed update_thought's signature the same way — an
+         * eighth, defaulted parameter, the model beside the vector, the
+         * 7-argument form dropped — and both stores send all eight. The same
+         * two states break every edit and neither shows in a presence check:
+         * the function predates 021 (the call has no function to resolve to),
+         * or the old form was re-created BESIDE 021's by a hand re-apply of
+         * 009/013/018 (021's answers the server; every 7-argument call — a
+         * PostgREST caller by name, hand-written SQL, community integrations —
+         * is "function is not unique").
+         */
+        try {
+          const { UPDATE_THOUGHT_SIGNATURE } = await import("../db/config.mjs");
+          const ut = (await sql`
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'update_thought' AND n.nspname = 'public'
+            ORDER BY (p.pronargs = 8) DESC, p.oid`) as { nargs: number; sig: string }[];
+          const current = ut.filter((r) => Number(r.nargs) === 8);
+          const extra = ut.filter((r) => Number(r.nargs) !== 8).map((r) => r.sig);
+          if (!ut.length) {
+            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", "Apply the migrations through db/migrations/021_embedding_model_per_row.sql.");
+          } else if (current.length && extra.length === 0) {
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 021 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
+          } else if (current.length) {
+            add("edit signature", "fail",
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 021 — so every call that sends seven arguments to update_thought, which is every PostgREST caller by name and every hand-written SELECT from before this change, fails with "function is not unique"`,
+                `Drop the earlier form, as 021 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+          } else {
+            add("edit signature", "fail",
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 021; the server sends p_embedding_model, which only 021's form takes — so every edit, and every db/reembed.ts run, would fail`,
+                APPLY_021);
+          }
+        } catch (e) {
+          add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
         }
 
         try {
@@ -934,6 +1013,58 @@ if (configFailed) {
         }
 
         /**
+         * The rows themselves (migration 021, SMD-1068). ob1_config records the
+         * model the corpus is MEANT to be at and the claim table (below) says
+         * how far a pass got; neither is a fact about a row, and the claim rows
+         * vanish when an operator clears them. Since 021 every vector carries
+         * the model that produced it, written by the same statement — so this
+         * is the one check that reads what the corpus IS at. Counted from the
+         * rows as the chunk-context check is: every labelled vector at the
+         * recorded model (the configured one when 006 recorded none) is ok;
+         * vectors at another model are a warning, whether or not any claim row
+         * remembers the pass that left them — the remedy is the pass, which
+         * takes exactly those rows; unlabelled vectors (from before 021, a raw
+         * INSERT, an older server) are detail: unknown, not wrong. The column
+         * absent under this server is a failure: every capture would drop the
+         * label and every edit would fail (the 8-argument update_thought is
+         * 021's too — `edit signature` above says so).
+         */
+        let haveLabel = false;
+        try {
+          const labelCol = await sql`
+            SELECT count(*)::int AS c FROM information_schema.columns
+            WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+          haveLabel = Number(labelCol[0].c) >= 1;
+          if (!haveLabel) {
+            add("vector models", "fail",
+                "thoughts.embedding_model does not exist — the server records the model on every vector it stores, and the writers before migration 021 cannot hold it: captures would silently lose the label and edits would fail",
+                APPLY_021);
+          } else {
+            const byModel = (await sql`
+              SELECT embedding_model AS model, count(*)::int AS c FROM thoughts WHERE embedding IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1`) as
+              { model: string | null; c: number }[];
+            const atModel = recorded.embedding_model ?? embModel;
+            const at = Number(byModel.find((r) => r.model === atModel)?.c ?? 0);
+            const unlabelled = Number(byModel.find((r) => r.model === null)?.c ?? 0);
+            const others = byModel.filter((r) => r.model !== null && r.model !== atModel);
+            const otherCount = others.reduce((a, r) => a + Number(r.c), 0);
+            const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (from before migration 021)` : ""}`;
+            if (otherCount > 0) {
+              const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
+              add("vector models", "warn",
+                  `${otherCount} vector(s) at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")}) beside ${detail} — searches rank across the two${recordDiffers ? `; the record says ${recorded.embedding_model} and this server embeds with ${embModel}` : ""}`,
+                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes exactly the rows not at ${embModel}.`);
+            } else if (at + unlabelled === 0) {
+              add("vector models", "ok", "no vectors stored yet");
+            } else {
+              add("vector models", "ok", detail);
+            }
+          }
+        } catch (e) {
+          add("vector models", "warn", `could not verify: ${(e as Error).message}`, "The check reads thoughts.embedding_model.");
+        }
+
+        /**
          * An unfinished re-embed pass (SMD-1024). `db/reembed.ts --switch-model`
          * records the new model in ob1_config before any row is re-embedded —
          * deliberately: that is what lets a server configured for the new model
@@ -981,6 +1112,22 @@ if (configFailed) {
               else if (r.status === "pending") c.pending = n;
               c.unpooled -= n;
               byKey.set(r.work_type, c);
+            }
+            // "Not yet in the pool" is what a run under the key would add. With
+            // 021's column that is the thoughts NOT AT THE KEY'S MODEL with no
+            // row under it — reembed.ts builds its pool so — rather than every
+            // thought with no row, which after a finished switch is every new
+            // capture. The key's model, or the recorded one for a key naming
+            // none (the model reembed.ts would run with there).
+            if (haveLabel) {
+              for (const [key, c] of byKey) {
+                const model = parseReembedKey(key)?.model ?? recorded.embedding_model ?? embModel;
+                const [{ n }] = await sql`
+                  SELECT count(*)::int AS n FROM thoughts t
+                  WHERE t.embedding_model IS DISTINCT FROM ${model}
+                    AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${key})`;
+                c.unpooled = Number(n);
+              }
             }
             const configuredKey = reembedKey(embModel, embDim);
             // The command has to be one reembed.ts will run: --switch-model when

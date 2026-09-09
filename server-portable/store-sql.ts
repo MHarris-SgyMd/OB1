@@ -211,6 +211,7 @@ export class SqlStore implements ThoughtStore {
     embedding: number[];
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -234,7 +235,14 @@ export class SqlStore implements ThoughtStore {
      * earlier version wrapped this in a transaction and left PostgREST
      * unattributed.
      */
-    const envelope = opts.actor ? { ...opts.payload, actor: actorPayload(opts.actor) } : opts.payload;
+    // The model rides the same way (021): upsert_thought writes
+    // p_payload.embedding_model beside the vector, and an envelope without the
+    // key leaves the row's label unknown.
+    const envelope = {
+      ...opts.payload,
+      ...(opts.actor ? { actor: actorPayload(opts.actor) } : {}),
+      ...(opts.embeddingModel !== undefined ? { embedding_model: opts.embeddingModel } : {}),
+    };
 
     const rows = chunks.length
       ? await this.sql`
@@ -264,12 +272,14 @@ export class SqlStore implements ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     ifUnchangedSince?: string;
     actor?: Actor;
+    embeddingModel?: string;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: toVector(c.embedding),
       context: c.context ?? null,
     }));
+    // Eight arguments since migration 021: the model beside the vector.
     const rows = await this.sql`
       SELECT update_thought(
         ${opts.id}::uuid,
@@ -278,7 +288,8 @@ export class SqlStore implements ThoughtStore {
         ${opts.embedding ? toVector(opts.embedding) : null}::vector,
         ${chunks.length ? chunks : null}::jsonb,
         ${opts.ifUnchangedSince ?? null}::timestamptz,
-        ${actorPayload(opts.actor)}::jsonb
+        ${actorPayload(opts.actor)}::jsonb,
+        ${opts.embeddingModel ?? null}::text
       ) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }

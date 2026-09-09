@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-seven numbered changes on top of the pin. Seven fix defects found in an
+Thirty-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–37 are the numbered `###` sections** further down, which is
+sections. Changes **18–38 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -169,6 +169,7 @@ db/migrations/019_*.sql          # fix 36  (new file — match_thoughts reaches 
 db/bench-plan.ts                 # fix 36  (new file — the unfiltered plan at the real width)
 db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends recency after the candidate scan; search_thoughts_hybrid carries the weight)
 evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
+db/migrations/021_*.sql          # fix 38  (new file — thoughts.embedding_model: a vector carries the model that produced it; both writers carry it)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -2777,7 +2778,9 @@ superseded key); a thought captured by a not-yet-switched server after the
 record moved, which has the old model's vector and no claim row, and is
 indistinguishable from a new-model capture once the pass is finished — the run
 says so at its end, and the operator's step is to switch the server first;
-recording the model per row, which would make the check exact (SMD-1068).
+recording the model per row, which would make the check exact (SMD-1068 —
+done in change 38, which retires that paragraph: the rows say which model they
+are at, and a re-run takes exactly them).
 
 ### 36. `match_thoughts` reaches the index at the shipped width — and both search functions say how many rows they return
 
@@ -3158,6 +3161,146 @@ the measurement above is the reason, and an operator who wants one has no knob;
 if one is wanted it is an environment default, not a constant. `ROWS` on
 `search_thoughts_hybrid` (change 36's note stands). A recency eval with ground
 truth for "what was I doing about X", which this corpus cannot supply.
+
+### 38. A vector carries its model — `thoughts.embedding_model`, written with the vector, read by preflight and the re-embed
+
+Migration 021, `db/reembed.ts`, `server-portable/preflight.ts`, both stores
+(Linear SMD-1068, filed by change 35's second review pass and named under its
+"Not done here"). Change 35 taught preflight to see an unfinished re-embed from
+the claim table: a pass is unfinished while any row under its key is pending,
+leased or failed. That is a proxy for a fact the schema never stored, and it
+vanishes when the rows do — migration 015's fourth principle and preflight's
+own remedy for a superseded key both tell the operator to `DELETE FROM
+thought_work_claims`. A pass to B dies at 5%, the operator clears its rows to
+start over and is interrupted: `embedding contract … matching`, `re-embed pass
+… none unfinished`, 95% of vectors another model's, and nothing left in the
+database could ever say so. The same blindness made `reembed.ts` end every
+switch with a paragraph about thoughts captured meanwhile by a server not yet
+switched, which "nothing here can tell" from new-model captures.
+
+**One nullable column, written by the statement that writes the vector.**
+`thoughts.embedding_model text`: the model's name exactly as
+`OB1_EMBEDDING_MODEL` gives it — the string `ob1_config.embedding_model`
+records, so "at the recorded model" is string equality. The rule is that *the
+label follows the vector*: `upsert_thought` writes it beside the vector and on
+a re-capture keeps it with a kept vector or takes the caller's with a new one;
+`update_thought` leaves it without content, sets it NULL with content and no
+vector, writes the caller's with a vector. NULL is *unknown*, not "the
+default": every row from before 021, every raw INSERT, the PostgREST two-step
+fallback, every capture from an older server. Nothing backfills it — stamping
+the recorded model on every existing row would be exactly the guess the column
+exists to stop making, on the one day (021's) the corpus may well be at two
+models. `thought_chunks` gets no column: a chunk's vector is written in the same
+statement as its parent's from one `embedCapture()`, so the parent's label is
+the chunks'. No index: the readers are a grouped count per server start and a
+scan per re-embed run. 008/010's audit trigger diffs content, metadata and the
+vector's presence, so a label change is not an event and a re-embed still
+writes no audit row — asserted, in `test-schema.ts` [22] and `test-live.ts`
+[9].
+
+**The label comes from the caller, never from `ob1_config`.** The server knows
+the model it embedded with and `ob1_config` knows the model the corpus is being
+moved to; they differ exactly during a switch, because `--switch-model` records
+the new model first, on purpose. A writer reading `ob1_config` would stamp the
+new model on a not-yet-switched server's old vectors — the one case the column
+is for. So `index.ts` passes the embedder's model on capture and on an edit with
+content; `reembed.ts` passes its own.
+
+**Two writers, two mechanisms, and 004's rule is the reason.** `upsert_thought`
+has three overloads and 004's header forbids a default on any of them (a
+defaulted fourth parameter beside the 4-argument chunk form makes an untyped
+4-argument call ambiguous); its `p_payload` has been an envelope since 004 and
+008 put the actor there for this exact constraint — so the label rides as
+`p_payload.embedding_model`, both stores, no signature change, only the
+3-argument body redefined. `update_thought` has one form, no envelope and every
+parameter but the id defaulted, so it gains `p_embedding_model text DEFAULT
+NULL` as an eighth parameter — and the 7-argument form is **dropped** first, as
+020 did for the search functions: `CREATE OR REPLACE` with a new parameter
+leaves the old form beside it and every call with seven arguments or fewer is
+"function is not unique". 020's ACL capture-and-replay runs across the drop,
+`COMMENT ON FUNCTION` is re-issued, and `UPDATE_THOUGHT_SIGNATURE` in
+`db/config.mjs` is the one spelling — `reembed.ts` resolves the body it will
+call by it (018's sentinel, now on the eight-argument form), `test-support`
+drops both forms on a reset, preflight reads the forms beside it. The migration
+is generated from 008's and 018's bodies with anchored edits, so the carried
+text — 005's guard, the actor, 009's guard, 013's context, 018's `FOR UPDATE`,
+advisory lock, `content_fingerprint_of` and sentinel — cannot drift.
+
+**What reads it.** Preflight gains two checks. `vector models`, directly under
+`embedding contract`: the corpus grouped by label — every labelled vector at
+the recorded model is ok (unlabelled ones reported as detail: unknown, not
+wrong); vectors at another model are a warning naming each model and its
+count, with the `reembed.ts` command as the remedy and `--switch-model` in it
+when the record disagrees with the configuration; the column absent under this
+server is a failure, because every capture would drop the label and every edit
+would fail. `edit signature`, beside `search signatures`: the eight-argument
+`update_thought` present and alone — 018 re-applied by hand beside it fails
+with the exact `DROP FUNCTION`, in its place fails naming 021; over PostgREST
+the probe is `update_thought` with an id no row has, which answers `NOT_FOUND`
+from its `FOR UPDATE` read and writes nothing. `re-embed pass` keeps its rule
+(`passUnfinished` stays claims-only — the data view is the new check), but its
+"not yet in the pool" now counts the thoughts *not at the key's model* with no
+row, because that is what a run adds. And `reembed.ts` builds its pool from the
+rows: `enqueue_thoughts` is given the ids `WHERE embedding_model IS DISTINCT
+FROM <target>`, so a thought already at the target with no row is finished and
+is never re-embedded "harmlessly" (a provider call each); and on *every* run a
+succeeded row whose thought is not at the target returns to the pool — the row
+says done, the thought says otherwise, the data wins. That is what retires the
+"nothing here can tell" paragraph: a capture or edit by a server still on the
+old model, before or after the pass finished, is found by the next run because
+its row says which model it is at. Failed rows stay terminal (the failure
+policy; `--retry-failed`) and caveat rows are at the target (the head window is
+the target model's vector), so neither is touched; the model-change start-over
+is kept as the rule for failed rows and expired leases of an earlier pass.
+`--status` and a run print the corpus by model. A run requires 021 and says so
+(the 018 probe became the 021 probe); `--status` and `--dry-run` answer on an
+older schema.
+
+**Found on the way.** The schema probe asked `to_regclass('schema_migrations')
+IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
+Postgres resolves the relation when it parses the statement, whatever the `AND`
+would have short-circuited — so a schema applied by hand, with no ledger,
+crashed `reembed.ts` at that probe. The ledger is asked in a second statement,
+only when it exists.
+
+**Held in the tests.** `test-schema.ts` [22]: the column and its comment; the
+label written from the envelope, NULL without it and through the 2-argument
+form; a re-capture with a vector relabels, one without keeps vector and label,
+a metadata-only one too; `update_thought` relabels with a vector, blanks with
+content and no vector, leaves a metadata-only edit, and resolves a 7-argument
+call through the default; no audit row for a re-embed or a label-only change;
+one `update_thought` of eight parameters carrying 018's body by name, 021 the
+last definer of both writers and 010 still of the audit trigger; 018 re-applied
+puts a second form beside it and a 7-argument call is `not unique` until 021 is
+re-applied; and the ACL across the drop — [21]'s four cases for this function.
+`test-upgrade.ts` [4]: 021 onto a populated 020 — rows before read NULL, a
+capture and a re-embed after carry the label, the 7-argument form is gone,
+re-applying is a no-op. `test-live.ts` [9]: every re-embedded row carries the
+model that produced its vector; then the ticket's case — a server still on the
+old model re-captures one text and captures a new one after the pass finished:
+preflight `vector models` warns `2 at old-model` from the rows while `re-embed
+pass` says none unfinished, `--status` prints the corpus by model and counts
+one thought not yet in the pool (the switched server's capture, at the target,
+is not counted), `--dry-run` says the finished row returns and the new one is
+added, a plain re-run re-embeds exactly those two and says nothing about
+guessing, the switched server's capture never enters the pool. The switch-back
+at the end re-embeds 41 rather than 42 for the same reason. `test-preflight.ts`
+[5]: rows at two models with an empty claim table warn with the counts and the
+pass as the remedy, `--json` carries it; a corpus wholly at the recorded model
+is ok with the unlabelled row as detail; the record on another model puts
+`--switch-model` in the remedy; the column dropped fails naming 021 and 021
+re-applied brings it back unlabelled; 018 beside 021 fails with the exact DROP,
+018 in its place fails naming 021. The store suites and the e2e suite assert the
+label on capture and on an edit, on both stores. Suites after: schema 461 at
+both widths, live 245, upgrade 20, preflight 115, sql 59, e2e 63, postgrest 43,
+update-delete 39.
+
+**Not done here.** The Supabase Edge Function server under `server/` still
+captures through the 3-argument RPC with no label, so its rows are unknown
+(this fork deploys `server-portable`). A backfill of the label for rows from
+before 021 — there is no fact to backfill from; a pass under the recorded model
+labels them. `--accept-failed` and `--retire` (SMD-1067) — with the column,
+accepting a row means "it stays at the old model, and the caveat says so".
 
 ## Detached from the fork network
 

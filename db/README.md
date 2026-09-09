@@ -62,9 +62,9 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `423 assertions: 423 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports twenty migrations applied, and
-`\d thoughts` shows seven columns and six indexes — five of our own plus the
+`bun test-schema.ts` prints `461 assertions: 461 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports twenty-one migrations applied, and
+`\d thoughts` shows eight columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
 
@@ -92,6 +92,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` are not covered. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
 | `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
+| `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, never backfilled). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
 
 ## What changed relative to the guide
 
@@ -239,8 +240,8 @@ differs from the one `ob1_config` records, the run needs `--switch-model`, and
 the first thing it does is record the new model — from that moment a server
 configured for it passes preflight and should be switched. Until the pass
 finishes, searches mix vectors from two models; `--status` says how far along
-it is, and a re-run adds anything captured meanwhile. The record and the pool
-are one transaction — the `ob1_config` row, the rows the retry flags return,
+it is. The record and the pool
+are one transaction — the `ob1_config` row, the rows the data rule (below) and the retry flags return,
 `enqueue_thoughts` — so a run that dies between them leaves both or neither,
 never a record naming the new model with no pool behind it. And a model change
 starts this pass over — every terminal row, and every lease expired with no
@@ -252,10 +253,25 @@ corpus is at the model again, which is what their finished rows say. A `--job`
 that names a model (`reembed:<model>@<dim>[:suffix]`) must name the configured
 one; a run under another model's key would write this model's vectors and
 record them as the other's, and is refused (`--status` still answers for it,
-so a key preflight reports can be inspected from any shell). Thoughts captured while the pass
-ran by a server not yet switched carry the previous model's vectors and no
-claim row, and nothing can tell them from new-model captures afterwards — the
-run says so at its end; switch the server first, and re-run once.
+so a key preflight reports can be inspected from any shell).
+
+**The row says which model it is at (migration 021).** Every vector carries the
+model that produced it, `thoughts.embedding_model`, written by the same
+statement as the vector — the server's from its configuration, this tool's
+from `OB1_EMBEDDING_MODEL` as `update_thought`'s eighth argument; NULL is a
+vector of unknown model (a row from before 021, a raw INSERT, an older server)
+and counts as not at any model. The pool is built from that: `enqueue_thoughts`
+is given the ids `WHERE embedding_model IS DISTINCT FROM <target>`, so a
+thought already at the target with no row is finished and is never re-embedded
+"harmlessly", and "not yet in the pool" means exactly what a run would add. And
+on every run a *succeeded* row whose thought is not at the target returns to the
+pool — the row says done, the thought says otherwise, the data wins — which is
+what finds a thought captured or edited by a server still on the old model,
+before or after the pass finished; until 021 the run could only say at its end
+that some rows were captured meanwhile and nothing could tell. Failed rows are
+left to `--retry-failed`; a row succeeded with a caveat is at the target.
+`--status` and a run print the corpus by model. A run requires 021 and says so;
+`--status` and `--dry-run` answer on an older schema.
 
 **What preflight sees.** A pass is *unfinished* while any row under its key is
 pending, leased or failed — `passUnfinished` in `config.mjs`, one rule for this
@@ -264,9 +280,16 @@ every start and warns, in the counts `--status` prints, for every unfinished
 key that starts with `reembed:` (the configured model's key, or a backfill's;
 extraction keys are left out because 016's trigger keeps that pool fed). No
 marker to clear: the claim table is the record of the pass and nothing else.
-Succeeded rows with a caveat are finished; thoughts not yet in the pool are
-detail while a pass is unfinished, and no signal on their own — after a switch
-every new capture is one. `--status` and the end of a run print `preflight will
+Succeeded rows with a caveat are finished; thoughts not yet in the pool —
+since 021, the thoughts not at the key's model with no row under it — are
+detail while a pass is unfinished, and are what the next run adds. The rows
+themselves are preflight's `vector models` check, directly under `embedding
+contract`: the corpus grouped by `embedding_model`, ok when every labelled
+vector is at the recorded model (unlabelled rows as detail), a warning naming
+each other model and its count with the pass as the remedy — whether or not any
+claim row remembers the pass that left them — and a failure when the column is
+missing under a server that writes it. `edit signature` beside it checks that
+the eight-argument `update_thought` is present and alone. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
 it. A key whose model is no longer the recorded one — a switch abandoned or
@@ -725,8 +748,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 423 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 230 assertions, real server, throwaway container
+bun test-schema.ts                    # 461 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 245 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -797,7 +820,12 @@ container.
   ghost lease is held, and once every row is terminal — and each time prints
   the counts the tool printed; last, the recorded model is switched back and
   `--switch-model` to it again starts the pool over and re-embeds every row
-  rather than finding nothing to do.
+  rather than finding nothing to do. Since 021: every re-embedded row carries
+  the model that produced its vector; a server still on the old model
+  re-captures one text and captures a new one after the pass finished, and
+  preflight's `vector models` warns from the rows while the claim table says
+  nothing, `--status` prints the corpus by model, a plain re-run re-embeds
+  exactly those two, and a capture the switched server made is never pooled.
 - **Entity extraction, end to end.** [10] runs `extract-entities.ts` against a
   stub model that answers from a table, so the expected graph is known exactly:
   seven entities, fourteen mentions, five edges from ten thoughts, one of which
@@ -812,7 +840,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 423 properties, including:
+asserts 461 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -934,6 +962,18 @@ asserts 423 properties, including:
   DROP — a revoke and a grant on the 4-argument form both carried to the
   6-argument one, a role the defaults grant to stripped when the old form had
   revoked it, and a hardened 6-argument form left alone on a re-run
+- **the vector's model** (migration 021): the column, text and nullable, with
+  its comment; `upsert_thought` writes the envelope's `embedding_model` beside
+  the vector, NULL without it and through the 2-argument form; a re-capture
+  with a vector relabels, one without keeps vector and label, a metadata-only
+  one too; `update_thought` relabels with a vector, blanks the label with
+  content and no vector, leaves a metadata-only edit, and a 7-argument call
+  resolves through the default; a re-embed and a label-only change write no
+  audit row; one `update_thought` of eight parameters carrying 018's body by
+  name, 021 the last definer of both writers and 010 still of the audit
+  trigger; 018 re-applied puts a second form beside it and a 7-argument call is
+  `not unique` until 021 is re-applied; and the ACL replayed across the drop of
+  the 7-argument form, the four cases above for this function
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

@@ -54,13 +54,20 @@ console.log("[1] captureThought without chunks — the 3-arg RPC, unchanged");
     content: "a short thought that needs no chunking",
     payload: { metadata: { type: "idea", topics: ["short"] } },
     embedding: vec(0),
+    embeddingModel: "unit-test-model",
   });
   assert(/^[0-9a-f-]{36}$/.test(id), `returns a uuid (${id.slice(0, 8)}…)`);
 
   const sql = new SQL({ url: URL_, max: 1 });
-  const [row] = await sql`SELECT metadata, vector_dims(embedding) AS d FROM thoughts WHERE id = ${id}`;
+  const [row] = await sql`SELECT metadata, vector_dims(embedding) AS d, embedding_model AS m FROM thoughts WHERE id = ${id}`;
   assert(Number(row.d) === DIM, "the embedding was stored, not dropped");
   assert(row.metadata?.type === "idea", `metadata survived the RPC (${JSON.stringify(row.metadata)})`);
+  assert(row.m === "unit-test-model", `the model rode in the envelope over PostgREST too (${row.m})`);
+  // The eighth argument by name (021): relabelled with content, untouched without.
+  await store.updateThought({ id, content: "a short thought that needs no chunking", embedding: vec(0), embeddingModel: "unit-test-model-2" });
+  await store.updateThought({ id, metadataPatch: { type: "note" } });
+  const [edited] = await sql`SELECT embedding_model AS m, metadata->>'type' AS t FROM thoughts WHERE id = ${id}`;
+  assert(edited.m === "unit-test-model-2" && edited.t === "note", `update_thought's p_embedding_model reaches the row by name, and a metadata-only edit leaves it (${edited.m})`);
   const [c] = await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}`;
   assert(c.c === 0, "no chunk rows for short content");
   await sql.close();

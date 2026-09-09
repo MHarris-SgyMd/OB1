@@ -31,6 +31,7 @@ import {
   HNSW_SEED_MAX_SCAN_TUPLES,
   MATCH_COUNT_CEILING,
   MATCH_THOUGHTS_SIGNATURE,
+  UPDATE_THOUGHT_SIGNATURE,
   migrationValues,
   parseSetConfig,
   substituteMigration,
@@ -156,6 +157,8 @@ console.log("\n[3] thoughts table matches docs/01-getting-started.md");
     created_at: "timestamp with time zone",
     updated_at: "timestamp with time zone",
     content_fingerprint: "text",
+    // 021: the model that produced `embedding`; NULL is unknown. See [22].
+    embedding_model: "text",
   };
   for (const [col, type] of Object.entries(expected)) {
     assert(shape[col] === type, `${col} is ${type}${shape[col] === type ? "" : ` (got ${shape[col]})`}`);
@@ -2064,6 +2067,141 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(!hasPublic(kept) && (await count("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_reader`);
+}
+
+// ── 22. Migration 021 — the vector's model rides with the vector ─────────────
+//
+// One nullable column, written by the same statement as the vector: the label
+// follows the vector through both writers, NULL is "unknown", and nothing else
+// moved — 018's body by name, 010's audit trigger, the ACL across the DROP of
+// the 7-argument update_thought.
+
+console.log("\n[22] Migration 021: the vector's model rides with the vector");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const UT = UPDATE_THOUGHT_SIGNATURE;
+  const UT_7 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)"; // the form 021 dropped; 018 re-creates it
+  const count = async (name: string) =>
+    (await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+  const rowOf = async (id: string) =>
+    (await db.query<{ model: string | null; axis: number | null; metadata: Record<string, unknown> }>(
+      `SELECT embedding_model AS model, array_position(embedding::real[], 1::real) - 1 AS axis, metadata FROM thoughts WHERE id = $1`, [id])).rows[0];
+  const capture = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r.id;
+  const update = async (...args: unknown[]) =>
+    (await db.query<{ r: { ok: boolean; error?: string } }>(
+      `SELECT update_thought($1::uuid, $2::text, $3::jsonb, $4::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, $5::text) AS r`, args)).rows[0].r;
+  const audits = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
+
+  const col = (await db.query<{ data_type: string; is_nullable: string; comment: string | null }>(
+    `SELECT c.data_type, c.is_nullable, col_description('thoughts'::regclass, a.attnum) AS comment
+     FROM information_schema.columns c JOIN pg_attribute a ON a.attrelid = 'thoughts'::regclass AND a.attname = c.column_name
+     WHERE c.table_name = 'thoughts' AND c.column_name = 'embedding_model'`)).rows[0];
+  assert(col?.data_type === "text" && col?.is_nullable === "YES", `thoughts.embedding_model exists, text, nullable (${JSON.stringify(col)})`);
+  assert(/Unknown, not the default/.test(col?.comment ?? ""), "…and its comment says what NULL means");
+
+  // Capture: the label rides in the envelope, beside the actor.
+  const labelled = await capture("a labelled capture", { metadata: {}, embedding_model: "model-a" }, unit(1));
+  assert((await rowOf(labelled)).model === "model-a", "upsert_thought writes p_payload.embedding_model beside the vector");
+  const unlabelled = await capture("an unlabelled capture", { metadata: {} }, unit(2));
+  assert((await rowOf(unlabelled)).model === null, "…a payload without the key writes NULL — a vector of unknown model");
+  const bare = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('a two-argument capture', '{"metadata":{},"embedding_model":"model-a"}'::jsonb) AS r`)).rows[0].r.id;
+  assert((await rowOf(bare)).model === null && (await rowOf(bare)).axis === null, "…the 2-argument form writes no vector and no label, whatever the envelope says");
+  // Re-capture: the label follows the vector.
+  await capture("a labelled capture", { metadata: { k: 1 }, embedding_model: "model-b" }, unit(3));
+  let row = await rowOf(labelled);
+  assert(row.model === "model-b" && row.axis === 3 && row.metadata.k === 1, `a re-capture with a vector takes the caller's label with it (${row.model}, axis ${row.axis})`);
+  await capture("a labelled capture", { metadata: { k: 2 } }, unit(4));
+  row = await rowOf(labelled);
+  assert(row.model === null && row.axis === 4, `…and an older caller's re-capture — a vector, no label — leaves the vector of unknown model (${row.model})`);
+  await capture("a labelled capture", { metadata: { k: 3 }, embedding_model: "model-c" }, unit(5));
+  await capture("a labelled capture", { metadata: { k: 4 }, embedding_model: "model-z" }, null);
+  row = await rowOf(labelled);
+  assert(row.model === "model-c" && row.axis === 5 && row.metadata.k === 4, `a re-capture with NO vector keeps the vector and its label, whatever label it names (${row.model}, axis ${row.axis})`);
+  await db.query(`SELECT upsert_thought('a labelled capture', '{"metadata":{"k":5}}'::jsonb)`);
+  row = await rowOf(labelled);
+  assert(row.model === "model-c" && row.axis === 5 && row.metadata.k === 5, "…as does a metadata-only 2-argument re-capture");
+
+  // Edit: the eighth parameter.
+  const before = await audits();
+  let r = await update(labelled, "a labelled capture", null, unit(6), "model-d");
+  row = await rowOf(labelled);
+  assert(r.ok === true && row.model === "model-d" && row.axis === 6, `update_thought with content, a vector and a model relabels (${row.model}, axis ${row.axis})`);
+  assert((await audits()) === before, "…and a re-embed — same text, new vector, new label — writes no audit row: 008's trigger diffs the vector's presence, not the label");
+  r = await update(labelled, null, { k: 6 }, null, "model-e");
+  row = await rowOf(labelled);
+  assert(r.ok === true && row.model === "model-d" && row.axis === 6 && row.metadata.k === 6, `a metadata-only edit leaves the vector and its label, whatever model it names (${row.model})`);
+  r = await update(labelled, "a labelled capture, edited", null, null, "model-e");
+  row = await rowOf(labelled);
+  assert(r.ok === true && row.model === null && row.axis === null, `content with no vector: the vector is NULL and so is the label, whatever model was named (${row.model})`);
+  const r7 = (await db.query<{ r: { ok: boolean } }>(
+    `SELECT update_thought($1::uuid, 'a labelled capture, edited', NULL::jsonb, $2::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb) AS r`, [labelled, unit(7)])).rows[0].r;
+  row = await rowOf(labelled);
+  assert(r7.ok === true && row.axis === 7 && row.model === null, "a 7-argument call — every caller before this change — resolves through the default and labels the vector unknown");
+  const beforeLabel = await audits();
+  await db.exec(`UPDATE thoughts SET embedding_model = 'model-f' WHERE id = '${labelled}'`);
+  assert((await audits()) === beforeLabel, "a label-only change is not an audit event either");
+
+  // One function, eight parameters, 018's body by name; 010's trigger untouched.
+  assert((await count("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
+  const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
+  assert(Number(proc?.n) === 8, `…of eight parameters (${proc?.n})`);
+  for (const [re, what] of [
+    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR UPDATE/, "018's FOR UPDATE"],
+    [/pg_advisory_xact_lock/, "018's advisory lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
+    [/date_trunc\('milliseconds'/, "009's guard"], [/jsonb_typeof\(p_payload\) <> 'object'/, null],
+  ] as [RegExp, string | null][]) {
+    if (what) assert(re.test(proc.src), `…carrying ${what}`);
+  }
+  const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
+  assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
+  assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("021") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
+         `021 is the last definer of both writers and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+
+  // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
+  // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
+  // drops it again.
+  await reapply("018");
+  assert((await count("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
+  let ambiguous = "";
+  try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb)`, [labelled]); }
+  catch (e) { ambiguous = (e as Error).message; }
+  assert(/not unique/.test(ambiguous), `…after which a 7-argument call is "function is not unique" (${ambiguous.slice(0, 60)})`);
+  await restoreShipped("update_thought");
+  assert((await count("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
+
+  // The ACL survives the DROP, as 020's does ([21]): 018's form back and
+  // hardened, 021 applied for the first time, the new form's ACL read.
+  const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
+  const hasPublic = (a: string) => /(^\{|,)=X\//.test(a);
+  assert((await acl(UT)) === "", "the shipped function has default privileges — a NULL ACL");
+  const pre021 = async () => { await db.exec(`DROP FUNCTION ${UT}`); await reapply("018"); };
+  await db.exec(`CREATE ROLE ob1_test_editor`);
+  await pre021();
+  await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM PUBLIC`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${UT_7} TO ob1_test_editor WITH GRANT OPTION`);
+  await restoreShipped("update_thought");
+  const granted = await acl(UT);
+  assert(!hasPublic(granted) && /ob1_test_editor=X\*\//.test(granted), `a revoke and a grant with grant option on the 7-argument form are carried to the eight-argument one (${granted})`);
+  await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ob1_test_editor`);
+  await pre021();
+  assert(/ob1_test_editor=X\//.test(await acl(UT_7)), "default privileges give a re-created 7-argument form EXECUTE for the role");
+  await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM ob1_test_editor`);
+  await restoreShipped("update_thought");
+  const stripped = await acl(UT);
+  assert(!/ob1_test_editor/.test(stripped) && hasPublic(stripped), `a role the defaults grant to but the old form had revoked is revoked on the new form too (${stripped})`);
+  await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM ob1_test_editor`);
+  await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM PUBLIC`);
+  await reapply("018");
+  await restoreShipped("update_thought");
+  const kept = await acl(UT);
+  assert(!hasPublic(kept) && (await count("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
+  await db.exec(`DROP ROLE ob1_test_editor`);
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 report();

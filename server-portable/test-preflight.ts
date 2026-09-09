@@ -14,7 +14,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
-import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE } from "../db/config.mjs";
+import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -533,6 +533,67 @@ else {
   assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
          "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
+
+  /**
+   * The rows say which model they are at (migration 021, SMD-1068). The claim
+   * table is a record of passes and vanishes when an operator clears it; the
+   * column is a fact about each vector. Every fixture below has an EMPTY claim
+   * table for the key, so `re-embed pass` says none unfinished throughout and
+   * only the rows can speak: a corpus at two models warns with the counts and
+   * the pass as the remedy; one wholly at the recorded model is ok, unlabelled
+   * rows as detail; the record disagreeing with the configuration puts
+   * --switch-model in the remedy; the column missing under this server fails;
+   * and the eight-argument update_thought is checked alone — 018 re-applied by
+   * hand beside it, or in its place, fails with the DROP or the migration.
+   */
+  const noVec = await run(SQL_ENV);
+  assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\\): the form the servers and reembed\\.ts call since migration 021 \\(${UPDATE_THOUGHT_SIGNATURE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\), alone`).test(noVec.out),
+         "the eight-argument update_thought is the only form");
+  const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = NULL WHERE id = '${ids[3]}'`);
+  const twoModels = await run(SQL_ENV);
+  assert(twoModels.code === 0 && new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(from before migration 021\\) — searches rank across the two`).test(twoModels.out),
+         "rows at two models, with an empty claim table, warn from the rows alone — with the counts by model");
+  assert(/re-embed pass\s+none unfinished/.test(twoModels.out), "…while the claim table, empty, still says no pass is unfinished — the state SMD-1068 was filed for");
+  assert(new RegExp(`Re-embed them: cd db && bun reembed\\.ts --url \\$DATABASE_URL — the pass takes exactly the rows not at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.`).test(twoModels.out) && !/vector models[^\n]*--switch-model/.test(twoModels.out),
+         "…with the pass as the remedy, and no --switch-model while the record and the configuration agree");
+  const twoJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
+  await claims.unsafe(`UPDATE thoughts SET embedding_model = '${EMBEDDING_MODEL}' WHERE id = '${ids[2]}'`);
+  const atModel = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+3 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 1 unlabelled \\(from before migration 021\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
+         "a corpus wholly at the recorded model is ok, the unlabelled row reported as detail rather than as wrong");
+  await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
+  const recordMoved = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(recordMoved.out) && /Re-embed them: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(recordMoved.out),
+         "with the record on another model, the rows at the configured one are the ones out of place, and the remedy carries --switch-model");
+  await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
+  await claims.unsafe("ALTER TABLE thoughts DROP COLUMN embedding_model");
+  const noColumn = await run(SQL_ENV);
+  assert(noColumn.code === 1 && /vector models\s+thoughts\.embedding_model does not exist/.test(noColumn.out) && /021_embedding_model_per_row\.sql/.test(noColumn.out),
+         "the column missing under this server does not start, naming 021");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  const restored = await run(SQL_ENV);
+  assert(restored.code === 0 && new RegExp(`vector models\\s+0 at ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, 4 unlabelled`).test(restored.out), "021 re-applied: the column is back, its labels gone — unknown again, not stamped");
+  // 018 re-applied by hand puts the 7-argument form back BESIDE 021's.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
+  const twoEdits = await run(SQL_ENV);
+  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\)/.test(twoEdits.out),
+         "018 re-applied over 021 leaves two update_thought forms, and the start is refused naming the extra one");
+  assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  assert((await run(SQL_ENV)).code === 0, "…which 021 re-applied performs");
+  // A database whose update_thought predates 021.
+  await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
+  const pre021 = await run(SQL_ENV);
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 021; the server sends p_embedding_model/.test(pre021.out) && /Apply db\/migrations\/021_embedding_model_per_row\.sql\./.test(pre021.out),
+         "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
   const pre015 = await run(SQL_ENV);
