@@ -53,8 +53,11 @@ function thoughtUrl(id: string): string {
 // The model every vector this server stores comes from — sent to the provider,
 // and written beside the vector as thoughts.embedding_model (migration 021)
 // through the payload envelope upsert_thought has read since 004; a schema
-// from before 021 ignores the key.
-const EMBEDDING_MODEL = "openai/text-embedding-3-small";
+// from before 021 ignores the key. Preflight and reembed.ts judge "at the
+// recorded model" by string equality with ob1_config.embedding_model, so this
+// must be that spelling: OB1_EMBEDDING_MODEL when set, as server-portable
+// reads it, else the id this server has always used.
+const EMBEDDING_MODEL = Deno.env.get("OB1_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
 
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {

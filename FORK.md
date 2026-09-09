@@ -3370,6 +3370,37 @@ count omitted an expired lease a model change would return; and preflight
 scanned `thoughts` once per finished key for a number it never prints — only
 unfinished keys are counted. Suites after: preflight 118.
 
+**A fourth pass.** Its top finding was again made of the earlier passes'
+additions: under a backfill key, `--switch-model` recorded the new model and
+re-embedded nothing — the narrowed start-over returned only failed rows and
+expired leases, the key's data rule trusted every finished row's unlabelled
+thought, and `enqueue_thoughts` skipped every thought with a row — so a brain
+whose history was under `reembed:nightly` ended a model change with "Nothing to
+do" and every vector the old model's. Under a backfill key every terminal row
+returns on a model change, as before 021: that key cannot judge by label, and
+the model's own key keeps the narrow rule. Eight more fixed: the `--dry-run`
+count of caveat rows used the own key's notion of "moved" while the run used
+the backfill's, and its count of unlabelled rows was a second hand-inverted
+copy of the requeue rules that counted rows the run never touched — both now
+derive from the start's own predicates, and the data rule's count is net of the
+rows the start-over takes first; the `updated_at trigger` check was nested
+inside the corpus scan's `try`, so a scan that failed hid it — it has its own,
+before the scan; the backfill's DISABLE / UPDATE / ENABLE were three
+statements, which a hand run under autocommit could separate — they are one
+`DO` block, and the "run it as one transaction" remedy text went with the
+hazard; the Edge Function server's capture test mirrored the write path
+without the label and its drift guard did not name the new lines — both do;
+`--status` for a key naming another model printed counts judged against the
+key's model, a corpus line judged against the shell's and a preamble about
+neither — every line is judged against the key's model and the preamble says
+so; and the Edge Function server's label was a hard-coded spelling where
+preflight compares by string equality with the record — it reads
+`OB1_EMBEDDING_MODEL` with that spelling as the default. Two findings are the
+boyscout's: the envelope built identically in both stores and the model
+threaded beside the vector rather than on `EmbeddedCapture`, and the
+corpus-by-model query and reduction duplicated between `reembed.ts` and
+preflight. Suites unchanged in count.
+
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
 Postgres resolves the relation when it parses the statement, whatever the `AND`

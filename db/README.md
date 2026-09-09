@@ -281,7 +281,8 @@ caveat row is neither failed nor a lease, and a row succeeded with a caveat is
 at the target unless its thought moved, in which case the data rule takes it.
 Which key pools how — a model's own key by the label, a `--job` key every
 thought — is `poolModelFor` in `config.mjs`, one rule for this tool and for
-preflight's "not yet in the pool".
+preflight's "not yet in the pool"; under a `--job` key a model change starts
+the pass over as before 021, since that key cannot judge by label.
 `--status` and a run print the corpus by model, and say what preflight's
 `vector models` line will say. A run requires 021 and says so; `--status` and
 `--dry-run` answer on an older schema.

@@ -1086,21 +1086,27 @@ if (configFailed) {
               add("vector models", "ok", detail);
             }
           }
-
-          /**
-           * 021's backfill holds 001's updated_at trigger off for one statement.
-           * Under the migrator that is one transaction; run by hand under
-           * autocommit, a failure between the DISABLE and the ENABLE leaves the
-           * trigger off, and from then on no raw or community UPDATE moves
-           * updated_at — 009's if_unchanged_since guard and 021's own evidence
-           * rule degrade silently. Read once per start; the remedy is one line.
-           */
-          const trg = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
-          if (!trg.length) add("updated_at trigger", "fail", "thoughts_updated_at is missing — updated_at would never move", "Apply db/migrations/001_core_schema.sql.");
-          else if (trg[0].e === "D") add("updated_at trigger", "fail", "thoughts_updated_at is disabled — a hand-run 021 stopped between DISABLE and ENABLE — so updated_at no longer moves on an update", "ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;");
-          else add("updated_at trigger", "ok", "thoughts_updated_at enabled");
         } catch (e) {
           add("vector models", "warn", `could not verify: ${(e as Error).message}`, "The check reads thoughts.embedding_model.");
+        }
+
+        /**
+         * 001's updated_at trigger, still enabled. 021's backfill holds it off
+         * inside one DO block, so nothing this fork ships can leave it off; a
+         * hand DISABLE, or an interrupted statement of the operator's own, can
+         * — and from then on no raw or community UPDATE moves updated_at, so
+         * 009's if_unchanged_since guard and 021's evidence rule degrade
+         * silently. Its own try, before the corpus scan, so a scan that fails
+         * cannot hide it (fourth review pass). Read once per start; the remedy
+         * is one line.
+         */
+        try {
+          const trg = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+          if (!trg.length) add("updated_at trigger", "fail", "thoughts_updated_at is missing — updated_at would never move", "Apply db/migrations/001_core_schema.sql.");
+          else if (trg[0].e === "D") add("updated_at trigger", "fail", "thoughts_updated_at is disabled, so updated_at no longer moves on an update — the if_unchanged_since guard and 021's evidence rule are blind to edits", "ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;");
+          else add("updated_at trigger", "ok", "thoughts_updated_at enabled");
+        } catch (e) {
+          add("updated_at trigger", "warn", `could not verify: ${(e as Error).message}`, "The check reads pg_trigger.");
         }
 
         /**

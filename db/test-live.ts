@@ -1134,14 +1134,14 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     WHERE work_type = ${REEMBED_JOB} AND thought_id = (SELECT id FROM thoughts WHERE content = ${held})`;
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   const recordOnly = await reembed("--dry-run");
-  assert(/start this pass over \(1 failed row\(s\) or expired lease\(s\) from before the change return to the pool\)/.test(recordOnly.out) && !/succeeded row\(s\) whose thought/.test(recordOnly.out) && /over 3 rows/.test(recordOnly.out),
-    `with only the record moved, a switch back would return the dead lease and pool the two unpooled thoughts — the rows still say stub-embed, so no finished row is re-embedded (${recordOnly.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  assert(/start this pass over \(40 terminal row\(s\) or expired lease\(s\) from before the change return to the pool\)/.test(recordOnly.out) && !/succeeded row\(s\) whose thought/.test(recordOnly.out) && /over 42 rows/.test(recordOnly.out),
+    `under the suite's backfill key a model change starts the pass over whatever the rows say — the key cannot judge by label, since 021 labels nothing from a key naming no model (${recordOnly.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
   await sql`UPDATE thoughts SET embedding_model = ${recordedModel}`;
   const backDry = await reembed("--dry-run");
-  assert(backDry.code === 0 && /would: refuse without --switch-model; with it: record stub-embed in ob1_config; start this pass over \(1 failed row\(s\) or expired lease\(s\) from before the change return to the pool\); return 39 succeeded row\(s\) whose thought is not at stub-embed to the pool; add 2 thoughts to the pool/.test(backDry.out) && /over 42 rows/.test(backDry.out),
-    `--dry-run of a switch back to a model the rows are at says the dead lease restarts, the data rule returns every finished row, and the unpooled thoughts are added (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  assert(backDry.code === 0 && /would: refuse without --switch-model; with it: record stub-embed in ob1_config; start this pass over \(40 terminal row\(s\) or expired lease\(s\) from before the change return to the pool\); add 2 thoughts to the pool/.test(backDry.out) && /over 42 rows/.test(backDry.out),
+    `--dry-run of a switch back with the rows moved too says every terminal row and the dead lease restart, and the unpooled thoughts are added (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
   const back = await reembed("--switch-model");
-  assert(back.code === 0 && /model change: this pass starts over — 1 failed row\(s\) or expired lease\(s\) from before the change returned to the pool/.test(back.out) && /39 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(back.out) && /42 re-embedded, 0 failed/.test(back.out),
+  assert(back.code === 0 && /model change: this pass starts over — 40 terminal row\(s\) or expired lease\(s\) from before the change returned to the pool/.test(back.out) && !/succeeded row\(s\) whose thought/.test(back.out) && /42 re-embedded, 0 failed/.test(back.out),
     `…and the run re-embeds every thought rather than finding nothing to do (exit ${back.code}: ${back.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   const backCounts = await claimCounts();
   assert(backCounts.succeeded === 42 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again, the expired lease and the two pooled thoughts included (${JSON.stringify(backCounts)})`);

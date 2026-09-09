@@ -44,9 +44,11 @@
 --   claim; a key naming no model (`reembed:nightly`) is no evidence and a row
 --   whose updated_at is NULL cannot be judged. The label is a fact about a
 --   vector already there, not an edit: 001's updated_at trigger is held off
---   for the statement, so no row's updated_at moves — a client holding a
---   pre-migration read would otherwise be told STALE_READ on its next edit
---   for a row nothing changed — and 008's audit trigger sees no event in it. Without this, the first plain
+--   for the statement — inside one DO block, so the hold and its release
+--   cannot be separated however the file is run — and no row's updated_at
+--   moves (a client holding a pre-migration read would otherwise be told
+--   STALE_READ on its next edit for a row nothing changed); 008's audit
+--   trigger sees no event in it. Without this, the first plain
 --   run of reembed.ts after upgrading would re-embed a whole corpus a
 --   finished pass had already proved was at the model — NULL is "not at the
 --   target" to that tool, and rightly, since nothing else says otherwise.
@@ -193,17 +195,19 @@ COMMENT ON COLUMN thoughts.embedding_model IS
 --
 -- 001's BEFORE UPDATE trigger would stamp updated_at = now() on every row
 -- labelled, and the label is not an edit (see the header); the trigger is held
--- off for this one statement. ALTER TABLE … TRIGGER changes no column. Under
--- bun migrate.ts this file is one transaction, so the locks it takes — ADD
--- COLUMN's included — are held until the migration commits, as every
--- migration's DDL is, and the DISABLE and the ENABLE cannot be separated. Run
--- by hand, run it as one transaction too (psql -1): a failure between the two
--- under autocommit leaves the trigger off, which preflight's `updated_at
--- trigger` check reports with the one-line remedy.
+-- off for the UPDATE. The three statements are ONE — a DO block — so the
+-- DISABLE and the ENABLE cannot be separated however the file is run: under
+-- bun migrate.ts the whole file is a transaction anyway (and the locks it
+-- takes, ADD COLUMN's included, are held until it commits, as every
+-- migration's DDL is), and by hand under autocommit a failure inside the block
+-- rolls the DISABLE back with it (fourth review pass — preflight's `updated_at
+-- trigger` check still says so if a hand DISABLE is ever left behind).
 -- ---------------------------------------------------------------------------
-ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
-UPDATE thoughts t
-   SET embedding_model = e.model
+DO $bf$
+BEGIN
+  ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
+  UPDATE thoughts t
+     SET embedding_model = e.model
   FROM (
     SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.finished_at
       FROM (
@@ -218,8 +222,10 @@ UPDATE thoughts t
  WHERE t.id = e.thought_id
    AND t.embedding_model IS NULL
    AND t.embedding IS NOT NULL
-   AND t.updated_at <= e.finished_at;
-ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;
+     AND t.updated_at <= e.finished_at;
+  ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;
+END
+$bf$;
 
 -- ---------------------------------------------------------------------------
 -- upsert_thought(text, jsonb, vector) — the label rides in the envelope
