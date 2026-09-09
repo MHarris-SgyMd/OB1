@@ -2109,6 +2109,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   assert((await rowOf(unlabelled)).model === null, "…a payload without the key writes NULL — a vector of unknown model");
   const bare = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('a two-argument capture', '{"metadata":{},"embedding_model":"model-a"}'::jsonb) AS r`)).rows[0].r.id;
   assert((await rowOf(bare)).model === null && (await rowOf(bare)).axis === null, "…the 2-argument form writes no vector and no label, whatever the envelope says");
+  const vectorless = await capture("a first capture with no vector", { metadata: {}, embedding_model: "model-a" }, null);
+  assert((await rowOf(vectorless)).model === null && (await rowOf(vectorless)).axis === null, "…and a first capture through the 3-argument form with a NULL vector takes no label either — nothing for it to be the model of");
   // Re-capture: the label follows the vector.
   await capture("a labelled capture", { metadata: { k: 1 }, embedding_model: "model-b" }, unit(3));
   let row = await rowOf(labelled);

@@ -184,9 +184,26 @@ console.log("\n[4] Migration 021 onto a populated 020 — the column, and the fu
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
 
-  // A corpus written before 021: through the writers and around them.
+  // A corpus written before 021: through the writers and around them, and
+  // what the claim table remembers of it — the one evidence 021 labels from.
   const [{ r: viaUpsert }] = await sql`SELECT upsert_thought('captured before 021', '{"metadata":{}}'::jsonb, ${vec}::vector) AS r`;
+  const viaUpsertId = (viaUpsert as { id: string }).id;
   await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('inserted before 021', '{}'::jsonb, ${vec}::vector)`;
+  const [{ id: editedId }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('re-embedded, then edited', '{}'::jsonb, ${vec}::vector) RETURNING id`;
+  const [{ id: nightlyId }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('re-embedded under a key naming no model', '{}'::jsonb, ${vec}::vector) RETURNING id`;
+  const [{ id: vectorlessId }] = await sql`INSERT INTO thoughts (content, metadata) VALUES ('re-embedded, vector since removed', '{}'::jsonb) RETURNING id`;
+  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
+  // Finished passes: the model's own key over four rows (an earlier pass to
+  // another model over one of them, so the LATEST claim must win), a key that
+  // names no model over one row. Every claim finished after its row was written.
+  await sql.unsafe(`SELECT enqueue_thoughts('reembed:earlier-model@${OPTS.dim}', ARRAY['${viaUpsertId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${"reembed:earlier-model@" + OPTS.dim}`;
+  await sql.unsafe(`SELECT enqueue_thoughts('${KEY}', ARRAY['${viaUpsertId}', '${editedId}', '${vectorlessId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY}`;
+  await sql.unsafe(`SELECT enqueue_thoughts('reembed:nightly', ARRAY['${nightlyId}']::uuid[])`);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = 'reembed:nightly'`;
+  // Written since its pass: the updated_at trigger moves it past finished_at.
+  await sql`UPDATE thoughts SET content = 're-embedded, then edited (edited)' WHERE id = ${editedId}::uuid`;
   const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
   assert(absent.c === 0, "at migration 020 there is no embedding_model column");
   const [seven] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought' AND pronargs = 7`;
@@ -194,8 +211,14 @@ console.log("\n[4] Migration 021 onto a populated 020 — the column, and the fu
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
 
-  const models = (await sql`SELECT content, embedding_model AS m FROM thoughts ORDER BY content`) as { content: string; m: string | null }[];
-  assert(models.length === 2 && models.every((r) => r.m === null), "every row written before 021 reads NULL — unknown, not stamped with the recorded model");
+  const models = Object.fromEntries(
+    ((await sql`SELECT content, embedding_model AS m FROM thoughts`) as { content: string; m: string | null }[]).map((r) => [r.content, r.m])
+  );
+  assert(models["captured before 021"] === OPTS.model, `a row a finished pass wrote, and nothing wrote since, is labelled from its latest succeeded claim (${models["captured before 021"]})`);
+  assert(models["inserted before 021"] === null, "a row no pass touched reads NULL — unknown, not stamped with the recorded model");
+  assert(models["re-embedded, then edited (edited)"] === null, "a row written since its pass reads NULL — the claim no longer vouches for its vector");
+  assert(models["re-embedded under a key naming no model"] === null, "a claim under a key naming no model is no evidence");
+  assert(models["re-embedded, vector since removed"] === null, "a row with no vector takes no label, whatever its claim says");
   const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
   assert(forms.length === 1 && Number(forms[0].n) === 8, `the 7-argument form is gone and the eight-argument one is the only update_thought (${forms.map((f) => f.n).join(",")})`);
 

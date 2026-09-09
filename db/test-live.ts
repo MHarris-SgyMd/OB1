@@ -1052,9 +1052,15 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // could only describe at the end of a run: a server still on the old model
   // re-captures one text and captures a new one AFTER the pass finished. Their
   // rows say old-model; preflight sees it from the rows with nothing in the
-  // claim table to say so; a plain re-run returns the finished row whose
-  // thought moved and pools the new one, and re-embeds exactly those two. A
-  // capture the switched server made is at the target and is never pooled.
+  // claim table to say so. Under the model's OWN key a plain run pools exactly
+  // the rows not at the model and re-embeds those two; a capture the switched
+  // server made is at the target and is never pooled. The suite's key,
+  // `reembed:test`, names no model and is a backfill: it pools every thought
+  // without a row, as every pass did before 021 (first review pass — a
+  // backfill under a --job key had pooled nothing), and the data rule returns
+  // its finished row for the re-captured thought under either key.
+  const DEFAULT_KEY = `reembed:stub-embed@${DIM}`;
+  const reembedDefault = (...extra: string[]) => reembedIn({}, "--job", DEFAULT_KEY, ...extra);
   const labels = (await sql`SELECT embedding_model AS m FROM thoughts`) as { m: string | null }[];
   assert(labels.length === 40 && labels.every((r) => r.m === "stub-embed"), `every re-embedded row carries the model that produced its vector (${[...new Set(labels.map((r) => r.m))].join(", ")})`);
   const stale = "captured by a server still on the old model";
@@ -1071,16 +1077,23 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     assert(/re-embed pass\s+none unfinished/.test(pf.out), "…while the claim table, which has a finished row for one of them and none for the other, says nothing");
     assert(/bun reembed\.ts --url \$DATABASE_URL — the pass takes exactly the rows not at stub-embed/.test(pf.out), "…and names the pass as the remedy");
   }
-  const byModel = await reembed("--status");
+  const byModel = await reembedDefault("--status");
   assert(/corpus:\s+40 at stub-embed, 2 at another model \(old-model: 2\)/.test(byModel.out), `--status prints the corpus by model (${byModel.out.split("\n").find((l) => /corpus:/.test(l))?.trim()})`);
-  assert(/42 thoughts — 40 succeeded, 0 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(byModel.out),
-    `…and "not yet in the pool" is the one thought not at the model with no row — the one at it is not counted (${byModel.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
-  const dryData = await reembed("--dry-run");
-  assert(/return 1 succeeded row\(s\) whose thought is not at stub-embed to the pool; add 1 thoughts to the pool/.test(dryData.out) && /over 2 rows/.test(dryData.out),
-    `--dry-run says the finished row whose thought moved returns and the new one is added (${dryData.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
-  const caught = await reembed();
-  assert(caught.code === 0 && /1 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(caught.out) && /1 thought\(s\) added/.test(caught.out) && /2 re-embedded, 0 failed/.test(caught.out),
-    `a plain re-run re-embeds exactly the two rows the old server wrote (exit ${caught.code}: ${caught.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(/42 thoughts — 0 succeeded, 0 failed, 0 in flight, 0 pending, 2 not yet in the pool/.test(byModel.out),
+    `…and under the model's own key "not yet in the pool" is the two thoughts not at the model — the one at it is not counted (${byModel.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
+  assert(/preflight will warn until they are re-embedded: 2 vector\(s\) at another model/.test(byModel.out), "…and --status says what preflight's vector models line will say meanwhile");
+  const backfillStatus = await reembed("--status");
+  assert(/42 thoughts — 40 succeeded, 0 failed, 0 in flight, 0 pending, 2 not yet in the pool/.test(backfillStatus.out),
+    `…while under the suite's backfill key every thought without a row counts, the one at the model included (${backfillStatus.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
+  const backfillDry = await reembed("--dry-run");
+  assert(/return 1 succeeded row\(s\) whose thought is not at stub-embed to the pool; add 2 thoughts to the pool/.test(backfillDry.out) && /over 3 rows/.test(backfillDry.out),
+    `…and a backfill run would return the finished row whose thought moved and pool both unpooled thoughts (${backfillDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  const dryData = await reembedDefault("--dry-run");
+  assert(!/succeeded row\(s\) whose thought/.test(dryData.out) && /add 2 thoughts to the pool/.test(dryData.out) && /over 2 rows/.test(dryData.out),
+    `--dry-run under the model's own key pools exactly the two rows not at it (${dryData.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  const caught = await reembedDefault();
+  assert(caught.code === 0 && /2 thought\(s\) added/.test(caught.out) && /2 re-embedded, 0 failed/.test(caught.out),
+    `a plain run under the model's own key re-embeds exactly the two rows the old server wrote (exit ${caught.code}: ${caught.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/nothing here can tell/.test(caught.out) && !/captured while the pass ran/.test(caught.out), "…and nothing is left to guess about");
   const moved = (await sql`SELECT content, embedding::text AS e, embedding_model AS m FROM thoughts WHERE content = ANY(${sql.array([shorts[0], stale, fresh], "TEXT")})`) as { content: string; e: string; m: string }[];
   const rowNamed = (c: string) => moved.find((r) => r.content === c)!;
@@ -1093,8 +1106,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     const pf = await preflight();
     assert(/vector models\s+42 at stub-embed\s*$/m.test(pf.out) && !/at another model/.test(pf.out), "preflight then sees the whole corpus at the model");
   }
-  const noop2 = await reembed();
-  assert(noop2.code === 0 && /Nothing to do/.test(noop2.out), "a further run has nothing to do");
+  const noop2 = await reembedDefault();
+  assert(noop2.code === 0 && /Nothing to do/.test(noop2.out), "a further run under the model's own key has nothing to do");
 
   // Switching back to a model used before. The key holds a finished pass's
   // terminal row for every thought, and enqueue_thoughts skips them by primary
@@ -1107,6 +1120,11 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // One row is left as a dead worker of the earlier pass would leave it —
   // claimed, lease long expired, attempts used up — and must be restarted too,
   // not reaped as failed for the earlier pass's reason (first review pass).
+  // Since 021 the start-over returns only that row and any failed ones: the
+  // succeeded rows are the data rule's, returned because the rows say the
+  // corpus is at the other model — here made so, as a real switch back would
+  // leave it — and not re-embedded on a record moved by hand alone (021's
+  // first review pass: every succeeded row was returned regardless).
   const CTX_KEY = `reembed:stub-embed@${DIM}:ctx`;
   await sql`SELECT enqueue_thoughts(${CTX_KEY}, (SELECT array_agg(id) FROM (SELECT id FROM thoughts ORDER BY created_at LIMIT 1) s))`;
   await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${CTX_KEY}`;
@@ -1114,14 +1132,18 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     UPDATE thought_work_claims SET status = 'claimed', finished_at = NULL, ttl_expires_at = now() - interval '1 minute', attempt_count = 3, worker_id = 'dead'
     WHERE work_type = ${REEMBED_JOB} AND thought_id = (SELECT id FROM thoughts WHERE content = ${held})`;
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
+  const recordOnly = await reembed("--dry-run");
+  assert(/start this pass over \(1 failed row\(s\) or expired lease\(s\) from before the change return to the pool\)/.test(recordOnly.out) && !/succeeded row\(s\) whose thought/.test(recordOnly.out) && /over 3 rows/.test(recordOnly.out),
+    `with only the record moved, a switch back would return the dead lease and pool the two unpooled thoughts — the rows still say stub-embed, so no finished row is re-embedded (${recordOnly.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  await sql`UPDATE thoughts SET embedding_model = ${recordedModel}`;
   const backDry = await reembed("--dry-run");
-  assert(backDry.code === 0 && /would: refuse without --switch-model; with it: record stub-embed in ob1_config; start this pass over \(41 row\(s\) from before the change return to the pool\)/.test(backDry.out) && /over 41 rows/.test(backDry.out),
-    `--dry-run of a switch back to a model used before says this pass starts over, the expired lease counted (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  assert(backDry.code === 0 && /would: refuse without --switch-model; with it: record stub-embed in ob1_config; start this pass over \(1 failed row\(s\) or expired lease\(s\) from before the change return to the pool\); return 39 succeeded row\(s\) whose thought is not at stub-embed to the pool; add 2 thoughts to the pool/.test(backDry.out) && /over 42 rows/.test(backDry.out),
+    `--dry-run of a switch back to a model the rows are at says the dead lease restarts, the data rule returns every finished row, and the unpooled thoughts are added (${backDry.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
   const back = await reembed("--switch-model");
-  assert(back.code === 0 && /model change: this pass starts over — 41 row\(s\) from before the change returned to the pool/.test(back.out) && /41 re-embedded, 0 failed/.test(back.out),
-    `…and the run re-embeds every pooled thought rather than finding nothing to do — the one the switched server captured is at the model by its row and has no row under the key, so 41 (exit ${back.code}: ${back.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(back.code === 0 && /model change: this pass starts over — 1 failed row\(s\) or expired lease\(s\) from before the change returned to the pool/.test(back.out) && /39 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(back.out) && /42 re-embedded, 0 failed/.test(back.out),
+    `…and the run re-embeds every thought rather than finding nothing to do (exit ${back.code}: ${back.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   const backCounts = await claimCounts();
-  assert(backCounts.succeeded === 41 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again, the expired lease included (${JSON.stringify(backCounts)})`);
+  assert(backCounts.succeeded === 42 && Object.keys(backCounts).length === 1, `…leaving every row succeeded again, the expired lease and the two pooled thoughts included (${JSON.stringify(backCounts)})`);
   const [{ deadAttempts }] = await sql`
     SELECT attempt_count AS "deadAttempts" FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = (SELECT id FROM thoughts WHERE content = ${held})`;
   assert(Number(deadAttempts) === 1, `…the dead worker's row on what counts as its first attempt (${deadAttempts})`);

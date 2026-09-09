@@ -28,11 +28,31 @@
 --   The width is the column's (006 refuses any other) and needs no second
 --   label. NULL means UNKNOWN, not "the default": every row from before this
 --   migration, every row a raw INSERT or the PostgREST store's two-step
---   fallback wrote, every capture from a server older than this change.
---   Nothing backfills it. Stamping the recorded model on every existing row
---   would be exactly the guess this column exists to stop making — on the day
---   021 is applied the corpus may well be at two models, which is the case
---   that motivated it.
+--   fallback wrote, every capture from a server older than this change. A
+--   row with no vector has no label either — there is nothing for it to be
+--   the model of.
+--
+-- The one backfill there is evidence for
+--   Stamping the recorded model on every existing row would be exactly the
+--   guess this column exists to stop making — on the day 021 is applied the
+--   corpus may well be at two models, which is the case that motivated it.
+--   But a row a re-embed pass wrote IS evidence: its succeeded claim row under
+--   `reembed:<model>@<dim>[:suffix]` names the model, and the pass wrote the
+--   vector before it released the claim, so `updated_at <= finished_at` says
+--   nothing has written the row since (update_thought moves updated_at; a
+--   later capture or edit puts it past finished_at and the row stays NULL).
+--   Those rows, and only those, are labelled below from the latest such
+--   claim; a key naming no model (`reembed:nightly`) is no evidence and a row
+--   whose updated_at is NULL cannot be judged. Without this, the first plain
+--   run of reembed.ts after upgrading would re-embed a whole corpus a
+--   finished pass had already proved was at the model — NULL is "not at the
+--   target" to that tool, and rightly, since nothing else says otherwise.
+--   What stays NULL after this is what genuinely has no evidence, and the
+--   first pass over it is what labels it; reembed.ts says how many such rows
+--   its pool holds before it runs. The one imprecision: a pre-021 edit that
+--   began after the pass's write and before its release is stamped with the
+--   pass's model although its vector was the editing server's — a window of
+--   a second or so, once, per row a pass touched.
 --
 --   thought_chunks gets no column. A chunk's vector is written in the same
 --   statement as its parent's, from one embedCapture() with one model, so the
@@ -44,12 +64,13 @@
 --
 -- The rule: the label follows the vector
 --   * upsert_thought(text, jsonb, vector) — the INSERT writes
---     p_payload->>'embedding_model' beside the vector. On conflict (a
---     re-capture of the same text): when the caller sent no vector the row
---     keeps its vector AND its label; when it sent one, the row takes the new
---     vector and the caller's label — NULL when the caller named none, which
---     is what a capture from an older server is: a vector of unknown model.
---     The 2-argument form writes no vector and touches neither column. The
+--     p_payload->>'embedding_model' beside the vector, and NULL when the
+--     vector is NULL, whatever the envelope names. On conflict (a re-capture
+--     of the same text): when the caller sent no vector the row keeps its
+--     vector AND its label; when it sent one, the row takes the new vector and
+--     the caller's label — NULL when the caller named none, which is what a
+--     capture from an older server is: a vector of unknown model. The
+--     2-argument form writes no vector and touches neither column. The
 --     4-argument form delegates to this one (007) and inherits the rule.
 --   * update_thought — content absent: the label is untouched, like the
 --     vector. Content present with no vector: the label is NULL, like the
@@ -104,9 +125,11 @@
 --     it, `edit signature`: the eight-argument update_thought present and
 --     alone (018 re-applied by hand puts the 7-argument form back beside it —
 --     the ambiguity above).
---   * db/reembed.ts: the pool is built from the rows not at the target
---     (`embedding_model IS DISTINCT FROM <model>`) rather than from every
---     thought, and on every run a SUCCEEDED row whose thought is not at the
+--   * db/reembed.ts: under the model's own key the pool is built from the
+--     rows not at the target (no vector, or `embedding_model IS DISTINCT FROM
+--     <model>`) rather than from every thought — a --job key is a backfill
+--     whose reason is not the model, and pools every thought as before — and
+--     on every run, under any key, a SUCCEEDED row whose thought is not at the
 --     target returns to the pool — the row says done, the thought says
 --     otherwise, the data wins. That is what retires the "nothing here can
 --     tell" paragraph: a capture or edit made by a server still on the old
@@ -125,7 +148,8 @@
 --
 -- Safety
 --   * Additive. One nullable column added to `thoughts`; no column altered or
---     dropped. No backfill, no DELETE beyond the chunk replacement 009 does.
+--     dropped. The only write to existing rows is the evidence-based label
+--     above; no DELETE beyond the chunk replacement 009 does.
 --   * Idempotent. ADD COLUMN IF NOT EXISTS; the DROP is IF EXISTS; the ACL
 --     replay runs only on the run that creates the eight-argument form (a
 --     re-run finds it present, CREATE OR REPLACE keeps its ACL, and the
@@ -145,6 +169,33 @@ ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS embedding_model text;
 
 COMMENT ON COLUMN thoughts.embedding_model IS
   'The model that produced `embedding`, as OB1_EMBEDDING_MODEL names it (the string ob1_config.embedding_model records); written by the same statement as the vector and NULL when that statement named none — a row from before migration 021, a raw INSERT, a capture from an older server. Unknown, not the default. The row''s chunks share the label: they are written in the same call from the same model.';
+
+
+-- ---------------------------------------------------------------------------
+-- The one backfill there is evidence for — see the header. A row a re-embed
+-- pass wrote, released as succeeded under a key naming the model, and not
+-- written since (updated_at <= finished_at): labelled from the latest such
+-- claim. Everything else stays NULL. Idempotent: a labelled row is not
+-- selected again. The key's shape is config.mjs's (reembedKey/parseReembedKey):
+-- `reembed:<model>@<dim>[:suffix]`, the model read up to the LAST "@".
+-- ---------------------------------------------------------------------------
+UPDATE thoughts t
+   SET embedding_model = e.model
+  FROM (
+    SELECT DISTINCT ON (c.thought_id)
+           c.thought_id,
+           substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model,
+           c.finished_at
+      FROM thought_work_claims c
+     WHERE c.status = 'succeeded'
+       AND c.finished_at IS NOT NULL
+       AND substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') IS NOT NULL
+     ORDER BY c.thought_id, c.finished_at DESC
+  ) e
+ WHERE t.id = e.thought_id
+   AND t.embedding_model IS NULL
+   AND t.embedding IS NOT NULL
+   AND t.updated_at <= e.finished_at;
 
 -- ---------------------------------------------------------------------------
 -- upsert_thought(text, jsonb, vector) — the label rides in the envelope
@@ -204,7 +255,7 @@ BEGIN
     v_fingerprint,
     COALESCE(p_payload->'metadata', '{}'::jsonb),
     p_embedding,
-    p_payload->>'embedding_model'
+    CASE WHEN p_embedding IS NULL THEN NULL ELSE p_payload->>'embedding_model' END
   )
   ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO UPDATE
     SET updated_at = now(),

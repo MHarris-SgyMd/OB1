@@ -568,8 +568,10 @@ else {
          "a corpus wholly at the recorded model is ok, the unlabelled row reported as detail rather than as wrong");
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const recordMoved = await run(SQL_ENV);
-  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(recordMoved.out) && /Re-embed them: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(recordMoved.out),
-         "with the record on another model, the rows at the configured one are the ones out of place, and the remedy carries --switch-model");
+  assert(new RegExp(`vector models\\s+3 vector\\(s\\) at another model \\(${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: 3\\) beside 0 at other-model, 1 unlabelled[^\\n]*; the record says other-model and this server embeds with ${EMBEDDING_MODEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(recordMoved.out),
+         "with the record on another model, the rows at the configured one are the ones out of place against the record");
+  assert(/Finish the switch to other-model: cd db && OB1_EMBEDDING_MODEL=other-model bun reembed\.ts --url \$DATABASE_URL, and configure the server for it; or, if .* stands: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model, which re-embeds the rows at other-model instead\./.test(recordMoved.out),
+         "…and the remedy gives both directions rather than a --switch-model from this shell that would revert the switch");
   await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
   await claims.unsafe("ALTER TABLE thoughts DROP COLUMN embedding_model");
   const noColumn = await run(SQL_ENV);

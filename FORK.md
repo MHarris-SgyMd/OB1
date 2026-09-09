@@ -3187,10 +3187,15 @@ a re-capture keeps it with a kept vector or takes the caller's with a new one;
 `update_thought` leaves it without content, sets it NULL with content and no
 vector, writes the caller's with a vector. NULL is *unknown*, not "the
 default": every row from before 021, every raw INSERT, the PostgREST two-step
-fallback, every capture from an older server. Nothing backfills it — stamping
-the recorded model on every existing row would be exactly the guess the column
-exists to stop making, on the one day (021's) the corpus may well be at two
-models. `thought_chunks` gets no column: a chunk's vector is written in the same
+fallback, every capture from an older server; and a row with no vector has no
+label, whatever its writer named. Stamping the recorded model on every
+existing row would be exactly the guess the column exists to stop making, on
+the one day (021's) the corpus may well be at two models — so the only
+backfill is the one there is evidence for: a row a finished pass wrote,
+released as succeeded under a key naming the model, and not written since
+(`updated_at <= finished_at`) is labelled from its latest such claim; a key
+naming no model is no evidence, and everything else stays NULL. `thought_chunks`
+gets no column: a chunk's vector is written in the same
 statement as its parent's from one `embedCapture()`, so the parent's label is
 the chunks'. No index: the readers are a grouped count per server start and a
 scan per re-embed run. 008/010's audit trigger diffs content, metadata and the
@@ -3256,6 +3261,40 @@ is kept as the rule for failed rows and expired leases of an earlier pass.
 (the 018 probe became the 021 probe); `--status` and `--dry-run` answer on an
 older schema.
 
+**A first pass, triaged — ten findings, all fixed.** The largest was the cost
+of NULL: with every pre-021 row unlabelled, the first plain run after upgrading
+would have re-embedded a whole corpus a finished pass had already proved was
+at the model — NULL is "not at the target", rightly — while the docs promised
+"exactly those two". The evidence-based backfill above is the answer, and a
+run says how many unlabelled rows its pool holds before it starts. The
+documented same-model backfill (`--job reembed:<model>@<dim>:ctx` after a
+chunk setting flips) had come to pool nothing, since every rule keyed on the
+label: a `--job` key is a backfill whose reason is not the model, and pools
+every thought under its key as before, while the model's own key pools by the
+label; preflight counts "not yet in the pool" by the same shape, so a key
+naming no model is no longer counted against the recorded model while the
+tool counts against its own. `vector models` judged the rows against the
+record but prescribed `--switch-model` from this shell, which when the record
+and the configuration disagree records *this* model and re-embeds the rows at
+the recorded one — reverting the switch whose finished rows are the majority;
+the remedy gives both directions now. "Not at the target" ignored a row with no
+vector whose stale label named the target, so it was never pooled while the
+header promised the pass would give it one — the predicate says `embedding IS
+NULL OR`; and `upsert_thought`'s INSERT branch wrote a label beside a NULL
+vector, contradicting the rule, so it writes none. On a model change the
+start-over still returned every succeeded row and re-embedded thoughts the
+rows said were already at the target; it returns the failed rows and expired
+leases, and the data rule owns the succeeded ones on every run — [9]'s
+switch-back now moves the rows too, and asserts that a record moved by hand
+alone re-embeds no finished row. `--status` said nothing about what
+preflight's new check would say; it does, when the record and the
+configuration agree. `--dry-run` counted a caveat row whose thought had moved
+twice, under the data rule and `--retry-fallbacks`; it counts the caveats the
+data rule leaves. And PostgREST answers PGRST202 both for a missing function
+and while its schema cache predates the migration, so the 020 and 021 PostgREST
+remedies carry the `NOTIFY pgrst, 'reload schema'` hint. Suites after: schema
+462, live 249, upgrade 24, preflight 116.
+
 **Found on the way.** The schema probe asked `to_regclass('schema_migrations')
 IS NOT NULL AND EXISTS (SELECT … FROM schema_migrations)` in one statement, and
 Postgres resolves the relation when it parses the statement, whatever the `AND`
@@ -3293,14 +3332,15 @@ re-applied brings it back unlabelled; 018 beside 021 fails with the exact DROP,
 018 in its place fails naming 021. The store suites and the e2e suite assert the
 label on capture and on an edit, on both stores. Suites after: schema 461 at
 both widths, live 245, upgrade 20, preflight 115, sql 59, e2e 63, postgrest 43,
-update-delete 39.
+update-delete 39 (before the pass below).
 
 **Not done here.** The Supabase Edge Function server under `server/` still
 captures through the 3-argument RPC with no label, so its rows are unknown
-(this fork deploys `server-portable`). A backfill of the label for rows from
-before 021 — there is no fact to backfill from; a pass under the recorded model
-labels them. `--accept-failed` and `--retire` (SMD-1067) — with the column,
-accepting a row means "it stays at the old model, and the caveat says so".
+(this fork deploys `server-portable`). A label for the rows no finished pass
+vouches for — there is no fact to backfill from; the first pass over them
+labels them, and says how many before it runs. `--accept-failed` and
+`--retire` (SMD-1067) — with the column, accepting a row means "it stays at
+the old model, and the caveat says so".
 
 ## Detached from the fork network
 

@@ -86,9 +86,16 @@ const EXPOSURE =
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
-const APPLY_020_POSTGREST = "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).";
+/**
+ * PostgREST answers a call it cannot resolve with PGRST202 both when the
+ * function is missing and while its schema cache predates the migration that
+ * added it — so a remedy that says only "apply" would send an operator who
+ * has just applied it back to the migrator (first review pass of 021).
+ */
+const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
-const APPLY_021_POSTGREST = "Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4).";
+const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
 
@@ -1050,10 +1057,18 @@ if (configFailed) {
             const otherCount = others.reduce((a, r) => a + Number(r.c), 0);
             const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (from before migration 021)` : ""}`;
             if (otherCount > 0) {
+              // Judged against the RECORD — what the corpus is meant to be at.
+              // When the record and this server's configuration disagree the
+              // rows are mid-switch and the direction is the operator's: a
+              // `--switch-model` from this shell would record THIS model and
+              // re-embed the rows at the recorded one — reverting the switch
+              // whose finished rows are the majority (first review pass).
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
                   `${otherCount} vector(s) at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")}) beside ${detail} — searches rank across the two${recordDiffers ? `; the record says ${recorded.embedding_model} and this server embeds with ${embModel}` : ""}`,
-                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes exactly the rows not at ${embModel}.`);
+                  recordDiffers
+                    ? `The record (${recorded.embedding_model}) and this server (${embModel}) disagree, so which rows are out of place depends on which stands. Finish the switch to ${recorded.embedding_model}: cd db && OB1_EMBEDDING_MODEL=${recorded.embedding_model} bun reembed.ts --url $DATABASE_URL, and configure the server for it; or, if ${embModel} stands: cd db && bun reembed.ts --url $DATABASE_URL --switch-model, which re-embeds the rows at ${recorded.embedding_model} instead.`
+                    : `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`);
             } else if (at + unlabelled === 0) {
               add("vector models", "ok", "no vectors stored yet");
             } else {
@@ -1113,18 +1128,24 @@ if (configFailed) {
               c.unpooled -= n;
               byKey.set(r.work_type, c);
             }
-            // "Not yet in the pool" is what a run under the key would add. With
-            // 021's column that is the thoughts NOT AT THE KEY'S MODEL with no
-            // row under it — reembed.ts builds its pool so — rather than every
-            // thought with no row, which after a finished switch is every new
-            // capture. The key's model, or the recorded one for a key naming
-            // none (the model reembed.ts would run with there).
+            // "Not yet in the pool" is what a run under the key would add, and
+            // reembed.ts builds its pool by the key's shape: under a model's own
+            // key (`reembed:<model>@<dim>`, nothing after) the thoughts NOT AT
+            // THAT MODEL — no vector, or another or no label — with no row under
+            // it, rather than every thought with no row, which after a finished
+            // switch is every new capture; under any other key (a suffix, or no
+            // model named) every thought with no row, as every pass did before
+            // 021 — a backfill's reason is not the model. The same rule here, or
+            // the two would print different numbers for one key (first review
+            // pass: a key naming no model was counted against the recorded model
+            // while the tool counts against its own).
             if (haveLabel) {
               for (const [key, c] of byKey) {
-                const model = parseReembedKey(key)?.model ?? recorded.embedding_model ?? embModel;
+                const named = parseReembedKey(key);
+                if (named === null || key !== reembedKey(named.model, named.dim)) continue;
                 const [{ n }] = await sql`
                   SELECT count(*)::int AS n FROM thoughts t
-                  WHERE t.embedding_model IS DISTINCT FROM ${model}
+                  WHERE (t.embedding IS NULL OR t.embedding_model IS DISTINCT FROM ${named.model})
                     AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${key})`;
                 c.unpooled = Number(n);
               }
