@@ -355,7 +355,7 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
       // same settings the function declares so the plan is the one it gets —
       // all but a plan mode, since this section exists to show both plans.
       await applyFunctionSettings(tx);
-      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb`, mode: mode as "force_custom_plan" | "force_generic_plan" });
+      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode: mode as "force_custom_plan" | "force_generic_plan" });
     });
     out[mode === "force_custom_plan" ? "custom" : "generic"] = shapeOf(text, ms);
   }
@@ -504,8 +504,8 @@ for (const n of SCALES) {
   // and a plan the deployed function cannot produce is not worth timing.
   const applied = await applyFunctionSettings(sql, { scope: "session" });
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
-  await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb) AS ${walkBody}`);
-  const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb)`;
+  await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb, float, float) AS ${walkBody}`);
+  const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
   const thin = tiers.filter((t) => t.share <= 0.001);
   for (const t of thin) {
     const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);

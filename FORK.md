@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-six numbered changes on top of the pin. Seven fix defects found in an
+Thirty-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–36 are the numbered `###` sections** further down, which is
+sections. Changes **18–37 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -167,6 +167,8 @@ evals/identifiers.ts             # fix 32  (new file — the identifier rule eva
 db/migrations/018_*.sql          # fix 33  (new file — update_thought: an unchanged edit is never a duplicate)
 db/migrations/019_*.sql          # fix 36  (new file — match_thoughts reaches the index at the shipped width; ROWS on both search functions)
 db/bench-plan.ts                 # fix 36  (new file — the unfiltered plan at the real width)
+db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends recency after the candidate scan; search_thoughts_hybrid carries the weight)
+evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -1613,8 +1615,8 @@ a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
 **Not done here.** SMD-969 asks whether the *unfiltered* candidate scan reaches
 the HNSW index at scale; this bench explains only the filtered case, and only at
 1% — measured in change 36, at the shipped width, where the answer was no.
-SMD-945 and SMD-958 both redefine `match_thoughts` and should build on this
-body so they do not reintroduce the post-filter.
+SMD-958 (change 32) built beside this body and SMD-945 (change 37) redefined
+it on this body; neither reintroduced the post-filter.
 
 ### 29. A lease per thought, and the re-embed that proves it
 
@@ -2192,9 +2194,10 @@ the query was literal-only. A third store type,
 `ThoughtHybridMatch`, with `similarity` nullable — a shared normaliser keeps
 both stores from turning "no vector" into "orthogonal" (`Number(null)` is 0).
 `preflight.ts` fails on a database that stops at 016, because the two most-used
-tools now need 017. SMD-945 (recency) has not landed; when it does it belongs
-in `match_thoughts`, and rows in the vector window inherit it through their
-rank — the keyword arm is boolean here, so age is never counted twice. One
+tools now need 017. SMD-945 (recency) landed in change 37, in `match_thoughts`
+as planned; the fused function ranks its vector arm on `match_thoughts`' `score`,
+so rows in the window inherit the blend through their rank — the keyword arm is
+boolean here, so age is never counted twice. One
 place must be mirrored: a keyword hit outside the window is scored by 017's own
 copy of the best-of-vector-and-chunks rule, and the header marks it.
 
@@ -2784,8 +2787,8 @@ issue reports that even the plain `match_thoughts` shape gets `Seq Scan` +
 `Sort` at ~9,300 rows and only `SET LOCAL enable_seqscan = off` makes the
 planner take `thoughts_embedding_idx` — 5.9 s and ~30,000 buffers a call
 against 180 ms and ~3,200. Its headline is about `match_thoughts_recency`,
-which this fork does not ship (SMD-945 already plans the candidate-then-rerank
-shape the issue arrives at). The half that applied here had never been
+which this fork does not ship (SMD-945, change 37, ships the
+candidate-then-rerank shape the issue arrives at, inside `match_thoughts`). The half that applied here had never been
 measured: change 28's bench explains only the filtered branches, at 64
 dimensions, and `db/test-live.ts` [5] asserted the index is *reachable* with
 sequential scans disabled, which is a different question from whether it is
@@ -2884,7 +2887,7 @@ structure assumed that structure gets an index scan. It does now, *because of*
 the function-level setting: a redefinition must carry `SET enable_seqscan =
 off`, `SET hnsw.iterative_scan = relaxed_order`, `ROWS 10`, the `requires`
 line and the `ob1:filter-inside-scan` sentinel — 019's header lists the five —
-and [5c] fails without the first at 2,000 rows.
+and [5c] fails without the first at 2,000 rows. Change 37 carried all five.
 
 **A first pass, triaged: nine fixes, one measurement.** Preflight checked
 `match_thoughts` for 014's clause and never for 019's, and its remedy restored
@@ -2945,12 +2948,121 @@ the chunk-row loader it and [5b] had both written is `loadChunkRows` in
 `db/test-support.ts`; and 019's header says why `ROWS` is the default page when
 017 asks the keyword function for 100 per needle.
 
-**Not done here.** The recency half of #469 (SMD-945); the walk's generic plan
+**Not done here.** The recency half of #469 (SMD-945, done in change 37); the walk's generic plan
 on a broad filter at 100,000 rows, measured in change 28 and again here, which
 no setting in this change addresses; `ROWS` on `search_thoughts_hybrid`
 itself, which returns at most `match_count` rows and is composed by nothing in
 the repo; a per-width run of `bench-hnsw.ts`, whose published tables stay at
 64 dimensions.
+
+### 37. `match_thoughts` blends recency into its ranking — opt-in, after the candidate scan, and measured to cost something here
+
+Migration 020, `evals/eval-recency.ts`, and `recency_weight` on
+`search_thoughts` (Linear SMD-945; the recency half of upstream
+[#469](https://github.com/NateBJones-Projects/OB1/issues/469)). `match_thoughts`
+ranked on cosine similarity alone, so two thoughts of equal fit ranked
+identically whether one was captured yesterday or two years ago — right for a
+reference brain, wrong for a working one, and quiet either way. Upstream's
+`schemas/recency-boosted-match-thoughts` has the formula — `score = similarity ·
+(1 − w) + exp(−age_days / half_life) · w`, `w` defaulting to 0 — and, as written,
+two regressions against this fork's function: it reads `thoughts` alone (change
+18's chunk retrieval gone) and puts the threshold and the blend into the scan
+(no `ORDER BY <=> LIMIT`, so no HNSW index — the cost change 36 measured). So
+the blend is grafted onto the body changes 28 and 36 built, and the access path
+does not move: the three candidate CTEs are 019's byte for byte (`test-schema`
+[20] compares them against a re-applied 014), only each branch's final SELECT
+orders by the blended score, the threshold still gates the raw similarity, and
+the exact branch — every matching row scored — makes a thin filter's blend
+exact. The plan is held where change 36 holds it: `test-live` [5c] explains the
+statement with `recency_weight = 0.3` and finds both HNSW indexes and a
+candidate window of 160.
+
+**Two facts found while planning shaped the work more than the formula did.**
+The signature had to change, and a second overload beside the 4-argument
+function is the ambiguity change 5's migration (004) warns about: with both
+present, every 4-argument call — both stores, 017's fused function, every
+PostgREST caller — fails with `function is not unique`. So 020 **drops** the
+4-argument function and defines the 6-argument one (`recency_weight float
+DEFAULT 0`, `half_life_days float DEFAULT 90`), and does the same to
+`search_thoughts_hybrid`, which passes the weight through; every place that
+spelled the old signatures (`dropSchema`'s list, `extractBody`, preflight's
+catalog reads, the fixtures' `ALTER FUNCTION`) now reads one constant in
+`db/config.mjs`, and `extractBody` resolves the function by name so the
+benches' before arms still read 014's. And 017 re-ranked the vector arm by
+`similarity` *inside* the fused function, which would have undone the blend for
+every first-party search. So `match_thoughts` returns the blended value as a new
+**`score`** column — equal to `similarity` at weight 0 — `similarity` stays the
+raw cosine (the threshold's quantity, the tools' "% match", and what 017's
+keyword-hit probe computes, so nothing has to be mirrored), and the hybrid
+ranks on `score`.
+
+**The window.** The blend can only reorder the candidates the scan produced,
+and no fixed window is exact: a recent row of similarity *s* just outside the
+nearest 4N enters the top *k* when *s(1−w)+w* beats the *k*-th blended score,
+which depends on the data. Under a weight the over-fetch widens fourfold (16N,
+at least 80), and the factor is measured rather than assumed: `eval-recency.ts`
+compares the function's top N against an exact blended ranking of the whole
+table, and against the top N the un-widened window would have given. On 486
+queries at every weight and half-life the function matched the oracle in
+every cell — 100.0% at 10 and at 100 results — where the 4N window fell to 95%
+at 0.2 over 30 days, 92% at 0.3 and 85% at weight 1. The adaptive alternative
+(fetch, check the bound, widen, fetch again) was declined: it either runs the
+index scan twice or moves the candidate CTEs out of the `RETURN QUERY` blocks
+that [5c] and both benches read from the catalog. What a weighted call costs
+is in `bench-plan.ts`'s new arm: at the default count and 10,000 rows,
+both candidate CTEs stay Index Scans and the call goes from 1.8 ms and 3,434
+buffers to 5.1 ms and 9,558; at count 50 from 6.3 to 16.9 ms; at the ceiling
+from 33 to 79 ms; at 100,000 rows, 2–3 ms become 8 at the default count, 12–14
+become 84 at count 50 and 170 become 365 at the ceiling, every cell still two
+`Index Scan`s.
+
+**Measured, and left off by default.** The corpus was rebuilt with each
+issue's creation date (`build-linear-corpus.ts` records it; the `/tmp` copy had
+gone), 486 issues, 0–183 days old, median 82. The task is `eval-real`'s — title
+finds body — so the right answer is the issue whatever its age, and the number
+is what a weight *costs* on a relevance task; this corpus has no ground truth
+for "what was I doing about X" and cannot show a weight helping. At the tools'
+setting (10 results, threshold 0.5) every weight lowered MRR: 0.899 at 0 →
+0.890 at 0.1 over 365 days, 0.870 at 0.1 over 90, 0.775 at 0.2 over 90 (9
+answers moved up, 113 down), 0.576 at 0.3, 0.158 at 1. The ticket said what to
+do with that result, and it is done: the default stays 0, `search_thoughts`
+takes `recency_weight` (0–1; the half-life stays 90 days for the tool) for a
+caller who knows their brain is a working log, and the ChatGPT `search`, which
+cannot take a parameter, sends a fixed 0 with the measurement as the reason.
+The control ran before any table was printed: at weight 0 the shipped
+function returned 019's rows in 019's order, and `score` equalled `similarity`,
+on every query at both settings.
+
+**Held, in the ticket's words.** `test-schema` [21]: backward compatibility
+*exactly* — 019's own function installed from its file under another name, and
+on a fixed corpus reaching the unfiltered and the exact branch the new one
+returns the same rows, ids and similarities, over eighteen calls, with `score`
+equal to `similarity`; chunks still found through the recency path; the blend
+does something — two rows swap as the weight crosses the formula's *w** =
+δ / (δ + r₂ − r₁), asserted on both sides, and a 30-day half-life moves *w**
+where the formula says, so one weight gives opposite orders under the two
+half-lives; the threshold gates raw similarity (a brand-new orthogonal row is
+not surfaced at weight 1); weights clamped, a non-positive half-life refused, a
+NULL `created_at` infinitely old (the first draft's `GREATEST` swallowed the
+NULL and called the row brand new — the test caught it); the widened window
+observable, a recent row ranked 61st by similarity coming first under a
+weight; the hybrid following the weighted order with its `similarity` still
+the cosine. [20] keeps 019's expectations for the keyword function and adds
+the new trap: re-applying 014 puts the 4-argument form back beside 020's, and a
+4-argument call is then `function is not unique`. Preflight gains a `search
+signatures` check that fails a database whose functions predate 020 (the
+server sends the new arguments) and one with an earlier form re-created beside
+020's, with the `DROP` as the remedy; its 014 and 019 checks read whichever
+form is there and name it in their `ALTER FUNCTION`. Both stores send all the
+arguments on every call and map `score`; `test-store-sql`, `test-store-postgrest`
+and the e2e suite each age a row and watch it drop. Suites: schema 403 (both
+widths), live 230, preflight 102, sql 56, e2e 62.
+
+**Not done here.** A default weight for the ChatGPT `search` other than 0 —
+the measurement above is the reason, and an operator who wants one has no knob;
+if one is wanted it is an environment default, not a constant. `ROWS` on
+`search_thoughts_hybrid` (change 36's note stands). A recency eval with ground
+truth for "what was I doing about X", which this corpus cannot supply.
 
 ## Detached from the fork network
 

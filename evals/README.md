@@ -1778,6 +1778,83 @@ must return identical rows before and after, row for row, and the script exits
 non-zero if it does not, because "the default path did not change" is the claim
 014 makes about itself. It held on 441 of 441.
 
+## Recency, measured — and left off by default
+
+`eval-recency.ts`, run as `bun run recency` (SMD-945, migration 020). Needs
+Ollama, the corpus at `/tmp/linear-corpus-full.json` **built on or after
+2026-09-08** — `build-linear-corpus.ts` now records each issue's `createdAt`,
+and the harness sets every thought's `created_at` from it — and a throwaway
+Postgres. Bodies and titles are cached in `/tmp` by text hash; a fresh run
+embeds for about two minutes and then spends a minute in the database.
+
+Migration 020 lets a caller weight cosine similarity against
+`exp(−age_days / half_life_days)`, after the candidate scan and with the
+threshold still on the raw similarity. The ticket said what to do if a weight
+hurts on this corpus: say so and keep the default at 0. This is that
+measurement, and two things the migration's header claims that only a run can
+hold:
+
+- **The control.** At weight 0 the shipped function must return the same rows
+  in the same order as 019's function, installed from its own file under
+  another name on the same load (same index, so HNSW recall noise is shared),
+  and `score` must equal `similarity`. On every query, at both settings, or no
+  table is printed. It held on 486 of 486.
+- **The window.** The blend can only reorder the candidates the scan produced —
+  16 · N under a weight, 4 · N without. For every query and cell the function's
+  top N is compared with an exact blended ranking of the whole table (a
+  sequential scan, the oracle), and so is the top N a 4 · N window would have
+  given, blended in TypeScript from the nearest 4 · N. The factor is priced by
+  what it recovers.
+
+**What the task can and cannot show.** It is `eval-real`'s: each issue's title
+is the query, its body the document, so the right answer is the issue itself
+whatever its age. That measures what a weight *costs* on a relevance task. It
+cannot show a weight *helping* — an active brain's "what was I doing about X"
+has no ground truth here, and the corpus is time-ordered engineering work. The
+486 issues are 0–183 days old, median 82; 100 are under 30 days, 266 under 90.
+
+### Results, 2026-09-08, `qwen3-embedding:4b@1024`
+
+At the tools' own setting — ten results, threshold 0.5. "window" is the share
+of the exact blended top-10 the function's top-10 contains; "4N" the same for
+the un-widened window.
+
+| weight | half-life | R@1 | R@5 | not in top-10 | MRR | top-1 changed | window | 4N |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | — | 84% | 97% | 9 | **0.899** | 0 | 100.0% | 100.0% |
+| 0.1 | 30 d | 80% | 95% | 9 | 0.866 | 40 | 100.0% | 99.5% |
+| 0.1 | 90 d | 80% | 96% | 10 | 0.870 | 36 | 100.0% | 100.0% |
+| 0.1 | 365 d | 83% | 97% | 9 | 0.890 | 15 | 100.0% | 100.0% |
+| 0.2 | 30 d | 59% | 85% | 38 | 0.694 | 164 | 100.0% | 95.0% |
+| 0.2 | 90 d | 69% | 88% | 28 | 0.775 | 113 | 100.0% | 98.2% |
+| 0.2 | 365 d | 81% | 96% | 10 | 0.878 | 34 | 100.0% | 100.0% |
+| 0.3 | 30 d | 32% | 61% | 124 | 0.447 | 307 | 100.0% | 92.0% |
+| 0.3 | 90 d | 45% | 72% | 75 | 0.576 | 238 | 100.0% | 95.1% |
+| 0.3 | 365 d | 76% | 92% | 16 | 0.835 | 65 | 100.0% | 99.7% |
+| 0.5 | 30 d | 24% | 50% | 170 | 0.357 | 348 | 100.0% | 89.8% |
+| 0.5 | 90 d | 27% | 48% | 187 | 0.366 | 335 | 100.0% | 91.5% |
+| 0.5 | 365 d | 54% | 76% | 65 | 0.637 | 195 | 100.0% | 96.9% |
+| 1 | any | 6% | 28% | 259 | 0.158 | 450 | 100.0% | 85.0% |
+
+At 100 results and no threshold the picture is the same (0.902 at weight 0,
+0.892 at 0.1 over 365 days, 0.756 at 0.2 over 90, 0.011 at 1), and the window
+column is 100.0% in every cell there too.
+
+**Every weight lowers MRR here.** Gently over a long half-life — 365 days is
+twice the corpus's span, so it barely decays — and steeply over a short one. At
+0.2 over 90 days, 9 answers moved up and 113 down; the ones that moved are the
+oldest issues in the tracker, displaced by newer issues on the same subject.
+That is the blend doing exactly what it says, on a task where it is the wrong
+thing to do. So the default stays 0, `search_thoughts` takes `recency_weight`
+for a caller who knows their brain is a working log, and the ChatGPT `search`
+tool, which cannot take a parameter, sends 0.
+
+**The window factor is supported.** The function's top N was the oracle's in
+every cell at both settings; the un-widened 4 · N window would have lost up to
+5% of the oracle's rows at a gentle weight and 15% at weight 1. That is what
+the fourfold widening buys, and what an opted-in caller pays for is in
+`db/bench-plan.ts`'s recency arm.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

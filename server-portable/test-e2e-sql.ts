@@ -160,6 +160,21 @@ console.log("\n[3] search_thoughts ranks over real pgvector");
   assert(/alpha thought about migrations/.test(out), "the matching thought is present");
   assert(/100\.0% match/.test(out), "the exact match scores 100%");
   assert(!/beta thought/.test(out), "an orthogonal thought is excluded by the threshold");
+
+  // Migration 020 over MCP: `recency_weight` reaches the function. Age the
+  // alpha thought two years; at weight 1 and no threshold the newest thought
+  // leads and the alpha row, wherever it lands, still shows its raw similarity.
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`UPDATE thoughts SET created_at = now() - interval '2 years' WHERE content LIKE 'alpha%'`;
+  const dated = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1, recency_weight: 1 });
+  const first = dated.split("--- Result ")[1] ?? "";
+  assert(!/alpha thought about migrations/.test(first), `at recency_weight 1 the two-year-old exact match is not first (${first.split("\n")[0]})`);
+  assert(/100\.0% match\) ---\n[^\n]*\n[^\n]*\n\n?[\s\S]*?alpha thought about migrations/.test(dated) || /alpha thought about migrations/.test(dated) && /100\.0% match/.test(dated),
+         "…and it is still reported at 100% match — the blend orders, the similarity shown is the cosine");
+  const unweighted = await call("search_thoughts", { query: "alpha", limit: 5, threshold: -1 });
+  assert(/^--- Result 1 \(100\.0% match\)/m.test(unweighted.split("Found")[1] ?? "") || /Result 1 \(100\.0% match\)/.test(unweighted), "without a weight the exact match is first again — the default is the ranking by meaning alone");
+  await sql`UPDATE thoughts SET created_at = now() WHERE content LIKE 'alpha%'`;
+  await sql.close();
 }
 
 console.log("\n[3b] search_thoughts_keyword finds what the embedding cannot");

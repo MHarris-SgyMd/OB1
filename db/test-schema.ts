@@ -30,6 +30,7 @@ import {
   HNSW_SEEDS,
   HNSW_SEED_MAX_SCAN_TUPLES,
   MATCH_COUNT_CEILING,
+  MATCH_THOUGHTS_SIGNATURE,
   migrationValues,
   parseSetConfig,
   substituteMigration,
@@ -476,7 +477,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
     assert(r.rows[0].c === want, `${label} (got ${r.rows[0].c})`);
   }
   // The body, read once: the ceiling and the sentinel are both in it.
-  const prosrc = String((await db.query<{ s: string | null }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`)).rows[0]?.s ?? "");
+  const prosrc = String((await db.query<{ s: string | null }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0]?.s ?? "");
   // The ceiling is the one config.mjs defines, templated into the body — so the
   // assertion is built from the constant, not from a literal that would have to
   // be hand-edited when the constant moves (an earlier draft pinned 500 twice).
@@ -494,7 +495,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   // the defined-twice class FORK.md keeps finding — fails here, not in search.
   const cfg = await db.query<{ cfg: string | null }>(
     `SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
-     WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`
+     WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`
   );
   assert(
     /(^|,)hnsw\.iterative_scan=relaxed_order(,|$)/.test(cfg.rows[0]?.cfg ?? ""),
@@ -510,7 +511,7 @@ console.log("\n[8b] match_thoughts applies the metadata filter inside the candid
   // Parsed as the array it is (parseSetConfig), not split on commas: a
   // list-valued setting such as search_path would break a split (tenth pass).
   const proconfig = parseSetConfig((await db.query<{ cfg: string[] | null }>(
-    `SELECT proconfig AS cfg FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`)).rows[0]?.cfg);
+    `SELECT proconfig AS cfg FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0]?.cfg);
   assert(proconfig["enable_seqscan"] === "off", `…and enable_seqscan=off, 019's plan setting (proconfig: ${JSON.stringify(proconfig)})`);
   assert(!("hnsw.max_scan_tuples" in proconfig) && !("hnsw.scan_mem_multiplier" in proconfig) && !("plan_cache_mode" in proconfig), "…and nothing else — neither walk bound nor a forced plan mode");
 
@@ -1677,14 +1678,19 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
 // that the bodies did not move, and the trap that put the clauses in the
 // defining statements rather than an ALTER.
 
-console.log("\n[20] Migration 019: the plan setting and the row estimates, and the bodies unchanged");
+console.log("\n[20] Migration 019: the row estimates and the plan setting — carried by 020, and the trap either re-apply springs");
 {
   const proc = async (sig: string) => {
     const r = (await db.query<{ prorows: number; provolatile: string; prosrc: string; cfg: string[] | null }>(
       `SELECT prorows, provolatile, prosrc, proconfig AS cfg FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0];
     return { ...r, settings: parseSetConfig(r.cfg) };
   };
-  const MT = "match_thoughts(vector, float, int, jsonb)";
+  const count = async (name: string) =>
+    (await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+  const MT = MATCH_THOUGHTS_SIGNATURE;
+  const MT_4 = "match_thoughts(vector, float, int, jsonb)"; // the form 020 dropped; 014 and 019 re-create it
   const KW = "search_thoughts_keyword(text, int, int, jsonb)";
 
   const mt = await proc(MT);
@@ -1695,7 +1701,7 @@ console.log("\n[20] Migration 019: the plan setting and the row estimates, and t
   assert(Object.keys(mt.settings).sort().join(",") === "enable_seqscan,hnsw.iterative_scan" && mt.settings["enable_seqscan"] === "off" && mt.settings["hnsw.iterative_scan"] === "relaxed_order",
          `match_thoughts carries exactly the scan mode and the plan setting (${JSON.stringify(mt.settings)})`);
   assert(Object.keys(kw.settings).length === 0, `search_thoughts_keyword carries no SET clause (${JSON.stringify(kw.settings)})`);
-  assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in 019's body");
+  assert(/ob1:filter-inside-scan/.test(mt.prosrc), "the ob1:filter-inside-scan sentinel is in the shipped body");
 
   // The estimate the clause exists for: a query composing either function is
   // planned against the declared count, not PostgreSQL's 1,000.
@@ -1706,38 +1712,221 @@ console.log("\n[20] Migration 019: the plan setting and the row estimates, and t
   const kwPlan = await plan(`SELECT * FROM search_thoughts_keyword('zylotrope', 25, 0, '{}'::jsonb)`);
   assert(/Function Scan on search_thoughts_keyword\s+\(cost=[^)]*rows=25\b/.test(kwPlan), `…and 25 from search_thoughts_keyword (${kwPlan.split("\n")[0]})`);
 
-  // The bodies are 014's and 012's byte for byte: re-apply each and compare
-  // prosrc. This is what "carried verbatim" means, held rather than claimed —
-  // and it is the trap SMD-1041's ticket recorded: CREATE OR REPLACE resets
-  // prorows and drops the SET clauses, so a hint set from another migration or
-  // by ALTER FUNCTION would be undone by exactly this re-apply.
+  // The candidate scan is 014's, byte for byte, through 019 and 020: the three
+  // RETURN QUERY blocks' CTEs (direct, chunked, best) and the routing statement.
+  // 020 changed each branch's final SELECT and nothing above it; this holds
+  // "carried verbatim" for the part that decides the plan. Re-applying 014
+  // gives 014's text to compare against — as a SECOND function, since 014's
+  // signature is the 4-argument one 020 dropped.
+  const cteBlocks = (src: string) => [...src.matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]);
+  const routing = (src: string) => /SELECT array_agg\(s\.id\) INTO v_ids[\s\S]*?\) s;/.exec(src)?.[0] ?? "";
   await reapply("014");
-  const mt014 = await proc(MT);
-  assert(mt014.prosrc === mt.prosrc, "019's match_thoughts body is 014's, byte for byte");
+  assert((await count("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
+  const mt014 = await proc(MT_4);
+  assert(cteBlocks(mt.prosrc).length === 3 && cteBlocks(mt.prosrc).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
+         "the three candidate CTEs of the shipped body are 014's, byte for byte");
+  assert(routing(mt.prosrc).length > 0 && routing(mt.prosrc) === routing(mt014.prosrc), "…and so is the routing statement");
   assert(Number(mt014.prorows) === 1000 && !("enable_seqscan" in mt014.settings),
-         `re-applying 014 alone resets the estimate to 1,000 and drops the plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
+         `014's function has the estimate 1,000 and no plan setting (prorows ${mt014.prorows}, proconfig ${JSON.stringify(mt014.settings)}) — the trap that puts both in the defining statement`);
+  // And the trap 020 adds: with both forms present, every 4-argument call —
+  // the stores' before 020, search_thoughts_hybrid's before 020, PostgREST — is
+  // ambiguous. preflight reports this state as a failure with the DROP remedy.
+  let ambiguous = "";
+  try {
+    await db.query(`SELECT count(*) FROM match_thoughts($1::vector, 0.0, 10, '{}'::jsonb)`, [unit(0)]);
+  } catch (e) {
+    ambiguous = (e as Error).message;
+  }
+  assert(/not unique/.test(ambiguous), `with two match_thoughts a 4-argument call is ambiguous (${ambiguous.split("\n")[0] || "it succeeded"})`);
   await reapply("012");
   const kw012 = await proc(KW);
   assert(kw012.prosrc === kw.prosrc, "019's search_thoughts_keyword body is 012's, byte for byte");
-  assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate too (prorows ${kw012.prorows})`);
+  assert(Number(kw012.prorows) === 1000, `…and re-applying 012 alone resets its estimate to 1,000 (prorows ${kw012.prorows})`);
   const restored = await restoreShipped("match_thoughts", "search_thoughts_keyword");
   const back = await proc(MT);
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
-         `re-applying the migration that last defines each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
-  // Deliberately pinned: this is 019's section. When a successor redefines
-  // either function this fails on purpose, and the expectations above move
-  // to the successor's section with the clauses it must carry.
-  assert(restored.length === 1 && restored[0].startsWith("019"), `019 is the last definer of both functions (${restored.join(", ")}) — a successor that redefines one must carry its clauses, and these expectations then move to its section`);
+         `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
+  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
+  // Deliberately pinned, as [20] pinned 019 before 020 landed: 019 last defines
+  // the keyword function, 020 match_thoughts. A successor that redefines either
+  // fails here on purpose, and the expectations move with the clauses it must carry.
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("020"),
+         `019 is the last definer of search_thoughts_keyword and 020 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
   const definer = readFileSync(join(MIGRATIONS, lastDefinerOf("match_thoughts")), "utf8");
   assert(/^--\s*requires:\s*pgvector\s*>=\s*0\.8\.0\s*$/m.test(definer), `${lastDefinerOf("match_thoughts")} declares \`requires: pgvector >= 0.8.0\` for migrate.ts`);
+}
+
+// ── 21. Migration 020 — the recency blend ────────────────────────────────────
+//
+// match_thoughts ranks on similarity alone; 020 lets a caller blend in age:
+// score = similarity * (1 - w) + exp(-age_days / half_life) * w, over the
+// candidates the scan already produced, with the threshold still on the raw
+// similarity. What this section holds, in the ticket's words: backward
+// compatibility EXACTLY (at w = 0 the rows and their order are 019's, on a
+// fixed corpus, against 019's own function installed under another name);
+// chunks still work through the recency path; the blend does something, and
+// the half-life moves the crossover where the formula says; the widened
+// candidate window is observable; the hybrid inherits the order and keeps the
+// raw similarity. The plan is db/test-live.ts [5c]'s to hold.
+
+console.log("\n[21] Migration 020: the recency blend — identical at weight 0, and the formula above it");
+{
+  const MT = MATCH_THOUGHTS_SIGNATURE;
+  const proc = (await db.query<{ prorows: number; cfg: string[] | null; prosrc: string }>(
+    `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
   const count = async (name: string) =>
     (await db.query<{ c: number }>(
       `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
        WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
-  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_keyword")) === 1, "one match_thoughts, one search_thoughts_keyword — redefined, not duplicated");
+  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
+  const settings = parseSetConfig(proc.cfg);
+  assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && Object.keys(settings).length === 2 && /ob1:filter-inside-scan/.test(proc.prosrc),
+         "020 carries what 019 handed over: ROWS 10, exactly the two settings, the sentinel");
+  const cols = (await db.query<{ n: string }>(
+    `SELECT a.attname AS n FROM pg_proc p, unnest(p.proallargtypes, p.proargmodes, p.proargnames) WITH ORDINALITY AS a(t, m, attname, o)
+     WHERE p.oid = $1::regprocedure AND a.m = 't' ORDER BY a.o`, [MT])).rows.map((r) => r.n);
+  assert(cols.join(",") === "id,content,metadata,similarity,created_at,score", `the return shape is 019's five columns plus score (${cols.join(",")})`);
+
+  // ── The fixture: 200 thoughts at known similarities, all old, plus the
+  // special rows below. Row i sits at cosine 0.95 - 0.003 i to the query
+  // unit(0) — a second axis carries the rest of the unit length — so the
+  // ranking by similarity is known exactly, and the candidate window's edge
+  // (40 at count 10 without a weight, 160 with one) falls between rows.
+  await db.exec(`DELETE FROM thoughts`);
+  const Q = unit(0);
+  const at = (cos: number, axis: number) => blend(0, axis, cos, Math.sqrt(1 - cos * cos));
+  const axisOf = (i: number) => 1 + (i % (EMBEDDING_DIM - 1));
+  for (let i = 0; i < 200; i += 50) {
+    const values = Array.from({ length: 50 }, (_, k) => {
+      const n = i + k;
+      return `('row ${n}', '{"kind":"${n % 3 === 0 ? "a" : "b"}"}'::jsonb, '${at(0.95 - 0.003 * n, axisOf(n))}'::vector, now() - interval '400 days' - (${n} || ' hours')::interval)`;
+    }).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ${values}`);
+  }
+  // Chunk rows for one row in five, carrying the parent's own vector (the
+  // shape db/test-live.ts [5b] loads), and one thought findable ONLY through a
+  // chunk: its own vector is far from the query, its chunk is the nearest
+  // thing in the table.
+  await db.exec(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding)
+                 SELECT id, 0, 'chunk', embedding FROM thoughts WHERE substr(content, 5)::int % 5 = 0`);
+  const chunkOnly = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ('chunk-only', '{"kind":"b"}'::jsonb, $1::vector, now() - interval '400 days') RETURNING id`,
+    [at(0.10, 2)])).rows[0].id;
+  await db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1::uuid, 0, 'the near chunk', $2::vector)`, [chunkOnly, at(0.99, 3)]);
+  // The recent row: 61st by similarity — outside the 40-candidate window an
+  // unweighted default call has, inside the 160 a weighted one has.
+  const recent = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content, metadata, embedding, created_at) VALUES ('recent', '{"kind":"b"}'::jsonb, $1::vector, now()) RETURNING id`,
+    [at(0.95 - 0.003 * 60 + 0.001, 4)])).rows[0].id;
+  const rankOf = async (id: string) =>
+    (await db.query<{ r: number }>(`SELECT (SELECT count(*)::int FROM thoughts o WHERE o.embedding <=> $1::vector < t.embedding <=> $1::vector) + 1 AS r FROM thoughts t WHERE t.id = $2::uuid`, [Q, id])).rows[0].r;
+  const recentRank = await rankOf(recent);
+  assert(recentRank > 40 && recentRank <= 160, `the recent row ranks ${recentRank} by similarity alone: outside the unweighted window of 40, inside the weighted one of 160`);
+
+  // ── Backward compatibility, exactly. 019's own function, installed from its
+  // file under another name, answers the same calls; rows and order must match
+  // and `score` must equal `similarity` on every row. Filters reach the
+  // unfiltered and the exact branch here; [8c] holds the walk against an exact
+  // scan on 1,200 rows, and its final SELECT is the same edit.
+  const m019 = files.find((f) => f.startsWith("019"))!;
+  const text019 = subst(readFileSync(join(MIGRATIONS, m019), "utf8"));
+  assert(text019.split("FUNCTION match_thoughts(").length === 2, "019's file defines match_thoughts once, so it can be installed under another name");
+  await db.exec(text019.replace("FUNCTION match_thoughts(", "FUNCTION match_thoughts_019("));
+  type Row = { id: string; similarity: number; score: number | null };
+  let compared = 0;
+  let same = true;
+  let scoreIsSim = true;
+  for (const [th, n, filter] of [[-1.0, 10, "{}"], [0.0, 50, "{}"], [0.5, 10, "{}"], [-1.0, 10, '{"kind":"a"}'], [0.3, 50, '{"kind":"b"}'], [-1.0, 500, "{}"]] as const) {
+    for (const q of [Q, at(0.5, 5), unit(3)]) {
+      const now = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
+      const was = (await db.query<Row>(`SELECT id, similarity FROM match_thoughts_019($1::vector, $2, $3, $4::jsonb)`, [q, th, n, filter])).rows;
+      compared++;
+      if (JSON.stringify(now.map((r) => [r.id, r.similarity])) !== JSON.stringify(was.map((r) => [r.id, r.similarity]))) same = false;
+      if (!now.every((r) => r.score === r.similarity)) scoreIsSim = false;
+    }
+  }
+  assert(same, `at weight 0 the rows and their order are 019's, row for row, over ${compared} calls (thresholds, counts, the unfiltered and the exact branch)`);
+  assert(scoreIsSim, "…and score equals similarity on every row, exactly");
+  const plain = (await db.query<Row>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q])).rows;
+  assert(plain[0].id === chunkOnly && Math.abs(plain[0].similarity - 0.99) < 1e-6, `the chunk-only thought is first at weight 0, scored by its chunk (${plain[0].similarity})`);
+  const fourArg = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q]);
+  assert(fourArg.rows[0].c === 10, "a 4-argument call still resolves — the defaults, not a second overload");
+  await db.exec(`DROP FUNCTION match_thoughts_019(vector, float, int, jsonb)`);
+  assert((await count("match_thoughts")) === 1, "the comparison function is gone again");
+
+  // ── The blend does something: with a weight the recent row comes first,
+  // which needs the widened window — by similarity alone it is 61st.
+  const weighted = (await db.query<Row & { content: string }>(`SELECT id, content, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows;
+  assert(weighted[0].id === recent, `at weight 0.5 the recent row is first (${weighted[0].content}, score ${weighted[0].score})`);
+  assert(Math.abs(weighted[0].similarity - (0.95 - 0.003 * 60 + 0.001)) < 1e-6, `…and its similarity is still the raw cosine (${weighted[0].similarity})`);
+  assert(weighted.every((r, i) => i === 0 || (r.score as number) <= (weighted[i - 1].score as number)), "…and score is monotone down the list");
+  const chunkRow = weighted.find((r) => r.id === chunkOnly);
+  assert(chunkRow !== undefined && Math.abs(chunkRow.similarity - 0.99) < 1e-6, `the chunk-only thought is still found through the recency path, scored by its chunk (${chunkRow?.similarity})`);
+  // Every score is the formula, from the raw similarity and the row's age.
+  const ages = new Map((await db.query<{ id: string; d: number }>(`SELECT id, extract(epoch FROM (now() - created_at)) / 86400.0 AS d FROM thoughts`)).rows.map((r) => [r.id, Number(r.d)]));
+  const formula = (sim: number, days: number, w: number, h: number) => sim * (1 - w) + Math.exp(-Math.max(days, 0) / h) * w;
+  assert(weighted.every((r) => Math.abs((r.score as number) - formula(r.similarity, ages.get(r.id)!, 0.5, 90)) < 1e-6), "every score is similarity * (1 - w) + exp(-age_days / half_life) * w");
+
+  // ── The crossover. Two rows: A older and more similar by δ, B newer. The
+  // formula says they swap at w* = δ / (δ + r_B - r_A); asserted on both sides
+  // of w*, and a shorter half-life moves w* — at one weight, the two
+  // half-lives give opposite orders.
+  await db.exec(`DELETE FROM thoughts`);
+  const A = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('A: older, closer', $1::vector, now() - interval '365 days') RETURNING id`, [at(0.90, 1)])).rows[0].id;
+  const B = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('B: newer, farther', $1::vector, now() - interval '5 days') RETURNING id`, [at(0.80, 2)])).rows[0].id;
+  await db.query(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('C: orthogonal, brand new', $1::vector, now())`, [unit(3)]);
+  const order = async (w: number | null, h: number | null, th = -1.0) =>
+    (await db.query<{ content: string; score: number }>(`SELECT content, score FROM match_thoughts($1::vector, $2, 10, '{}'::jsonb, $3, $4)`, [Q, th, w, h])).rows;
+  const sims = Object.fromEntries((await db.query<{ id: string; s: number }>(`SELECT id, 1 - (embedding <=> $1::vector) AS s FROM thoughts`, [Q])).rows.map((r) => [r.id, Number(r.s)]));
+  const wStar = (h: number) => {
+    const delta = sims[A] - sims[B];
+    const rA = Math.exp(-365 / h), rB = Math.exp(-5 / h);
+    return delta / (delta + rB - rA);
+  };
+  const w90 = wStar(90), w30 = wStar(30);
+  assert((await order(0, 90))[0].content.startsWith("A"), "at weight 0 the closer row A leads");
+  assert((await order(w90 - 0.02, 90))[0].content.startsWith("A"), `just below w* = ${w90.toFixed(4)} (half-life 90) A still leads`);
+  assert((await order(w90 + 0.02, 90))[0].content.startsWith("B"), `just above it the newer row B leads`);
+  assert(w30 > w90 + 0.005, `a 30-day half-life moves the crossover to w* = ${w30.toFixed(4)}, later than ${w90.toFixed(4)}: with a short half-life B's five days already cost it something`);
+  const between = (w90 + w30) / 2;
+  assert((await order(between, 90))[0].content.startsWith("B") && (await order(between, 30))[0].content.startsWith("A"),
+         `at weight ${between.toFixed(4)} the two half-lives give opposite orders — the half-life moves the crossover where the formula says`);
+  // The threshold gates the RAW similarity: the brand-new orthogonal row cannot
+  // be surfaced by any weight — and at weight 1 with no threshold it leads.
+  assert(!(await order(1, 90, 0.5)).some((r) => r.content.startsWith("C")), "at weight 1 a recent row with similarity 0 is still excluded by threshold 0.5 — the threshold gates raw similarity");
+  assert((await order(1, 90, -1))[0].content.startsWith("C"), "…and with no threshold, weight 1 ranks by age alone: the brand-new row first");
+  // Inputs: clamped weights, NULLs as defaults, a non-positive half-life refused.
+  // Two calls see two now()s a few milliseconds apart, so scores are compared
+  // to a tolerance and the order exactly.
+  const sameAs = async (a: [number | null, number | null], b: [number | null, number | null]) => {
+    const x = await order(...a), y = await order(...b);
+    return x.length === y.length && x.every((r, i) => r.content === y[i].content && Math.abs(r.score - y[i].score) < 1e-6);
+  };
+  assert(await sameAs([5, 90], [1, 90]), "a weight above 1 is clamped to 1");
+  assert(await sameAs([-1, 90], [0, 90]), "a weight below 0 is clamped to 0");
+  assert(await sameAs([null, null], [0, 90]), "NULL weight and half-life are the defaults, 0 and 90");
+  assert(await sameAs([0.3, null], [0.3, 90]), "…a NULL half-life alone is 90");
+  let refused = "";
+  try { await order(0.3, 0); } catch (e) { refused = (e as Error).message; }
+  assert(/half_life_days must be positive/.test(refused), `a non-positive half-life is refused (${refused.split("\n")[0] || "it was accepted"})`);
+  const nullAge = (await db.query<{ id: string }>(`INSERT INTO thoughts (content, embedding, created_at) VALUES ('no date', $1::vector, NULL) RETURNING id`, [at(0.85, 4)])).rows[0].id;
+  const dated = (await db.query<{ id: string; similarity: number; score: number }>(`SELECT id, similarity, score FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb, 0.5, 90.0)`, [Q])).rows.find((r) => r.id === nullAge)!;
+  assert(dated !== undefined && Math.abs(dated.score - dated.similarity * 0.5) < 1e-9, `a row with no created_at scores as infinitely old (${dated?.score} = ${dated?.similarity} * 0.5)`);
+
+  // ── The hybrid inherits the order through the vector arm and keeps the raw
+  // similarity (017's probe compares like with like — 020's header says why
+  // `similarity` did not change).
+  const hy = (await db.query<{ id: string; content: string; similarity: number; score: number }>(
+    `SELECT id, content, similarity, score FROM search_thoughts_hybrid($1::vector, 'what was I doing lately', -1.0, 10, '{}'::jsonb, 1.0, 90.0)`, [Q])).rows;
+  const mt1 = await order(1, 90, -1);
+  assert(hy.map((r) => r.content).join("|") === mt1.map((r) => r.content).join("|"), `with a weight and no needle the fused order is match_thoughts' weighted order (${hy.map((r) => r.content.split(":")[0]).join(", ")})`);
+  const rawSims = Object.fromEntries((await db.query<{ id: string; s: number }>(`SELECT id, 1 - (embedding <=> $1::vector) AS s FROM thoughts`, [Q])).rows.map((r) => [r.id, Number(r.s)]));
+  assert(hy.every((r) => Math.abs(r.similarity - rawSims[r.id]) < 1e-9), "…and every fused row's similarity is its raw cosine, not the blended score");
+  const hy0 = (await db.query<{ content: string }>(`SELECT content FROM search_thoughts_hybrid($1::vector, 'what was I doing lately', -1.0, 10, '{}'::jsonb)`, [Q])).rows;
+  assert(hy0.map((r) => r.content).join("|") === (await order(0, 90)).map((r) => r.content).join("|"), "…and the 5-argument hybrid call — every caller before 020 — still resolves, to the unweighted order");
 }
 
 report();

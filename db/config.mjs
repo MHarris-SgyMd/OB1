@@ -800,6 +800,30 @@ export const BOUNDS_IN_FORCE_SQL =
 export const MATCH_COUNT_CEILING = 500;
 
 /**
+ * The two search functions' signatures, as regprocedure text — the forms the
+ * servers call. Migration 020 (SMD-945) gave both two defaulted parameters,
+ * `recency_weight` and `half_life_days`, by DROPPING the earlier form first: a
+ * 6-argument match_thoughts beside the 4-argument one makes every 4-argument
+ * call fail with "function is not unique", the ambiguity 004's header names
+ * for upsert_thought. Written once here because a dozen places resolve a
+ * function by signature — `dropSchema`, extractBody, preflight's catalog
+ * reads, the test fixtures' ALTER FUNCTION — and a stale copy in any of them
+ * goes on resolving a function that no longer exists. `float` and `int` are the
+ * aliases regprocedure accepts; `vector` needs no typmod (not part of the
+ * signature).
+ */
+export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
+export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
+/**
+ * The forms 020 dropped. Still owned: a bench's "before" arm re-applies 014 or
+ * 017 and re-creates them, so a schema reset must drop them too.
+ */
+export const SUPERSEDED_SIGNATURES = Object.freeze([
+  "match_thoughts(vector, float, int, jsonb)",
+  "search_thoughts_hybrid(vector, text, float, int, jsonb)",
+]);
+
+/**
  * `pg_settings.source` values under which a setting reaches EVERY role in the
  * database — the server's configuration (postgresql.conf and ALTER SYSTEM both
  * report 'configuration file'; a managed parameter group, the command line,

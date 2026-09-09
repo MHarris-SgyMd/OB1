@@ -30,7 +30,7 @@
 
 import { SQL } from "bun";
 import { readFileSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, runScript, seededRandom } from "./test-support.ts";
@@ -272,7 +272,7 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
 
   const [{ cfg }] = await sql`
     SELECT array_to_string(proconfig, ',') AS cfg FROM pg_proc
-    WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure`;
+    WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`;
   assert(/hnsw\.iterative_scan=relaxed_order/.test(String(cfg ?? "")), "match_thoughts carries hnsw.iterative_scan on a real server");
   // The LIBRARY's version, not the catalog record: a binary upgraded under an
   // old volume runs 014 fine while pg_extension still says 0.7.x — the state
@@ -281,7 +281,7 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   assert(versionAtLeast(String(library), 0, 8), `the server's pgvector library (${library}) supports the iterative scan 014 declares`);
 }
 
-console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at the configured width (migration 019)");
+console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at the configured width, with and without a recency weight (migrations 019, 020)");
 {
   // SMD-969 (upstream #469). At the shipped width a vector is TOASTed, and the
   // planner's sequential-scan estimate counts heap pages and never the detoast
@@ -306,11 +306,11 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
   // the assertions after it still hold what the setting must deliver.
   const body = await extractBody(sql, "unfiltered", EMBEDDING_DIM);
   const qv = `[${seededRandom(969).unitVector(EMBEDDING_DIM).join(",")}]`;
-  const explain = async (count: number, mode: "force_custom_plan" | "force_generic_plan", withSettings: boolean) =>
+  const explain = async (count: number, mode: "force_custom_plan" | "force_generic_plan", withSettings: boolean, weight = 0) =>
     sql.begin(async (tx: SQL) => {
       if (withSettings) await applyFunctionSettings(tx);
       else await tx.unsafe(`SET LOCAL hnsw.iterative_scan = relaxed_order`); // 014's one setting: the function before 019
-      return explainPrepared(tx, { body, dim: EMBEDDING_DIM, args: `'${qv}'::vector, -1.0, ${count}, '{}'::jsonb`, mode, warm: true });
+      return explainPrepared(tx, { body, dim: EMBEDDING_DIM, args: `'${qv}'::vector, -1.0, ${count}, '{}'::jsonb, ${weight}, 90.0`, mode, warm: true });
     });
   const onIndex = (plan: string) => ({
     thoughts: /Index Scan using thoughts_embedding_idx on thoughts/.test(plan),
@@ -341,9 +341,25 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
     }
   }
 
+  // 020 (SMD-945): under a recency weight the candidate window widens fourfold
+  // and the plan must not change — the ticket's "still an index scan with a
+  // non-zero recency weight", at the scale and width above. The CTEs' Limit
+  // nodes show the window: 16 * count candidates from `thoughts` (the chunk
+  // table has 400 rows here, so its CTE is capped by the table at count 50).
+  for (const count of [10, 50]) {
+    for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+      const { text: plan, buffers } = await explain(count, mode, true, 0.3);
+      const on = onIndex(plan);
+      assert(on.thoughts && on.chunks && seqOn(plan).length === 0,
+        `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan, recency_weight 0.3: both candidate CTEs are Index Scans on their HNSW indexes and nothing seq-scans (${buffers} buffers)`);
+      const limits = [...plan.matchAll(/Limit \(actual time=[^)]*rows=(\d+)/g)].map((m) => Number(m[1]));
+      assert(limits.includes(count * 16), `…and the window is ${count * 16} candidates, four times the unweighted one (Limit rows: ${limits.join(", ")})`);
+    }
+  }
+
   // The estimates, on a real server (db/test-schema.ts [20] holds them under PGlite).
   const [{ mt, kw }] = await sql`
-    SELECT (SELECT prorows FROM pg_proc WHERE oid = 'match_thoughts(vector, float, int, jsonb)'::regprocedure) AS mt,
+    SELECT (SELECT prorows FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure) AS mt,
            (SELECT prorows FROM pg_proc WHERE oid = 'search_thoughts_keyword(text, int, int, jsonb)'::regprocedure) AS kw`;
   assert(Number(mt) === 10 && Number(kw) === 25, `match_thoughts declares ROWS 10 and search_thoughts_keyword ROWS 25 on a real server (${mt}, ${kw})`);
 }

@@ -341,9 +341,15 @@ if (configFailed) {
                 "search_thoughts_hybrid cannot run because search_thoughts_keyword is missing — every semantic search would fail",
                 "Apply db/migrations/012_search_thoughts_keyword.sql first; 017 is present or will run once it is.");
           } else if (missing(msg)) {
+            // The probe sends 020's two extra arguments, so over PostgREST a
+            // function from before 020 reads exactly like a missing one.
             add("hybrid search", "fail",
-                "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                "Apply db/migrations/017_search_thoughts_hybrid.sql against the project's direct connection (server-portable/README.md §4).");
+                "search_thoughts_hybrid is missing, or is the form from before migration 020 (the server sends recency_weight and half_life_days, which only 020's takes) — either way search and search_thoughts, which call it, would fail on every call",
+                "Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4).");
+          } else if (/could not choose the best candidate/i.test(msg)) {
+            add("hybrid search", "fail",
+                "search_thoughts_hybrid has more than one overload — an earlier migration re-applied by hand beside 020's — and PostgREST cannot choose between them, so every search would fail",
+                "DROP FUNCTION search_thoughts_hybrid(vector, text, float, int, jsonb); against the project's direct connection — the form 020 drops.");
           } else {
             add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
           }
@@ -447,7 +453,7 @@ if (configFailed) {
         if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                 "Apply db/migrations/017_search_thoughts_hybrid.sql.");
+                 "Apply the migrations through db/migrations/020_match_thoughts_recency.sql (017_search_thoughts_hybrid.sql defines it; 020 redefines it with the arguments the server sends).");
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,
@@ -478,37 +484,92 @@ if (configFailed) {
          * with the recall it had before 014.
          */
         /**
-         * The catalog rows both function checks read — match_thoughts' definition
-         * (the one signature the servers call, resolved as the call would
-         * resolve it; to_regprocedure is NULL rather than an error when it is
-         * not defined, so "not defined" stays a verdict and not a throw; by
-         * name and arity, an earlier draft read the first of however many
-         * 4-argument overloads existed), search_thoughts_keyword's row
-         * estimate, and which of 014 and 019 the ledger records — read ONCE,
-         * so the two checks judge the same definition (second review pass).
-         * A failed read is re-thrown inside each check, whose catch words it.
+         * The catalog rows the function checks read — every match_thoughts in
+         * `public` with its arity and signature (the 6-argument form the
+         * servers call since 020 first, so `mt[0]` is the one a call resolves
+         * to when it exists; a lone earlier form otherwise, so the 014 and 019
+         * checks can still describe a database that predates 020), every
+         * search_thoughts_hybrid likewise, search_thoughts_keyword's row
+         * estimate, and which of 014, 019 and 020 the ledger records — read
+         * ONCE, so the checks judge the same definitions (second review pass
+         * of 019). A failed read is re-thrown inside each check, whose catch
+         * words it.
          */
-        let catalog: { mt: { cfg: string; settings: Record<string, string>; src: string; rows: number }[]; kwRows: number | null; ledger: Set<string> } | Error;
+        type Overload = { cfg: string; settings: Record<string, string>; src: string; rows: number; nargs: number; sig: string };
+        let catalog: { mt: Overload[]; hy: { nargs: number; sig: string }[]; kwRows: number | null; ledger: Set<string> } | Error;
         try {
           const { parseSetConfig } = await import("../db/config.mjs");
           const mtRows = await sql`
-            SELECT p.proconfig AS cfg, p.prosrc AS src, p.prorows AS rows FROM pg_proc p
-            WHERE p.oid = to_regprocedure('public.match_thoughts(vector, double precision, integer, jsonb)')`;
+            SELECT p.proconfig AS cfg, p.prosrc AS src, p.prorows AS rows, p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'match_thoughts' AND n.nspname = 'public'
+            ORDER BY (p.pronargs = 6) DESC, p.oid`;
+          const hyRows = await sql`
+            SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'
+            ORDER BY (p.pronargs = 7) DESC, p.oid`;
           const kw = await sql`SELECT p.prorows AS rows FROM pg_proc p WHERE p.oid = to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)')`;
           let ledger = new Set<string>();
           try {
-            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%'`;
+            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%' OR name LIKE '020\\_%'`;
             ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
           } catch {
             /* no ledger */
           }
           catalog = {
-            mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0) })),
+            mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number; nargs: number; sig: string }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0), nargs: Number(r.nargs), sig: String(r.sig) })),
+            hy: hyRows.map((r: { nargs: number; sig: string }) => ({ nargs: Number(r.nargs), sig: String(r.sig) })),
             kwRows: kw.length ? Number(kw[0].rows) : null,
             ledger,
           };
         } catch (e) {
           catalog = e as Error;
+        }
+
+        /**
+         * Migration 020 changed both search functions' signatures — two
+         * defaulted parameters, recency_weight and half_life_days — by DROPPING
+         * the earlier forms, and both stores send all the arguments. Two states
+         * break every search and neither shows in the presence checks above:
+         *
+         *   * the functions predate 020 (the ledger stops at 019, or a hand
+         *     re-apply of 007/014/019 or 017 replaced them): the call the
+         *     server makes has no function to resolve to;
+         *   * an earlier form was re-created BESIDE 020's — the same hand
+         *     re-apply on a database that had reached 020: 020's function still
+         *     answers the server, but every 4-argument (5-) call — PostgREST
+         *     callers by name, hand-written SQL, community integrations — is
+         *     "function is not unique", the ambiguity 004's header names.
+         *
+         * A failure in both, as `hybrid search` is: the absence does not
+         * degrade a tool, it breaks it. The remedy for the second is the DROP
+         * 020 itself runs, named with the exact signature the catalog holds.
+         */
+        try {
+          if (catalog instanceof Error) throw catalog;
+          const { mt, hy } = catalog;
+          if (!mt.length || !hy.length) {
+            add("search signatures", "skip", "not checked — a search function is missing, and the checks above say which");
+          } else {
+            const mtNew = mt.some((r) => r.nargs === 6);
+            const hyNew = hy.some((r) => r.nargs === 7);
+            const extra = [...mt.filter((r) => r.nargs !== 6), ...hy.filter((r) => r.nargs !== 7)].map((r) => r.sig);
+            if (mtNew && hyNew && extra.length === 0) {
+              add("search signatures", "ok", `${mt[0].sig} and ${hy[0].sig}: the forms the servers call since migration 020, one of each`);
+            } else if (mtNew && hyNew) {
+              add("search signatures", "fail",
+                  `beside the forms the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 020 — so every call that sends four arguments to match_thoughts (five to search_thoughts_hybrid), which is every PostgREST caller by name and every hand-written SELECT, fails with "function is not unique"`,
+                  `Drop the earlier form, as 020 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+            } else {
+              const old = [...(mtNew ? [] : mt), ...(hyNew ? [] : hy)].map((r) => r.sig);
+              add("search signatures", "fail",
+                  `${old.join(" and ")} ${old.length === 1 ? "is the form" : "are the forms"} from before migration 020; the server sends recency_weight and half_life_days, which only 020's forms take — so every search would fail`,
+                  "Apply db/migrations/020_match_thoughts_recency.sql.");
+            }
+          }
+        } catch (e) {
+          add("search signatures", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
         }
 
         try {
@@ -585,7 +646,7 @@ if (configFailed) {
           const seedBounds =
             `Run as the database owner, in one session: SELECT '[1]'::vector; ${Object.entries(HNSW_SEEDS).map(([n, v]) => `ALTER DATABASE <db> SET ${n} = ${v};`).join(" ")}  then restart the server so its pool reconnects.`;
           const putBack =
-            "Put it back: SELECT '[1]'::vector; ALTER FUNCTION match_thoughts(vector, float, int, jsonb) SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's too (the candidate scan check below says) — and carry them into the migration that redefined it.";
+            `Put it back: SELECT '[1]'::vector; ALTER FUNCTION ${mt[0]?.sig ?? "match_thoughts"} SET hnsw.iterative_scan = relaxed_order;  — a redefinition that dropped this clause dropped 019's too (the candidate scan check below says) — and carry them into the migration that redefined it.`;
           const staleRecord = installedOld && libraryNew;
 
           if (mt.length === 0) {
@@ -669,7 +730,7 @@ if (configFailed) {
             const ledgerHas019 = ledger.has("019");
             // One statement per function that needs it, in the order to run them.
             const alters = [
-              ...(!seqOff || rows !== 10 ? [`ALTER FUNCTION match_thoughts(vector, float, int, jsonb)${seqOff ? "" : " SET enable_seqscan = off"}${rows !== 10 ? " ROWS 10" : ""};`] : []),
+              ...(!seqOff || rows !== 10 ? [`ALTER FUNCTION ${mt[0].sig}${seqOff ? "" : " SET enable_seqscan = off"}${rows !== 10 ? " ROWS 10" : ""};`] : []),
               ...(kwOff ? ["ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 25;"] : []),
             ];
             const remedy = ledgerHas019

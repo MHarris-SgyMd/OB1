@@ -298,6 +298,15 @@ function buildServer(principal: Principal): McpServer {
   // identifier it got what 012 measured — the containing thought outside the
   // top ten 37 times in 60. The fused function returns exactly what
   // match_thoughts returned for any query without an identifier in it.
+  //
+  // Nor can it grow `recency_weight` (migration 020, SMD-945), so it sends a
+  // fixed one — 0, by measurement: on the 486-issue corpus a weight lowered
+  // MRR at every setting tried (0.899 → 0.890 at 0.1 over 365 days, 0.775 at
+  // 0.2 over 90; evals/eval-recency.ts), and this surface has no caller who
+  // can turn it off. An operator whose brain is a working log rather than a
+  // reference can ask search_thoughts for a weight; this tool stays where
+  // every result is the one the query names.
+  const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
   server.registerTool(
     "search",
     {
@@ -321,6 +330,7 @@ function buildServer(principal: Principal): McpServer {
           threshold: 0.5,
           limit: 10,
           filter: {},
+          recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT,
         });
 
         const results = data.map((t) => ({
@@ -420,9 +430,17 @@ function buildServer(principal: Principal): McpServer {
         // guaranteed every row cleared it, the fused function exempts exact hits.
         threshold: z.number().optional().default(0.5)
           .describe("Minimum similarity, 0-1, for results found by meaning alone. An exact hit on an identifier or quoted span from the query is exempt from it."),
+        // Migration 020 (SMD-945): age blended into the order, after the
+        // candidate scan, with the threshold still on raw similarity — so a
+        // weight reorders relevant thoughts and cannot surface irrelevant recent
+        // ones. 0 is the ranking by meaning alone. Clamped, as limit is; the
+        // half-life stays the function's 90 days for this tool.
+        recency_weight: z.number().optional().default(0)
+          .describe("How much a thought's age counts against its similarity, 0-1. 0 (default) ranks by meaning alone; 0.2 is a gentle preference for recent captures; 1 ranks the relevant thoughts newest first. A thought's recency halves every 90 days.")
+          .transform((w) => Math.min(Math.max(w, 0), 1)),
       },
     },
-    async ({ query, limit, threshold }) => {
+    async ({ query, limit, threshold, recency_weight }) => {
       try {
         const qEmb = await getEmbedding(query, "query");
         const data = await (await db()).hybridThoughts({
@@ -431,6 +449,7 @@ function buildServer(principal: Principal): McpServer {
           threshold,
           limit,
           filter: {},
+          recencyWeight: recency_weight,
         });
 
         if (data.length === 0) {
