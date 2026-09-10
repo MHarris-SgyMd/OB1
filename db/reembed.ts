@@ -252,31 +252,42 @@
  * (ACCEPTED_CAVEAT_PREFIX in config.mjs, the one spelling both tools read) —
  * SMD-1021's rule unchanged: a succeeded row's last_error is what the worker
  * could not do, here what the operator has accepted it will not do. The row's
- * finished_at is left as the FAILURE's: the bound below is measured from the
- * moment the provider refused the content it refused, so a thought edited
- * between the failure and the acceptance is not covered by it — the new
- * content was never tried, and the next run tries it (first review pass:
- * stamping the acceptance's time would have spoken for content the caveat
- * never described). Per row, by id; --all accepts every failed row under the
- * job and says that it hides a provider outage as well as a refusal — and
- * takes no ids beside it, since a list beside --all would be read as one or
- * the other silently. An id that is not a failed row under this job refuses
- * the whole command, and nothing is written. It needs 021: acceptance is read
- * against the label, and 021's evidence backfill trusts every succeeded row
- * under a key naming a model — it predates acceptance and, applied, is never
- * edited — so a brain that accepted rows before 021 would have them labelled
- * at a model whose pass never wrote their vector. (A hand re-run of 021's body
- * on a brain with accepted rows whose thought is unlabelled would do the same:
- * --retry-fallbacks them first, or retire the key.)
+ * timestamps are left as the FAILURE's, and the bound below is measured from
+ * claimed_at — the moment the attempt READ the content the provider refused
+ * (015 stamps it at every claim and keeps it after release) — so a thought
+ * edited during the attempt, or between the failure and the acceptance, is not
+ * covered: that content was never tried, and the next run tries it (first
+ * review pass: stamping the acceptance's time would have spoken for content the
+ * caveat never described; second: so would the release's, for an edit that
+ * landed while the provider was still refusing). Per row, by id; --all accepts
+ * every failed row under the job and says that it hides a provider outage as
+ * well as a refusal — and takes no ids beside it, since a list beside --all
+ * would be read as one or the other silently. Every argument is accounted for:
+ * an id after another flag, or a flag this tool does not have, is refused
+ * rather than dropped (second review pass). An id that is not a failed row
+ * under this job refuses the whole command, and nothing is written. So does a
+ * failed row whose thought has NO vector (passed over, and said, under --all):
+ * acceptance keeps the vector a row has, and a thought with none is invisible
+ * to semantic search with nothing afterwards to say so — delete it, or fix its
+ * text and --retry-failed. It needs 021's schema whole — the column and the
+ * eight-argument update_thought, the same refusal a run makes: acceptance is
+ * read against the label, and 021's evidence backfill trusts every succeeded
+ * row under a key naming a model — it predates acceptance and, applied, is
+ * never edited — so a brain that accepted rows before 021 would have them
+ * labelled at a model whose pass never wrote their vector. A hand re-run of
+ * 021's body (the remedy for a --baseline'd brain, below) on a brain with
+ * accepted rows whose thought is unlabelled would do the same, and that remedy
+ * says so: --retry-fallbacks them first, or retire the key.
  *
  * What acceptance means to the two readers of the row, and its bound. The
  * data rule above returns a succeeded row whose thought is not at the target —
  * which an accepted row's thought is, by decision. So the data rule leaves an
  * accepted row, and preflight's `vector models` counts its vector as detail
  * ("accepted by the operator") rather than as a warning — each ONLY WHILE
- * NOTHING HAS WRITTEN THE THOUGHT SINCE: `updated_at <= finished_at`, the bound
- * 021 gave its backfill and the fifth review pass of SMD-1068 gave the data
- * rule under a backfill key. An edit, or a re-capture, is a new question, and
+ * NOTHING HAS WRITTEN THE THOUGHT SINCE THE ATTEMPT READ IT: `updated_at <=
+ * claimed_at` (finished_at where a row was never claimed), the shape of the
+ * bound 021 gave its backfill and the fifth review pass of SMD-1068 gave the
+ * data rule under a backfill key. An edit, or a re-capture, is a new question, and
  * the row returns to the pool as any moved row does (a metadata-only edit
  * reopens it too: one evidence rule, not two). Preflight counts an acceptance
  * only under the OWN key of the model it judges against, the recorded one
@@ -309,8 +320,10 @@
  * not, whose pass can be finished or its failed rows accepted, a key with a
  * live lease (a pass under it is running), and a key with no rows (a typo is
  * the likelier cause). The lease check and the DELETE are one transaction with
- * the key's rows locked, so a claim taken meanwhile is not lost under it
- * (first review pass). The vectors the retired pass wrote are still at its model, and the
+ * the key's rows locked, the DELETE takes exactly the rows the check locked,
+ * and the record is read again inside it — so a claim taken meanwhile is not
+ * lost under it, and a --switch-model back to that model committing meanwhile
+ * keeps its pool and its record (first and second review passes). The vectors the retired pass wrote are still at its model, and the
  * corpus line printed after says so: `vector models` reports them until they
  * are re-embedded, which is the truth the rows keep once the record is gone.
  *
@@ -404,6 +417,27 @@ const RETIRE_KEY = flag("retire");
   }
   if (ACCEPT_ALL && !ACCEPT_FAILED) {
     console.error("  --all belongs to --accept-failed.");
+    process.exit(2);
+  }
+}
+// Every argument accounted for: an id after another flag, or a flag this tool
+// does not have, is refused rather than dropped — `--accept-failed a --dry-run
+// b` would otherwise accept one row and exit 0 (second review pass).
+{
+  const takesOne = new Set(["url", "workers", "batch", "ttl", "job", "retire"]);
+  const takesMany = new Set(["accept-failed"]);
+  const takesNone = new Set(["status", "dry-run", "switch-model", "retry-failed", "retry-fallbacks", "all"]);
+  const stray: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith("--")) { stray.push(a); continue; }
+    const name = a.slice(2);
+    if (takesOne.has(name)) i += 1;
+    else if (takesMany.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
+    else if (!takesNone.has(name)) stray.push(a);
+  }
+  if (stray.length) {
+    console.error(`  not understood: ${stray.join(" ")} — ids go right after --accept-failed, and the flags are listed in the header of db/reembed.ts.`);
     process.exit(2);
   }
 }
@@ -578,7 +612,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}}."
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}} — after returning any accepted rows (--status lists\n  them) with --retry-fallbacks, or retiring their key: the backfill in that body trusts a succeeded row whatever its caveat."
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────
@@ -646,11 +680,12 @@ const poolable = () => (BACKFILL ? sql`true` : notAtTarget());
  */
 const doneButNotAtTarget = () =>
   // An ACCEPTED row is left, under either key shape, by the same bound: the
-  // operator's word holds while nothing has written the thought since
-  // (updated_at <= finished_at); an edit is a new question — "Saying I know".
+  // operator's word holds while nothing has written the thought since the
+  // failed attempt read it (updated_at <= claimed_at; finished_at for a row
+  // never claimed); an edit is a new question — "Saying I know".
   sql`status = 'succeeded' AND EXISTS (
         SELECT 1 FROM thoughts x WHERE x.id = thought_id
-          AND NOT ((${accepted()}) AND COALESCE(x.updated_at, x.created_at) <= finished_at)
+          AND NOT ((${accepted()}) AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at))
           AND ${BACKFILL
             ? // The trust is bounded by 021's own evidence rule: a finished row
               // vouches for an unlabelled thought only while nothing has written
@@ -667,16 +702,18 @@ const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget(
  */
 const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`;
 /**
- * …and STANDING: nothing has written the thought since the failure it
- * accepted. The counts use this form, so they cannot call a row accepted that
- * the data rule and preflight no longer treat as such (first review pass).
+ * …and STANDING: nothing has written the thought since the failed attempt
+ * read it — claimed_at, not the release's finished_at, which an edit during a
+ * slow refusal would have hidden behind (second review pass). The counts use
+ * this form, so they cannot call a row accepted that the data rule and
+ * preflight no longer treat as such (first review pass).
  * `last_error IS NOT NULL` above is not decoration: starts_with(NULL, …) is
  * NULL, and a NOT around it inside the data rule turned every ordinary
  * succeeded row's predicate NULL — false — for a row whose thought moved
  * before its claim was released (first review pass).
  */
 const standingAcceptance = () =>
-  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= finished_at)`;
+  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at))`;
 
 /**
  * Return this job's rows a predicate selects to the pool as if never tried:
@@ -740,10 +777,10 @@ function printCounts(c: PassCounts, label: string): void {
  * not written since, is detail — "Saying I know" — and `unaccepted` is what a
  * warning counts. Before 021 there is nothing to read, and the line says so.
  */
-async function printCorpusByModel(): Promise<{ unaccepted: number }> {
+async function printCorpusByModel(): Promise<{ unaccepted: number; noneAt: boolean }> {
   if (!HAS_LABEL) {
     console.log("  corpus:    the rows carry no model (migration 021 not applied)");
-    return { unaccepted: 0 };
+    return { unaccepted: 0, noneAt: false };
   }
   // The queries and the arithmetic are config.mjs's, shared with preflight.
   // Against the target the counts are judged against — the key's model where
@@ -765,7 +802,9 @@ async function printCorpusByModel(): Promise<{ unaccepted: number }> {
       (unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : "") +
       (Number(noVector) ? `, ${noVector} without a vector` : "")
   );
-  return { unaccepted };
+  // Preflight's other warning: NO vector known to be at the model — every
+  // vector unlabelled, or accepted at another model (second review pass).
+  return { unaccepted, noneAt: unaccepted === 0 && at === 0 && unlabelled + otherCount > 0 };
 }
 
 /**
@@ -802,7 +841,9 @@ async function unlabelledPooled(pooled: boolean): Promise<number> {
  * one account — and, since 021, what its `vector models` line will say about
  * the rows: vectors at another model are a warning there whether or not any
  * claim row remembers them — except those the operator accepted, which are
- * detail there as here. Preflight judges the rows against the RECORDED
+ * detail there as here — and a corpus with NO vector known to be at the model,
+ * accepted or unlabelled as its vectors may be, is a warning there too
+ * (second review pass: the first note alone missed it). Preflight judges the rows against the RECORDED
  * model, this tool against its own, so the second note is given only when the
  * two agree AS THEY STAND — after a run that recorded the model they do,
  * whatever they did before it (second review pass); when they do not,
@@ -812,12 +853,13 @@ async function unlabelledPooled(pooled: boolean): Promise<number> {
  */
 /** Whether the rows here are judged against the model preflight judges by — the record, as it stands (after this run recorded it, or as found). */
 const judgedAsPreflight = (afterRecord: boolean) => TARGET === (afterRecord ? embedConfig.embeddingModel : recorded.embedding_model);
-function printPreflightNote(c: PassCounts, unaccepted: number, recordAgrees: boolean): void {
+function printPreflightNote(c: PassCounts, corpus: { unaccepted: number; noneAt: boolean }, recordAgrees: boolean): void {
   if (passUnfinished(c)) {
     if (PREFLIGHT_SEES) console.error(`  preflight will warn until this finishes: ${JOB} — ${formatPassCounts(c)}`);
     else console.error(`  unfinished, and preflight cannot see this key: ${JOB} — ${formatPassCounts(c)}`);
   }
-  if (unaccepted > 0 && recordAgrees) console.error(`  preflight will warn until they are re-embedded: ${unaccepted} vector(s) at another model (its vector models check)`);
+  if (corpus.unaccepted > 0 && recordAgrees) console.error(`  preflight will warn until they are re-embedded: ${corpus.unaccepted} vector(s) at another model (its vector models check)`);
+  if (corpus.noneAt && recordAgrees) console.error(`  preflight will warn: no vector is known to be at ${TARGET} — accepted or unlabelled rows are all it has (its vector models check)`);
 }
 
 /**
@@ -910,33 +952,41 @@ if (RETIRE) {
   // the recorded width, and the column's when none is recorded (a hand-applied
   // schema; preflight resolves the width the same way, so the two agree on
   // which keys are superseded — first review pass).
-  const currentModels = new Set([recorded.embedding_model, embedConfig.embeddingModel].filter((m): m is string => m !== undefined));
+  const currentModel = recorded.embedding_model ?? embedConfig.embeddingModel;
   const currentDim = recorded.embedding_dim === undefined ? Number(col.width) : Number(recorded.embedding_dim);
-  if (named !== null && currentModels.has(named.model) && named.dim === currentDim) {
-    await refuse(
-      `it names the ${recorded.embedding_model === named.model ? "recorded" : "configured"} model (${named.model} @ ${currentDim}), so its pass can be finished —\n` +
-        `  cd db && OB1_EMBEDDING_MODEL=${named.model} bun reembed.ts --url … --job ${key} — or its failed rows accepted with --accept-failed.\n` +
+  const isCurrent = (model: string) => named !== null && named.model === model && named.dim === currentDim;
+  const refuseCurrent = (model: string, how: string) =>
+    refuse(
+      `it names the ${how} model (${model} @ ${currentDim}), so its pass can be finished —\n` +
+        `  cd db && OB1_EMBEDDING_MODEL=${model} bun reembed.ts --url … --job ${key} — or its failed rows accepted with --accept-failed.\n` +
         `  --retire is for a pass the record has moved on from.`
     );
-  }
+  if (isCurrent(currentModel)) await refuseCurrent(currentModel, recorded.embedding_model === undefined ? "configured" : "recorded");
   // The lease check and the DELETE in one transaction, the key's rows locked:
   // claim_thoughts skips locked rows, so a claim cannot be taken between the
-  // two and lost under the DELETE.
+  // two and lost under the DELETE. The DELETE takes exactly the rows locked,
+  // and the record is read again here: a --switch-model back to this key's
+  // model committing meanwhile — its record and its pool in one transaction —
+  // keeps both (second review pass).
   const outcome = await sql.begin(async (tx: SQL) => {
     const rows = (await tx`
-      SELECT status, (status = 'claimed' AND ttl_expires_at >= now()) AS live
-      FROM thought_work_claims WHERE work_type = ${key} FOR UPDATE`) as { status: string; live: boolean }[];
+      SELECT thought_id::text AS id, status, (status = 'claimed' AND ttl_expires_at >= now()) AS live
+      FROM thought_work_claims WHERE work_type = ${key} FOR UPDATE`) as { id: string; status: string; live: boolean }[];
+    const [nowRecorded] = (await tx`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
     const byStatus = [...rows.reduce((m, r) => m.set(r.status, (m.get(r.status) ?? 0) + 1), new Map<string, number>())]
       .sort(([a], [b]) => a.localeCompare(b)).map(([s, c]) => `${c} ${s}`).join(", ");
     const live = rows.filter((r) => r.live).length;
-    if (rows.length === 0 || live > 0 || DRY_RUN) return { total: rows.length, live, byStatus };
-    // Qualified by the key, the one DELETE this tool makes: the record of a
-    // pass the record has moved on from, as 015's fourth principle allows.
-    await tx`DELETE FROM thought_work_claims WHERE work_type = ${key}`;
-    return { total: rows.length, live, byStatus };
+    const movedTo = nowRecorded !== undefined && nowRecorded.value !== recorded.embedding_model && isCurrent(nowRecorded.value) ? nowRecorded.value : null;
+    if (rows.length === 0 || live > 0 || movedTo !== null || DRY_RUN) return { total: rows.length, live, byStatus, movedTo };
+    // Qualified by the key and bounded to the rows locked, the one DELETE this
+    // tool makes: the record of a pass the record has moved on from, as 015's
+    // fourth principle allows.
+    const removed = (await tx`DELETE FROM thought_work_claims WHERE work_type = ${key} AND thought_id = ANY(${sql.array(rows.map((r) => r.id), "TEXT")}::uuid[]) RETURNING 1`) as unknown[];
+    return { total: removed.length, live, byStatus, movedTo };
   });
   if (outcome.total === 0) await refuse("no rows are recorded under that key — nothing to retire (a typo in the key is the likelier cause; --status --job <key> shows what a key holds).");
   if (outcome.live > 0) await refuse(`${outcome.live} row(s) under it are leased right now — a pass under this key is running; stop it first, or wait for the leases to expire.`);
+  if (outcome.movedTo !== null) await refuseCurrent(outcome.movedTo, "now recorded — the record moved while this ran");
   if (DRY_RUN) {
     console.log(`\n  would: retire ${key} — remove its ${outcome.total} row(s) (${outcome.byStatus}). Nothing was written.`);
   } else {
@@ -955,14 +1005,15 @@ if (ACCEPT_FAILED) {
     process.exit(2);
   };
   if (refusalJob) await refuse(refusalJob.trim());
-  // Acceptance is read against the label, and 021's evidence backfill would
-  // read an accepted row as proof the thought is AT the key's model — see
-  // "Saying I know" (first review pass).
-  if (!HAS_LABEL) {
+  // 021 whole, as a run needs it: acceptance is read against the label, and
+  // 021's evidence backfill — which the remedy for an older body re-runs —
+  // would read an accepted row as proof the thought is AT the key's model; see
+  // "Saying I know" (first and second review passes).
+  if (refusal021) {
     await refuse(
-      `the schema predates migration 021. Acceptance is read against thoughts.embedding_model, and 021's backfill labels every thought\n` +
-        `  a succeeded row vouches for — an accepted row included, at a model whose pass never wrote its vector. Apply 021 first:\n` +
-        `    cd db && bun migrate.ts --url …`
+      `${refusal021.trim()}\n` +
+        `  --accept-failed needs the same: acceptance is read against the label, and 021's backfill reads a succeeded row — an accepted\n` +
+        `  one included — as proof the thought is at the key's model.`
     );
   }
   if (ACCEPT_ALL && (ACCEPT_IDS.length > 0 || values("all").length > 0)) {
@@ -975,10 +1026,14 @@ if (ACCEPT_FAILED) {
         `  ${embedConfig.embeddingModel} is simply set wrong in this shell, fix it instead.`
     );
   }
+  // With whether the thought has a vector to keep: one with none is invisible
+  // to semantic search, and an accepted row would be the last thing to say so
+  // (second review pass) — refused by id, passed over and said under --all.
   const failedRows = (await sql`
-    SELECT thought_id::text AS id, last_error FROM thought_work_claims
-    WHERE work_type = ${JOB} AND status = 'failed' ORDER BY finished_at DESC`) as { id: string; last_error: string | null }[];
-  const describe = (r: { id: string; last_error: string | null }) => `    ${r.id}  ${r.last_error ?? "(no error recorded)"}`;
+    SELECT c.thought_id::text AS id, c.last_error, (t.embedding IS NULL) AS vectorless FROM thought_work_claims c
+    JOIN thoughts t ON t.id = c.thought_id
+    WHERE c.work_type = ${JOB} AND c.status = 'failed' ORDER BY c.finished_at DESC`) as { id: string; last_error: string | null; vectorless: boolean }[];
+  const describe = (r: { id: string; last_error: string | null; vectorless?: boolean }) => `    ${r.id}  ${r.vectorless ? "(no vector) " : ""}${r.last_error ?? "(no error recorded)"}`;
   if (!ACCEPT_ALL && ACCEPT_IDS.length === 0) {
     await refuse(
       `it needs the rows to accept, by id — --accept-failed <thought-id…> — or --all for every failed row under ${JOB}, said explicitly\n` +
@@ -1002,12 +1057,27 @@ if (ACCEPT_FAILED) {
         `  accepted — a pending or leased one has not been tried, a succeeded one needs nothing.`
     );
   }
-  const ids = ACCEPT_ALL ? failedRows.map((r) => r.id) : asked;
-  if (ids.length === 0) await refuse(`no failed rows under ${JOB} — nothing to accept.`);
+  const vectorless = failedRows.filter((r) => r.vectorless);
+  const noVector = asked.filter((id) => vectorless.some((r) => r.id === id));
+  if (noVector.length) {
+    await refuse(
+      `no vector to keep: ${noVector.join(", ")}. Acceptance keeps the vector a row has; a thought with none is invisible to semantic\n` +
+        `  search, and an accepted row would be the last thing to say so. Delete the thought, or fix its text and --retry-failed.`
+    );
+  }
+  const passedOver = ACCEPT_ALL ? vectorless : [];
+  const ids = ACCEPT_ALL ? failedRows.filter((r) => !r.vectorless).map((r) => r.id) : asked;
+  if (ids.length === 0) await refuse(`no failed rows under ${JOB}${passedOver.length ? ` with a vector to keep (${passedOver.length} without one, listed by --status)` : ""} — nothing to accept.`);
   const chosen = failedRows.filter((r) => ids.includes(r.id));
+  const sayPassedOver = () => {
+    if (!passedOver.length) return;
+    console.error(`  ${passedOver.length} failed row(s) whose thought has no vector were not accepted — nothing to keep, and nothing would say afterwards that the thought is invisible to search; delete them, or fix their text and --retry-failed:`);
+    for (const r of passedOver) console.error(describe(r));
+  };
   if (DRY_RUN) {
     console.log(`\n  would: accept ${chosen.length} failed row(s) under ${JOB} — each becomes succeeded with the caveat "${ACCEPTED_CAVEAT_PREFIX}<the failure>", keeping the vector it has:`);
     for (const r of chosen) console.log(describe(r));
+    sayPassedOver();
     console.log("  Nothing was written.");
     await sql.close();
     process.exit(0);
@@ -1029,11 +1099,12 @@ if (ACCEPT_FAILED) {
   );
   for (const r of written) console.log(`    ${r.id}  ${r.last_error}`);
   if (written.length < chosen.length) console.error(`  ${chosen.length - written.length} of the rows named left 'failed' meanwhile — returned to the pool by another process — and were not accepted.`);
+  sayPassedOver();
   console.log("  --retry-fallbacks returns them to the pool on the day the cause changes; an edit to the thought reopens it by itself.");
   const c = await counts();
   printCounts(c, "status");
-  const { unaccepted } = await printCorpusByModel();
-  printPreflightNote(c, unaccepted, judgedAsPreflight(false));
+  const corpus = await printCorpusByModel();
+  printPreflightNote(c, corpus, judgedAsPreflight(false));
   await sql.close();
   process.exit(0);
 }
@@ -1041,8 +1112,8 @@ if (ACCEPT_FAILED) {
 if (STATUS_ONLY || DRY_RUN) {
   const c = await counts();
   printCounts(c, STATUS_ONLY ? "status" : "before");
-  const { unaccepted } = await printCorpusByModel();
-  if (STATUS_ONLY) printPreflightNote(c, unaccepted, judgedAsPreflight(false));
+  const corpus = await printCorpusByModel();
+  if (STATUS_ONLY) printPreflightNote(c, corpus, judgedAsPreflight(false));
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
@@ -1179,7 +1250,7 @@ if (RETRY_FALLBACKS) console.log(`  --retry-fallbacks: ${start.retriedFallbacks}
 const before = await counts();
 console.log(`  pool: ${start.added} thought(s) added`);
 printCounts(before, "before");
-const { unaccepted: unacceptedBefore } = await printCorpusByModel();
+const corpusBefore = await printCorpusByModel();
 {
   const unlabelled = await unlabelledPooled(true);
   if (unlabelled > 0) console.error(`  ${unlabelled} of the rows to re-embed are unlabelled — nothing vouches for their model — and this pass is what labels them`);
@@ -1191,7 +1262,7 @@ if (total === 0) {
   if (before.failed > 0) {
     console.error(`  ${before.failed} failed row(s) remain from an earlier run — pass --retry-failed to try them again:`);
     await printFailures();
-    printPreflightNote(before, unacceptedBefore, judgedAsPreflight(recordModel));
+    printPreflightNote(before, corpusBefore, judgedAsPreflight(recordModel));
     await sql.close();
     process.exit(1);
   }
@@ -1474,7 +1545,7 @@ if (after.failed > 0) {
   console.error(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
   await printFailures();
 }
-const { unaccepted: unacceptedAfter } = await printCorpusByModel();
+const corpusAfter = await printCorpusByModel();
 if (after.unpooled > 0) {
   // Under the model's own key: captured or edited while the pass ran, by a
   // server on another model — the rows say so (021), and a re-run takes exactly
@@ -1488,7 +1559,7 @@ if (after.unpooled > 0) {
           `  server if that is what it was, then re-run: the pool takes exactly them.`
   );
 }
-printPreflightNote(after, unacceptedAfter, judgedAsPreflight(recordModel));
+printPreflightNote(after, corpusAfter, judgedAsPreflight(recordModel));
 if (after.claimed > 0) {
   console.error(
     `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +

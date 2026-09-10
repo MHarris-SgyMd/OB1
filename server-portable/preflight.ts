@@ -1009,6 +1009,19 @@ if (configFailed) {
           add("embedding contract", "warn", `could not read ob1_config: ${(e as Error).message}`,
               "Apply db/migrations/006_embedding_config.sql.");
         }
+        // The column's width, for where the record has none (a hand-applied
+        // schema): the re-embed pass check judges a key's width by it, as
+        // reembed.ts does, so the two agree on which keys are superseded — this
+        // server's OB1_EMBEDDING_DIM stood in before, and a server misconfigured
+        // for another width called the live pass one nothing could finish
+        // (SMD-1067's second review pass).
+        let columnWidth: number | undefined;
+        try {
+          const [w] = (await sql`SELECT atttypmod AS width FROM pg_attribute WHERE attrelid = 'thoughts'::regclass AND attname = 'embedding'`) as { width: number }[];
+          if (w && Number(w.width) > 0) columnWidth = Number(w.width);
+        } catch {
+          // The schema checks below report a missing table or column.
+        }
         if (recorded.embedding_dim && Number(recorded.embedding_dim) !== embDim) {
           add("embedding contract", "fail",
               `schema was built for ${recorded.embedding_dim} dimensions, but OB1_EMBEDDING_DIM=${embDim}`,
@@ -1058,7 +1071,7 @@ if (configFailed) {
             // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
             const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
-            const atDim = Number(recorded.embedding_dim ?? embDim);
+            const atDim = Number(recorded.embedding_dim ?? columnWidth ?? embDim);
             const corpus = (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[];
             // The acceptances — under the recorded model's OWN key, exactly
             // (config.mjs says why) — are read only when a vector at another
@@ -1174,7 +1187,7 @@ if (configFailed) {
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
                      count(*) FILTER (WHERE last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})
-                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= finished_at))::int AS accepted,
+                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at)))::int AS accepted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number }[];
@@ -1225,7 +1238,11 @@ if (configFailed) {
             const cmd = (envPrefix: string, flags: string) => `${envPrefix}bun reembed.ts --url $DATABASE_URL${flags}`;
             const finishIt = (envPrefix: string, jobFlag: string, c: PassCounts, needsSwitch: boolean) =>
               `Finish it: cd db && ${cmd(envPrefix, `${jobFlag}${needsSwitch ? " --switch-model" : ""}`)}` +
-              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed, or --accept-failed <thought-id…> for one the provider refuses permanently)` : ""}; ` +
+              // Acceptance is a command of its own, under the KEY (the shell's
+              // default key is another pass), and not offered beside
+              // --switch-model: reembed.ts refuses it under a model change, and
+              // refuses the two flags together (second review pass).
+              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed${needsSwitch ? "" : `, or ${cmd(envPrefix, `${jobFlag} --accept-failed <thought-id…>`)} for one the provider refuses permanently`})` : ""}; ` +
               `${cmd(envPrefix, `${jobFlag} --status`)} shows where it stands.`;
             let unfinished = 0;
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
@@ -1234,14 +1251,15 @@ if (configFailed) {
               const named = parseReembedKey(key);
               // Superseded: the key names a model or width that is not the
               // recorded one. A missing embedding_dim row (a hand-applied
-              // schema) is no evidence about the width, so the configured
-              // width stands in for it — as reembed.ts takes the column's, so
-              // the two agree on which keys `--retire` may take (SMD-1067's
-              // first review pass; before it, a missing row made every width
-              // "other" — SMD-1024's second review pass — and then no width at
-              // all, which left a stale key with no remedy that ran).
+              // schema) is no evidence about the width, so the COLUMN's stands
+              // in for it, as reembed.ts takes it, and the two agree on which
+              // keys `--retire` may take (SMD-1067's first and second review
+              // passes; before them, a missing row made every width "other" —
+              // SMD-1024's second review pass — then no width at all, which
+              // left a stale key with no remedy that ran; then this server's
+              // configured width, which a misconfigured server made wrong).
               const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
-              const widthHere = Number(recorded.embedding_dim ?? embDim);
+              const widthHere = Number(recorded.embedding_dim ?? columnWidth ?? embDim);
               const otherWidth = named !== null && named.dim !== widthHere;
               // The tool's own flag, not a hand DELETE: it refuses the recorded
               // model's keys and a key with a live lease (SMD-1067).

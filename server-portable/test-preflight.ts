@@ -462,6 +462,10 @@ else {
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
   assert(!/--switch-model/.test(other.out), "…and, with the record and the configuration agreeing, no --switch-model in the remedy");
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${CTX}`;
+  const otherFailed = await run(SQL_ENV);
+  assert(otherFailed.out.includes(`--job ${CTX} --accept-failed <thought-id…>`),
+         "…and with a failed row its acceptance remedy carries the key, so the row is accepted under the pass it belongs to and not the shell's default key");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
 
   /**
@@ -489,13 +493,13 @@ else {
    * --switch-model, or reembed.ts exits 2 on it (first review pass).
    */
   await claims.unsafe(`SELECT enqueue_thoughts('${KEY}', ARRAY['${ids[1]}']::uuid[])`);
-  await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const reverted = await run(SQL_ENV);
   assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /the pass to .* has not finished/.test(reverted.out),
          "with the record on another model and the configured model's pass unfinished, both lines warn");
-  assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model;/.test(reverted.out),
-         "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse");
+  assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model \(--retry-failed for the 1 failed row\(s\) once their cause is fixed\);/.test(reverted.out) && !/--accept-failed/.test(reverted.out),
+         "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse — and not --accept-failed, which it refuses under a model change");
   /**
    * The same disagreement, with an unfinished key preflight cannot read a
    * model from: the command still needs --switch-model, since the shell it
@@ -508,7 +512,7 @@ else {
          "an unfinished key naming no model, while the record disagrees with the configuration, gets --switch-model too");
   await claims`DELETE FROM thought_work_claims WHERE work_type = 'reembed:nightly'`;
   await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
-  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND status = 'pending'`;
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${KEY} AND status IN ('pending', 'failed')`;
 
   /**
    * A hand-applied schema can carry the model row without the width row. The
@@ -521,6 +525,9 @@ else {
   const noDim = await run(SQL_ENV);
   assert(noDim.out.includes(`--job ${CTX}`) && !/abandoned or reverted/.test(noDim.out),
          "with no width recorded, the configured model's backfill is still a pass to resume, not an abandoned switch");
+  const wrongDim = await run({ ...SQL_ENV, OB1_EMBEDDING_DIM: String(EMBEDDING_DIM + 1) });
+  assert(wrongDim.out.includes(`--job ${CTX}`) && !/where the column and the record are/.test(wrongDim.out),
+         "…and a server misconfigured for another width does not make it one nothing can finish: the width judged by is the column's, not this server's");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
   await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM)})`;
 
