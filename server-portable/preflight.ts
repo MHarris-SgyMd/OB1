@@ -1071,7 +1071,9 @@ if (configFailed) {
             // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
             const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
-            const atDim = Number(recorded.embedding_dim ?? columnWidth ?? embDim);
+            // The column's width first: the key reembed.ts writes is at the
+            // column's width whatever a hand-edited record says (third review pass).
+            const atDim = Number(columnWidth ?? recorded.embedding_dim ?? embDim);
             const corpus = (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[];
             // The acceptances — under the recorded model's OWN key, exactly
             // (config.mjs says why) — are read only when a vector at another
@@ -1187,7 +1189,7 @@ if (configFailed) {
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
                      count(*) FILTER (WHERE last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})
-                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at)))::int AS accepted,
+                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)))::int AS accepted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number }[];
@@ -1250,32 +1252,40 @@ if (configFailed) {
               unfinished++;
               const named = parseReembedKey(key);
               // Superseded: the key names a model or width that is not the
-              // recorded one. A missing embedding_dim row (a hand-applied
-              // schema) is no evidence about the width, so the COLUMN's stands
-              // in for it, as reembed.ts takes it, and the two agree on which
-              // keys `--retire` may take (SMD-1067's first and second review
-              // passes; before them, a missing row made every width "other" —
-              // SMD-1024's second review pass — then no width at all, which
-              // left a stale key with no remedy that ran; then this server's
-              // configured width, which a misconfigured server made wrong).
-              const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
-              const widthHere = Number(recorded.embedding_dim ?? columnWidth ?? embDim);
+              // current one — the recorded model, or this server's when nothing
+              // is recorded (as reembed.ts's --retire judges, so the two agree:
+              // with no record a stale key fell to "finish it under X", which
+              // would have re-embedded the corpus to X — SMD-1067's third review
+              // pass); the COLUMN's width, before any record (a hand-edited
+              // record must not make the one finishable key superseded — third
+              // pass; before that, a missing width row made every width "other"
+              // — SMD-1024's second review pass — then no width at all, then
+              // this server's configured width, which a misconfigured server
+              // made wrong — SMD-1067's first and second passes).
+              const currentModelHere = recorded.embedding_model ?? embModel;
+              const otherModel = named !== null && named.model !== currentModelHere;
+              const widthHere = Number(columnWidth ?? recorded.embedding_dim ?? embDim);
               const otherWidth = named !== null && named.dim !== widthHere;
               // The tool's own flag, not a hand DELETE: it refuses the recorded
               // model's keys and a key with a live lease (SMD-1067).
               const retire = `retire its record: cd db && ${cmd("", ` --retire ${key}`)}`;
-              if (key === configuredKey) {
-                add("re-embed pass", "warn",
-                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
-                    finishIt("", "", c, recordDiffers));
-              } else if (otherModel) {
+              if (otherModel) {
                 // A switch that was abandoned or reverted: the recorded model
                 // has moved on, so finishing this pass under the current shell
                 // would write the wrong model's vectors — reembed.ts refuses
                 // it. Either that switch is completed, or its record retired.
+                // Judged before the configured key: a server still configured
+                // for the model the record moved on from has THIS key, and its
+                // operator has the same two choices — the first review pass's
+                // "finish it" alone offered no way to let the revert stand
+                // (third review pass).
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? "?"}); its rows describe a switch that was abandoned or reverted`,
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is ${recorded.embedding_model === undefined ? `not this server's model (${embModel}; nothing is recorded)` : `no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? widthHere})`}; its rows describe a switch that was abandoned or reverted`,
                     `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
+              } else if (key === configuredKey) {
+                add("re-embed pass", "warn",
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
+                    finishIt("", "", c, recordDiffers));
               } else if (otherWidth) {
                 // The same model at another width. Migration 006 keeps the
                 // recorded width equal to the column's, so no run can finish

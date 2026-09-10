@@ -263,13 +263,24 @@
  * every failed row under the job and says that it hides a provider outage as
  * well as a refusal — and takes no ids beside it, since a list beside --all
  * would be read as one or the other silently. Every argument is accounted for:
- * an id after another flag, or a flag this tool does not have, is refused
- * rather than dropped (second review pass). An id that is not a failed row
- * under this job refuses the whole command, and nothing is written. So does a
- * failed row whose thought has NO vector (passed over, and said, under --all):
- * acceptance keeps the vector a row has, and a thought with none is invisible
- * to semantic search with nothing afterwards to say so — delete it, or fix its
- * text and --retry-failed. It needs 021's schema whole — the column and the
+ * an id after another flag, a flag this tool does not have, a flag given twice,
+ * or a flag that takes a value followed by another flag, is refused rather than
+ * dropped or read as the value (second and third review passes: `--job
+ * --switch-model` would have backfilled the corpus under the key
+ * "--switch-model"). An id that is not a failed row under this job refuses the
+ * whole command, and nothing is written. So does a failed row whose thought
+ * has NO vector (passed over, and said, under --all): acceptance keeps the
+ * vector a row has, and a thought with none is invisible to semantic search
+ * with nothing afterwards to say so — delete it, or fix its text and
+ * --retry-failed. And so does a failed row whose thought was WRITTEN SINCE the
+ * attempt read it and is not at the target: the acceptance would be void the
+ * moment it was written — every reader applies the bound below — and the row
+ * would return to the pool on the next run with the acceptance gone; the
+ * content the provider refused is not the content the row has, so
+ * --retry-failed tries that first (third review pass). A row whose thought IS
+ * at the target — the worker wrote a head window or bare windows before the
+ * row failed — is accepted whatever its timestamps: no reader needs the
+ * acceptance to leave it, and the counts list it as a caveat. It needs 021's schema whole — the column and the
  * eight-argument update_thought, the same refusal a run makes: acceptance is
  * read against the label, and 021's evidence backfill trusts every succeeded
  * row under a key naming a model — it predates acceptance and, applied, is
@@ -319,13 +330,18 @@
  * at the recorded width (the column's, when no width is recorded), suffix or
  * not, whose pass can be finished or its failed rows accepted, a key with a
  * live lease (a pass under it is running), and a key with no rows (a typo is
- * the likelier cause). The lease check and the DELETE are one transaction with
- * the key's rows locked, the DELETE takes exactly the rows the check locked,
- * and the record is read again inside it — so a claim taken meanwhile is not
- * lost under it, and a --switch-model back to that model committing meanwhile
- * keeps its pool and its record (first and second review passes). The vectors the retired pass wrote are still at its model, and the
- * corpus line printed after says so: `vector models` reports them until they
- * are re-embedded, which is the truth the rows keep once the record is gone.
+ * the likelier cause). The width judged by is the COLUMN's, before any record: a pass runs
+ * at the column's width and no other, so a record that disagrees with the
+ * column (a hand edit, a restore from another brain) must not make the one
+ * finishable key superseded (third review pass). The lease check and the
+ * DELETE are one transaction with the key's rows locked, the DELETE takes
+ * exactly the rows the check locked, and the record's row is read FOR UPDATE
+ * inside it — so a claim taken meanwhile is not lost under it, and a
+ * --switch-model back to that model either commits first and is seen, or
+ * waits (first to third review passes). The corpus line printed after, judged
+ * against the current model, says what the rows still are: the record of the
+ * pass is gone, the vectors it wrote are not, and `vector models` reports them
+ * until they are re-embedded.
  *
  * Both are maintenance modes like --status: they need the claim table and
  * nothing else — no provider, no model recorded — and refuse to be combined
@@ -428,12 +444,27 @@ const RETIRE_KEY = flag("retire");
   const takesMany = new Set(["accept-failed"]);
   const takesNone = new Set(["status", "dry-run", "switch-model", "retry-failed", "retry-fallbacks", "all"]);
   const stray: string[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (!a.startsWith("--")) { stray.push(a); continue; }
     const name = a.slice(2);
-    if (takesOne.has(name)) i += 1;
-    else if (takesMany.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
+    // Once: flag() and values() read the first occurrence, and a second
+    // would otherwise be consumed here and done nothing (third review pass).
+    if (seen.has(name)) {
+      console.error(`  --${name} is given twice — once, with everything it takes after it.`);
+      process.exit(2);
+    }
+    seen.add(name);
+    if (takesOne.has(name)) {
+      // The value must be one: `--job --switch-model` read "--switch-model" as
+      // the key and backfilled the corpus under it (third review pass).
+      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+        console.error(`  --${name} needs a value; what follows it is ${args[i + 1] ?? "nothing"}.`);
+        process.exit(2);
+      }
+      i += 1;
+    } else if (takesMany.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
     else if (!takesNone.has(name)) stray.push(a);
   }
   if (stray.length) {
@@ -685,7 +716,7 @@ const doneButNotAtTarget = () =>
   // never claimed); an edit is a new question — "Saying I know".
   sql`status = 'succeeded' AND EXISTS (
         SELECT 1 FROM thoughts x WHERE x.id = thought_id
-          AND NOT ((${accepted()}) AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at))
+          AND NOT ((${accepted()}) AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz))
           AND ${BACKFILL
             ? // The trust is bounded by 021's own evidence rule: a finished row
               // vouches for an unlabelled thought only while nothing has written
@@ -704,7 +735,10 @@ const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND s
 /**
  * …and STANDING: nothing has written the thought since the failed attempt
  * read it — claimed_at, not the release's finished_at, which an edit during a
- * slow refusal would have hidden behind (second review pass). The counts use
+ * slow refusal would have hidden behind (second review pass); a hand-written
+ * row with neither timestamp is never standing rather than NULL, which no
+ * reader would have counted and the data rule would never have returned
+ * (third review pass). The counts use
  * this form, so they cannot call a row accepted that the data rule and
  * preflight no longer treat as such (first review pass).
  * `last_error IS NOT NULL` above is not decoration: starts_with(NULL, …) is
@@ -713,7 +747,7 @@ const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND s
  * before its claim was released (first review pass).
  */
 const standingAcceptance = () =>
-  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at))`;
+  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz))`;
 
 /**
  * Return this job's rows a predicate selects to the pool as if never tried:
@@ -777,7 +811,7 @@ function printCounts(c: PassCounts, label: string): void {
  * not written since, is detail — "Saying I know" — and `unaccepted` is what a
  * warning counts. Before 021 there is nothing to read, and the line says so.
  */
-async function printCorpusByModel(): Promise<{ unaccepted: number; noneAt: boolean }> {
+async function printCorpusByModel(against: string = TARGET): Promise<{ unaccepted: number; noneAt: boolean }> {
   if (!HAS_LABEL) {
     console.log("  corpus:    the rows carry no model (migration 021 not applied)");
     return { unaccepted: 0, noneAt: false };
@@ -788,13 +822,13 @@ async function printCorpusByModel(): Promise<{ unaccepted: number; noneAt: boole
   const rows = (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[];
   // Acceptances under the target's OWN key, asked only when there is a vector
   // at another model to explain — the scan joins the corpus to the claims.
-  const acceptedRows = rows.some((r) => r.model !== null && r.model !== TARGET)
-    ? (await sql.unsafe(ACCEPTED_BY_MODEL_SQL, [reembedKey(TARGET, embedConfig.embeddingDim), ACCEPTED_CAVEAT_PREFIX])) as { model: string | null; accepted: number }[]
+  const acceptedRows = rows.some((r) => r.model !== null && r.model !== against)
+    ? (await sql.unsafe(ACCEPTED_BY_MODEL_SQL, [reembedKey(against, embedConfig.embeddingDim), ACCEPTED_CAVEAT_PREFIX])) as { model: string | null; accepted: number }[]
     : [];
-  const { at, unlabelled, others, otherCount, acceptedCount, unaccepted } = summariseCorpusByModel(rows, TARGET, acceptedRows);
+  const { at, unlabelled, others, otherCount, acceptedCount, unaccepted } = summariseCorpusByModel(rows, against, acceptedRows);
   const [{ n: noVector }] = await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`;
   console.log(
-    `  corpus:    ${at} at ${TARGET}` +
+    `  corpus:    ${at} at ${against}` +
       (others.length
         ? `, ${otherCount} at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")})` +
           (acceptedCount ? `, ${acceptedCount} of them accepted by the operator` : "")
@@ -931,7 +965,13 @@ async function printFailures(limit = 10): Promise<void> {
   for (const r of rows) {
     console.error(`    ${r.thought_id}  attempt ${r.attempt_count}  ${r.last_error ?? "(no error recorded)"}`);
   }
-  if (rows.length) console.error(`    a row the provider refuses permanently, that no retry will change: --accept-failed <thought-id…> — it keeps its vector, and the row says so`);
+  // The hint names what THIS shell can do: acceptance is refused under a
+  // model change and under a key naming another model (third review pass).
+  if (rows.length) {
+    if (refusalJob) console.error(`    a pass to another model: once the revert stands, --retire ${JOB} removes its record; its failed rows are not this shell's to accept`);
+    else if (modelChange) console.error(`    a row the provider refuses permanently: --accept-failed <thought-id…> once the switch is recorded (--switch-model) — it keeps its vector, and the row says so`);
+    else console.error(`    a row the provider refuses permanently, that no retry will change: --accept-failed <thought-id…> — it keeps its vector, and the row says so`);
+  }
 }
 
 // ── Saying "I know" — see the header ────────────────────────────────────────
@@ -953,7 +993,8 @@ if (RETIRE) {
   // schema; preflight resolves the width the same way, so the two agree on
   // which keys are superseded — first review pass).
   const currentModel = recorded.embedding_model ?? embedConfig.embeddingModel;
-  const currentDim = recorded.embedding_dim === undefined ? Number(col.width) : Number(recorded.embedding_dim);
+  // The column is the width authority — see the header (third review pass).
+  const currentDim = Number(col.width);
   const isCurrent = (model: string) => named !== null && named.model === model && named.dim === currentDim;
   const refuseCurrent = (model: string, how: string) =>
     refuse(
@@ -965,34 +1006,44 @@ if (RETIRE) {
   // The lease check and the DELETE in one transaction, the key's rows locked:
   // claim_thoughts skips locked rows, so a claim cannot be taken between the
   // two and lost under the DELETE. The DELETE takes exactly the rows locked,
-  // and the record is read again here: a --switch-model back to this key's
-  // model committing meanwhile — its record and its pool in one transaction —
-  // keeps both (second review pass).
+  // and the record's row is read FOR UPDATE here: a --switch-model back to
+  // this key's model — its record and its pool in one transaction — either
+  // committed first and is seen, or waits on the row until this commits (second
+  // review pass read it plainly, and a switch that locked none of the key's
+  // rows could commit unseen in between — third).
   const outcome = await sql.begin(async (tx: SQL) => {
     const rows = (await tx`
       SELECT thought_id::text AS id, status, (status = 'claimed' AND ttl_expires_at >= now()) AS live
       FROM thought_work_claims WHERE work_type = ${key} FOR UPDATE`) as { id: string; status: string; live: boolean }[];
-    const [nowRecorded] = (await tx`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
+    const [nowRecorded] = (await tx`SELECT value FROM ob1_config WHERE key = 'embedding_model' FOR UPDATE`) as { value: string }[];
     const byStatus = [...rows.reduce((m, r) => m.set(r.status, (m.get(r.status) ?? 0) + 1), new Map<string, number>())]
       .sort(([a], [b]) => a.localeCompare(b)).map(([s, c]) => `${c} ${s}`).join(", ");
     const live = rows.filter((r) => r.live).length;
     const movedTo = nowRecorded !== undefined && nowRecorded.value !== recorded.embedding_model && isCurrent(nowRecorded.value) ? nowRecorded.value : null;
-    if (rows.length === 0 || live > 0 || movedTo !== null || DRY_RUN) return { total: rows.length, live, byStatus, movedTo };
+    const wrote = rows.some((r) => r.status === "succeeded");
+    if (rows.length === 0 || live > 0 || movedTo !== null || DRY_RUN) return { total: rows.length, live, byStatus, movedTo, wrote };
     // Qualified by the key and bounded to the rows locked, the one DELETE this
     // tool makes: the record of a pass the record has moved on from, as 015's
     // fourth principle allows.
     const removed = (await tx`DELETE FROM thought_work_claims WHERE work_type = ${key} AND thought_id = ANY(${sql.array(rows.map((r) => r.id), "TEXT")}::uuid[]) RETURNING 1`) as unknown[];
-    return { total: removed.length, live, byStatus, movedTo };
+    return { total: removed.length, live, byStatus, movedTo, wrote };
   });
   if (outcome.total === 0) await refuse("no rows are recorded under that key — nothing to retire (a typo in the key is the likelier cause; --status --job <key> shows what a key holds).");
   if (outcome.live > 0) await refuse(`${outcome.live} row(s) under it are leased right now — a pass under this key is running; stop it first, or wait for the leases to expire.`);
-  if (outcome.movedTo !== null) await refuseCurrent(outcome.movedTo, "now recorded — the record moved while this ran");
+  if (outcome.movedTo !== null) await refuseCurrent(outcome.movedTo, "recorded — the record moved to it while this ran —");
   if (DRY_RUN) {
     console.log(`\n  would: retire ${key} — remove its ${outcome.total} row(s) (${outcome.byStatus}). Nothing was written.`);
   } else {
     console.log(`\n  retired ${key}: ${outcome.total} row(s) removed (${outcome.byStatus}).`);
-    if (named !== null) console.log(`  The vectors that pass wrote are still at ${named.model}; preflight's vector models check reports them until they are re-embedded:`);
-    await printCorpusByModel();
+    // Judged against the CURRENT model, not this shell's — the shell that ran
+    // the abandoned switch is still configured for the model it abandoned
+    // (third review pass) — and worded by what the pass did.
+    console.log(
+      outcome.wrote && named !== null
+        ? `  The vectors that pass wrote are still at ${named.model}; preflight's vector models check reports them until they are re-embedded:`
+        : "  That pass wrote no vector; the record of it is gone and the corpus stands as it was:"
+    );
+    await printCorpusByModel(currentModel);
   }
   await sql.close();
   process.exit(0);
@@ -1029,11 +1080,20 @@ if (ACCEPT_FAILED) {
   // With whether the thought has a vector to keep: one with none is invisible
   // to semantic search, and an accepted row would be the last thing to say so
   // (second review pass) — refused by id, passed over and said under --all.
+  // …and whether the thought was written since the attempt read it while not
+  // at the target — an acceptance every reader would treat as void from the
+  // start, and the next run would spend (third review pass); a thought at the
+  // target needs no reader to leave it, so the worker's own head-window write
+  // does not count against it.
   const failedRows = (await sql`
-    SELECT c.thought_id::text AS id, c.last_error, (t.embedding IS NULL) AS vectorless FROM thought_work_claims c
+    SELECT c.thought_id::text AS id, c.last_error, (t.embedding IS NULL) AS vectorless,
+           (t.embedding IS NOT NULL AND t.embedding_model IS DISTINCT FROM ${TARGET}
+            AND COALESCE(t.updated_at, t.created_at) > COALESCE(c.claimed_at, c.finished_at, '-infinity'::timestamptz)) AS edited_since
+    FROM thought_work_claims c
     JOIN thoughts t ON t.id = c.thought_id
-    WHERE c.work_type = ${JOB} AND c.status = 'failed' ORDER BY c.finished_at DESC`) as { id: string; last_error: string | null; vectorless: boolean }[];
-  const describe = (r: { id: string; last_error: string | null; vectorless?: boolean }) => `    ${r.id}  ${r.vectorless ? "(no vector) " : ""}${r.last_error ?? "(no error recorded)"}`;
+    WHERE c.work_type = ${JOB} AND c.status = 'failed' ORDER BY c.finished_at DESC`) as { id: string; last_error: string | null; vectorless: boolean; edited_since: boolean }[];
+  const describe = (r: { id: string; last_error: string | null; vectorless?: boolean; edited_since?: boolean }) =>
+    `    ${r.id}  ${r.vectorless ? "(no vector) " : r.edited_since ? "(written since the attempt) " : ""}${r.last_error ?? "(no error recorded)"}`;
   if (!ACCEPT_ALL && ACCEPT_IDS.length === 0) {
     await refuse(
       `it needs the rows to accept, by id — --accept-failed <thought-id…> — or --all for every failed row under ${JOB}, said explicitly\n` +
@@ -1065,13 +1125,26 @@ if (ACCEPT_FAILED) {
         `  search, and an accepted row would be the last thing to say so. Delete the thought, or fix its text and --retry-failed.`
     );
   }
-  const passedOver = ACCEPT_ALL ? vectorless : [];
-  const ids = ACCEPT_ALL ? failedRows.filter((r) => !r.vectorless).map((r) => r.id) : asked;
-  if (ids.length === 0) await refuse(`no failed rows under ${JOB}${passedOver.length ? ` with a vector to keep (${passedOver.length} without one, listed by --status)` : ""} — nothing to accept.`);
+  const editedSince = failedRows.filter((r) => r.edited_since);
+  const edited = asked.filter((id) => editedSince.some((r) => r.id === id));
+  if (edited.length) {
+    await refuse(
+      `written since the attempt read it: ${edited.join(", ")}. The content the provider refused is not the content the row has now, and\n` +
+        `  the acceptance would be void as written — every reader applies that bound, and the next run would return the row with it gone.\n` +
+        `  --retry-failed tries the new content; accept what still fails.`
+    );
+  }
+  const passedOver = ACCEPT_ALL ? failedRows.filter((r) => r.vectorless || r.edited_since) : [];
+  const ids = ACCEPT_ALL ? failedRows.filter((r) => !r.vectorless && !r.edited_since).map((r) => r.id) : asked;
+  if (ids.length === 0) await refuse(`no failed rows under ${JOB}${passedOver.length ? ` to accept as they are (${passedOver.length} passed over, listed by --status)` : ""} — nothing to accept.`);
   const chosen = failedRows.filter((r) => ids.includes(r.id));
   const sayPassedOver = () => {
     if (!passedOver.length) return;
-    console.error(`  ${passedOver.length} failed row(s) whose thought has no vector were not accepted — nothing to keep, and nothing would say afterwards that the thought is invisible to search; delete them, or fix their text and --retry-failed:`);
+    console.error(
+      `  ${passedOver.length} failed row(s) were not accepted — a thought with no vector has nothing to keep, and nothing would say afterwards that it is invisible\n` +
+        `  to search (delete it, or fix its text and --retry-failed); one written since the attempt read it has content the provider never saw (--retry-failed\n` +
+        `  tries it; accept what still fails):`
+    );
     for (const r of passedOver) console.error(describe(r));
   };
   if (DRY_RUN) {

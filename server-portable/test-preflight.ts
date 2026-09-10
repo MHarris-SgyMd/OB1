@@ -496,10 +496,12 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const reverted = await run(SQL_ENV);
-  assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /the pass to .* has not finished/.test(reverted.out),
+  assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /re-embed pass\s+reembed:/.test(reverted.out),
          "with the record on another model and the configured model's pass unfinished, both lines warn");
-  assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model \(--retry-failed for the 1 failed row\(s\) once their cause is fixed\);/.test(reverted.out) && !/--accept-failed/.test(reverted.out),
-         "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse — and not --accept-failed, which it refuses under a model change");
+  assert(new RegExp(`${rx(KEY)}: 6 thoughts — .* — a pass to ${rx(EMBEDDING_MODEL)} @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(other-model @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(reverted.out),
+         "…and the configured model's own key, which the record has moved on from, is a superseded key too — the record decides, not this server's environment");
+  assert(new RegExp(`Either finish that switch — cd db && OB1_EMBEDDING_MODEL=${rx(EMBEDDING_MODEL)} OB1_EMBEDDING_DIM=${EMBEDDING_DIM} bun reembed\\.ts --url \\$DATABASE_URL --switch-model — or, if the revert stands, retire its record: cd db && bun reembed\\.ts --url \\$DATABASE_URL --retire ${rx(KEY)}`).test(reverted.out) && !/--accept-failed/.test(reverted.out),
+         "…with both remedies — finish the switch, or retire the record — and not --accept-failed, which reembed.ts refuses under a model change");
   /**
    * The same disagreement, with an unfinished key preflight cannot read a
    * model from: the command still needs --switch-model, since the shell it
@@ -528,6 +530,11 @@ else {
   const wrongDim = await run({ ...SQL_ENV, OB1_EMBEDDING_DIM: String(EMBEDDING_DIM + 1) });
   assert(wrongDim.out.includes(`--job ${CTX}`) && !/where the column and the record are/.test(wrongDim.out),
          "…and a server misconfigured for another width does not make it one nothing can finish: the width judged by is the column's, not this server's");
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM + 1)})`;
+  const wrongRecord = await run(SQL_ENV);
+  assert(wrongRecord.out.includes(`--job ${CTX}`) && !/where the column and the record are/.test(wrongRecord.out),
+         "…nor does a record that disagrees with the column: the column comes first, since a pass runs at its width and no other");
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_dim'`;
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
   await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM)})`;
 
@@ -544,6 +551,21 @@ else {
   assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`--retire ${WIDE}`) && !/DELETE FROM/.test(wide.out) && !/--switch-model/.test(wide.out),
          "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
+
+  /**
+   * Nothing recorded (006 not applied, or the row deleted) and a stale key at
+   * another model: this server's model stands in for the record, as
+   * reembed.ts's --retire judges, so the key is an abandoned switch with
+   * --retire as a remedy — not "finish it under X", which would have
+   * re-embedded the corpus to X against a server configured for M.
+   */
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${OTHER}', ARRAY['${ids[0]}']::uuid[])`);
+  const noRecord = await run(SQL_ENV);
+  assert(new RegExp(`${rx(OTHER)}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is not this server's model \\(${rx(EMBEDDING_MODEL)}; nothing is recorded\\); its rows describe a switch that was abandoned or reverted`).test(noRecord.out) && noRecord.out.includes(`--retire ${OTHER}`) && !noRecord.out.includes(`--job ${OTHER}`),
+         `with nothing recorded, a stale key at another model is an abandoned switch judged against this server's model, with --retire as a remedy and never --job under it (${noRecord.out.split("\n").find((l) => /re-embed pass/.test(l))?.trim()})`);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${OTHER}`;
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${EMBEDDING_MODEL})`;
 
   /**
    * The rows say which model they are at (migration 021, SMD-1068). The claim

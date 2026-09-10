@@ -778,7 +778,9 @@ export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the o
  * The accepted vectors by label, for the same reduction: per embedding_model,
  * how many rows with a vector have an accepted row — standing: nothing has
  * written the thought since the attempt READ it, claimed_at (015 keeps it on
- * the row after release; finished_at stands in for a row never claimed) —
+ * the row after release; finished_at stands in for a row never claimed, and a
+ * hand-written row with neither is never standing — -infinity, so no reader
+ * evaluates NULL and leaves it stuck between them) —
  * under $1, the OWN key of the model the corpus is
  * judged against (`reembedKey(model, dim)`, exactly). The own key only: a
  * backfill key's failure is about the backfill, and its acceptance tells the
@@ -796,7 +798,7 @@ export const ACCEPTED_BY_MODEL_SQL =
   "WHERE t.embedding IS NOT NULL AND EXISTS (" +
   "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.work_type = $1 " +
   "AND k.status = 'succeeded' AND k.last_error IS NOT NULL AND starts_with(k.last_error, $2) " +
-  "AND COALESCE(t.updated_at, t.created_at) <= COALESCE(k.claimed_at, k.finished_at)) GROUP BY 1";
+  "AND COALESCE(t.updated_at, t.created_at) <= COALESCE(k.claimed_at, k.finished_at, '-infinity'::timestamptz)) GROUP BY 1";
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's

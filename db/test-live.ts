@@ -1012,6 +1012,26 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
   const stray = await reembed("--accept-failed", poisonId, "--dry-run", lateId);
   assert(stray.code === 2 && /not understood: /.test(stray.out) && stray.out.includes(lateId), "…and an id after another flag is refused rather than dropped");
+  const twice = await reembed("--accept-failed", poisonId, "--accept-failed", lateId);
+  assert(twice.code === 2 && /--accept-failed is given twice/.test(twice.out), "…as is the flag given twice, whose second list would otherwise be dropped");
+  const jobless = await reembedIn({}, "--job", "--switch-model");
+  assert(jobless.code === 2 && /--job needs a value/.test(jobless.out) && (await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = '--switch-model'`)[0].c === 0,
+    `a flag that takes a value followed by another flag is refused, not read as the value — no pass runs under the key "--switch-model" (exit ${jobless.code})`);
+  // A thought written since the attempt read it, not at the target: the
+  // acceptance would be void as written, so it is refused and --retry-failed
+  // named; a thought AT the target (the worker wrote its head window before
+  // the row failed) is accepted whatever its timestamps.
+  await sql`SELECT update_thought((SELECT id FROM thoughts WHERE content = ${poisonText}), NULL::text, ${{ edited: true }}::jsonb)`;
+  const editedSince = await reembed("--accept-failed", poisonId);
+  assert(editedSince.code === 2 && /written since the attempt read it/.test(editedSince.out) && /--retry-failed tries the new content/.test(editedSince.out) && (await claimCounts()).failed === 3,
+    `a failed row whose thought was written since the attempt read it is refused — the content the provider refused is not the row's now (exit ${editedSince.code})`);
+  const [{ id: throttledId }] = await sql`SELECT id::text AS id FROM thoughts WHERE content = ${throttledDoc}`;
+  const atTargetDry = await reembed("--dry-run", "--accept-failed", throttledId);
+  assert(atTargetDry.code === 0 && /would: accept 1 failed row\(s\)/.test(atTargetDry.out),
+    `…while a failed row whose thought is at the target — its head window written by the worker before it failed — can be accepted whatever its timestamps (exit ${atTargetDry.code})`);
+  // A fresh attempt would stamp claimed_at past the edit; stamped by hand here,
+  // since the stub still refuses the text and a retry would change the flow.
+  await sql`UPDATE thought_work_claims SET claimed_at = now() WHERE work_type = ${REEMBED_JOB} AND thought_id = ${poisonId}::uuid`;
   // A failed row whose thought has no vector: nothing to keep, and an accepted
   // row would be the last thing to say the thought is invisible to search.
   const vectorless = "refused, and never embedded";
@@ -1023,7 +1043,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(noVector.code === 2 && /no vector to keep/.test(noVector.out) && (await claimCounts()).failed === 4,
     `a failed row whose thought has no vector is refused — acceptance keeps a vector, and a thought with none would vanish from search with nothing to say so (exit ${noVector.code})`);
   const allDry = await reembed("--dry-run", "--accept-failed", "--all");
-  assert(allDry.code === 0 && /would: accept 3 failed row\(s\)/.test(allDry.out) && /1 failed row\(s\) whose thought has no vector were not accepted/.test(allDry.out) && allDry.out.includes(`${vectorlessId}  (no vector)`),
+  assert(allDry.code === 0 && /would: accept 3 failed row\(s\)/.test(allDry.out) && /1 failed row\(s\) were not accepted — a thought with no vector has nothing to keep/.test(allDry.out) && allDry.out.includes(`${vectorlessId}  (no vector)`),
     `…and --all passes over it, saying so (exit ${allDry.code})`);
   await sql`DELETE FROM thoughts WHERE id = ${vectorlessId}::uuid`;
   const allAndIds = await reembed("--accept-failed", "--all", poisonId);
@@ -1282,6 +1302,12 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(DIM)})`;
   // No model recorded: this shell's own key is still not retireable — a record
   // deleted by hand does not make a running pass a superseded one.
+  // A record that disagrees with the column (a hand edit): the column is the
+  // width authority, so the one finishable key is still not retireable.
+  await sql`UPDATE ob1_config SET value = ${String(DIM + 1)} WHERE key = 'embedding_dim'`;
+  const retireWrongRecord = await reembed("--retire", DEFAULT_KEY);
+  assert(retireWrongRecord.code === 2 && /names the recorded model/.test(retireWrongRecord.out), `…and a record that disagrees with the column does not make the column-width key superseded (exit ${retireWrongRecord.code})`);
+  await sql`UPDATE ob1_config SET value = ${String(DIM)} WHERE key = 'embedding_dim'`;
   await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
   const retireOwnNoRecord = await reembed("--retire", DEFAULT_KEY);
   assert(retireOwnNoRecord.code === 2 && /names the configured model/.test(retireOwnNoRecord.out), `…while with no model recorded this shell's own key is refused as the configured model's (exit ${retireOwnNoRecord.code})`);
@@ -1296,8 +1322,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // From the shell that ran the abandoned switch — still configured for
   // other-model: the record, not this shell, says which model is current.
   const retired = await reembedIn({ OB1_EMBEDDING_MODEL: "other-model" }, "--retire", OTHER_KEY);
-  assert(retired.code === 0 && new RegExp(`retired ${OTHER_KEY}: 2 row\\(s\\) removed \\(2 pending\\)`).test(retired.out) && /still at other-model/.test(retired.out),
-    `--retire removes the superseded key's rows, from the shell that ran that switch, and says what its vectors still are (exit ${retired.code}: ${retired.out.split("\n").find((l) => /retired/.test(l))?.trim()})`);
+  assert(retired.code === 0 && new RegExp(`retired ${OTHER_KEY}: 2 row\\(s\\) removed \\(2 pending\\)`).test(retired.out) && /wrote no vector/.test(retired.out) && /corpus:\s+42 at stub-embed\s*$/m.test(retired.out),
+    `--retire removes the superseded key's rows, from the shell that ran that switch, and reports the corpus against the recorded model — not this shell's (exit ${retired.code}: ${retired.out.split("\n").find((l) => /corpus:/.test(l))?.trim()})`);
   const [{ c: otherLeft }] = await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${OTHER_KEY}`;
   assert(Number(otherLeft) === 0, "…leaving nothing under it");
   {

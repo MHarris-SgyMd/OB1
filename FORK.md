@@ -3537,9 +3537,16 @@ whose pass never wrote its vector (the remedy that re-runs 021's body on a
 `--baseline`'d brain now says to return accepted rows first); and so does a
 failed row whose thought has *no vector*, passed over and said under `--all`,
 since acceptance keeps a vector and a thought with none would vanish from search
-with nothing left to say so. Every argument is accounted for: an id after
-another flag, or a flag the tool does not have, is refused rather than dropped
-(second pass — `--accept-failed a --dry-run b` accepted one row and exited 0). `--status`
+with nothing left to say so; and so does a failed row whose thought was written
+since the attempt read it while not at the target — the acceptance would be void
+as written, every reader applying the bound below, and the next run would spend
+it (third pass; a thought at the target, its head window the worker's own write,
+is accepted whatever its timestamps). Every argument is accounted for: an id
+after another flag, a flag the tool does not have, a flag given twice, or a flag
+that takes a value followed by another flag, is refused rather than dropped or
+read as the value (second pass — `--accept-failed a --dry-run b` accepted one
+row and exited 0; third — `--job --switch-model` would have backfilled the
+corpus under the key `--switch-model`). `--status`
 counts them inside the caveat parenthesis ("37 succeeded (2 with a caveat, 1
 accepted by the operator)") and lists them among the caveats; every list of
 failed rows names the flag; `--retry-fallbacks` returns them like any caveat,
@@ -3558,9 +3565,10 @@ updated_at <= finished_at)`, under either key shape), and `vector models` counts
 its vector as detail — "41 at stub-embed, 1 at another model accepted by the
 operator (old-model: 1)", an ok — a warning counting only the un-accepted. Each
 ONLY WHILE NOTHING HAS WRITTEN THE THOUGHT SINCE THE ATTEMPT READ IT:
-`updated_at <= claimed_at` (`finished_at` for a row never claimed), the shape of
-the bound 021 gave its backfill and change 38's fifth review pass gave the data
-rule under a backfill key. An edit, or a re-capture, is a new question, and the
+`updated_at <= claimed_at` (`finished_at` for a row never claimed, and a
+hand-written row with neither is never standing rather than NULL — third pass),
+the shape of the bound 021 gave its backfill and change 38's fifth review pass
+gave the data rule under a backfill key. An edit, or a re-capture, is a new question, and the
 row returns to the pool as any moved row does (a metadata-only edit reopens it
 too: one evidence rule, not two). Preflight counts an acceptance only under the
 recorded model's *own* key (`ACCEPTED_BY_MODEL_SQL`; a backfill key's acceptance
@@ -3583,16 +3591,22 @@ the recorded model at another width (which nothing can complete), or a
 `reembed:` key naming no model (an abandoned backfill) — printed by preflight
 as the remedy in place of the hand statement. Refused, with nothing written: a
 key without the prefix (another tool's pass), a key naming the recorded model —
-or this shell's, when nothing is recorded — at the recorded width, or the
-column's when none is recorded, suffix or not, whose pass can be finished or its
-failed rows accepted (both tools take the column's width when none is recorded
-— preflight now reads it, where this server's configured width stood in and a
-misconfigured server called the live pass one nothing could finish), a key with
-a live lease (a pass under it is running — the check and the DELETE are one
-transaction over the key's locked rows, the DELETE bounded to those rows and the
-record read again inside, so a `--switch-model` back to that model committing
-meanwhile keeps its pool), and a key with no rows (a typo is the likelier
-cause). It prints what it removed and
+or this shell's, when nothing is recorded — at the column's width, suffix or
+not, whose pass can be finished or its
+failed rows accepted (both tools judge a key's width by the *column's*, before
+any record — a pass runs at the column's width and no other, so a hand-edited
+record must not make the one finishable key superseded — and the current model
+is the record's, or this server's when nothing is recorded, in both: second and
+third passes, where this server's configured width had stood in for a column
+preflight never read, and where preflight with nothing recorded sent a stale key
+to "finish it under X"), a key with a live lease (a pass under it is running —
+the check and the DELETE are one transaction over the key's locked rows, the
+DELETE bounded to those rows and the record's row read `FOR UPDATE` inside, so a
+`--switch-model` back to that model either committed first and is seen or waits
+— second pass read it plainly, and a switch that locked none of the key's rows
+could commit unseen in between, third), and a key with no rows (a typo is the
+likelier cause). It prints what it removed, judged against the current model
+rather than this shell's, worded by what the pass did, and
 then the corpus by model: the vectors the retired pass wrote are still at its
 model, and `vector models` reports them until they are re-embedded — the truth
 the rows keep once the record is gone. Both flags are maintenance modes like
@@ -3602,10 +3616,15 @@ pass` remedies name both: `--accept-failed <thought-id…>` under the key's own
 `--job`, beside `--retry-failed`, wherever a key has failed rows and the remedy
 does not carry `--switch-model` (the tool refuses the two together, and refuses
 acceptance under a model change — the switch first, then what it leaves); and
-`--retire <key>` in the superseded and other-width branches. `--status` and a
-run predict preflight's second `vector models` warning too — no vector known to
-be at the model, its vectors all accepted or unlabelled — so the two tools
-still never disagree.
+`--retire <key>` in the superseded and other-width branches — and a configured
+key the record has moved on from is a superseded key too, judged before the
+configured-key branch, so its operator gets both remedies rather than "finish
+it" alone (third pass). `--status` and a run predict preflight's second `vector
+models` warning too — no vector known to be at the model, its vectors all
+accepted or unlabelled — so the two tools still never disagree; and the hint
+under a list of failed rows names what *this* shell can do — `--retire` for a
+key naming another model, `--accept-failed` after the switch under a model
+change.
 
 **Verify, as the ticket asked.** `test-live.ts` [9]: the poisoned row that never
 recovers — `--accept-failed` with no ids refuses listing the three failed rows
@@ -3690,6 +3709,36 @@ space by the pass and left for the tidy-up: the bound spelled four times, the
 inline copy of `notAtTarget()`, two vocabularies for one corpus line, the
 `O(F²)` filter under `--all`, `--retire` materialising every row to count by
 status. Suites after: live 298, preflight 128.
+
+**A third pass, triaged.** Ten more, all fixed, none ticketed; the top one was
+again in the previous pass's own addition — the argument scanner — and three of
+the rest were cells of the same tables the first two passes had drawn (the
+width authority, the current model, the bound's NULLs). The scanner read a flag
+as another flag's value: `--job --switch-model` backfilled the corpus under the
+key `--switch-model` — a value must be one, and a flag given twice is refused
+rather than its second list dropped. `--retire` and preflight judged a key's
+width by the record before the column, so a hand-edited record made the one
+finishable key superseded — the column first, in both. The record re-read inside
+`--retire`'s transaction was a plain read: a `--switch-model` back to that model
+that locked none of the key's rows committed unseen between the lock and the
+DELETE — the record's row is read `FOR UPDATE`. Preflight's "another model"
+test required a recorded model while `--retire` fell back to the shell's, so
+with nothing recorded a stale key was sent to "finish it under X" — the same
+fallback in both. `--accept-failed` wrote an acceptance every reader would treat
+as void when the thought had been written since the attempt read it — refused,
+with `--retry-failed` named, for a thought not at the target. The corpus line
+after a `--retire` was judged against this shell's model, so the shell that ran
+the abandoned switch was told the whole corpus was elsewhere — against the
+current model, and "wrote no vector" when it wrote none. A configured key the
+record had moved on from got "finish it" alone — the superseded branch first.
+The failed-rows hint offered `--accept-failed` under `--status` in the two
+states the tool refuses it — it names `--retire` or the switch there. A
+hand-written accepted row with neither timestamp evaluated NULL in every reader
+and was never returned — `-infinity`, so it is consistently not standing. Cut
+for space and left for the tidy-up: the standing predicate spelled three times,
+the width read twice, the flag-arity table beside `flag()`/`values()`, the UUID
+regex `store-sql.ts` already has, dead `values("all")`. Suites after: live 303,
+preflight 131.
 
 **Not done here.** An acceptance under a backfill key is spent by a model change
 (every terminal row restarts there, as before 021), so a corpus whose history is
