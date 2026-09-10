@@ -381,6 +381,10 @@ const flag = (name: string): string | undefined => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 const has = (name: string) => args.includes(`--${name}`);
+/** What each flag takes — one value, any number, none — for the scanner below; flag(), has() and values() read by it. */
+const TAKES_ONE = new Set(["url", "workers", "batch", "ttl", "job", "retire"]);
+const TAKES_MANY = new Set(["accept-failed"]);
+const TAKES_NONE = new Set(["status", "dry-run", "switch-model", "retry-failed", "retry-fallbacks", "all"]);
 const numberFlag = (name: string, fallback: number, min: number): number => {
   const raw = flag(name);
   if (raw === undefined) return fallback;
@@ -440,9 +444,6 @@ const RETIRE_KEY = flag("retire");
 // does not have, is refused rather than dropped — `--accept-failed a --dry-run
 // b` would otherwise accept one row and exit 0 (second review pass).
 {
-  const takesOne = new Set(["url", "workers", "batch", "ttl", "job", "retire"]);
-  const takesMany = new Set(["accept-failed"]);
-  const takesNone = new Set(["status", "dry-run", "switch-model", "retry-failed", "retry-fallbacks", "all"]);
   const stray: string[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
@@ -456,7 +457,7 @@ const RETIRE_KEY = flag("retire");
       process.exit(2);
     }
     seen.add(name);
-    if (takesOne.has(name)) {
+    if (TAKES_ONE.has(name)) {
       // The value must be one: `--job --switch-model` read "--switch-model" as
       // the key and backfilled the corpus under it (third review pass).
       if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
@@ -464,8 +465,8 @@ const RETIRE_KEY = flag("retire");
         process.exit(2);
       }
       i += 1;
-    } else if (takesMany.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
-    else if (!takesNone.has(name)) stray.push(a);
+    } else if (TAKES_MANY.has(name)) while (i + 1 < args.length && !args[i + 1].startsWith("--")) i++;
+    else if (!TAKES_NONE.has(name)) stray.push(a);
   }
   if (stray.length) {
     console.error(`  not understood: ${stray.join(" ")} — ids go right after --accept-failed, and the flags are listed in the header of db/reembed.ts.`);
@@ -716,7 +717,7 @@ const doneButNotAtTarget = () =>
   // never claimed); an edit is a new question — "Saying I know".
   sql`status = 'succeeded' AND EXISTS (
         SELECT 1 FROM thoughts x WHERE x.id = thought_id
-          AND NOT ((${accepted()}) AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz))
+          AND NOT ((${accepted()}) AND ${standingBound()})
           AND ${BACKFILL
             ? // The trust is bounded by 021's own evidence rule: a finished row
               // vouches for an unlabelled thought only while nothing has written
@@ -725,13 +726,23 @@ const doneButNotAtTarget = () =>
               sql`(x.embedding IS NULL
                    OR (x.embedding_model IS NOT NULL AND x.embedding_model <> ${TARGET})
                    OR (x.embedding_model IS NULL AND x.updated_at > finished_at))`
-            : sql`(x.embedding IS NULL OR x.embedding_model IS DISTINCT FROM ${TARGET})`})`;
+            : // notAtTarget()'s columns are unqualified, and name x's here: the
+              // claim row has none of them.
+              notAtTarget()})`;
 const caveatsAtTarget = () => sql`${withCaveat()} AND NOT (${doneButNotAtTarget()})`;
 /**
  * An accepted row — see "Saying I know": a succeeded row whose caveat is the
  * operator's. Recognised by the prefix config.mjs spells once for both tools.
  */
 const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`;
+/**
+ * The bound an acceptance stands within: the thought `x` written no later than
+ * the claim row's attempt read it. Named for a thought aliased x beside an
+ * unaliased claim row, which is how every reader here joins the two; config.mjs
+ * spells it once more for preflight and the corpus query, where the aliases
+ * differ. See "Saying I know".
+ */
+const standingBound = () => sql`COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)`;
 /**
  * …and STANDING: nothing has written the thought since the failed attempt
  * read it — claimed_at, not the release's finished_at, which an edit during a
@@ -747,7 +758,7 @@ const accepted = () => sql`status = 'succeeded' AND last_error IS NOT NULL AND s
  * before its claim was released (first review pass).
  */
 const standingAcceptance = () =>
-  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz))`;
+  sql`${accepted()} AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND ${standingBound()})`;
 
 /**
  * Return this job's rows a predicate selects to the pool as if never tried:
@@ -1067,7 +1078,8 @@ if (ACCEPT_FAILED) {
         `  one included — as proof the thought is at the key's model.`
     );
   }
-  if (ACCEPT_ALL && (ACCEPT_IDS.length > 0 || values("all").length > 0)) {
+  // Ids AFTER --all are the scanner's to refuse (it takes nothing); this is the list before it.
+  if (ACCEPT_ALL && ACCEPT_IDS.length > 0) {
     await refuse(`--all takes no ids beside it — name the rows, or accept every failed row under ${JOB} with --all alone.`);
   }
   if (modelChange) {
@@ -1086,12 +1098,11 @@ if (ACCEPT_FAILED) {
   // target needs no reader to leave it, so the worker's own head-window write
   // does not count against it.
   const failedRows = (await sql`
-    SELECT c.thought_id::text AS id, c.last_error, (t.embedding IS NULL) AS vectorless,
-           (t.embedding IS NOT NULL AND t.embedding_model IS DISTINCT FROM ${TARGET}
-            AND COALESCE(t.updated_at, t.created_at) > COALESCE(c.claimed_at, c.finished_at, '-infinity'::timestamptz)) AS edited_since
-    FROM thought_work_claims c
-    JOIN thoughts t ON t.id = c.thought_id
-    WHERE c.work_type = ${JOB} AND c.status = 'failed' ORDER BY c.finished_at DESC`) as { id: string; last_error: string | null; vectorless: boolean; edited_since: boolean }[];
+    SELECT thought_id::text AS id, last_error, (x.embedding IS NULL) AS vectorless,
+           (x.embedding IS NOT NULL AND x.embedding_model IS DISTINCT FROM ${TARGET} AND NOT (${standingBound()})) AS edited_since
+    FROM thought_work_claims
+    JOIN thoughts x ON x.id = thought_id
+    WHERE work_type = ${JOB} AND status = 'failed' ORDER BY finished_at DESC`) as { id: string; last_error: string | null; vectorless: boolean; edited_since: boolean }[];
   const describe = (r: { id: string; last_error: string | null; vectorless?: boolean; edited_since?: boolean }) =>
     `    ${r.id}  ${r.vectorless ? "(no vector) " : r.edited_since ? "(written since the attempt) " : ""}${r.last_error ?? "(no error recorded)"}`;
   if (!ACCEPT_ALL && ACCEPT_IDS.length === 0) {
@@ -1137,7 +1148,8 @@ if (ACCEPT_FAILED) {
   const passedOver = ACCEPT_ALL ? failedRows.filter((r) => r.vectorless || r.edited_since) : [];
   const ids = ACCEPT_ALL ? failedRows.filter((r) => !r.vectorless && !r.edited_since).map((r) => r.id) : asked;
   if (ids.length === 0) await refuse(`no failed rows under ${JOB}${passedOver.length ? ` to accept as they are (${passedOver.length} passed over, listed by --status)` : ""} — nothing to accept.`);
-  const chosen = failedRows.filter((r) => ids.includes(r.id));
+  const idSet = new Set(ids);
+  const chosen = failedRows.filter((r) => idSet.has(r.id));
   const sayPassedOver = () => {
     if (!passedOver.length) return;
     console.error(
@@ -1155,8 +1167,9 @@ if (ACCEPT_FAILED) {
     await sql.close();
     process.exit(0);
   }
-  // finished_at stays the failure's — the bound is measured from it (see the
-  // header); a row 015 marked failed without one (a reaped lease) gets now().
+  // The row's timestamps stay the failure's — the bound is claimed_at (see the
+  // header). 015 stamps finished_at on every failed row, released or reaped;
+  // the COALESCE covers a hand-written one.
   // What is printed is what was written: a row another process returned to the
   // pool between the list above and this statement is not accepted, and is not
   // listed as if it were (first review pass).

@@ -3740,6 +3740,21 @@ the width read twice, the flag-arity table beside `flag()`/`values()`, the UUID
 regex `store-sql.ts` already has, dead `values("all")`. Suites after: live 303,
 preflight 131.
 
+**Tidy-up, while the files were open.** No behaviour change. The standing bound
+is spelled once in `reembed.ts` (`standingBound()`, for a thought aliased `x`
+beside an unaliased claim row, which is how every reader there joins the two —
+the acceptance query is re-aliased to match) and once more in `config.mjs` for
+preflight and the corpus query, where the aliases differ; the data rule's
+own-key branch reuses `notAtTarget()` instead of its inline copy; the flag-arity
+table sits beside `flag()`, `has()` and `values()`; the dead `values("all")`
+test is gone (the scanner refuses anything after `--all`); the chosen rows are
+filtered by a set; the comment that said a reaped lease lacks `finished_at`
+says what 015 does. Left: `store-sql.ts`'s UUID pattern is inline, not
+exported, and that file is not this change's to touch; `--retire` reads the
+key's rows rather than counting them, because the lock and the bounded DELETE
+need them; the corpus line's wording differs between the two tools, and
+changing it is a change in what they print.
+
 **Not done here.** An acceptance under a backfill key is spent by a model change
 (every terminal row restarts there, as before 021), so a corpus whose history is
 under `reembed:nightly` re-asks every accepted row on a switch. 021's evidence
