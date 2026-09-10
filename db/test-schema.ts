@@ -2275,13 +2275,13 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   row = await rowOf(fresh);
   assert(row.windows === 0 && row.axis === 5, "a first capture with a vector has nothing to remove and stores as before");
 
-  // The body: 021's, plus the CTE and the block — and the sentinel a successor must keep.
+  // The body: 021's, plus the locked read and the block. The rule itself is
+  // proved by the cases above; asserted here are the sentinel a successor must
+  // keep and the one fact behaviour cannot show — that the label is read from
+  // the row LOCKED, so the INSERT lands on the row whose label was read.
   const up = await bodyOf(UP3);
   assert(/ob1:vector-replaces-chunks/.test(up), "the 3-argument body carries the ob1:vector-replaces-chunks sentinel");
-  assert(/WITH before AS \(\s+SELECT embedding_model FROM thoughts WHERE content_fingerprint = v_fingerprint\s+\)\s+INSERT INTO thoughts/.test(up) && /RETURNING id, EXISTS \(SELECT 1 FROM before\), \(SELECT embedding_model FROM before\)/.test(up),
-         "…the row's label before the write read in the same statement as the write");
-  assert(/IF p_embedding IS NOT NULL AND v_existed\s+AND \(v_old_label IS NULL OR v_old_label IS DISTINCT FROM p_payload->>'embedding_model'\) THEN\s+DELETE FROM thought_chunks WHERE thought_id = v_id;\s+END IF;/.test(up),
-         "…the DELETE bounded to the captured row, under a vector arriving that the label does not vouch for");
+  assert(/content_fingerprint = v_fingerprint FOR UPDATE/.test(up) && !/WITH before AS/.test(up), "…and reads the row's label FOR UPDATE, not at the statement's snapshot");
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up) && /ELSE EXCLUDED\.embedding_model END/.test(up),
          "…carrying 005's guard, 008's actor and 021's label in the INSERT and the ON CONFLICT clause");
   const up4 = await bodyOf("upsert_thought(text, jsonb, vector, jsonb)");

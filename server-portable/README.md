@@ -70,9 +70,9 @@ Over a direct connection `atomic capture` reads the 3-argument
 `upsert_thought`'s body as well: 021 re-applied by hand puts back the form
 from before migration 022, under which a re-capture that makes no windows at
 another model leaves the previous vector's chunk rows behind, and that is a
-warning naming 022; a role that cannot DELETE from `thought_chunks` — the
-function runs as its caller — is a failure with the GRANT as the remedy. Over
-PostgREST the check is a skip: neither is reachable there.
+warning naming 022. `chunk delete privilege`: a role that cannot DELETE from
+`thought_chunks` — every chunk writer runs as its caller — is a failure with the
+GRANT as the remedy. Over PostgREST both are skips: neither is reachable there.
 
 ## Choosing a data layer
 

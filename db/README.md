@@ -62,7 +62,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `484 assertions: 484 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `483 assertions: 483 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty-two migrations applied, and
 `\d thoughts` shows eight columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
@@ -93,7 +93,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
 | `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
-| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read in the same statement as the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and that check refuses a role without the privilege, printing the GRANT | This fork |
+| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `chunk delete privilege` refuses a role without DELETE on the table, printing the GRANT | This fork |
 
 ## What changed relative to the guide
 
@@ -776,7 +776,7 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 484 assertions, PGlite, no container
+bun test-schema.ts                    # 483 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts   # 308 assertions, real server, throwaway container
 ```
 
@@ -890,7 +890,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 484 properties, including:
+asserts 483 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1030,10 +1030,8 @@ asserts 484 properties, including:
   the windows; at another model, naming no model, or over a row whose label
   is unknown it removes them; one with no vector keeps windows, vector and
   label, and so does a 2-argument re-capture; a first capture has nothing to
-  remove; the body reads the row's label in the same statement as the write,
-  carries the `ob1:vector-replaces-chunks` sentinel, the DELETE bounded to
-  the captured row under the rule, and 005's guard, 008's actor and 021's
-  label; the 4-argument form is 013's; three overloads, 022 the last definer
+  remove; the body carries the `ob1:vector-replaces-chunks` sentinel and
+  reads the row's label `FOR UPDATE` before the write; the 4-argument form is 013's; three overloads, 022 the last definer
   of `upsert_thought`; and the trap — 021 re-applied puts 021's body back and
   a re-capture at another model leaves the windows again, until 022 is
   re-applied

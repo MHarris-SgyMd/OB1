@@ -170,7 +170,7 @@ db/bench-plan.ts                 # fix 36  (new file — the unfiltered plan at 
 db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends recency after the candidate scan; search_thoughts_hybrid carries the weight)
 evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
 db/migrations/021_*.sql          # fix 38  (new file — thoughts.embedding_model: a vector carries the model that produced it; both writers carry it)
-db/migrations/022_*.sql          # fix 40  (new file — a vector replaces the chunks on every capture path; the 3-argument upsert_thought redefined)
+db/migrations/022_*.sql          # fix 40  (new file — a re-capture's windows stay while the label vouches for them; the 3-argument upsert_thought redefined)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -3765,7 +3765,7 @@ over accepted rows whose thought is unlabelled is the case that remains, said in
 `reembed.ts`'s header. The extraction worker has no acknowledgement path of its
 own — its failed rows are 016's, and preflight does not read them.
 
-### 40. A new vector replaces the chunks on every capture path — migration 022 redefines the 3-argument `upsert_thought`
+### 40. A re-capture's windows stay while the label vouches for them — migration 022 redefines the 3-argument `upsert_thought`
 
 `db/migrations/022_capture_replaces_chunks.sql` and `server-portable/preflight.ts`
 (Linear SMD-1175, filed by change 38's second review pass). `upsert_thought(text,
@@ -3788,11 +3788,20 @@ windows under a parent that says it is at the new model.
 
 **The windows stay while the label vouches for them.** Migration 022 redefines
 the 3-argument body — 021's, 005's guard and 008's actor and 021's label carried
-— reading the row the capture lands on in the same statement as the write (a
-CTE the RETURNING list reads: one snapshot, no window between a SELECT and the
-INSERT) and adding one block after it: when a vector arrived over an existing
-row and the row's label does not vouch for the windows, `DELETE FROM
-thought_chunks WHERE thought_id = v_id`. The label vouches exactly when the
+— reading the row the capture lands on `FOR UPDATE` before the write and adding
+one block after it: when a vector arrived and the row's label does not vouch for
+the windows, `DELETE FROM thought_chunks WHERE thought_id = v_id`. Locked,
+because under READ COMMITTED an `ON CONFLICT DO UPDATE` lands on whatever row
+holds the fingerprint when it runs — one a concurrent transaction committed
+after this one's snapshot included — so a label read without the lock could be
+the row's label before an edit that changed it, and `update_thought` locks the
+row `FOR UPDATE` too (018), so the two are ordered either way. The one case the
+lock cannot cover is a row that does not exist yet: two first captures of one
+text racing, one with windows and one without, resolve by the INSERT's
+conflict with the label read NULL, so the windows go — rightly at another
+model, needlessly at the same one; SMD-1043's advisory lock on the fingerprint
+serialises captures of one text before either inserts, and closes that. The
+label vouches exactly when the
 row's vector was labelled with a model and the arriving vector is labelled with
 the same one: the windows were written in the same call as the vector before,
 by that model (021's rule), and 003's fingerprint says the text is the same, so
@@ -3811,13 +3820,23 @@ theirs to supply; a chunkless re-capture of the same text supplies nothing
 about them, and the label is the one fact in the row that says whether they
 are still the vector's. The 4-argument form is not redefined: it delegates to
 this one and then replaces the windows with the caller's whatever the label,
-and 013 stays its last definer. No backfill: a window left before 022 cannot be
-told from a live one; a `--job` pass regenerates every thought's windows
-through `update_thought`, and the header says so.
+and 013 stays its last definer. Considered and not built: a trigger on
+`thoughts` — `AFTER UPDATE OF embedding`, when the vector or label changed and
+the old label does not vouch — which would see the row's old label as `OLD`
+for every writer, with no lock and no sentinel. The two writers that send
+windows already replace them wholesale, so the trigger would run beside their
+DELETE on every edit and every re-embedded row; the rule is about the one
+writer that sends nothing about the windows, and it also fires on a raw
+UPDATE of the vector, which 021 leaves to the operator on purpose. If a fourth
+writer ever needs the rule, the trigger is where it goes. No backfill: a
+window left before 022 cannot be told from a live one; a `--job` pass
+regenerates every thought's windows through `update_thought`, and the header
+says so.
 
-**What it costs.** One probe on 003's unique index for the row the INSERT is
-about to find anyway, and one DELETE per re-capture whose label does not vouch,
-bounded by `thought_id` on 007's index; a fresh insert runs none. The first
+**What it costs.** One probe on 003's unique index — `FOR UPDATE`, on the row
+the INSERT is about to lock anyway — and one DELETE per capture that carries a
+vector the label does not vouch for, bounded by `thought_id` on 007's index; on
+a fresh insert both find nothing. The first
 version ran the DELETE on every vectored capture, fresh inserts included, and
 was measured so at 1,024 dimensions, 2,000 operations per line, two rounds each
 side on one container: fresh 3-argument captures 0.9–1.4 ms each at 021 and
@@ -3831,15 +3850,20 @@ re-applied by hand puts 021's body back — `CREATE OR REPLACE`, no error, and t
 defect with it — and nothing else would say so. Over a direct connection
 preflight's `atomic capture` check reads every `upsert_thought` form in one
 schema-qualified catalog read and warns without the sentinel, naming 022 — a
-warning, not a refusal: captures work, and search is merely over-inclusive. The
-function is SECURITY INVOKER, so the DELETE runs as the calling role: a role
-that only ever captured chunklessly never needed DELETE on `thought_chunks`
-(007's 4-argument form and `update_thought` did), and does from here — the same
-check reads `has_table_privilege` for the connection's role and refuses to start
-without it, printing the GRANT. A missing 3-argument form names 022, its last
-definer, not 004 (whose body would drop 005's guard, 008's actor, 021's label
-and 022's rule); a missing 2-argument form names 005. Over PostgREST neither the
-body nor the privilege is reachable, and the check says so as a skip.
+warning, not a refusal: captures work, and search is merely over-inclusive. A
+missing 3-argument form names 022, its last definer, not 004 (whose body would
+drop 005's guard, 008's actor, 021's label and 022's rule); a missing
+2-argument form names 005. The function is SECURITY INVOKER, so the DELETE runs
+as the calling role: a role that only ever captured chunklessly never needed
+DELETE on `thought_chunks` (007's 4-argument form and `update_thought` did),
+and does from here — a check of its own, `chunk delete privilege`, reads
+`has_table_privilege` for the connection's role wherever the table exists,
+schema-qualified (the bare name resolves through `search_path` and raises for a
+relation it cannot see), and refuses to start without it, printing the GRANT.
+Two facts, two remedies, so a body from before 022 and a role without the
+privilege are both said at once rather than the second surfacing only after
+the first is fixed. Over PostgREST neither is reachable, and both checks say
+so as skips.
 
 **Verify, as the ticket asked.** `test-live.ts` [7]: a thought at `old-model`
 with two windows, found by its second; re-captured through the 3-argument form
@@ -3858,11 +3882,12 @@ its environment on its first request, so the grown window runs the embedding
 path with the new configuration, as the suite already does for a changed
 setting). `test-store-sql.ts` [6] and `test-store-postgrest.ts` [6]: the
 store's routing to the 3-argument form keeps the windows at the same model and
-leaves none at another or over an unknown label, on both stores.
-`test-schema.ts` [23]: the rule through a planted window (PGlite cannot run the
-4-argument insert) — same model keeps, another removes, no model on either side
-removes, no vector keeps — the CTE and the block in the body with the sentinel
-and 021's carried parts, the 4-argument form still 013's, three overloads, 022
+leaves none at another, on both stores, and none over an unknown label on the
+PostgREST one. `test-schema.ts` [23]: the rule through a planted window (PGlite
+cannot run the 4-argument insert) — same model keeps, another removes, no model
+on either side removes, no vector keeps — the sentinel and the locked read in
+the body with 021's carried parts, the 4-argument form still 013's, three
+overloads, 022
 the last definer of `upsert_thought`, and the trap: 021 re-applied leaves the
 windows again, 022 re-applied removes them. `test-upgrade.ts` [5]: 022 onto a
 populated 021 — the defect shown at 021, after 022 a same-model re-capture
@@ -3871,8 +3896,8 @@ changed, the window left before 022 left where it was, a re-apply a no-op.
 `test-preflight.ts` [5]: 021 re-applied over 022 warns naming 022, 022
 re-applied is ok, the 3-argument form dropped is refused naming 022 and not
 004, and a capturing role without DELETE on `thought_chunks` is refused with
-the GRANT and starts once granted. Suites after: schema 484 at both widths,
-live 308, upgrade 36, preflight 137, chunking 35, sql 62, postgrest 44.
+the GRANT and starts once granted. Suites after: schema 483 at both widths,
+live 308, upgrade 36, preflight 138, chunking 35, sql 62, postgrest 46.
 
 **A first pass, triaged.** Its top finding was the rule itself: the first
 version deleted the windows on every vectored re-capture, and on the path the
@@ -3893,10 +3918,35 @@ helper's own rule — pass both names — covers. Two findings were refuted by t
 pass itself: the `xmax` distinction (the probe is measured inside noise) and
 `content_fingerprint_of` in this body (SMD-1043's, said in the header).
 
+**A second pass, triaged.** Its top finding was in the first pass's addition:
+the label was read at the statement's snapshot, in a CTE, and under READ
+COMMITTED the `ON CONFLICT` lands on the row as committed when it runs — an
+`update_thought` at model B writing B's windows between the read and the write
+would have had them removed by a capture that read "A". The read is `FOR
+UPDATE` now (above), and `v_existed` is gone with the CTE: `(old = new) IS NOT
+TRUE` is the whole condition, and it runs the DELETE in the racing-first-
+captures case the flag would have skipped. The rest: `has_table_privilege` by
+bare name resolved through `search_path` and would have raised into the block's
+catch, silencing every later check — qualified and guarded with `to_regclass`,
+and split into its own check with its own remedy; the migration's title and
+Expected outcome, and this change's heading, still stated the first version's
+rule; the role fixture created a cluster-wide role with no guard and no
+`finally`, and swapped credentials into a URL that might carry none — guarded,
+`finally`, and a skip; the PostgREST store test proved only the unknown-label
+case, so the claim about both stores was wider than the tests; [23] pinned the
+whole block's text with whitespace-sensitive regexes beside a sentinel that
+exists so the contract is a marker — shrunk to the sentinel and the lock. The
+trigger alternative is recorded above with the reasons. Refuted by the pass
+itself: "apply 022 alone" as a remedy (the `vector models` failure fires first
+on a pre-021 schema), the `IS NULL` arm as a defect (the documented
+trade-off), and the Edge server's GRANT (Supabase's defaults, or 008's audit
+trigger fails first).
+
 **Not done here.** Windows left before 022 — no backfill, since nothing can tell
 them from live ones; a `--job` pass is the remedy. SMD-1043's advisory lock in
-both inserting overloads redefines this body next and carries the CTE, the
-block and the sentinel forward, as 022's header lists. `server/index.ts` is
+both inserting overloads redefines this body next and carries the locked
+read, the block and the sentinel forward, as 022's header lists; its fingerprint
+lock also closes the racing-first-captures case above. `server/index.ts` is
 unchanged: the migration fixes its path. The 4-argument form's body has no
 sentinel and no check; a hand re-apply of 007 over 013 would drop the context
 column from the chunk insert, which preflight's `chunk context` check reads

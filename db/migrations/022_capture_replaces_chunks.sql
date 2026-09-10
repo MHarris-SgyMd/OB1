@@ -1,5 +1,6 @@
 -- ============================================================================
--- 022 — a new vector replaces the chunks, on every capture path
+-- 022 — a re-capture's windows stay while the label vouches for them, and go
+--       when it does not
 --
 -- Why (Linear SMD-1175, found by SMD-1068's second review pass)
 --   upsert_thought(text, jsonb, vector) — 004's atomic capture, last redefined
@@ -48,14 +49,35 @@
 --
 --   The 3-argument body below is 021's — 005's guard, 008's actor, 021's
 --   label in the INSERT and its ON CONFLICT clause — with the row's label
---   read in the same statement as the write (a CTE the RETURNING list reads:
---   one snapshot, no window between a SELECT and the INSERT), and one block
---   after it:
+--   read and the row LOCKED before the write, and one block after it:
 --
---     IF p_embedding IS NOT NULL AND v_existed
---        AND (v_old_label IS NULL OR v_old_label IS DISTINCT FROM p_payload->>'embedding_model') THEN
+--     SELECT embedding_model INTO v_old_label
+--       FROM thoughts WHERE content_fingerprint = v_fingerprint FOR UPDATE;
+--     INSERT … ON CONFLICT … DO UPDATE … RETURNING id INTO v_id;
+--     IF p_embedding IS NOT NULL AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
 --       DELETE FROM thought_chunks WHERE thought_id = v_id;
 --     END IF;
+--
+--   FOR UPDATE, because the label must be the label of the row the INSERT
+--   lands on. Under READ COMMITTED, ON CONFLICT DO UPDATE lands on whatever
+--   row holds the fingerprint WHEN IT RUNS — a row another transaction
+--   committed after this one's snapshot included — so a label read without
+--   the lock could be the row's label before a concurrent edit that changed
+--   it (an update_thought at model B writing B's windows, then this capture
+--   reading "A" and removing them; the first version of this migration read
+--   it in a CTE, and its second review pass found this). Locked, a writer to
+--   the same text is waited for, or waits: update_thought locks the row FOR
+--   UPDATE too (018), so the two are ordered either way. The one case the
+--   lock cannot cover is a row that does not exist yet — two FIRST captures
+--   of one text racing, one with windows and one without: the second's
+--   SELECT finds nothing, its INSERT waits on the first's and updates, and
+--   the label it read is NULL, so the windows go — at another model rightly,
+--   at the same model needlessly (nothing vouched). SMD-1043's advisory lock
+--   on the fingerprint, which serialises captures of one text before either
+--   inserts, closes that; it is that ticket's mechanism, not this one's.
+--   `(v_old_label = new) IS NOT TRUE` is the whole condition: NULL on either
+--   side, or a different model, and a fresh insert (v_old_label NULL) runs a
+--   DELETE that finds nothing.
 --
 --   Why not unconditional, as 007's 4-argument form and update_thought are.
 --   Those two callers SEND windows, or send content: the 4-argument form
@@ -70,11 +92,24 @@
 --   the windows are still the vector's; keying on it fixes SMD-1175's case
 --   (a different model) and leaves valid windows alone.
 --
+--   Considered and not built: a trigger on thoughts — AFTER UPDATE OF
+--   embedding, WHEN the vector or label changed and the old label does not
+--   vouch, one DELETE — which would see the row's old label as OLD, for every
+--   writer, with no lock and no sentinel. Not here: the two writers that send
+--   windows (007's form, update_thought) already replace them wholesale, so
+--   the trigger would run beside their DELETE on every edit and every
+--   re-embedded row, and the rule is about the one writer that sends nothing
+--   about the windows — a capture landing on an existing row. It also fires
+--   on a raw UPDATE of the vector, which 021 leaves to the operator on
+--   purpose. If a fourth writer ever needs the rule, the trigger is where it
+--   goes.
+--
 -- Cost
---   One DELETE per re-capture that carries a vector and whose label does not
---   vouch, bounded by thought_id on 007's thought_chunks_thought_id_idx; a
---   fresh insert (v_existed false) runs none. The CTE is one probe on 003's
---   unique index for the row the INSERT is about to find anyway. Measured
+--   One probe on 003's unique index — FOR UPDATE, on the row the INSERT is
+--   about to lock anyway — and one DELETE per capture that carries a vector
+--   and whose label does not vouch, bounded by thought_id on 007's
+--   thought_chunks_thought_id_idx; on a fresh insert both find nothing.
+--   Measured
 --   for the first version — the DELETE on every vectored capture, fresh
 --   inserts included — at 1,024 dimensions, 2,000 operations per line, two
 --   rounds each at 021 and at 022 on the same container: fresh 3-argument
@@ -113,8 +148,8 @@
 -- What a successor must carry
 --   Everything 021 listed for this body — 005's non-object guard, 008's
 --   ob1.actor, p_payload->>'embedding_model' in the INSERT and its ON
---   CONFLICT clause — and now the CTE reading the row's label, the chunk
---   DELETE under the condition above, and the sentinel. SMD-1043 (the
+--   CONFLICT clause — and now the FOR UPDATE read of the row's label, the
+--   chunk DELETE under the condition above, and the sentinel. SMD-1043 (the
 --   advisory lock in both inserting
 --   overloads, and 016's content_fingerprint_of in place of the inline hash)
 --   is the next redefinition and takes both from here.
@@ -128,8 +163,8 @@
 --     calling role: a role that captures must hold DELETE on thought_chunks.
 --     007's 4-argument form and 009's update_thought needed it already; a
 --     role that only ever captured chunklessly did not, and does from here.
---     Preflight's `atomic capture` checks the connection's role over a direct
---     connection and prints the GRANT.
+--     Preflight's `chunk delete privilege` checks the connection's role over
+--     a direct connection and prints the GRANT.
 --   * Idempotent. CREATE OR REPLACE of one function; COMMENT re-issued.
 --
 -- Prerequisites
@@ -137,16 +172,18 @@
 --   by `bun db/migrate.ts`.
 --
 -- Expected outcome
---   Three upsert_thought overloads, as before; a chunkless re-capture with a
---   vector leaves the thought with no chunk rows; preflight's `atomic capture`
---   reports the body is 022's.
+--   Three upsert_thought overloads, as before. A chunkless re-capture with a
+--   vector labelled with the model the row's vector is labelled with leaves
+--   the thought's chunk rows as they were; one labelled with another model,
+--   or with none, or over a row whose label is unknown, leaves none.
+--   Preflight's `atomic capture` reports the body is 022's.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
 -- upsert_thought(text, jsonb, vector) — 021's body, and the windows stay while
 -- the label vouches for them. Repeated in full because CREATE OR REPLACE has no
--- partial form; the additions are the CTE the RETURNING list reads, and the
--- block after the INSERT.
+-- partial form; the additions are the locked read before the INSERT and the
+-- block after it.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION upsert_thought(
   p_content   text,
@@ -159,9 +196,8 @@ AS $$
 DECLARE
   v_fingerprint text;
   v_id          uuid;
-  -- 022: whether this capture landed on a row, and the model that row's
-  -- vector — and so its windows — was labelled with before the write.
-  v_existed     boolean;
+  -- 022: the model the row's vector — and so its windows — was labelled with
+  -- before this write; NULL for no row, or a row whose model is unknown.
   v_old_label   text;
 BEGIN
   /**
@@ -194,13 +230,14 @@ BEGIN
     'hex'
   );
 
+  -- 022: the row this capture lands on, if any, locked — so the INSERT below
+  -- lands on THIS row, not on one a concurrent writer commits meanwhile — and
+  -- its label before the write, which says whether its windows still hold.
+  SELECT embedding_model INTO v_old_label
+    FROM thoughts WHERE content_fingerprint = v_fingerprint FOR UPDATE;
+
   -- 021: the label is written beside the vector, from the envelope; NULL when
   -- the caller named none (an older server), which is a vector of unknown model.
-  -- 022: the row this capture lands on, if any, read in the same statement —
-  -- its label before the write is what says whether its windows still hold.
-  WITH before AS (
-    SELECT embedding_model FROM thoughts WHERE content_fingerprint = v_fingerprint
-  )
   INSERT INTO thoughts (content, content_fingerprint, metadata, embedding, embedding_model)
   VALUES (
     p_content,
@@ -217,8 +254,7 @@ BEGIN
         -- caller's with a new one — NULL if the caller named none.
         embedding_model = CASE WHEN EXCLUDED.embedding IS NULL THEN thoughts.embedding_model
                                ELSE EXCLUDED.embedding_model END
-  RETURNING id, EXISTS (SELECT 1 FROM before), (SELECT embedding_model FROM before)
-  INTO v_id, v_existed, v_old_label;
+  RETURNING id INTO v_id;
 
   -- ob1:vector-replaces-chunks — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` check reads it. 022: the windows
@@ -226,10 +262,9 @@ BEGIN
   -- with a model and the vector arriving is labelled with the same one — and
   -- go in every other case: a label unknown on either side, or another model.
   -- No vector arriving keeps vector, label and windows alike; a fresh insert
-  -- has none. The 4-argument form delegates here and then writes the caller's
-  -- windows; update_thought does the same for an edit.
-  IF p_embedding IS NOT NULL AND v_existed
-     AND (v_old_label IS NULL OR v_old_label IS DISTINCT FROM p_payload->>'embedding_model') THEN
+  -- has none to find. The 4-argument form delegates here and then writes the
+  -- caller's windows; update_thought does the same for an edit.
+  IF p_embedding IS NOT NULL AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
     DELETE FROM thought_chunks WHERE thought_id = v_id;
   END IF;
 

@@ -683,7 +683,7 @@ else {
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(021 re-applied by hand puts it back\)/.test(reapplied021.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql\./.test(reapplied021.out),
          "021 re-applied over 022 leaves 021's 3-argument upsert_thought, and the start warns naming 022 rather than refusing");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them, and this role can remove them/.test((await run(SQL_ENV)).out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them\s*$/m.test((await run(SQL_ENV)).out),
          "…and 022 re-applied is the shipped body again, said as such");
   // The 3-argument form gone from a 022 database: the remedy is the last
   // definer, not 004 — whose body would drop 005's guard, 008's actor, 021's
@@ -709,24 +709,39 @@ else {
          "before migration 015 there is nothing to read, and the check says so rather than warning");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
 
-  // 022's DELETE runs as the calling role. A role that can read everything
-  // and write thoughts, but not delete from thought_chunks, would fail every
-  // re-capture at another model — so preflight refuses to start it, with the
-  // GRANT; granted, it starts.
+  // The chunk writers run as the calling role. A role that can read
+  // everything and write thoughts, but not delete from thought_chunks, would
+  // fail every edit with content and every re-capture at another model — so
+  // preflight refuses to start it, with the GRANT; granted, it starts. A
+  // role is cluster-wide and dropSchema does not touch it, so an interrupted
+  // run's leftover is dropped first and the fixture is cleaned up whatever
+  // happens inside it.
   const CAPTURE_URL = LIVE.replace(/\/\/[^@]*@/, "//ob1_pf_capture:ob1pf@");
-  await claims.unsafe("CREATE ROLE ob1_pf_capture LOGIN PASSWORD 'ob1pf'");
-  await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
-  await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
-  await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
-  const noDelete = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-  assert(noDelete.code === 1 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 022's, but this connection's role \(ob1_pf_capture\) cannot DELETE from thought_chunks/.test(noDelete.out) && /GRANT DELETE ON thought_chunks TO ob1_pf_capture;/.test(noDelete.out),
-         `a capturing role without DELETE on thought_chunks does not start, with the GRANT as the remedy (exit ${noDelete.code})`);
-  await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
-  const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-  assert(granted.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(granted.out),
-         `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
-  await claims.unsafe("DROP OWNED BY ob1_pf_capture");
-  await claims.unsafe("DROP ROLE ob1_pf_capture");
+  const dropCaptureRole = () => claims.unsafe(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_pf_capture') THEN
+      EXECUTE 'DROP OWNED BY ob1_pf_capture'; EXECUTE 'DROP ROLE ob1_pf_capture';
+    END IF; END $$`);
+  if (CAPTURE_URL === LIVE) {
+    skipRaw("a capturing role without DELETE on thought_chunks does not start", "DATABASE_URL carries no credentials to swap for the role's");
+  } else {
+    await dropCaptureRole();
+    try {
+      await claims.unsafe("CREATE ROLE ob1_pf_capture LOGIN PASSWORD 'ob1pf'");
+      await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
+      await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
+      const noDelete = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noDelete.code === 1 && /chunk delete privilege\s+this connection's role \(ob1_pf_capture\) cannot DELETE from thought_chunks/.test(noDelete.out) && /GRANT DELETE ON thought_chunks TO ob1_pf_capture;/.test(noDelete.out),
+             `a capturing role without DELETE on thought_chunks does not start, with the GRANT as the remedy (exit ${noDelete.code})`);
+      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(noDelete.out), "…while atomic capture, a separate fact, is ok for it");
+      await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
+      const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(granted.code === 0 && /chunk delete privilege\s+ob1_pf_capture can replace a thought's windows/.test(granted.out),
+             `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+    } finally {
+      await dropCaptureRole();
+    }
+  }
 
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
