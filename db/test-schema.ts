@@ -2172,7 +2172,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb)`, [labelled]); }
   catch (e) { ambiguous = (e as Error).message; }
   assert(/not unique/.test(ambiguous), `…after which a 7-argument call is "function is not unique" (${ambiguous.slice(0, 60)})`);
-  await restoreShipped("update_thought");
+  await restoreShipped("update_thought", "upsert_thought");
   assert((await count("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
 
   // The ACL survives the DROP, as 020's does ([21]): 018's form back and
@@ -2185,14 +2185,14 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await pre021();
   await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM PUBLIC`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT_7} TO ob1_test_editor WITH GRANT OPTION`);
-  await restoreShipped("update_thought");
+  await restoreShipped("update_thought", "upsert_thought");
   const granted = await acl(UT);
   assert(!hasPublic(granted) && /ob1_test_editor=X\*\//.test(granted), `a revoke and a grant with grant option on the 7-argument form are carried to the eight-argument one (${granted})`);
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ob1_test_editor`);
   await pre021();
   assert(/ob1_test_editor=X\//.test(await acl(UT_7)), "default privileges give a re-created 7-argument form EXECUTE for the role");
   await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM ob1_test_editor`);
-  await restoreShipped("update_thought");
+  await restoreShipped("update_thought", "upsert_thought");
   const stripped = await acl(UT);
   assert(!/ob1_test_editor/.test(stripped) && hasPublic(stripped), `a role the defaults grant to but the old form had revoked is revoked on the new form too (${stripped})`);
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM ob1_test_editor`);
@@ -2281,7 +2281,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   // the row LOCKED, so the INSERT lands on the row whose label was read.
   const up = await bodyOf(UP3);
   assert(/ob1:vector-replaces-chunks/.test(up), "the 3-argument body carries the ob1:vector-replaces-chunks sentinel");
-  assert(/content_fingerprint = v_fingerprint FOR UPDATE/.test(up) && !/WITH before AS/.test(up), "…and reads the row's label FOR UPDATE, not at the statement's snapshot");
+  assert(/content_fingerprint = v_fingerprint FOR NO KEY UPDATE/.test(up) && !/WITH before AS/.test(up), "…and reads the row's label FOR NO KEY UPDATE — locked against update_thought, not against the foreign keys' KEY SHARE — not at the statement's snapshot");
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up) && /ELSE EXCLUDED\.embedding_model END/.test(up),
          "…carrying 005's guard, 008's actor and 021's label in the INSERT and the ON CONFLICT clause");
   const up4 = await bodyOf("upsert_thought(text, jsonb, vector, jsonb)");

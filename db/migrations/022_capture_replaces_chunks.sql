@@ -49,35 +49,83 @@
 --
 --   The 3-argument body below is 021's — 005's guard, 008's actor, 021's
 --   label in the INSERT and its ON CONFLICT clause — with the row's label
---   read and the row LOCKED before the write, and one block after it:
+--   read and the row LOCKED before the write, when a vector arrives, and one
+--   block after it:
 --
---     SELECT embedding_model INTO v_old_label
---       FROM thoughts WHERE content_fingerprint = v_fingerprint FOR UPDATE;
+--     IF p_embedding IS NOT NULL THEN
+--       SELECT embedding_model INTO v_old_label
+--         FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
+--       v_existed := FOUND;
+--     END IF;
 --     INSERT … ON CONFLICT … DO UPDATE … RETURNING id INTO v_id;
---     IF p_embedding IS NOT NULL AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
+--     IF p_embedding IS NOT NULL AND v_existed
+--        AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
 --       DELETE FROM thought_chunks WHERE thought_id = v_id;
 --     END IF;
 --
---   FOR UPDATE, because the label must be the label of the row the INSERT
---   lands on. Under READ COMMITTED, ON CONFLICT DO UPDATE lands on whatever
---   row holds the fingerprint WHEN IT RUNS — a row another transaction
---   committed after this one's snapshot included — so a label read without
---   the lock could be the row's label before a concurrent edit that changed
---   it (an update_thought at model B writing B's windows, then this capture
---   reading "A" and removing them; the first version of this migration read
---   it in a CTE, and its second review pass found this). Locked, a writer to
---   the same text is waited for, or waits: update_thought locks the row FOR
---   UPDATE too (018), so the two are ordered either way. The one case the
---   lock cannot cover is a row that does not exist yet — two FIRST captures
---   of one text racing, one with windows and one without: the second's
---   SELECT finds nothing, its INSERT waits on the first's and updates, and
---   the label it read is NULL, so the windows go — at another model rightly,
---   at the same model needlessly (nothing vouched). SMD-1043's advisory lock
---   on the fingerprint, which serialises captures of one text before either
---   inserts, closes that; it is that ticket's mechanism, not this one's.
---   `(v_old_label = new) IS NOT TRUE` is the whole condition: NULL on either
---   side, or a different model, and a fresh insert (v_old_label NULL) runs a
---   DELETE that finds nothing.
+--   Locked, because the label must be the label of the row the INSERT lands
+--   on. Under READ COMMITTED, ON CONFLICT DO UPDATE lands on whatever row
+--   holds the fingerprint WHEN IT RUNS — a row another transaction committed
+--   after this one's snapshot included — so a label read without the lock
+--   could be the row's label before a concurrent edit that changed it (an
+--   update_thought at model B writing B's windows, then this capture reading
+--   "A" and removing them; the first version of this migration read it in a
+--   CTE, and its second review pass found this). Locked, a writer to the
+--   same text is waited for, or waits: update_thought locks the row FOR
+--   UPDATE (018), which conflicts with this lock, so the two are ordered
+--   either way. FOR NO KEY UPDATE, not FOR UPDATE: every foreign key onto
+--   thoughts(id) — thought_chunks, thought_work_claims, 016's mention and
+--   edge tables — holds FOR KEY SHARE on the parent row while its inserting
+--   transaction is open, and FOR UPDATE is the one row lock that conflicts
+--   with it. db/reembed.ts enqueues a whole corpus in one transaction, so
+--   with FOR UPDATE a re-capture of any existing text waited out the entire
+--   enqueue (measured by the third review pass: 4 s against a small held
+--   enqueue, 1 ms with this lock — the same as 021's plain INSERT, which
+--   takes FOR NO KEY UPDATE itself because no key column is set).
+--
+--   v_existed — the row was there to lock — bounds the DELETE to a
+--   re-capture. Without it the DELETE ran on every fresh insert too, finding
+--   nothing but needing the privilege (Postgres checks it before it looks
+--   for rows), and two shapes the row lock cannot cover became destructive:
+--     * two FIRST captures of one text racing, one with windows and one
+--       without — the second's SELECT finds nothing, its INSERT waits on the
+--       first's speculative insert and updates the first's row;
+--     * an update_thought MOVING another row onto this text — its new
+--       fingerprint is not in this transaction's snapshot, the SELECT finds
+--       nothing, the INSERT waits on the unique index and lands on the row
+--       the edit just gave windows to.
+--   In both the label read is NULL — nothing was found — and a DELETE keyed
+--   on it would have removed windows another writer had just committed, at
+--   the same model as well as another. With v_existed false nothing is
+--   removed: the other writer's windows stay, which is exactly 021's
+--   behaviour, and at another model the SMD-1175 state — for that race only.
+--   SMD-1043's advisory lock on the fingerprint, which update_thought already
+--   takes and which serialises captures of one text before either inserts,
+--   closes both shapes by making the SELECT find the row; it is that
+--   ticket's mechanism, not this one's. Otherwise `(v_old_label = new) IS
+--   NOT TRUE` is the whole condition: NULL on either side, or a different
+--   model.
+--
+--   Two consequences of "unknown vouches for nothing", decided on purpose:
+--     * A row 021 left unlabelled — every pre-021 vector no finished pass
+--       vouched for, on a brain upgraded through 021 that has not yet run
+--       one — loses its windows on its first chunkless re-capture at ANY
+--       model, the same one included. The alternative, keeping them when
+--       the old label is unknown, would leave the windows of a pre-021 vector
+--       at the old model under a new-model label: SMD-1175's motivating case,
+--       for exactly those rows. The remedy is the pass 021 already asks for
+--       (db/reembed.ts under the model's own key pools the unlabelled rows,
+--       labels them and rewrites their windows through update_thought), and
+--       reembed.ts says how many unlabelled rows its pool holds before it
+--       runs.
+--     * "The same model" is 021's rule — string equality of the label, as
+--       OB1_EMBEDDING_MODEL spells it, and nothing else. Two servers sharing
+--       a brain that spell one model two ways ("openai/text-embedding-3-small"
+--       through OpenRouter, "text-embedding-3-small" direct) are two models
+--       to every reader of the column — preflight's `vector models` already
+--       reports them as such — and to this rule too: each re-save from the
+--       other server would remove the windows and flip the label. Spell it
+--       the same, which the `vector models` warning is there to say.
 --
 --   Why not unconditional, as 007's 4-argument form and update_thought are.
 --   Those two callers SEND windows, or send content: the 4-argument form
@@ -105,11 +153,11 @@
 --   goes.
 --
 -- Cost
---   One probe on 003's unique index — FOR UPDATE, on the row the INSERT is
---   about to lock anyway — and one DELETE per capture that carries a vector
---   and whose label does not vouch, bounded by thought_id on 007's
---   thought_chunks_thought_id_idx; on a fresh insert both find nothing.
---   Measured
+--   When a vector arrives: one probe on 003's unique index — FOR NO KEY
+--   UPDATE, on the row the INSERT is about to lock anyway — and, on a
+--   re-capture whose label does not vouch, one DELETE bounded by thought_id
+--   on 007's thought_chunks_thought_id_idx. A fresh insert runs the probe
+--   and finds nothing; a capture with no vector runs neither. Measured
 --   for the first version — the DELETE on every vectored capture, fresh
 --   inserts included — at 1,024 dimensions, 2,000 operations per line, two
 --   rounds each at 021 and at 022 on the same container: fresh 3-argument
@@ -128,7 +176,9 @@
 -- No backfill
 --   A chunk row left behind before this migration cannot be told from a live
 --   one — no model, no timestamp — so nothing here removes any. From this
---   migration on, no new stale set is left. For rows left earlier, a
+--   migration on, the three writers leave no new stale set (a raw UPDATE of
+--   the vector around them is the operator's, as 021 says). For rows left
+--   earlier, a
 --   db/reembed.ts pass under a --job key pools every thought and regenerates
 --   its windows through update_thought; a pass under the model's own key
 --   reaches only the thoughts not at the target, which — after a chunkless
@@ -148,9 +198,9 @@
 -- What a successor must carry
 --   Everything 021 listed for this body — 005's non-object guard, 008's
 --   ob1.actor, p_payload->>'embedding_model' in the INSERT and its ON
---   CONFLICT clause — and now the FOR UPDATE read of the row's label, the
---   chunk DELETE under the condition above, and the sentinel. SMD-1043 (the
---   advisory lock in both inserting
+--   CONFLICT clause — and now the FOR NO KEY UPDATE read of the row's label
+--   with its FOUND, the chunk DELETE under the condition above, and the
+--   sentinel. SMD-1043 (the advisory lock in both inserting
 --   overloads, and 016's content_fingerprint_of in place of the inline hash)
 --   is the next redefinition and takes both from here.
 --
@@ -196,8 +246,9 @@ AS $$
 DECLARE
   v_fingerprint text;
   v_id          uuid;
-  -- 022: the model the row's vector — and so its windows — was labelled with
-  -- before this write; NULL for no row, or a row whose model is unknown.
+  -- 022: whether a row was there to lock, and the model its vector — and so
+  -- its windows — was labelled with before this write (NULL: unknown).
+  v_existed     boolean := false;
   v_old_label   text;
 BEGIN
   /**
@@ -233,8 +284,13 @@ BEGIN
   -- 022: the row this capture lands on, if any, locked — so the INSERT below
   -- lands on THIS row, not on one a concurrent writer commits meanwhile — and
   -- its label before the write, which says whether its windows still hold.
-  SELECT embedding_model INTO v_old_label
-    FROM thoughts WHERE content_fingerprint = v_fingerprint FOR UPDATE;
+  -- FOR NO KEY UPDATE: ordered against update_thought's FOR UPDATE, not
+  -- against the FOR KEY SHARE every foreign key onto this row holds.
+  IF p_embedding IS NOT NULL THEN
+    SELECT embedding_model INTO v_old_label
+      FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
+    v_existed := FOUND;
+  END IF;
 
   -- 021: the label is written beside the vector, from the envelope; NULL when
   -- the caller named none (an older server), which is a vector of unknown model.
@@ -262,9 +318,11 @@ BEGIN
   -- with a model and the vector arriving is labelled with the same one — and
   -- go in every other case: a label unknown on either side, or another model.
   -- No vector arriving keeps vector, label and windows alike; a fresh insert
-  -- has none to find. The 4-argument form delegates here and then writes the
-  -- caller's windows; update_thought does the same for an edit.
-  IF p_embedding IS NOT NULL AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
+  -- runs no DELETE (v_existed), and neither does a race the lock could not
+  -- cover — see the header. The 4-argument form delegates here and then
+  -- writes the caller's windows; update_thought does the same for an edit.
+  IF p_embedding IS NOT NULL AND v_existed
+     AND (v_old_label = p_payload->>'embedding_model') IS NOT TRUE THEN
     DELETE FROM thought_chunks WHERE thought_id = v_id;
   END IF;
 

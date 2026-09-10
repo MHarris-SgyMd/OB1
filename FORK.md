@@ -3788,20 +3788,27 @@ windows under a parent that says it is at the new model.
 
 **The windows stay while the label vouches for them.** Migration 022 redefines
 the 3-argument body — 021's, 005's guard and 008's actor and 021's label carried
-— reading the row the capture lands on `FOR UPDATE` before the write and adding
-one block after it: when a vector arrived and the row's label does not vouch for
-the windows, `DELETE FROM thought_chunks WHERE thought_id = v_id`. Locked,
-because under READ COMMITTED an `ON CONFLICT DO UPDATE` lands on whatever row
-holds the fingerprint when it runs — one a concurrent transaction committed
-after this one's snapshot included — so a label read without the lock could be
-the row's label before an edit that changed it, and `update_thought` locks the
-row `FOR UPDATE` too (018), so the two are ordered either way. The one case the
-lock cannot cover is a row that does not exist yet: two first captures of one
-text racing, one with windows and one without, resolve by the INSERT's
-conflict with the label read NULL, so the windows go — rightly at another
-model, needlessly at the same one; SMD-1043's advisory lock on the fingerprint
-serialises captures of one text before either inserts, and closes that. The
-label vouches exactly when the
+— when a vector arrives, reading the row the capture lands on `FOR NO KEY
+UPDATE` before the write, and adding one block after it: when the row was there
+to lock and its label does not vouch for the windows, `DELETE FROM
+thought_chunks WHERE thought_id = v_id`. Locked, because under READ COMMITTED
+an `ON CONFLICT DO UPDATE` lands on whatever row holds the fingerprint when it
+runs — one a concurrent transaction committed after this one's snapshot
+included — so a label read without the lock could be the row's label before an
+edit that changed it; `update_thought` locks the row `FOR UPDATE` (018), which
+conflicts with this lock, so the two are ordered either way. `FOR NO KEY
+UPDATE` and not `FOR UPDATE`, because every foreign key onto `thoughts(id)`
+holds `FOR KEY SHARE` on the parent while its inserting transaction is open and
+`FOR UPDATE` is the one row lock that conflicts with it: `reembed.ts` enqueues
+a corpus in one transaction, and with `FOR UPDATE` a re-capture of any existing
+text waited out the whole enqueue (4 s against a small held one in the third
+pass's measurement, 1 ms with this lock). Two shapes the row lock cannot cover
+— two first captures of one text racing, and an edit moving another row onto
+this text — find no row to lock, and remove nothing: the other writer's windows
+stay, as under 021, at another model the SMD-1175 state for that race only;
+SMD-1043's advisory lock on the fingerprint, which `update_thought` already
+takes, makes the read find the row and closes both. The label vouches exactly
+when the
 row's vector was labelled with a model and the arriving vector is labelled with
 the same one: the windows were written in the same call as the vector before,
 by that model (021's rule), and 003's fingerprint says the text is the same, so
@@ -3833,10 +3840,17 @@ window left before 022 cannot be told from a live one; a `--job` pass
 regenerates every thought's windows through `update_thought`, and the header
 says so.
 
-**What it costs.** One probe on 003's unique index — `FOR UPDATE`, on the row
-the INSERT is about to lock anyway — and one DELETE per capture that carries a
-vector the label does not vouch for, bounded by `thought_id` on 007's index; on
-a fresh insert both find nothing. The first
+**What it costs.** When a vector arrives, one probe on 003's unique index — on
+the row the INSERT is about to lock anyway — and, on a re-capture whose label
+does not vouch, one DELETE bounded by `thought_id` on 007's index; a fresh
+insert runs the probe and nothing else, a capture with no vector neither. Two
+consequences of "unknown vouches for nothing" are decided on purpose and said
+in the header: a row 021 left unlabelled loses its windows on its first
+chunkless re-capture at any model, the same one included — keeping them would
+be SMD-1175's case for exactly those rows, and the remedy is the pass 021
+already asks for, which labels and re-windows them; and "the same model" is
+021's string equality, so two servers spelling one model two ways are two
+models to this rule as to `vector models`. The first
 version ran the DELETE on every vectored capture, fresh inserts included, and
 was measured so at 1,024 dimensions, 2,000 operations per line, two rounds each
 side on one container: fresh 3-argument captures 0.9–1.4 ms each at 021 and
@@ -3942,11 +3956,32 @@ on a pre-021 schema), the `IS NULL` arm as a defect (the documented
 trade-off), and the Edge server's GRANT (Supabase's defaults, or 008's audit
 trigger fails first).
 
+**A third pass, asked for after the stop.** Its top findings were in the second
+pass's additions. The locked read was `FOR UPDATE`, the one row lock that
+conflicts with the `FOR KEY SHARE` every foreign key onto `thoughts` holds, so
+a re-capture blocked behind an open `enqueue_thoughts` for its whole duration
+(reproduced by the pass) — `FOR NO KEY UPDATE` now, ordered against
+`update_thought` and nothing else. The DELETE ran on every fresh insert, which
+needs the privilege before Postgres looks for rows, and made two races the lock
+cannot cover destructive — a `FOUND` flag after the read bounds it to a
+re-capture, so those races remove nothing, as under 021, until SMD-1043's lock
+closes them; the read itself runs only when a vector arrives. The remedy for a
+missing 2-argument form re-applied 005, which redefines the 3-argument body too
+— it says "then 022", and the missing form is a warning, since this server
+never calls it. The GRANT remedy quotes the role; the privilege check's ok text
+says what it checked, DELETE and nothing more; the fixture skips where the
+connection cannot create a role; [22]'s two other restores of `update_thought`
+name both writers. Two findings were trade-offs the tests already lock in, and
+are now said as such above rather than changed: an unknown row label removes
+the windows, and the label is a string.
+
 **Not done here.** Windows left before 022 — no backfill, since nothing can tell
-them from live ones; a `--job` pass is the remedy. SMD-1043's advisory lock in
-both inserting overloads redefines this body next and carries the locked
-read, the block and the sentinel forward, as 022's header lists; its fingerprint
-lock also closes the racing-first-captures case above. `server/index.ts` is
+them from live ones; a `--job` pass is the remedy, and a brain upgraded through
+021 that has not run a pass should run one before re-saving long notes from a
+chunkless server. SMD-1043's advisory lock in both inserting overloads
+redefines this body next and carries the locked read with its `FOUND`, the
+block and the sentinel forward, as 022's header lists; its fingerprint lock
+also closes the two races above. `server/index.ts` is
 unchanged: the migration fixes its path. The 4-argument form's body has no
 sentinel and no check; a hand re-apply of 007 over 013 would drop the context
 column from the chunk insert, which preflight's `chunk context` check reads

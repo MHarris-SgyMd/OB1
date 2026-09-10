@@ -498,8 +498,11 @@ if (configFailed) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
               "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs).");
         } else if (!two) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing`,
-              "Apply db/migrations/005_reject_non_object_payload.sql — the last definer of the 2-argument form.");
+          // This server never calls the 2-argument form; PostgREST callers by
+          // name and the two-step fallback do. A warning, and the remedy says
+          // "then 022": 005 redefines the 3-argument form too, with its body.
+          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do`,
+              "Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then 022 again — 005 redefines the 3-argument form as well, with a body from before 008, 021 and 022.");
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
               "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
@@ -519,15 +522,15 @@ if (configFailed) {
         const [chunks] = await sql`
           SELECT to_regclass('public.thought_chunks') IS NOT NULL AS present,
                  CASE WHEN to_regclass('public.thought_chunks') IS NOT NULL THEN has_table_privilege('public.thought_chunks', 'DELETE') END AS can,
-                 current_user::text AS role`;
+                 current_user::text AS role, quote_ident(current_user::text) AS ident`;
         if (!chunks.present) {
           add("chunk delete privilege", "skip", "not checked — thought_chunks does not exist (before migration 007)");
         } else if (!chunks.can) {
           add("chunk delete privilege", "fail",
               `this connection's role (${chunks.role}) cannot DELETE from thought_chunks — the chunk writers run as their caller, so every edit with content, every capture with windows, and since 022 every re-capture with a vector the row's label does not vouch for would fail`,
-              `GRANT DELETE ON thought_chunks TO ${chunks.role};`);
+              `GRANT DELETE ON thought_chunks TO ${chunks.ident};`);
         } else {
-          add("chunk delete privilege", "ok", `${chunks.role} can replace a thought's windows`);
+          add("chunk delete privilege", "ok", `${chunks.role} can DELETE from thought_chunks (INSERT on it, and on thought_audit, are not checked here)`);
         }
 
         /**

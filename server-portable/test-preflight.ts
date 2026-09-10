@@ -721,8 +721,11 @@ else {
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_pf_capture') THEN
       EXECUTE 'DROP OWNED BY ob1_pf_capture'; EXECUTE 'DROP ROLE ob1_pf_capture';
     END IF; END $$`);
+  const [{ mayCreate }] = await claims`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`;
   if (CAPTURE_URL === LIVE) {
     skipRaw("a capturing role without DELETE on thought_chunks does not start", "DATABASE_URL carries no credentials to swap for the role's");
+  } else if (!mayCreate) {
+    skipRaw("a capturing role without DELETE on thought_chunks does not start", "the connection's role cannot CREATE ROLE");
   } else {
     await dropCaptureRole();
     try {
@@ -736,7 +739,7 @@ else {
       assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(noDelete.out), "…while atomic capture, a separate fact, is ok for it");
       await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
       const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(granted.code === 0 && /chunk delete privilege\s+ob1_pf_capture can replace a thought's windows/.test(granted.out),
+      assert(granted.code === 0 && /chunk delete privilege\s+ob1_pf_capture can DELETE from thought_chunks/.test(granted.out),
              `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
     } finally {
       await dropCaptureRole();
