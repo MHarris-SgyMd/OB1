@@ -476,9 +476,24 @@ if (configFailed) {
           WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`;
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
-        if (Number(rows[0].c) >= 2) add("atomic capture", "ok", "both upsert_thought overloads present");
-        else add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
-                 "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
+        // The 3-arg body's semantics are declared by a sentinel in the body
+        // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): a
+        // vector arriving through it removes the thought's chunk rows. 021
+        // re-applied by hand puts 021's body back — CREATE OR REPLACE, no
+        // error — and a chunkless re-capture then leaves the previous vector's
+        // windows under the new one, found by search and named by nothing.
+        const body3 = await sql`
+          SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('upsert_thought(text, jsonb, vector)')`;
+        if (Number(rows[0].c) < 2 || !body3.length) {
+          add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
+              "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
+        } else if (/ob1:vector-replaces-chunks/.test(body3[0].prosrc)) {
+          add("atomic capture", "ok", "both upsert_thought overloads present; the 3-arg body is 022's, so a vector replaces the chunks on every capture path");
+        } else {
+          add("atomic capture", "warn",
+              "both upsert_thought overloads present, but the 3-arg body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
+              "Apply db/migrations/022_capture_replaces_chunks.sql.");
+        }
 
         /**
          * The audit trail, treated as fatal for the same reason migration 004 is:

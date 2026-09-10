@@ -21,6 +21,7 @@
 
 import { SQL } from "bun";
 import { estimateTokens } from "./chunk.ts";
+import { SqlStore } from "./store-sql.ts";
 import { createEmbedder, resolveEmbedConfig } from "./embed.ts";
 import { createAssert, neverAnswers, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
 import { mcpClient } from "./test-support.ts";
@@ -40,7 +41,7 @@ await resetSchema(URL_, { dim: DIM, model: EMB_MODEL });
  * embeds onto its axis, so a query for that sentinel ranks it first — and only if
  * the sentinel was actually inside the text that got embedded.
  */
-const SENTINELS = ["zeppelin", "marzipan", "quicksilver", "harpsichord"];
+const SENTINELS = ["zeppelin", "marzipan", "quicksilver", "harpsichord", "gramophone"];
 function axisFor(text: string): number {
   const i = SENTINELS.findIndex((s) => text.toLowerCase().includes(s));
   return i >= 0 ? i : SENTINELS.length;
@@ -286,6 +287,40 @@ console.log("\n[5] Re-capturing replaces chunks rather than accumulating them");
   await call("capture_thought", { content: LONG });          // same content, dedup path
   const after = Number((await sql`SELECT count(*)::int AS c FROM thought_chunks`)[0].c);
   assert(before === after, `chunk count unchanged after re-capture (${before} → ${after})`);
+  await sql.close();
+}
+
+console.log("\n[5b] The window grown, the same text makes no windows — and leaves none behind (migration 022)");
+{
+  // A text over today's window (BATCH - 200) and under the provider's batch:
+  // two windows today, one call once OB1_CHUNK_TOKENS covers it — the operator
+  // raising the headroom, or a provider with a wider batch. The re-capture
+  // then takes the 3-argument form, which until 022 left the two windows of
+  // the vector it replaced. The server snapshots its environment on its first
+  // request (CI's note on test-chunk-context.ts), so the grown window runs the
+  // way [1b] runs a changed setting — the embedding path with the new
+  // configuration — and is written through the store index.ts writes through.
+  let text = "Notes from the retrospective, in full. ";
+  while (estimateTokens(text) < BATCH - 120) text += FILLER;
+  text += "The gramophone budget was approved in the final minute.";
+  assert(estimateTokens(text) > BATCH - 200 && estimateTokens(text) < BATCH, `≈${estimateTokens(text)} tokens: over the window, under the batch`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const windowsOf = async () => Number((await sql`
+    SELECT count(*)::int AS c FROM thought_chunks ch JOIN thoughts t ON t.id = ch.thought_id
+    WHERE t.content LIKE 'Notes from the retrospective%'`)[0].c);
+
+  await call("capture_thought", { content: text });
+  assert((await windowsOf()) === 2, `captured through the server at today's window: two windows (${await windowsOf()})`);
+  assert(/gramophone budget/.test(await call("search_thoughts", { query: "gramophone", limit: 5, threshold: 0.1 })), "…and found by its ending, through the second window");
+
+  const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_CHUNK_TOKENS: String(BATCH) }), { rememberRefusal: false });
+  const embedded = await grown.embedCapture(text);
+  assert(embedded.chunks.length === 0, `with the window at the batch the same text makes no windows (${embedded.chunks.length})`);
+  const store = new SqlStore(URL_, { max: 1 });
+  await store.captureThought({ content: text, payload: { metadata: {} }, embedding: embedded.embedding, chunks: embedded.chunks, embeddingModel: embedded.model });
+  await store.close();
+  assert((await windowsOf()) === 0, `the re-capture took the 3-argument form and left no stale windows (${await windowsOf()})`);
+  assert(/gramophone budget/.test(await call("search_thoughts", { query: "gramophone", limit: 5, threshold: 0.1 })), "…and the thought is still found by its ending — by its whole-content vector now");
   await sql.close();
 }
 

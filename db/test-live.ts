@@ -511,6 +511,33 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
     WHERE t.content = ${"a second long capture"}`;
   assert(legacy.context === null, "a chunk payload with no context key is accepted and stored bare");
 
+  /**
+   * 022: the chunks follow the vector on the 3-argument path too. A long
+   * thought captured with two windows and re-captured with the same text
+   * through the form every caller uses when the capture made no windows —
+   * the Edge server, a window that grew — used to keep the windows of the
+   * vector it no longer had, and match_thoughts found it by them.
+   */
+  const RECAP = "a long capture, re-captured through the 3-argument form";
+  const [long] = await sql`
+    SELECT upsert_thought(${RECAP}, ${{ metadata: {}, embedding_model: "old-model" }}::jsonb, ${unit(5)}::vector,
+      ${chunkPayload([{ content: "first window", at: 6 }, { content: "second window", at: 7 }])}::jsonb) AS r`;
+  const longId = long.r.id as string;
+  const windows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${longId}::uuid`)[0].c);
+  const foundAt = async (axis: number) =>
+    ((await sql`SELECT id FROM match_thoughts(${unit(axis)}::vector, 0.5, 10)`) as { id: string }[]).some((r) => r.id === longId);
+  assert((await windows()) === 2 && (await foundAt(7)), "a thought at old-model with two windows, found by its second window");
+  await sql`SELECT upsert_thought(${RECAP}, ${{ metadata: {}, embedding_model: "new-model" }}::jsonb, ${unit(8)}::vector)`;
+  const [moved] = await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${longId}::uuid`;
+  assert((await windows()) === 0 && moved.m === "new-model",
+         `a chunkless re-capture with a vector moves the vector and label and leaves no windows under them (${await windows()} windows, ${moved.m})`);
+  assert(!(await foundAt(7)) && (await foundAt(8)), "…so the thought is no longer found by a window of the vector it no longer has, and is found by the one it has");
+  await sql`SELECT upsert_thought(${RECAP}, ${{ metadata: {}, embedding_model: "new-model" }}::jsonb, ${unit(9)}::vector, ${chunkPayload([{ content: "one window", at: 9 }])}::jsonb)`;
+  await sql`SELECT upsert_thought(${RECAP}, ${{ metadata: { k: 1 }, embedding_model: "other-model" }}::jsonb, NULL::vector)`;
+  const [kept] = await sql`SELECT embedding_model AS m, metadata->>'k' AS k FROM thoughts WHERE id = ${longId}::uuid`;
+  assert((await windows()) === 1 && kept.m === "new-model" && kept.k === "1",
+         `a re-capture with no vector keeps the windows with the vector and its label, whatever label it names (${await windows()} window, ${kept.m})`);
+
   // Deleting still takes the chunks with it — the CASCADE from 007 is unaffected
   // by the new column, and an orphaned vector would keep answering searches.
   await sql`DELETE FROM thoughts`;

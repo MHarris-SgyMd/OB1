@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Thirty-nine numbered changes on top of the pin. Seven fix defects found in an
+Forty numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–39 are the numbered `###` sections** further down, which is
+sections. Changes **18–40 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -170,6 +170,7 @@ db/bench-plan.ts                 # fix 36  (new file — the unfiltered plan at 
 db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends recency after the candidate scan; search_thoughts_hybrid carries the weight)
 evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
 db/migrations/021_*.sql          # fix 38  (new file — thoughts.embedding_model: a vector carries the model that produced it; both writers carry it)
+db/migrations/022_*.sql          # fix 40  (new file — a vector replaces the chunks on every capture path; the 3-argument upsert_thought redefined)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -3334,7 +3335,7 @@ backfill takes 015's set-based branch again. One finding was pre-existing and
 is a ticket, not a fix: a chunkless re-capture through the 3-argument
 `upsert_thought` replaces the parent's vector and label and leaves 007's chunk
 rows from the previous vector (SMD-1175); 021's header no longer claims the
-parent's label is the chunks' on that path. Suites after: schema 462, live 249,
+parent's label is the chunks' on that path (done in change 40). Suites after: schema 462, live 249,
 upgrade 27, preflight 116; the three `server/` suites 47, 30, 36.
 
 **A third pass, asked for after the stop.** Its top finding was again in the
@@ -3484,8 +3485,8 @@ both widths, live 245, upgrade 20, preflight 115, sql 59, e2e 63, postgrest 43,
 update-delete 39 (before the pass below).
 
 **Not done here.** Chunk rows left by a chunkless re-capture through the
-3-argument `upsert_thought`, which predate this change (SMD-1175); the
-community integrations `update-thought-mcp` and `enhanced-mcp`, which write
+3-argument `upsert_thought`, which predate this change (SMD-1175) — done in
+change 40; the community integrations `update-thought-mcp` and `enhanced-mcp`, which write
 content and vector with a raw update around `update_thought` and so leave a
 stale label as they leave a stale fingerprint. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
@@ -3763,6 +3764,93 @@ caveat: the gate on 021 closes the upgrade path, and a hand re-run of 021's body
 over accepted rows whose thought is unlabelled is the case that remains, said in
 `reembed.ts`'s header. The extraction worker has no acknowledgement path of its
 own — its failed rows are 016's, and preflight does not read them.
+
+### 40. A new vector replaces the chunks on every capture path — migration 022 redefines the 3-argument `upsert_thought`
+
+`db/migrations/022_capture_replaces_chunks.sql` and `server-portable/preflight.ts`
+(Linear SMD-1175, filed by change 38's second review pass). `upsert_thought(text,
+jsonb, vector)` — 004's atomic capture, last redefined by 021 — replaced the
+parent's vector and label on a re-capture of the same normalised text and never
+touched `thought_chunks`. Only the 4-argument form (007, 013) and
+`update_thought` (009, 018, 021) replace chunk rows, and every caller routes a
+capture that produced no windows to the 3-argument form: both stores
+(`chunks.length ? 4-arg : 3-arg`, kept so a deployment without 007 keeps
+working) and the Supabase Edge Function server, which never makes windows. So a
+thought first captured with windows and re-captured through a path that made
+none — the Edge server, or `server-portable` after `OB1_CHUNK_TOKENS` grew or
+the provider's window changed so the text fits one call — kept the windows of
+the vector it no longer had, and `match_thoughts` found it by them. Silently:
+no error on the write, none on the search. Pre-existing since 007; since 021
+also invisible: the re-capture labels the parent at the new model, so `vector
+models` reports it at the target and the re-embed's pool skips it — old-model
+windows under a parent that says it is at the new model.
+
+**The chunks follow the vector, as the label does.** Migration 022 redefines the
+3-argument body — 021's, byte for byte, 005's guard and 008's actor and 021's
+label carried — with one block after the INSERT: when a vector arrived, `DELETE
+FROM thought_chunks WHERE thought_id = v_id`. A caller that sends a vector and
+no chunks has said the text needs no windows; one that sends no vector keeps the
+row's vector, label and windows alike. That is the wholesale replacement the
+other two writers already do (`update_thought` with content and no chunks
+deletes them all), so the three writers agree, and the rule lives in the one
+body every caller reaches — both stores, the Edge server, any PostgREST
+integration calling the RPC by name — rather than in two stores taught to always
+call the 4-argument form with `'[]'`, which would have left `server/index.ts`
+and every third-party caller as they were. The 4-argument form is not
+redefined: it delegates to this one and then writes the caller's windows, so its
+own DELETE becomes a second, empty probe, and 013 stays its last definer.
+Considered and not done: keeping the windows when the old and new labels agree.
+A chunk row carries no model and no time, the label may be NULL on either side,
+and `update_thought` does not do it — the honest reading of a chunkless capture
+is the last writer's judgement that the text needs no windows. No backfill: a
+window left before 022 cannot be told from a live one; a `--job` pass
+regenerates every thought's windows through `update_thought`, and the header
+says so.
+
+**What it costs.** One DELETE per capture that carries a vector, bounded by
+`thought_id` on 007's index, finding nothing on a fresh insert — plpgsql cannot
+tell ON CONFLICT's UPDATE from the INSERT without reading `xmax`, and the probe
+is cheaper than the distinction. Measured at 1,024 dimensions, 2,000 operations
+per line, two rounds each side on one container: fresh 3-argument captures
+0.9–1.4 ms each at 021 and 1.2–1.4 ms at 022; re-captures 1.3–1.6 ms and
+1.2–1.4 ms; re-captures with no vector 0.35–0.46 ms and 0.32–0.38 ms. Inside
+the run-to-run spread, on either side of it.
+
+**The sentinel, and preflight.** The body carries `ob1:vector-replaces-chunks`,
+a contract sentinel in 014's convention: 021 re-applied by hand puts 021's body
+back — `CREATE OR REPLACE`, no error, and the defect with it — and nothing else
+would say so. Preflight's `atomic capture` check reads the 3-argument body and
+warns without the sentinel, naming 022. A warning, not a refusal: captures
+work, and search is merely over-inclusive.
+
+**Verify, as the ticket asked.** `test-live.ts` [7]: a thought at `old-model`
+with two windows, found by its second; re-captured through the 3-argument form
+with a vector and a new label → no windows, no longer found by the old window's
+axis, found by the new vector's; a re-capture with no vector keeps the windows,
+vector and label whatever label it names. `test-chunking.ts` [5b]: a text over
+today's window and under the provider's batch, captured through the server as
+two windows and found by its ending; the same text embedded with the window at
+the batch makes no windows, written through the store leaves none, and is still
+found by its ending — by its whole-content vector now (the server snapshots its
+environment on its first request, so the grown window runs the embedding path
+with the new configuration, as the suite already does for a changed setting).
+`test-store-sql.ts` [6] and `test-store-postgrest.ts` [6]: the store's routing
+to the 3-argument form leaves no windows, on both stores. `test-schema.ts`
+[23]: the rule through a planted window (PGlite cannot run the 4-argument
+insert), the body's sentinel and 021's carried parts, the 4-argument form still
+013's, three overloads, 022 the last definer of `upsert_thought` — and the
+trap: 021 re-applied leaves the windows again, 022 re-applied removes them.
+`test-upgrade.ts` [5]: 022 onto a populated 021 — the defect shown at 021 and
+gone after, no column or signature changed, the window left before 022 left
+where it was, a re-apply a no-op. `test-preflight.ts` [5]: 021 re-applied over
+022 warns naming 022, 022 re-applied is ok. Suites after: schema 480 at both
+widths, live 307, upgrade 35, preflight 133, chunking 33, sql 61, postgrest 44.
+
+**Not done here.** Windows left before 022 — no backfill, since nothing can tell
+them from live ones; a `--job` pass is the remedy. SMD-1043's advisory lock in
+both inserting overloads redefines this body next and carries the block and the
+sentinel forward, as 022's header lists. `server/index.ts` is unchanged: the
+migration fixes its path.
 
 ## Detached from the fork network
 

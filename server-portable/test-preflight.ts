@@ -619,7 +619,7 @@ else {
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC} WHERE id IN ('${ids[0]}', '${ids[1]}')`);
   // The counts line says "accepted" only while the acceptance stands — the
   // same bound the readers apply — so one report gives one account.
-  // (The head-window caveat on ids[1] was cleared by the reverted fixture
+  // (The head-window caveat on ids[1] was cleared by the reapplied021 fixture
   // above, so the accepted row is the one caveat here. finished_at is put back
   // as it was: a fresh one would be evidence for 021's backfill below.)
   const [{ fin: pendingFin }] = await claims`SELECT finished_at::text AS fin FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${ids[3]}::uuid`;
@@ -654,7 +654,9 @@ else {
   const noColumn = await run(SQL_ENV);
   assert(noColumn.code === 1 && /vector models\s+thoughts\.embedding_model does not exist/.test(noColumn.out) && /021_embedding_model_per_row\.sql/.test(noColumn.out),
          "the column missing under this server does not start, naming 021");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  // 021 and 022 together: 021's CREATE OR REPLACE puts its 3-argument
+  // upsert_thought back over 022's, which is the warning asserted below.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -673,14 +675,23 @@ else {
          "018 re-applied over 021 leaves two update_thought forms, and the start is refused naming the extra one");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
-  assert((await run(SQL_ENV)).code === 0, "…which 021 re-applied performs");
+  const reapplied021 = await run(SQL_ENV);
+  assert(reapplied021.code === 0, "…which 021 re-applied performs");
+  // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
+  // 022's: a chunkless re-capture would leave the previous vector's windows
+  // again. A warning naming 022 — captures work, search is over-inclusive.
+  assert(/atomic capture\s+both upsert_thought overloads present, but the 3-arg body is from before migration 022 \(021 re-applied by hand puts it back\)/.test(reapplied021.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql\./.test(reapplied021.out),
+         "021 re-applied over 022 leaves 021's 3-argument upsert_thought, and the start warns naming 022 rather than refusing");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
+  assert(/atomic capture\s+both upsert_thought overloads present; the 3-arg body is 022's, so a vector replaces the chunks on every capture path/.test((await run(SQL_ENV)).out),
+         "…and 022 re-applied is the shipped body again, said as such");
   // A database whose update_thought predates 021.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
   assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 021; the server sends p_embedding_model/.test(pre021.out) && /Apply db\/migrations\/021_embedding_model_per_row\.sql\./.test(pre021.out),
          "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") });
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");

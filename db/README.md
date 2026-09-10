@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `462 assertions: 462 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports twenty-one migrations applied, and
+`bun test-schema.ts` prints `480 assertions: 480 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports twenty-two migrations applied, and
 `\d thoughts` shows eight columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -78,7 +78,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `004_upsert_thought_with_embedding.sql` | 3-arg atomic-capture overload | This fork |
 | `005_reject_non_object_payload.sql` | Reject a non-object `p_payload` instead of silently storing `{}` | This fork |
 | `006_embedding_config.sql` | Record the embedding contract so preflight can catch a later disagreement | This fork |
-| `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables | This fork |
+| `007_thought_chunks.sql` | `thought_chunks` table, 4-arg capture overload, `match_thoughts` over both tables. Since 022 a re-capture with a vector replaces the chunk rows on the 3-arg path too | This fork |
 | `008_thought_audit.sql` | Append-only `thought_audit`, enforced by trigger; audit written inside the mutating transaction | Ported from `schemas/thought-audit` |
 | `009_update_delete_thought.sql` | `update_thought` / `delete_thought`; recomputes the fingerprint and replaces chunks, atomic `if_unchanged_since` | Ported from `integrations/*-thought-mcp` |
 | `010_agent_identity.sql` | `ob1_agents` / `ob1_agent_keys`, `resolve_agent`, `revoke_agent_key`; `thought_audit.canonical_agent_id` | Ported from `schemas/per-agent-identity` |
@@ -93,6 +93,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
 | `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
+| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body, one block added): a vector arriving through it deletes the thought's chunk rows, none arriving keeps them — the chunks follow the vector as the label does, on the path every chunkless capture takes (both stores, the Edge Function server, any PostgREST caller). Until then a thought captured with windows and re-captured through that form kept the windows of the vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them). The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back | This fork |
 
 ## What changed relative to the guide
 
@@ -775,8 +776,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 462 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 303 assertions, real server, throwaway container
+bun test-schema.ts                    # 480 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 307 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -823,6 +824,14 @@ container.
   removed the same scenario waits on the transaction id and raises `duplicate
   key value violates unique constraint "idx_thoughts_fingerprint"` — measured,
   which is why the assertion names the lock type.
+- **The chunks follow the vector on the 3-argument path** (migration 022). [7]
+  captures a thought at `old-model` with two windows through the 4-argument
+  form and finds it by its second window; re-captured with the same text
+  through the 3-argument form with a vector and a new label it has no
+  windows, is no longer found by the old window's axis and is found by the
+  new vector's; a re-capture with no vector keeps the windows with the vector
+  and its label. `test-upgrade.ts` [5] shows the defect at 021 before
+  applying 022 over it.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
   thirty-eight rows including three chunked ones (one of whose whole-content
@@ -880,7 +889,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 462 properties, including:
+asserts 480 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1010,10 +1019,20 @@ asserts 462 properties, including:
   content and no vector, leaves a metadata-only edit, and a 7-argument call
   resolves through the default; a re-embed and a label-only change write no
   audit row; one `update_thought` of eight parameters carrying 018's body by
-  name, 021 the last definer of both writers and 010 still of the audit
+  name, 021 the last definer of `update_thought`, 022 of `upsert_thought` and 010 still of the audit
   trigger; 018 re-applied puts a second form beside it and a 7-argument call is
   `not unique` until 021 is re-applied; and the ACL replayed across the drop of
   the 7-argument form, the four cases above for this function
+- **the chunks follow the vector** (migration 022): through a window planted
+  directly (see below), a re-capture through the 3-argument `upsert_thought`
+  with a vector removes the thought's windows as it moves the vector and
+  label, one with no vector keeps windows, vector and label, and so does a
+  2-argument re-capture; a first capture has nothing to remove; the body
+  carries the `ob1:vector-replaces-chunks` sentinel, the DELETE bounded to the
+  captured row under a vector arriving, and 005's guard, 008's actor and
+  021's label; the 4-argument form is 013's; three overloads, 022 the last
+  definer of `upsert_thought`; and the trap — 021 re-applied puts 021's body
+  back and a re-capture leaves the windows again, until 022 is re-applied
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

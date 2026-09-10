@@ -281,6 +281,22 @@ console.log("\n[6] Dedup and merge behave as the tools expect");
 
   const merged = await store.getThought(again.id);
   assert(merged?.metadata.kind === "a" && merged?.metadata.extra === 1, "metadata merged rather than replaced");
+
+  // 022: the chunks follow the vector on the 3-argument path too. A thought
+  // captured with windows, re-captured through this store with a vector and
+  // no chunks — the routing every chunkless capture takes — has none after.
+  const admin = new SQL({ url: URL_, max: 1 });
+  const windowed = await store.captureThought({
+    content: "a long thought, later short",
+    payload: { metadata: {} },
+    embedding: unit(1),
+    chunks: [{ content: "window one", embedding: unit(1) }, { content: "window two", embedding: unit(2) }],
+  });
+  const windows = async () => Number((await admin`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${windowed.id}`)[0].c);
+  assert((await windows()) === 2, "a capture with two windows writes both");
+  await store.captureThought({ content: "a long thought, later short", payload: { metadata: {} }, embedding: unit(3) });
+  assert((await windows()) === 0, "a re-capture with a vector and no chunks — the 3-argument routing — leaves no windows behind (migration 022)");
+  await admin.close();
 }
 
 console.log("\n[7] Missing and malformed ids");

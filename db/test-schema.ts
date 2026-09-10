@@ -2160,8 +2160,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("021") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
-         `021 is the last definer of both writers and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("022") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
+         `021 is the last definer of update_thought, 022 of upsert_thought (its 3-argument body carries 021's label) and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
@@ -2203,6 +2203,91 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   assert(!hasPublic(kept) && (await count("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_editor`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 23. Migration 022 — the chunks follow the vector ─────────────────────────
+//
+// The 3-argument upsert_thought replaced the parent's vector and label on a
+// re-capture and left 007's chunk rows as they were: a thought captured with
+// windows and re-captured through a path that made none (the Edge server, a
+// window that grew) was found by windows of a vector it no longer had — and
+// since 021 under a label that said it was at the new model. The chunk row is
+// planted directly, as [8b] does: PGlite cannot run the 4-argument insert.
+
+console.log("\n[23] Migration 022: a vector arriving through the 3-argument form replaces the chunks");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  // [22]'s restoreShipped("update_thought") re-ran 021 whole, and 021's CREATE
+  // OR REPLACE put its 3-argument body back over 022's — the trap the sentinel
+  // below exists for. The shipped body first.
+  await restoreShipped("upsert_thought");
+  const UP3 = "upsert_thought(text, jsonb, vector)";
+  const count = async (name: string) =>
+    (await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
+  const bodyOf = async (sig: string) => (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].src;
+  const capture = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r.id;
+  const rowOf = async (id: string) =>
+    (await db.query<{ model: string | null; axis: number | null; metadata: Record<string, unknown>; windows: number }>(
+      `SELECT embedding_model AS model, array_position(embedding::real[], 1::real) - 1 AS axis, metadata,
+              (SELECT count(*)::int FROM thought_chunks c WHERE c.thought_id = t.id) AS windows
+       FROM thoughts t WHERE id = $1`, [id])).rows[0];
+  const plant = (id: string) =>
+    db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, 'window', $2::vector)`, [id, unit(1)]);
+
+  const id = await capture("a long capture", { metadata: {}, embedding_model: "model-a" }, unit(0));
+  await plant(id);
+  let row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-a" && row.axis === 0, `a thought at model-a with one window (${row.windows} window, ${row.model})`);
+
+  await capture("a long capture", { metadata: {}, embedding_model: "model-b" }, unit(2));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === "model-b" && row.axis === 2,
+         `a re-capture with a vector and no chunks removes the windows as it moves the vector and label (${row.windows} windows, ${row.model}, axis ${row.axis})`);
+
+  await plant(id);
+  await capture("a long capture", { metadata: { k: 1 }, embedding_model: "model-z" }, null);
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-b" && row.axis === 2 && row.metadata.k === 1,
+         `a re-capture with NO vector keeps the windows with the vector and its label, whatever label it names (${row.windows} window, ${row.model})`);
+  await db.query(`SELECT upsert_thought('a long capture', '{"metadata":{"k":2}}'::jsonb)`);
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.metadata.k === 2, "…as does a metadata-only 2-argument re-capture");
+
+  const fresh = await capture("a fresh capture", { metadata: {} }, unit(3));
+  row = await rowOf(fresh);
+  assert(row.windows === 0 && row.axis === 3, "a first capture with a vector has nothing to remove and stores as before");
+
+  // The body: 021's, plus the block — and the sentinel a successor must keep.
+  const up = await bodyOf(UP3);
+  assert(/ob1:vector-replaces-chunks/.test(up), "the 3-argument body carries the ob1:vector-replaces-chunks sentinel");
+  assert(/IF p_embedding IS NOT NULL THEN\s+DELETE FROM thought_chunks WHERE thought_id = v_id;\s+END IF;/.test(up), "…the DELETE bounded to the captured row, under a vector arriving");
+  assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up) && /ELSE EXCLUDED\.embedding_model END/.test(up),
+         "…carrying 005's guard, 008's actor and 021's label in the INSERT and the ON CONFLICT clause");
+  const up4 = await bodyOf("upsert_thought(text, jsonb, vector, jsonb)");
+  assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
+         "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
+  assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert(lastDefinerOf("upsert_thought").startsWith("022"), `022 is the last definer of upsert_thought (${lastDefinerOf("upsert_thought")})`);
+
+  // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
+  // defect with it — which is what preflight's `atomic capture` reads the
+  // sentinel for.
+  await reapply("021");
+  assert(!/ob1:vector-replaces-chunks/.test(await bodyOf(UP3)), "021 re-applied over 022 puts 021's body back — the sentinel is gone");
+  // The window the vectorless re-captures kept is still there.
+  await capture("a long capture", { metadata: {}, embedding_model: "model-c" }, unit(4));
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-c" && row.axis === 4, `…and a re-capture with a vector leaves the windows under the moved vector again (${row.windows} window at model-c)`);
+  await restoreShipped("upsert_thought");
+  assert(/ob1:vector-replaces-chunks/.test(await bodyOf(UP3)), "022 re-applied: the sentinel is back");
+  await capture("a long capture", { metadata: {}, embedding_model: "model-d" }, unit(5));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === "model-d", `…and the next re-capture with a vector removes them (${row.windows} windows)`);
+  assert((await count("upsert_thought")) === 3, "…with three overloads throughout");
   await db.exec(`DELETE FROM thoughts`);
 }
 
