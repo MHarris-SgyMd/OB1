@@ -1009,6 +1009,19 @@ if (configFailed) {
           add("embedding contract", "warn", `could not read ob1_config: ${(e as Error).message}`,
               "Apply db/migrations/006_embedding_config.sql.");
         }
+        // The column's width, for where the record has none (a hand-applied
+        // schema): the re-embed pass check judges a key's width by it, as
+        // reembed.ts does, so the two agree on which keys are superseded — this
+        // server's OB1_EMBEDDING_DIM stood in before, and a server misconfigured
+        // for another width called the live pass one nothing could finish
+        // (SMD-1067's second review pass).
+        let columnWidth: number | undefined;
+        try {
+          const [w] = (await sql`SELECT atttypmod AS width FROM pg_attribute WHERE attrelid = 'thoughts'::regclass AND attname = 'embedding'`) as { width: number }[];
+          if (w && Number(w.width) > 0) columnWidth = Number(w.width);
+        } catch {
+          // The schema checks below report a missing table or column.
+        }
         if (recorded.embedding_dim && Number(recorded.embedding_dim) !== embDim) {
           add("embedding contract", "fail",
               `schema was built for ${recorded.embedding_dim} dimensions, but OB1_EMBEDDING_DIM=${embDim}`,
@@ -1034,7 +1047,12 @@ if (configFailed) {
          * remembers the pass that left them — the remedy is the pass, which
          * takes exactly those rows; unlabelled vectors (a row from before 021 no
          * pass vouched for, a raw INSERT, a writer naming no model) are detail:
-         * unknown, not wrong. The column
+         * unknown, not wrong. A vector at another model whose thought the
+         * operator ACCEPTED — a failed row `reembed.ts --accept-failed` marked
+         * succeeded under a key naming the recorded model, and nothing has
+         * written the thought since — is detail too (SMD-1067): the acceptance
+         * is the operator's word about exactly that vector, and clearing the
+         * claim table brings the warning back, which is right. The column
          * absent under this server is a failure: every capture would drop the
          * label and every edit would fail (the 8-argument update_thought is
          * 021's too — `edit signature` above says so).
@@ -1050,13 +1068,31 @@ if (configFailed) {
                 "thoughts.embedding_model does not exist — the server records the model on every vector it stores, and the writers before migration 021 cannot hold it: captures would silently lose the label and edits would fail",
                 APPLY_021);
           } else {
-            // The query and the arithmetic are config.mjs's, shared with reembed.ts.
-            const { CORPUS_BY_MODEL_SQL, summariseCorpusByModel } = await import("../db/config.mjs");
+            // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
+            const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
-            const { at, unlabelled, others, otherCount } = summariseCorpusByModel(
-              (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[], atModel);
-            const detail = `${at} at ${atModel}${unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : ""}`;
-            if (otherCount > 0) {
+            // The column's width first: the key reembed.ts writes is at the
+            // column's width whatever a hand-edited record says (third review pass).
+            const atDim = Number(columnWidth ?? recorded.embedding_dim ?? embDim);
+            const corpus = (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[];
+            // The acceptances — under the recorded model's OWN key, exactly
+            // (config.mjs says why) — are read only when a vector at another
+            // model needs explaining, and only where the claim table exists: a
+            // relation named in a statement is resolved when it is parsed.
+            let acceptedRows: { model: string | null; accepted: number }[] = [];
+            if (corpus.some((r) => r.model !== null && r.model !== atModel)) {
+              const [{ haveClaims }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS "haveClaims"`;
+              if (haveClaims) acceptedRows = (await sql.unsafe(ACCEPTED_BY_MODEL_SQL, [reembedKey(atModel, atDim), ACCEPTED_CAVEAT_PREFIX])) as { model: string | null; accepted: number }[];
+            }
+            const { at, unlabelled, others, otherCount, acceptedCount, unaccepted } = summariseCorpusByModel(corpus, atModel, acceptedRows);
+            // What is known about the rows NOT at the model: said the same way in
+            // every branch, so an accepted vector never drops out of one of them.
+            const rest = [
+              acceptedCount ? `${acceptedCount} at another model accepted by the operator (${others.filter((r) => r.accepted).map((r) => `${r.model}: ${r.accepted}`).join(", ")})` : null,
+              unlabelled ? `${unlabelled} unlabelled (model unknown)` : null,
+            ].filter((s): s is string => s !== null);
+            const detail = [`${at} at ${atModel}`, ...rest].join(", ");
+            if (unaccepted > 0) {
               // Judged against the RECORD — what the corpus is meant to be at.
               // When the record and this server's configuration disagree the
               // rows are mid-switch and the direction is the operator's: a
@@ -1065,22 +1101,27 @@ if (configFailed) {
               // whose finished rows are the majority (first review pass).
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
-                  `${otherCount} vector(s) at another model (${others.map((r) => `${r.model}: ${r.c}`).join(", ")}) beside ${detail} — searches rank across the two${recordDiffers ? `; the record says ${recorded.embedding_model} and this server embeds with ${embModel}` : ""}`,
+                  `${unaccepted} vector(s) at another model (${others.filter((r) => r.c > r.accepted).map((r) => `${r.model}: ${r.c - r.accepted}`).join(", ")}) beside ${detail} — searches rank across the two${recordDiffers ? `; the record says ${recorded.embedding_model} and this server embeds with ${embModel}` : ""}`,
                   recordDiffers
                     ? `The record (${recorded.embedding_model}) and this server (${embModel}) disagree, so which rows are out of place depends on which stands. Finish the switch to ${recorded.embedding_model}: cd db && OB1_EMBEDDING_MODEL=${recorded.embedding_model} bun reembed.ts --url $DATABASE_URL, and configure the server for it; or, if ${embModel} stands: cd db && bun reembed.ts --url $DATABASE_URL --switch-model, which re-embeds the rows at ${recorded.embedding_model} instead.`
                     : `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`);
-            } else if (at + unlabelled === 0) {
+            } else if (at + unlabelled + otherCount === 0) {
               add("vector models", "ok", "no vectors stored yet");
             } else if (at === 0) {
               // The migration's own motivating corpus: a switch that died, its
               // claim rows cleared, nothing labelled — every vector unknown and
               // none known to be at the model the record names. Unknown is not
               // wrong, but a corpus with NO vector known to be at its model is
-              // the state this column exists to make visible (third review pass).
+              // the state this column exists to make visible (third review pass
+              // of SMD-1068) — and so is one whose every vector is at another
+              // model with the operator's acceptance: a switch during an outage,
+              // every row failed and accepted with --all, would otherwise be
+              // green with no vector at the model the server embeds with
+              // (SMD-1067's first review pass).
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
-                  `no vector is known to be at ${atModel}: ${unlabelled} unlabelled (model unknown) — nothing vouches for them, and the corpus may be at any model the record was ever moved to`,
-                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it.`);
+                  `no vector is known to be at ${atModel}: ${rest.join(", ")} — ${acceptedCount ? "nothing is at the model the record names" : "nothing vouches for them, and the corpus may be at any model the record was ever moved to"}`,
+                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it${acceptedCount ? "; the accepted rows return through --retry-fallbacks, or when their thought is edited" : ""}.`);
             } else {
               add("vector models", "ok", detail);
             }
@@ -1130,9 +1171,13 @@ if (configFailed) {
          *
          * A warning, as the model mismatch above is: the server answers, and
          * ranks across the old and the new vectors until the pass is finished.
+         * A row the provider refuses permanently is the operator's to accept
+         * (`reembed.ts --accept-failed`), and a superseded key's record theirs
+         * to retire (`--retire`); the remedies name both, in place of the hand
+         * DELETE they named before (SMD-1067).
          */
         try {
-          const { formatPassCounts, parseReembedKey, passUnfinished, poolModelFor, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
+          const { ACCEPTED_CAVEAT_PREFIX, formatPassCounts, parseReembedKey, passUnfinished, poolModelFor, REEMBED_KEY_PREFIX, reembedKey } = await import("../db/config.mjs");
           const [{ present }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
           if (!present) {
             add("re-embed pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
@@ -1143,14 +1188,16 @@ if (configFailed) {
             // evaluated only when there are groups.
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
+                     count(*) FILTER (WHERE last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})
+                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= COALESCE(claimed_at, finished_at, '-infinity'::timestamptz)))::int AS accepted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
-              { work_type: string; status: string; c: number; noted: number; thoughts: number }[];
+              { work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number }[];
             const byKey = new Map<string, PassCounts>();
             for (const r of rows) {
-              const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
+              const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
               const n = Number(r.c);
-              if (r.status === "succeeded") { c.succeeded = n; c.fellBack = Number(r.noted); }
+              if (r.status === "succeeded") { c.succeeded = n; c.fellBack = Number(r.noted); c.accepted = Number(r.accepted); }
               else if (r.status === "failed") c.failed = n;
               else if (r.status === "claimed") c.claimed = n;
               else if (r.status === "pending") c.pending = n;
@@ -1193,7 +1240,11 @@ if (configFailed) {
             const cmd = (envPrefix: string, flags: string) => `${envPrefix}bun reembed.ts --url $DATABASE_URL${flags}`;
             const finishIt = (envPrefix: string, jobFlag: string, c: PassCounts, needsSwitch: boolean) =>
               `Finish it: cd db && ${cmd(envPrefix, `${jobFlag}${needsSwitch ? " --switch-model" : ""}`)}` +
-              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ` +
+              // Acceptance is a command of its own, under the KEY (the shell's
+              // default key is another pass), and not offered beside
+              // --switch-model: reembed.ts refuses it under a model change, and
+              // refuses the two flags together (second review pass).
+              `${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed${needsSwitch ? "" : `, or ${cmd(envPrefix, `${jobFlag} --accept-failed <thought-id…>`)} for one the provider refuses permanently`})` : ""}; ` +
               `${cmd(envPrefix, `${jobFlag} --status`)} shows where it stands.`;
             let unfinished = 0;
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
@@ -1201,32 +1252,47 @@ if (configFailed) {
               unfinished++;
               const named = parseReembedKey(key);
               // Superseded: the key names a model or width that is not the
-              // recorded one. A missing embedding_dim row (a hand-applied
-              // schema) is no evidence about the width — the contract check
-              // above guards the same absence — so only a present one is
-              // compared (second review pass).
-              const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
-              const otherWidth = named !== null && recorded.embedding_dim !== undefined && named.dim !== Number(recorded.embedding_dim);
-              const retire = `retire its record: DELETE FROM thought_work_claims WHERE work_type = '${key}';`;
-              if (key === configuredKey) {
-                add("re-embed pass", "warn",
-                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
-                    finishIt("", "", c, recordDiffers));
-              } else if (otherModel) {
+              // current one — the recorded model, or this server's when nothing
+              // is recorded (as reembed.ts's --retire judges, so the two agree:
+              // with no record a stale key fell to "finish it under X", which
+              // would have re-embedded the corpus to X — SMD-1067's third review
+              // pass); the COLUMN's width, before any record (a hand-edited
+              // record must not make the one finishable key superseded — third
+              // pass; before that, a missing width row made every width "other"
+              // — SMD-1024's second review pass — then no width at all, then
+              // this server's configured width, which a misconfigured server
+              // made wrong — SMD-1067's first and second passes).
+              const currentModelHere = recorded.embedding_model ?? embModel;
+              const otherModel = named !== null && named.model !== currentModelHere;
+              const widthHere = Number(columnWidth ?? recorded.embedding_dim ?? embDim);
+              const otherWidth = named !== null && named.dim !== widthHere;
+              // The tool's own flag, not a hand DELETE: it refuses the recorded
+              // model's keys and a key with a live lease (SMD-1067).
+              const retire = `retire its record: cd db && ${cmd("", ` --retire ${key}`)}`;
+              if (otherModel) {
                 // A switch that was abandoned or reverted: the recorded model
                 // has moved on, so finishing this pass under the current shell
                 // would write the wrong model's vectors — reembed.ts refuses
                 // it. Either that switch is completed, or its record retired.
+                // Judged before the configured key: a server still configured
+                // for the model the record moved on from has THIS key, and its
+                // operator has the same two choices — the first review pass's
+                // "finish it" alone offered no way to let the revert stand
+                // (third review pass).
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? "?"}); its rows describe a switch that was abandoned or reverted`,
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} @ ${named.dim}, which is ${recorded.embedding_model === undefined ? `not this server's model (${embModel}; nothing is recorded)` : `no longer the recorded model (${recorded.embedding_model} @ ${recorded.embedding_dim ?? widthHere})`}; its rows describe a switch that was abandoned or reverted`,
                     `Either finish that switch — cd db && ${cmd(`OB1_EMBEDDING_MODEL=${named.model} OB1_EMBEDDING_DIM=${named.dim} `, " --switch-model")} — or, if the revert stands, ${retire}`);
+              } else if (key === configuredKey) {
+                add("re-embed pass", "warn",
+                    `the pass to ${embModel} @ ${embDim} has not finished: ${formatPassCounts(c)} — until it does, the rows it has not reached carry what they had before it (another model's vector, after --switch-model), and searches rank across the two`,
+                    finishIt("", "", c, recordDiffers));
               } else if (otherWidth) {
                 // The same model at another width. Migration 006 keeps the
                 // recorded width equal to the column's, so no run can finish
                 // this: a width change is a schema migration that does not
                 // exist, and reembed.ts refuses one. Only the record can go.
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${recorded.embedding_dim}; a width change is a schema migration that does not exist yet, so no run can finish this`,
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${widthHere}; a width change is a schema migration that does not exist yet, so no run can finish this`,
                     `Nothing can complete it (reembed.ts refuses a width other than the column's); ${retire}`);
               } else {
                 const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";

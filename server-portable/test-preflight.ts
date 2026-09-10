@@ -14,7 +14,7 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
-import { MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -429,6 +429,8 @@ else {
          "…and warns with the counts, in the words reembed.ts prints under --status");
   assert(/--retry-failed for the 1 failed row/.test(mid.out) && /--status shows where it stands/.test(mid.out),
          "…with the run that finishes it, --retry-failed while a row is failed, and --status as the remedy");
+  assert(/--accept-failed <thought-id…> for one the provider refuses permanently/.test(mid.out),
+         "…and --accept-failed for a row no retry will change (SMD-1067)");
   assert(/embedding contract.*matching/s.test(mid.out), "…beside a contract line that still says matching, which is true of the record");
   const midJson = await run(SQL_ENV, "--json");
   const midParsed = JSON.parse(midJson.out) as { ok: boolean; checks: { name: string; status: string }[] };
@@ -460,6 +462,10 @@ else {
   assert(other.out.includes(`--job ${CTX}`), "…with the flag that resumes it");
   assert(!/the pass to .* has not finished/.test(other.out), "…while the finished pass to the configured model is not reported");
   assert(!/--switch-model/.test(other.out), "…and, with the record and the configuration agreeing, no --switch-model in the remedy");
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${CTX}`;
+  const otherFailed = await run(SQL_ENV);
+  assert(otherFailed.out.includes(`--job ${CTX} --accept-failed <thought-id…>`),
+         "…and with a failed row its acceptance remedy carries the key, so the row is accepted under the pass it belongs to and not the shell's default key");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
 
   /**
@@ -475,8 +481,8 @@ else {
   const superseded = await run(SQL_ENV);
   assert(superseded.code === 0 && new RegExp(`${rx(OTHER)}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(${EMBEDDING_MODEL} @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(superseded.out),
          "a pass to a model that is no longer the recorded one is described as an abandoned switch");
-  assert(/OB1_EMBEDDING_MODEL=other-model OB1_EMBEDDING_DIM=\d+ bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(superseded.out) && superseded.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${OTHER}';`),
-         "…with the two remedies: finish that switch in its own environment, or retire its record");
+  assert(/OB1_EMBEDDING_MODEL=other-model OB1_EMBEDDING_DIM=\d+ bun reembed\.ts --url \$DATABASE_URL --switch-model/.test(superseded.out) && superseded.out.includes(`retire its record: cd db && bun reembed.ts --url $DATABASE_URL --retire ${OTHER}`) && !/DELETE FROM/.test(superseded.out),
+         "…with the two remedies: finish that switch in its own environment, or retire its record with the tool's own flag — never a hand DELETE (SMD-1067)");
   assert(!superseded.out.includes(`--job ${OTHER}`), "…and never --job under the current model, which reembed.ts would refuse");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${OTHER}`;
 
@@ -487,13 +493,15 @@ else {
    * --switch-model, or reembed.ts exits 2 on it (first review pass).
    */
   await claims.unsafe(`SELECT enqueue_thoughts('${KEY}', ARRAY['${ids[1]}']::uuid[])`);
-  await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL, last_error = NULL WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: refused this text' WHERE work_type = ${KEY} AND thought_id = ${ids[1]}::uuid`;
   await claims`UPDATE ob1_config SET value = 'other-model' WHERE key = 'embedding_model'`;
   const reverted = await run(SQL_ENV);
-  assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /the pass to .* has not finished/.test(reverted.out),
+  assert(/embedding contract\s+schema was built with other-model, now configured for/.test(reverted.out) && /re-embed pass\s+reembed:/.test(reverted.out),
          "with the record on another model and the configured model's pass unfinished, both lines warn");
-  assert(/Finish it: cd db && bun reembed\.ts --url \$DATABASE_URL --switch-model;/.test(reverted.out),
-         "…and the finishing command carries --switch-model, which reembed.ts would otherwise refuse");
+  assert(new RegExp(`${rx(KEY)}: 6 thoughts — .* — a pass to ${rx(EMBEDDING_MODEL)} @ ${EMBEDDING_DIM}, which is no longer the recorded model \\(other-model @ ${EMBEDDING_DIM}\\); its rows describe a switch that was abandoned or reverted`).test(reverted.out),
+         "…and the configured model's own key, which the record has moved on from, is a superseded key too — the record decides, not this server's environment");
+  assert(new RegExp(`Either finish that switch — cd db && OB1_EMBEDDING_MODEL=${rx(EMBEDDING_MODEL)} OB1_EMBEDDING_DIM=${EMBEDDING_DIM} bun reembed\\.ts --url \\$DATABASE_URL --switch-model — or, if the revert stands, retire its record: cd db && bun reembed\\.ts --url \\$DATABASE_URL --retire ${rx(KEY)}`).test(reverted.out) && !/--accept-failed/.test(reverted.out),
+         "…with both remedies — finish the switch, or retire the record — and not --accept-failed, which reembed.ts refuses under a model change");
   /**
    * The same disagreement, with an unfinished key preflight cannot read a
    * model from: the command still needs --switch-model, since the shell it
@@ -506,7 +514,7 @@ else {
          "an unfinished key naming no model, while the record disagrees with the configuration, gets --switch-model too");
   await claims`DELETE FROM thought_work_claims WHERE work_type = 'reembed:nightly'`;
   await claims`UPDATE ob1_config SET value = ${EMBEDDING_MODEL} WHERE key = 'embedding_model'`;
-  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND status = 'pending'`;
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${KEY} AND status IN ('pending', 'failed')`;
 
   /**
    * A hand-applied schema can carry the model row without the width row. The
@@ -519,6 +527,14 @@ else {
   const noDim = await run(SQL_ENV);
   assert(noDim.out.includes(`--job ${CTX}`) && !/abandoned or reverted/.test(noDim.out),
          "with no width recorded, the configured model's backfill is still a pass to resume, not an abandoned switch");
+  const wrongDim = await run({ ...SQL_ENV, OB1_EMBEDDING_DIM: String(EMBEDDING_DIM + 1) });
+  assert(wrongDim.out.includes(`--job ${CTX}`) && !/where the column and the record are/.test(wrongDim.out),
+         "…and a server misconfigured for another width does not make it one nothing can finish: the width judged by is the column's, not this server's");
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM + 1)})`;
+  const wrongRecord = await run(SQL_ENV);
+  assert(wrongRecord.out.includes(`--job ${CTX}`) && !/where the column and the record are/.test(wrongRecord.out),
+         "…nor does a record that disagrees with the column: the column comes first, since a pass runs at its width and no other");
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_dim'`;
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CTX}`;
   await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(EMBEDDING_DIM)})`;
 
@@ -532,9 +548,24 @@ else {
   const wide = await run(SQL_ENV);
   assert(new RegExp(`${rx(WIDE)}: 6 thoughts — .* — a pass to ${rx(EMBEDDING_MODEL)} at ${EMBEDDING_DIM + 1} dimensions, where the column and the record are ${EMBEDDING_DIM}`).test(wide.out),
          "a key at another width is described as one no run can finish");
-  assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`DELETE FROM thought_work_claims WHERE work_type = '${WIDE}';`) && !/--switch-model/.test(wide.out),
+  assert(/Nothing can complete it/.test(wide.out) && wide.out.includes(`--retire ${WIDE}`) && !/DELETE FROM/.test(wide.out) && !/--switch-model/.test(wide.out),
          "…with retiring the record as the only remedy, and no --switch-model that reembed.ts would refuse on the width");
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${WIDE}`;
+
+  /**
+   * Nothing recorded (006 not applied, or the row deleted) and a stale key at
+   * another model: this server's model stands in for the record, as
+   * reembed.ts's --retire judges, so the key is an abandoned switch with
+   * --retire as a remedy — not "finish it under X", which would have
+   * re-embedded the corpus to X against a server configured for M.
+   */
+  await claims`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${OTHER}', ARRAY['${ids[0]}']::uuid[])`);
+  const noRecord = await run(SQL_ENV);
+  assert(new RegExp(`${rx(OTHER)}: 6 thoughts — .* — a pass to other-model @ ${EMBEDDING_DIM}, which is not this server's model \\(${rx(EMBEDDING_MODEL)}; nothing is recorded\\); its rows describe a switch that was abandoned or reverted`).test(noRecord.out) && noRecord.out.includes(`--retire ${OTHER}`) && !noRecord.out.includes(`--job ${OTHER}`),
+         `with nothing recorded, a stale key at another model is an abandoned switch judged against this server's model, with --retire as a remedy and never --job under it (${noRecord.out.split("\n").find((l) => /re-embed pass/.test(l))?.trim()})`);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${OTHER}`;
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${EMBEDDING_MODEL})`;
 
   /**
    * The rows say which model they are at (migration 021, SMD-1068). The claim
@@ -564,6 +595,50 @@ else {
          "…with the pass as the remedy, and no --switch-model while the record and the configuration agree");
   const twoJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(twoJson.ok === true && twoJson.checks.some((c) => c.name === "vector models" && c.status === "warn"), "--json carries it as a warning, under ok:true");
+  /**
+   * The operator accepts the row at the other model (SMD-1067): its row under
+   * the recorded model's key becomes a succeeded row with the accepted caveat,
+   * as `reembed.ts --accept-failed` writes it, and the vector is detail rather
+   * than a warning — the acknowledgement is the operator's word about exactly
+   * that vector. A second row at that model, not spoken for, warns, counting
+   * only itself; and the acceptance holds only while nothing has written the
+   * thought since (021's evidence rule) — an edit makes it a new question.
+   */
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX} || 'stub: refused this text' WHERE work_type = ${KEY} AND thought_id = ${ids[2]}::uuid`;
+  const acceptedOne = await run(SQL_ENV);
+  assert(acceptedOne.code === 0 && new RegExp(`vector models\\s+2 at ${rx(EMBEDDING_MODEL)}, 1 at another model accepted by the operator \\(other-model: 1\\), 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(acceptedOne.out) && !/vector\(s\) at another model/.test(acceptedOne.out),
+         "a vector at another model whose thought the operator accepted is detail, not a warning — the acknowledgement SMD-1067 adds");
+  assert(/re-embed pass\s+none unfinished/.test(acceptedOne.out), "…and its row, succeeded with the caveat, leaves the pass finished");
+  // Every vector at the recorded model gone: a corpus whose only vectors are
+  // accepted ones at another model is NOT ok — nothing is at the model the
+  // server embeds with (first review pass).
+  await claims.unsafe(`UPDATE thoughts SET embedding = NULL WHERE id IN ('${ids[0]}', '${ids[1]}')`);
+  const noneAt = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 1 at another model accepted by the operator \\(other-model: 1\\), 1 unlabelled \\(model unknown\\) — nothing is at the model the record names`).test(noneAt.out) && /--retry-fallbacks/.test(noneAt.out),
+         "…but with no vector at the recorded model at all, an accepted corpus is a warning, naming the way the accepted rows come back");
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC} WHERE id IN ('${ids[0]}', '${ids[1]}')`);
+  // The counts line says "accepted" only while the acceptance stands — the
+  // same bound the readers apply — so one report gives one account.
+  // (The head-window caveat on ids[1] was cleared by the reverted fixture
+  // above, so the accepted row is the one caveat here. finished_at is put back
+  // as it was: a fresh one would be evidence for 021's backfill below.)
+  const [{ fin: pendingFin }] = await claims`SELECT finished_at::text AS fin FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${ids[3]}::uuid`;
+  await claims`UPDATE thought_work_claims SET status = 'pending', finished_at = NULL WHERE work_type = ${KEY} AND thought_id = ${ids[3]}::uuid`;
+  const pendingOne = await run(SQL_ENV);
+  assert(/re-embed pass\s+the pass to .* has not finished: 6 thoughts — 5 succeeded \(1 with a caveat, 1 accepted by the operator\), 0 failed, 0 in flight, 1 pending/.test(pendingOne.out),
+         `the pass counts name the accepted row inside the caveat count while its acceptance stands (${pendingOne.out.split("\n").filter((l) => /re-embed pass|vector models|could not/.test(l)).join(" | ").trim()})`);
+  await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[4]}'`);
+  const oneMore = await run(SQL_ENV);
+  assert(new RegExp(`vector models\\s+1 vector\\(s\\) at another model \\(other-model: 1\\) beside 2 at ${rx(EMBEDDING_MODEL)}, 1 at another model accepted by the operator \\(other-model: 1\\), 1 unlabelled`).test(oneMore.out),
+         "a second row at that model, not accepted, warns — counting only the one the operator has not spoken for");
+  await claims.unsafe(`UPDATE thoughts SET metadata = metadata || '{"edited":true}'::jsonb WHERE id = '${ids[2]}'`);
+  const edited = await run(SQL_ENV);
+  assert(/vector models\s+2 vector\(s\) at another model \(other-model: 2\)/.test(edited.out) && !/accepted by the operator/.test(edited.out),
+         "…and a thought written since its acceptance is no longer spoken for: the acceptance held while nothing wrote the row");
+  assert(/5 succeeded \(1 with a caveat\), 0 failed, 0 in flight, 1 pending/.test(edited.out), `…and the pass counts call it a caveat now, not an acceptance (${edited.out.split("\n").filter((l) => /re-embed pass/.test(l)).join(" | ").trim()})`);
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = ${pendingFin}::timestamptz WHERE work_type = ${KEY} AND thought_id = ${ids[3]}::uuid`;
+  await claims`UPDATE thought_work_claims SET last_error = NULL WHERE work_type = ${KEY} AND thought_id = ${ids[2]}::uuid`;
+  await claims.unsafe(`UPDATE thoughts SET embedding = NULL, embedding_model = NULL WHERE id = '${ids[4]}'`);
   await claims.unsafe(`UPDATE thoughts SET embedding_model = '${EMBEDDING_MODEL}' WHERE id = '${ids[2]}'`);
   const atModel = await run(SQL_ENV);
   assert(new RegExp(`vector models\\s+3 at ${rx(EMBEDDING_MODEL)}, 1 unlabelled \\(model unknown\\)\\s*$`, "m").test(atModel.out) && !/at another model/.test(atModel.out),
@@ -582,7 +657,7 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
-         "021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok");
+         `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
   // 021's backfill holds the updated_at trigger off for one statement; a
   // hand run that stopped between DISABLE and ENABLE leaves it off.
   await claims.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
