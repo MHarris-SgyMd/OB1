@@ -1010,6 +1010,10 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `…an id whose row is not failed refuses the whole command, and nothing is written (exit ${notFailed.code})`);
   const combined = await reembed("--accept-failed", poisonId, "--retry-failed");
   assert(combined.code === 2 && /do not combine/.test(combined.out), "…and it does not combine with a run's flags");
+  const allAndIds = await reembed("--accept-failed", "--all", poisonId);
+  assert(allAndIds.code === 2 && /--all takes no ids beside it/.test(allAndIds.out) && (await claimCounts()).failed === 3,
+    `…nor does --all take ids beside it — one or the other, never a list read silently as either (exit ${allAndIds.code})`);
+  const [{ fin: failedAt }] = await sql`SELECT finished_at::text AS fin FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = ${poisonId}::uuid`;
   const acceptDry = await reembed("--dry-run", "--accept-failed", poisonId);
   assert(acceptDry.code === 0 && /would: accept 1 failed row\(s\) under reembed:test/.test(acceptDry.out) && /Nothing was written/.test(acceptDry.out) && (await claimCounts()).failed === 3,
     `--dry-run --accept-failed says what it would accept and writes nothing (exit ${acceptDry.code})`);
@@ -1017,8 +1021,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(accepted.code === 0 && /1 failed row\(s\) accepted under reembed:test/.test(accepted.out) && /kept the vector it had; accepted by the operator: .*stub: refused this text/.test(accepted.out),
     `--accept-failed marks the poisoned row succeeded with the caveat naming the failure (exit ${accepted.code})`);
   assert(/37 succeeded \(2 with a caveat, 1 accepted by the operator\), 2 failed/.test(accepted.out), `…and the counts say so, the accepted row inside the caveat count (${accepted.out.split("\n").find((l) => /status:/.test(l))?.trim()})`);
-  const [acceptedRow] = await sql`SELECT status, last_error AS err FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = ${poisonId}::uuid`;
+  const [acceptedRow] = await sql`SELECT status, last_error AS err, finished_at::text AS fin FROM thought_work_claims WHERE work_type = ${REEMBED_JOB} AND thought_id = ${poisonId}::uuid`;
   assert(acceptedRow?.status === "succeeded" && /^kept the vector it had; accepted by the operator: .*stub: refused this text/.test(acceptedRow?.err ?? ""), `…on the row itself (${acceptedRow?.status}: ${acceptedRow?.err})`);
+  assert(acceptedRow?.fin === failedAt, "…with the failure's own finished_at kept, so the bound is measured from the refusal and not from the acceptance");
   const [{ e: keptVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${poisonText}`;
   assert(axisOf(keptVec) === 0, "…which keeps the vector it had");
   const acceptedStatus = await reembed("--status");
@@ -1187,6 +1192,9 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     const pf = await preflight();
     assert(/vector models\s+1 vector\(s\) at another model \(old-model: 1\) beside 41 at stub-embed/.test(pf.out), "…and preflight no longer counts the acceptance either — one evidence rule for both readers");
   }
+  const reopenedStatus = await reembedDefault("--status");
+  const reopenedLine = reopenedStatus.out.split("\n").find((l) => /status:/.test(l)) ?? "";
+  assert(/2 succeeded \(1 with a caveat\), 0 failed/.test(reopenedLine) && !/accepted/.test(reopenedLine), `…and the counts call it a caveat, not an acceptance — one report, one account (${reopenedLine.trim()})`);
   poison = false;
   const relented = await reembedDefault();
   assert(relented.code === 0 && /1 succeeded row\(s\) whose thought is not at stub-embed returned to the pool/.test(relented.out) && /1 re-embedded, 0 failed/.test(relented.out),
@@ -1199,6 +1207,20 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   }
   const noop2 = await reembedDefault();
   assert(noop2.code === 0 && /Nothing to do/.test(noop2.out), "a further run under the model's own key has nothing to do");
+  // A finished row with no caveat whose thought is not at the model, with the
+  // thought's updated_at not past the row's finished_at — the state a thought
+  // edited between update_thought and release_thought leaves. The acceptance
+  // test inside the data rule must be NULL-safe for a row with no caveat, or
+  // this row is never returned (first review pass).
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at`;
+  await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE content = ${stale}`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at`;
+  const quietMove = await reembedDefault("--dry-run");
+  assert(/return 1 succeeded row\(s\) whose thought is not at stub-embed to the pool/.test(quietMove.out),
+    `a finished row without a caveat whose thought is not at the model returns whatever its timestamps say (${quietMove.out.split("\n").find((l) => /would:/.test(l))?.trim()})`);
+  await sql`ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at`;
+  await sql`UPDATE thoughts SET embedding_model = 'stub-embed' WHERE content = ${stale}`;
+  await sql`ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at`;
 
   // --retire (SMD-1067): the record of a superseded pass — a switch to
   // other-model that was abandoned — is removed by the tool, as the remedy
@@ -1217,6 +1239,25 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(retireForeign.code === 2 && /another tool's pass/.test(retireForeign.out), "…a key without the reembed: prefix, which is another tool's");
   const retireEmpty = await reembed("--retire", `reembed:nobody@${DIM}`);
   assert(retireEmpty.code === 2 && /nothing to retire/.test(retireEmpty.out), "…and a key with no rows — a typo is the likelier cause");
+  // No width recorded (a hand-applied schema): the column's width stands in,
+  // in both tools, so a key at another width has a remedy that runs.
+  const WIDE_KEY = `reembed:stub-embed@${DIM + 1}`;
+  await sql`SELECT enqueue_thoughts(${WIDE_KEY}, (SELECT array_agg(id) FROM (SELECT id FROM thoughts ORDER BY created_at LIMIT 1) s))`;
+  await sql`DELETE FROM ob1_config WHERE key = 'embedding_dim'`;
+  {
+    const pf = await preflight();
+    assert(new RegExp(`${WIDE_KEY}: 42 thoughts — .* a pass to stub-embed at ${DIM + 1} dimensions, where the column and the record are ${DIM}`).test(pf.out) && pf.out.includes(`--retire ${WIDE_KEY}`),
+      `with no width recorded, a key at another width is still one nothing can finish, with --retire as the remedy (${pf.out.split("\n").find((l) => /re-embed pass/.test(l))?.trim()})`);
+  }
+  const retireWide = await reembed("--retire", WIDE_KEY);
+  assert(retireWide.code === 0 && /1 row\(s\) removed/.test(retireWide.out), `…and --retire takes it, judging the width by the column's (exit ${retireWide.code})`);
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', ${String(DIM)})`;
+  // No model recorded: this shell's own key is still not retireable — a record
+  // deleted by hand does not make a running pass a superseded one.
+  await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+  const retireOwnNoRecord = await reembed("--retire", DEFAULT_KEY);
+  assert(retireOwnNoRecord.code === 2 && /names the configured model/.test(retireOwnNoRecord.out), `…while with no model recorded this shell's own key is refused as the configured model's (exit ${retireOwnNoRecord.code})`);
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', 'stub-embed')`;
   const retireDry = await reembed("--dry-run", "--retire", REEMBED_JOB);
   assert(retireDry.code === 0 && /would: retire reembed:test — remove its \d+ row\(s\) \(\d+ succeeded\)/.test(retireDry.out) && (await claimCounts()).succeeded > 0,
     `--dry-run --retire says what it would remove — a key naming no model is retireable — and removes nothing (exit ${retireDry.code})`);

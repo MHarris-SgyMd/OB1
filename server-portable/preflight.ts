@@ -1056,20 +1056,27 @@ if (configFailed) {
                 APPLY_021);
           } else {
             // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
-            const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, summariseCorpusByModel } = await import("../db/config.mjs");
+            const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");
             const atModel = recorded.embedding_model ?? embModel;
-            // The acceptances are read only where the claim table exists: a
+            const atDim = Number(recorded.embedding_dim ?? embDim);
+            const corpus = (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[];
+            // The acceptances — under the recorded model's OWN key, exactly
+            // (config.mjs says why) — are read only when a vector at another
+            // model needs explaining, and only where the claim table exists: a
             // relation named in a statement is resolved when it is parsed.
-            const [{ haveClaims }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS "haveClaims"`;
-            const acceptedRows = haveClaims
-              ? (await sql.unsafe(ACCEPTED_BY_MODEL_SQL, [atModel, ACCEPTED_CAVEAT_PREFIX])) as { model: string | null; accepted: number }[]
-              : [];
-            const { at, unlabelled, others, otherCount, acceptedCount, unaccepted } = summariseCorpusByModel(
-              (await sql.unsafe(CORPUS_BY_MODEL_SQL)) as { model: string | null; c: number }[], atModel, acceptedRows);
-            const acceptedNote = acceptedCount
-              ? `, ${acceptedCount} at another model accepted by the operator (${others.filter((r) => r.accepted).map((r) => `${r.model}: ${r.accepted}`).join(", ")})`
-              : "";
-            const detail = `${at} at ${atModel}${acceptedNote}${unlabelled ? `, ${unlabelled} unlabelled (model unknown)` : ""}`;
+            let acceptedRows: { model: string | null; accepted: number }[] = [];
+            if (corpus.some((r) => r.model !== null && r.model !== atModel)) {
+              const [{ haveClaims }] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS "haveClaims"`;
+              if (haveClaims) acceptedRows = (await sql.unsafe(ACCEPTED_BY_MODEL_SQL, [reembedKey(atModel, atDim), ACCEPTED_CAVEAT_PREFIX])) as { model: string | null; accepted: number }[];
+            }
+            const { at, unlabelled, others, otherCount, acceptedCount, unaccepted } = summariseCorpusByModel(corpus, atModel, acceptedRows);
+            // What is known about the rows NOT at the model: said the same way in
+            // every branch, so an accepted vector never drops out of one of them.
+            const rest = [
+              acceptedCount ? `${acceptedCount} at another model accepted by the operator (${others.filter((r) => r.accepted).map((r) => `${r.model}: ${r.accepted}`).join(", ")})` : null,
+              unlabelled ? `${unlabelled} unlabelled (model unknown)` : null,
+            ].filter((s): s is string => s !== null);
+            const detail = [`${at} at ${atModel}`, ...rest].join(", ");
             if (unaccepted > 0) {
               // Judged against the RECORD — what the corpus is meant to be at.
               // When the record and this server's configuration disagree the
@@ -1085,16 +1092,21 @@ if (configFailed) {
                     : `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL — the pass takes exactly the rows not at ${embModel}.`);
             } else if (at + unlabelled + otherCount === 0) {
               add("vector models", "ok", "no vectors stored yet");
-            } else if (at === 0 && unlabelled > 0) {
+            } else if (at === 0) {
               // The migration's own motivating corpus: a switch that died, its
               // claim rows cleared, nothing labelled — every vector unknown and
               // none known to be at the model the record names. Unknown is not
               // wrong, but a corpus with NO vector known to be at its model is
-              // the state this column exists to make visible (third review pass).
+              // the state this column exists to make visible (third review pass
+              // of SMD-1068) — and so is one whose every vector is at another
+              // model with the operator's acceptance: a switch during an outage,
+              // every row failed and accepted with --all, would otherwise be
+              // green with no vector at the model the server embeds with
+              // (SMD-1067's first review pass).
               const recordDiffers = recorded.embedding_model !== undefined && recorded.embedding_model !== embModel;
               add("vector models", "warn",
-                  `no vector is known to be at ${atModel}: ${unlabelled} unlabelled (model unknown) — nothing vouches for them, and the corpus may be at any model the record was ever moved to`,
-                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it.`);
+                  `no vector is known to be at ${atModel}: ${rest.join(", ")} — ${acceptedCount ? "nothing is at the model the record names" : "nothing vouches for them, and the corpus may be at any model the record was ever moved to"}`,
+                  `Re-embed them: cd db && bun reembed.ts --url $DATABASE_URL${recordDiffers ? " --switch-model" : ""} — the pass takes every row nothing vouches for, and labels it${acceptedCount ? "; the accepted rows return through --retry-fallbacks, or when their thought is edited" : ""}.`);
             } else {
               add("vector models", "ok", detail);
             }
@@ -1161,7 +1173,8 @@ if (configFailed) {
             // evaluated only when there are groups.
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c, count(*) FILTER (WHERE last_error IS NOT NULL)::int AS noted,
-                     count(*) FILTER (WHERE starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX}))::int AS accepted,
+                     count(*) FILTER (WHERE last_error IS NOT NULL AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})
+                                      AND EXISTS (SELECT 1 FROM thoughts x WHERE x.id = thought_id AND COALESCE(x.updated_at, x.created_at) <= finished_at))::int AS accepted,
                      (SELECT count(*)::int FROM thoughts) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${REEMBED_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; noted: number; accepted: number; thoughts: number }[];
@@ -1221,11 +1234,15 @@ if (configFailed) {
               const named = parseReembedKey(key);
               // Superseded: the key names a model or width that is not the
               // recorded one. A missing embedding_dim row (a hand-applied
-              // schema) is no evidence about the width — the contract check
-              // above guards the same absence — so only a present one is
-              // compared (second review pass).
+              // schema) is no evidence about the width, so the configured
+              // width stands in for it — as reembed.ts takes the column's, so
+              // the two agree on which keys `--retire` may take (SMD-1067's
+              // first review pass; before it, a missing row made every width
+              // "other" — SMD-1024's second review pass — and then no width at
+              // all, which left a stale key with no remedy that ran).
               const otherModel = named !== null && recorded.embedding_model !== undefined && named.model !== recorded.embedding_model;
-              const otherWidth = named !== null && recorded.embedding_dim !== undefined && named.dim !== Number(recorded.embedding_dim);
+              const widthHere = Number(recorded.embedding_dim ?? embDim);
+              const otherWidth = named !== null && named.dim !== widthHere;
               // The tool's own flag, not a hand DELETE: it refuses the recorded
               // model's keys and a key with a live lease (SMD-1067).
               const retire = `retire its record: cd db && ${cmd("", ` --retire ${key}`)}`;
@@ -1247,7 +1264,7 @@ if (configFailed) {
                 // this: a width change is a schema migration that does not
                 // exist, and reembed.ts refuses one. Only the record can go.
                 add("re-embed pass", "warn",
-                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${recorded.embedding_dim}; a width change is a schema migration that does not exist yet, so no run can finish this`,
+                    `${key}: ${formatPassCounts(c)} — a pass to ${named.model} at ${named.dim} dimensions, where the column and the record are ${widthHere}; a width change is a schema migration that does not exist yet, so no run can finish this`,
                     `Nothing can complete it (reembed.ts refuses a width other than the column's); ${retire}`);
               } else {
                 const envPrefix = named && named.model !== embModel ? `OB1_EMBEDDING_MODEL=${named.model} ` : "";

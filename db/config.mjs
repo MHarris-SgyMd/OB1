@@ -644,7 +644,11 @@ export function embeddingConfigWarnings(dim = EMBEDDING_DIM, model = EMBEDDING_M
  * cannot describe the same claim rows in two vocabularies (SMD-1024).
  *
  * A row the operator accepted (SMD-1067) is a succeeded row with a caveat,
- * and is counted inside that parenthesis so the two numbers cannot disagree.
+ * and is counted inside that parenthesis so the two numbers cannot disagree —
+ * counted while the acceptance STANDS (nothing has written the thought since),
+ * the same bound the data rule and preflight's `vector models` apply, so one
+ * report cannot call a row accepted on its counts line and not two lines
+ * later (first review pass).
  *
  * @param {{thoughts:number, succeeded:number, fellBack:number, accepted:number, failed:number, claimed:number, pending:number, unpooled:number}} c
  * @returns {string}
@@ -772,19 +776,25 @@ export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the o
 
 /**
  * The accepted vectors by label, for the same reduction: per embedding_model,
- * how many rows with a vector have an accepted row — unchanged since — under
- * a `reembed:` key naming $1, the model the corpus is judged against. An
- * acceptance under B's key says "stays where it is while the corpus moves to
- * B"; judged against C it says nothing, and C's own pass asks the thought
- * again. Parameters: $1 the model, $2 ACCEPTED_CAVEAT_PREFIX. Needs
- * thought_work_claims (015) — run it only where that exists.
+ * how many rows with a vector have an accepted row — standing, nothing has
+ * written the thought since — under $1, the OWN key of the model the corpus is
+ * judged against (`reembedKey(model, dim)`, exactly). The own key only: a
+ * backfill key's failure is about the backfill, and its acceptance tells the
+ * backfill; whether the VECTOR is at the model is the own pass's question, and
+ * that pass pools the thought by its label whatever another key accepted — so
+ * an acceptance under `reembed:B@d:ctx` counted here would have silenced this
+ * check while the own key's pass re-failed the same thought on every run
+ * (first review pass). And judged against C, an acceptance under B's key says
+ * nothing: C's own pass asks the thought again. Parameters: $1 the key, $2
+ * ACCEPTED_CAVEAT_PREFIX. Needs thought_work_claims (015) — run it only where
+ * that exists, and only when a vector at another model was found.
  */
 export const ACCEPTED_BY_MODEL_SQL =
   "SELECT t.embedding_model AS model, count(*)::int AS accepted FROM thoughts t " +
   "WHERE t.embedding IS NOT NULL AND EXISTS (" +
-  "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.status = 'succeeded' AND starts_with(k.last_error, $2) " +
-  "AND COALESCE(t.updated_at, t.created_at) <= k.finished_at " +
-  "AND substring(k.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') = $1) GROUP BY 1";
+  "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.work_type = $1 " +
+  "AND k.status = 'succeeded' AND k.last_error IS NOT NULL AND starts_with(k.last_error, $2) " +
+  "AND COALESCE(t.updated_at, t.created_at) <= k.finished_at) GROUP BY 1";
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's

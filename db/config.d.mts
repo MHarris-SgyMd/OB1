@@ -159,7 +159,7 @@ export function summariseCorpusByModel(
 ): { at: number; unlabelled: number; others: { model: string; c: number; accepted: number }[]; otherCount: number; acceptedCount: number; unaccepted: number };
 /** The caveat `reembed.ts --accept-failed` writes on a failed row it marks succeeded (SMD-1067); both readers recognise an accepted row by it. */
 export const ACCEPTED_CAVEAT_PREFIX: string;
-/** Per embedding_model, the rows with a vector whose thought has an accepted row, unchanged since, under a `reembed:` key naming $1; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
+/** Per embedding_model, the rows with a vector whose thought has a standing accepted row under $1, the model's own key exactly; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
 export const ACCEPTED_BY_MODEL_SQL: string;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */

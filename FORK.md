@@ -3515,16 +3515,22 @@ as one of its two remedies.
 **`--accept-failed <thought-id…>`, under change 34's rule.** The failed row
 becomes succeeded with the caveat `kept the vector it had; accepted by the
 operator: <the failure>` — `ACCEPTED_CAVEAT_PREFIX` in `db/config.mjs`, the one
-spelling both tools read — and `finished_at` is the moment of acceptance. The
-rule is unchanged: a succeeded row's `last_error` is what the worker could not
-do, here what the operator has accepted it will not do. No fifth status (015's
-CHECK would need a migration for four lines of value), no column. Per row, by
-id; `--all` exists and is explicit, and says that a provider outage accepted
-that way hides itself. An id that is not a *failed* row under the job —
-succeeded, pending, leased, or no row — refuses the whole command with each
-id's state, and nothing is written; so does a shell whose model is not the
-recorded one (the failed rows under its key are a pass that has not recorded
-itself: run it with `--switch-model`, and accept what it leaves). `--status`
+spelling both tools read — and the row's `finished_at` stays the *failure's*,
+so the bound below is measured from the refusal and not from the acceptance
+(first review pass: stamping the acceptance's time would have spoken for content
+edited between the two, which the caveat never described). The rule is
+unchanged: a succeeded row's `last_error` is what the worker could not do, here
+what the operator has accepted it will not do. No fifth status (015's CHECK
+would need a migration for four lines of value), no column. Per row, by id;
+`--all` exists and is explicit, says that a provider outage accepted that way
+hides itself, and takes no ids beside it. An id that is not a *failed* row
+under the job — succeeded, pending, leased, or no row — refuses the whole
+command with each id's state, and nothing is written; so does a shell whose
+model is not the recorded one (the failed rows under its key are a pass that
+has not recorded itself: run it with `--switch-model`, and accept what it
+leaves); so does a schema before 021, because 021's evidence backfill trusts
+every succeeded row under a key naming a model, an accepted row included, and
+would label the thought at a model whose pass never wrote its vector. `--status`
 counts them inside the caveat parenthesis ("37 succeeded (2 with a caveat, 1
 accepted by the operator)") and lists them among the caveats; every list of
 failed rows names the flag; `--retry-fallbacks` returns them like any caveat,
@@ -3546,9 +3552,11 @@ ONLY WHILE NOTHING HAS WRITTEN THE THOUGHT SINCE: `updated_at <= finished_at`,
 the bound 021 gave its backfill and change 38's fifth review pass gave the data
 rule under a backfill key. An edit, or a re-capture, is a new question, and the
 row returns to the pool as any moved row does (a metadata-only edit reopens it
-too: one evidence rule, not two). Preflight counts an acceptance only under a
-`reembed:` key naming the model it judges against, the recorded one
-(`ACCEPTED_BY_MODEL_SQL`, with 021's own regex over the key): an acceptance
+too: one evidence rule, not two). Preflight counts an acceptance only under the
+recorded model's *own* key (`ACCEPTED_BY_MODEL_SQL`; a backfill key's acceptance
+tells the backfill, while the own pass pools the thought by its label whatever
+another key accepted — counting it would have silenced the check while the own
+pass re-failed the thought on every run, first review pass): an acceptance
 under B's key says "stays where it is while the corpus moves to B", and after a
 move to C it says nothing — C's own pass has no row for the thought, pools it,
 and it is accepted under C's key or not. The claim table may lower that warning
@@ -3564,10 +3572,13 @@ pass's rows — a key whose `reembed:<model>@<dim>` is not the recorded model,
 the recorded model at another width (which nothing can complete), or a
 `reembed:` key naming no model (an abandoned backfill) — printed by preflight
 as the remedy in place of the hand statement. Refused, with nothing written: a
-key without the prefix (another tool's pass), a key naming the recorded model
-at the recorded width — suffix or not — whose pass can be finished or its
-failed rows accepted, a key with a live lease (a pass under it is running), and
-a key with no rows (a typo is the likelier cause). It prints what it removed and
+key without the prefix (another tool's pass), a key naming the recorded model —
+or this shell's, when nothing is recorded — at the recorded width, or the
+column's when none is recorded, suffix or not, whose pass can be finished or its
+failed rows accepted (preflight resolves the width the same way, so the two
+agree on which keys are superseded), a key with a live lease (a pass under it is
+running — the check and the DELETE are one transaction over the key's locked
+rows), and a key with no rows (a typo is the likelier cause). It prints what it removed and
 then the corpus by model: the vectors the retired pass wrote are still at its
 model, and `vector models` reports them until they are re-embedded — the truth
 the rows keep once the record is gone. Both flags are maintenance modes like
@@ -3603,13 +3614,41 @@ the superseded and other-width remedies name `--retire` and no DELETE; an
 accepted row's vector is detail beside the recorded model's, a second
 un-accepted row at that model warns counting only itself, and an edit since the
 acceptance is no longer spoken for. Suites: live 286, preflight 123; schema 462
-at both widths, upgrade 27; the rest unchanged.
+at both widths, upgrade 27; the rest unchanged (before the pass below).
+
+**A first pass, triaged.** Ten findings, all fixed, none ticketed — each a seam
+between the acceptance and a rule that already read the row. The acceptance
+test inside the data rule was `NOT (starts_with(last_error, …) AND …)`, and
+`starts_with(NULL, …)` is NULL: every ordinary succeeded row's predicate went
+NULL, so a thought that moved before its claim was released was never returned
+— now `last_error IS NOT NULL AND …`, and the live suite constructs that row.
+Acceptance stamped `finished_at = now()`, so an edit between the failure and the
+acceptance was covered by a caveat that never described it — the failure's own
+`finished_at` stays. `ACCEPTED_BY_MODEL_SQL` matched keys by model name, so an
+acceptance under a backfill key silenced `vector models` while the own key
+re-failed the thought — the own key only. A corpus with zero vectors at the
+recorded model and every foreign one accepted fell through to ok — `at === 0`
+warns whatever is accepted. `--accept-failed` ran on a pre-021 schema, where
+021's backfill would then trust the accepted row — refused. `--all` beside ids
+took every failed row — refused. The counts called a row accepted by prefix
+while both readers applied the bound — the counts apply it too. `--retire` with
+no width recorded refused every width while preflight sent the operator to a
+`--job` the tool refuses — the column's width stands in, in both. With no model
+recorded the configured shell's own key was retireable, and the lease check and
+the DELETE were two statements — this shell's model counts, and the two are one
+transaction over the key's locked rows. The accepted rows were listed from the
+SELECT before the UPDATE — from its `RETURNING`. Cut for space by the pass and
+left for the tidy-up: the inline copy of `notAtTarget()` inside the data rule.
+Suites after: live 293, preflight 126.
 
 **Not done here.** An acceptance under a backfill key is spent by a model change
 (every terminal row restarts there, as before 021), so a corpus whose history is
-under `reembed:nightly` re-asks every accepted row on a switch. The extraction
-worker has no acknowledgement path of its own — its failed rows are 016's, and
-preflight does not read them.
+under `reembed:nightly` re-asks every accepted row on a switch. 021's evidence
+backfill is applied and never edited, and trusts a succeeded row whatever its
+caveat: the gate on 021 closes the upgrade path, and a hand re-run of 021's body
+over accepted rows whose thought is unlabelled is the case that remains, said in
+`reembed.ts`'s header. The extraction worker has no acknowledgement path of its
+own — its failed rows are 016's, and preflight does not read them.
 
 ## Detached from the fork network
 
