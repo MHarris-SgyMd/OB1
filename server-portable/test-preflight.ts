@@ -109,7 +109,7 @@ else {
   const after = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(after.code === 0, "a migrated database passes");
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
-  assert(/both upsert_thought overloads present/.test(after.out), "…and that atomic capture is available");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(after.out), "…and that atomic capture is available, with the shipped body (a warn would also say \"present\")");
   assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
@@ -619,7 +619,7 @@ else {
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC} WHERE id IN ('${ids[0]}', '${ids[1]}')`);
   // The counts line says "accepted" only while the acceptance stands — the
   // same bound the readers apply — so one report gives one account.
-  // (The head-window caveat on ids[1] was cleared by the reapplied021 fixture
+  // (The head-window caveat on ids[1] was cleared by the reverted fixture
   // above, so the accepted row is the one caveat here. finished_at is put back
   // as it was: a fresh one would be evidence for 021's backfill below.)
   const [{ fin: pendingFin }] = await claims`SELECT finished_at::text AS fin FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${ids[3]}::uuid`;
@@ -680,11 +680,20 @@ else {
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 022's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 022 — captures work, search is over-inclusive.
-  assert(/atomic capture\s+both upsert_thought overloads present, but the 3-arg body is from before migration 022 \(021 re-applied by hand puts it back\)/.test(reapplied021.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql\./.test(reapplied021.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(021 re-applied by hand puts it back\)/.test(reapplied021.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql\./.test(reapplied021.out),
          "021 re-applied over 022 leaves 021's 3-argument upsert_thought, and the start warns naming 022 rather than refusing");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
-  assert(/atomic capture\s+both upsert_thought overloads present; the 3-arg body is 022's, so a vector replaces the chunks on every capture path/.test((await run(SQL_ENV)).out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them, and this role can remove them/.test((await run(SQL_ENV)).out),
          "…and 022 re-applied is the shipped body again, said as such");
+  // The 3-argument form gone from a 022 database: the remedy is the last
+  // definer, not 004 — whose body would drop 005's guard, 008's actor, 021's
+  // label and 022's rule.
+  await claims.unsafe("DROP FUNCTION upsert_thought(text, jsonb, vector)");
+  const noThree = await run(SQL_ENV);
+  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql — the last definer of the 3-argument form/.test(noThree.out) && !/Apply db\/migrations\/004_/.test(noThree.out),
+         "the 3-argument form missing is a refusal whose remedy is 022, the last definer — not 004");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
+  assert((await run(SQL_ENV)).code === 0, "…which 022 re-applied performs");
   // A database whose update_thought predates 021.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
@@ -699,6 +708,25 @@ else {
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "before migration 015 there is nothing to read, and the check says so rather than warning");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+
+  // 022's DELETE runs as the calling role. A role that can read everything
+  // and write thoughts, but not delete from thought_chunks, would fail every
+  // re-capture at another model — so preflight refuses to start it, with the
+  // GRANT; granted, it starts.
+  const CAPTURE_URL = LIVE.replace(/\/\/[^@]*@/, "//ob1_pf_capture:ob1pf@");
+  await claims.unsafe("CREATE ROLE ob1_pf_capture LOGIN PASSWORD 'ob1pf'");
+  await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
+  await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
+  await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
+  const noDelete = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+  assert(noDelete.code === 1 && /atomic capture\s+the 2- and 3-argument upsert_thought present and the 3-argument body is 022's, but this connection's role \(ob1_pf_capture\) cannot DELETE from thought_chunks/.test(noDelete.out) && /GRANT DELETE ON thought_chunks TO ob1_pf_capture;/.test(noDelete.out),
+         `a capturing role without DELETE on thought_chunks does not start, with the GRANT as the remedy (exit ${noDelete.code})`);
+  await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
+  const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+  assert(granted.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(granted.out),
+         `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+  await claims.unsafe("DROP OWNED BY ob1_pf_capture");
+  await claims.unsafe("DROP ROLE ob1_pf_capture");
 
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();

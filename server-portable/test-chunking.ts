@@ -290,17 +290,21 @@ console.log("\n[5] Re-capturing replaces chunks rather than accumulating them");
   await sql.close();
 }
 
-console.log("\n[5b] The window grown, the same text makes no windows — and leaves none behind (migration 022)");
+console.log("\n[5b] The window grown, the same text makes no windows — the windows stay at the same model and go at another (migration 022)");
 {
   // A text over today's window (BATCH - 200) and under the provider's batch:
   // two windows today, one call once OB1_CHUNK_TOKENS covers it — the operator
   // raising the headroom, or a provider with a wider batch. The re-capture
-  // then takes the 3-argument form, which until 022 left the two windows of
-  // the vector it replaced. The server snapshots its environment on its first
-  // request (CI's note on test-chunk-context.ts), so the grown window runs the
-  // way [1b] runs a changed setting — the embedding path with the new
+  // then takes the 3-argument form, which until 022 left the windows of the
+  // vector it replaced whatever the model, and since 022 leaves them while
+  // the label vouches for them. One sentinel at each end: the whole-content
+  // vector lands on the FIRST sentinel's axis (zeppelin), the second window
+  // alone on the other's (gramophone) — so "gramophone" is answered by the
+  // window or not at all. The server snapshots its environment on its first
+  // request (CI's note on test-chunk-context.ts), so the grown window runs
+  // the way [1b] runs a changed setting — the embedding path with the new
   // configuration — and is written through the store index.ts writes through.
-  let text = "Notes from the retrospective, in full. ";
+  let text = "Notes from the retrospective, the zeppelin one, in full. ";
   while (estimateTokens(text) < BATCH - 120) text += FILLER;
   text += "The gramophone budget was approved in the final minute.";
   assert(estimateTokens(text) > BATCH - 200 && estimateTokens(text) < BATCH, `≈${estimateTokens(text)} tokens: over the window, under the batch`);
@@ -308,19 +312,30 @@ console.log("\n[5b] The window grown, the same text makes no windows — and lea
   const windowsOf = async () => Number((await sql`
     SELECT count(*)::int AS c FROM thought_chunks ch JOIN thoughts t ON t.id = ch.thought_id
     WHERE t.content LIKE 'Notes from the retrospective%'`)[0].c);
+  const foundBy = async (query: string) => /Notes from the retrospective/.test(await call("search_thoughts", { query, limit: 10, threshold: 0.1 }));
+  /** The same text embedded with the window at the batch — no windows — and written as index.ts writes a capture. */
+  const recapture = async (model?: string) => {
+    const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_CHUNK_TOKENS: String(BATCH), ...(model ? { OB1_EMBEDDING_MODEL: model } : {}) }));
+    const embedded = await grown.embedCapture(text);
+    assert(embedded.chunks.length === 0, `with the window at the batch the same text makes no windows (${embedded.chunks.length}; model ${embedded.model})`);
+    const store = new SqlStore(URL_, { max: 1 });
+    await store.captureThought({ content: text, payload: { metadata: {} }, embedding: embedded.embedding, chunks: embedded.chunks, embeddingModel: embedded.model });
+    await store.close();
+  };
 
   await call("capture_thought", { content: text });
-  assert((await windowsOf()) === 2, `captured through the server at today's window: two windows (${await windowsOf()})`);
-  assert(/gramophone budget/.test(await call("search_thoughts", { query: "gramophone", limit: 5, threshold: 0.1 })), "…and found by its ending, through the second window");
+  let n = await windowsOf();
+  assert(n === 2, `captured through the server at today's window: two windows (${n})`);
+  assert((await foundBy("gramophone")) && (await foundBy("zeppelin")), "…found by its ending through the second window, and by its opening through the whole-content vector");
 
-  const grown = createEmbedder(() => resolveEmbedConfig({ ...(process.env as Record<string, string>), OB1_CHUNK_TOKENS: String(BATCH) }), { rememberRefusal: false });
-  const embedded = await grown.embedCapture(text);
-  assert(embedded.chunks.length === 0, `with the window at the batch the same text makes no windows (${embedded.chunks.length})`);
-  const store = new SqlStore(URL_, { max: 1 });
-  await store.captureThought({ content: text, payload: { metadata: {} }, embedding: embedded.embedding, chunks: embedded.chunks, embeddingModel: embedded.model });
-  await store.close();
-  assert((await windowsOf()) === 0, `the re-capture took the 3-argument form and left no stale windows (${await windowsOf()})`);
-  assert(/gramophone budget/.test(await call("search_thoughts", { query: "gramophone", limit: 5, threshold: 0.1 })), "…and the thought is still found by its ending — by its whole-content vector now");
+  await recapture();
+  n = await windowsOf();
+  assert(n === 2 && (await foundBy("gramophone")), `re-captured at the same model with no windows: the windows stay — still that model's vectors of this text — and the ending is still found (${n} windows)`);
+
+  await recapture(`${EMB_MODEL}-next`);
+  n = await windowsOf();
+  assert(n === 0, `re-captured at another model: the windows of the model the row is no longer at go (${n} windows)`);
+  assert(!(await foundBy("gramophone")) && (await foundBy("zeppelin")), "…so the ending no longer answers, and the whole-content vector still does");
   await sql.close();
 }
 

@@ -282,11 +282,17 @@ console.log("\n[5] Migration 022 onto a populated 021 — the chunks follow the 
   const after = await shape(sql);
   assert(before.columns === after.columns && before.functions === after.functions, "022 adds no column and changes no signature");
   assert((await windows()) === 1, "…and removes nothing on its own: the window left before it stays (no backfill — nothing can tell it from a live one)");
+  await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "new-model" }}::jsonb, ${vec(3)}::vector)`;
+  let n = await windows();
+  assert(n === 1 && (await label()) === "new-model", `after 022 a re-capture at the model the row is labelled with keeps the window — the label vouches for it (${n} window)`);
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "newer-model" }}::jsonb, ${vec(3)}::vector)`;
-  assert((await windows()) === 0 && (after && (await label()) === "newer-model"), `after 022 the same re-capture removes the window as it moves the vector and label (${await windows()} windows at ${await label()})`);
+  n = await windows();
+  const m = await label();
+  assert(n === 0 && m === "newer-model", `…and one at another model removes the window as it moves the vector and label (${n} windows at ${m})`);
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "newer-model" }}::jsonb, ${vec(4)}::vector, ${chunks(5)}::jsonb)`;
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: { k: 1 } }}::jsonb, NULL::vector)`;
-  assert((await windows()) === 1 && (await label()) === "newer-model", "a re-capture with no vector keeps the windows with the vector and its label");
+  n = await windows();
+  assert(n === 1 && (await label()) === "newer-model", "a re-capture with no vector keeps the windows with the vector and its label");
   assert((await overloads()) === 3 && /ob1:vector-replaces-chunks/.test(await body3()), "three upsert_thought overloads, the 3-argument body carrying the sentinel");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("022") });

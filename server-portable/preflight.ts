@@ -461,6 +461,10 @@ if (configFailed) {
           add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
       }
+      // The 3-argument upsert_thought's body (022's sentinel) and the role's
+      // DELETE on thought_chunks are catalog facts; over PostgREST neither is
+      // reachable, and a check that prints nothing looks like one that passed.
+      add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's, and whether the role can remove a re-captured thought's windows, are read from the catalog; ${CATALOG_HINT}`);
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
@@ -470,29 +474,44 @@ if (configFailed) {
       try {
         const { SQL } = await import("bun");
         const sql = new SQL({ url: env.DATABASE_URL, max: 1 });
-        const rows = await sql`
-          SELECT count(*)::int AS c FROM pg_proc p
+        // One schema-qualified read of every form, arity and body; no name or
+        // type resolved through the session's search_path (to_regprocedure
+        // returns NULL where `vector` is out of the path on PG16, and raises
+        // on PG15 — into the catch below, taking every later check with it).
+        const forms = (await sql`
+          SELECT p.pronargs::int AS n, p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`;
+          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
+        const three = forms.find((f) => f.n === 3);
+        const two = forms.find((f) => f.n === 2);
         // The 3-arg body's semantics are declared by a sentinel in the body
-        // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): a
-        // vector arriving through it removes the thought's chunk rows. 021
+        // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
+        // windows stay while the label vouches for them and go otherwise. 021
         // re-applied by hand puts 021's body back — CREATE OR REPLACE, no
-        // error — and a chunkless re-capture then leaves the previous vector's
-        // windows under the new one, found by search and named by nothing.
-        const body3 = await sql`
-          SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('upsert_thought(text, jsonb, vector)')`;
-        if (Number(rows[0].c) < 2 || !body3.length) {
-          add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
-              "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
-        } else if (/ob1:vector-replaces-chunks/.test(body3[0].prosrc)) {
-          add("atomic capture", "ok", "both upsert_thought overloads present; the 3-arg body is 022's, so a vector replaces the chunks on every capture path");
-        } else {
+        // error — and a chunkless re-capture at another model then leaves the
+        // previous vector's windows under the new one, found by search and
+        // named by nothing. And the DELETE runs as the calling role.
+        if (!three) {
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
+              "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs).");
+        } else if (!two) {
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing`,
+              "Apply db/migrations/005_reject_non_object_payload.sql — the last definer of the 2-argument form.");
+        } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              "both upsert_thought overloads present, but the 3-arg body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
+              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
               "Apply db/migrations/022_capture_replaces_chunks.sql.");
+        } else {
+          const [{ can, role }] = await sql`SELECT has_table_privilege('thought_chunks', 'DELETE') AS can, current_user::text AS role`;
+          if (!can) {
+            add("atomic capture", "fail",
+                `the 2- and 3-argument upsert_thought present and the 3-argument body is 022's, but this connection's role (${role}) cannot DELETE from thought_chunks — the function runs as its caller, so every re-capture with a vector the row's label does not vouch for would fail (007's 4-argument form and update_thought needed the privilege already)`,
+                `GRANT DELETE ON thought_chunks TO ${role};`);
+          } else {
+            add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them, and this role can remove them");
+          }
         }
 
         /**

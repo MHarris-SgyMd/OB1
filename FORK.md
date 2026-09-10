@@ -3774,8 +3774,9 @@ parent's vector and label on a re-capture of the same normalised text and never
 touched `thought_chunks`. Only the 4-argument form (007, 013) and
 `update_thought` (009, 018, 021) replace chunk rows, and every caller routes a
 capture that produced no windows to the 3-argument form: both stores
-(`chunks.length ? 4-arg : 3-arg`, kept so a deployment without 007 keeps
-working) and the Supabase Edge Function server, which never makes windows. So a
+(`chunks.length ? 4-arg : 3-arg` — a deployment stopped before 007 has no
+4-argument form, and no 022 either) and the Supabase Edge Function server,
+which never makes windows. So a
 thought first captured with windows and re-captured through a path that made
 none — the Edge server, or `server-portable` after `OB1_CHUNK_TOKENS` grew or
 the provider's window changed so the text fits one call — kept the windows of
@@ -3785,72 +3786,121 @@ also invisible: the re-capture labels the parent at the new model, so `vector
 models` reports it at the target and the re-embed's pool skips it — old-model
 windows under a parent that says it is at the new model.
 
-**The chunks follow the vector, as the label does.** Migration 022 redefines the
-3-argument body — 021's, byte for byte, 005's guard and 008's actor and 021's
-label carried — with one block after the INSERT: when a vector arrived, `DELETE
-FROM thought_chunks WHERE thought_id = v_id`. A caller that sends a vector and
-no chunks has said the text needs no windows; one that sends no vector keeps the
-row's vector, label and windows alike. That is the wholesale replacement the
-other two writers already do (`update_thought` with content and no chunks
-deletes them all), so the three writers agree, and the rule lives in the one
-body every caller reaches — both stores, the Edge server, any PostgREST
-integration calling the RPC by name — rather than in two stores taught to always
-call the 4-argument form with `'[]'`, which would have left `server/index.ts`
-and every third-party caller as they were. The 4-argument form is not
-redefined: it delegates to this one and then writes the caller's windows, so its
-own DELETE becomes a second, empty probe, and 013 stays its last definer.
-Considered and not done: keeping the windows when the old and new labels agree.
-A chunk row carries no model and no time, the label may be NULL on either side,
-and `update_thought` does not do it — the honest reading of a chunkless capture
-is the last writer's judgement that the text needs no windows. No backfill: a
-window left before 022 cannot be told from a live one; a `--job` pass
-regenerates every thought's windows through `update_thought`, and the header
-says so.
+**The windows stay while the label vouches for them.** Migration 022 redefines
+the 3-argument body — 021's, 005's guard and 008's actor and 021's label carried
+— reading the row the capture lands on in the same statement as the write (a
+CTE the RETURNING list reads: one snapshot, no window between a SELECT and the
+INSERT) and adding one block after it: when a vector arrived over an existing
+row and the row's label does not vouch for the windows, `DELETE FROM
+thought_chunks WHERE thought_id = v_id`. The label vouches exactly when the
+row's vector was labelled with a model and the arriving vector is labelled with
+the same one: the windows were written in the same call as the vector before,
+by that model (021's rule), and 003's fingerprint says the text is the same, so
+they are still that model's vectors of windows of this text — a note windowed
+by `server-portable` and re-saved through the Edge server at the same model
+keeps the tail-anchored recall 007 added. Any other case removes them: a label
+unknown on either side (a vector from before 021, a caller naming no model), or
+another model. No vector arriving keeps vector, label and windows alike. The
+rule lives in the one body every caller reaches — both stores, the Edge server,
+any PostgREST integration calling the RPC by name — rather than in two stores
+taught to always call the 4-argument form with `'[]'`, which would have left
+`server/index.ts` and every third-party caller as they were. Why not
+unconditional, as the 4-argument form and `update_thought` are: those callers
+*send* windows, or send content that may have changed, so the windows are
+theirs to supply; a chunkless re-capture of the same text supplies nothing
+about them, and the label is the one fact in the row that says whether they
+are still the vector's. The 4-argument form is not redefined: it delegates to
+this one and then replaces the windows with the caller's whatever the label,
+and 013 stays its last definer. No backfill: a window left before 022 cannot be
+told from a live one; a `--job` pass regenerates every thought's windows
+through `update_thought`, and the header says so.
 
-**What it costs.** One DELETE per capture that carries a vector, bounded by
-`thought_id` on 007's index, finding nothing on a fresh insert — plpgsql cannot
-tell ON CONFLICT's UPDATE from the INSERT without reading `xmax`, and the probe
-is cheaper than the distinction. Measured at 1,024 dimensions, 2,000 operations
-per line, two rounds each side on one container: fresh 3-argument captures
-0.9–1.4 ms each at 021 and 1.2–1.4 ms at 022; re-captures 1.3–1.6 ms and
-1.2–1.4 ms; re-captures with no vector 0.35–0.46 ms and 0.32–0.38 ms. Inside
-the run-to-run spread, on either side of it.
+**What it costs.** One probe on 003's unique index for the row the INSERT is
+about to find anyway, and one DELETE per re-capture whose label does not vouch,
+bounded by `thought_id` on 007's index; a fresh insert runs none. The first
+version ran the DELETE on every vectored capture, fresh inserts included, and
+was measured so at 1,024 dimensions, 2,000 operations per line, two rounds each
+side on one container: fresh 3-argument captures 0.9–1.4 ms each at 021 and
+1.2–1.4 ms at 022; re-captures 1.3–1.6 ms and 1.2–1.4 ms; re-captures with no
+vector 0.35–0.46 ms and 0.32–0.38 ms. Inside the run-to-run spread, on either
+side of it; this version does less.
 
-**The sentinel, and preflight.** The body carries `ob1:vector-replaces-chunks`,
-a contract sentinel in 014's convention: 021 re-applied by hand puts 021's body
-back — `CREATE OR REPLACE`, no error, and the defect with it — and nothing else
-would say so. Preflight's `atomic capture` check reads the 3-argument body and
-warns without the sentinel, naming 022. A warning, not a refusal: captures
-work, and search is merely over-inclusive.
+**The sentinel, the privilege, and preflight.** The body carries
+`ob1:vector-replaces-chunks`, a contract sentinel in 014's convention: 021
+re-applied by hand puts 021's body back — `CREATE OR REPLACE`, no error, and the
+defect with it — and nothing else would say so. Over a direct connection
+preflight's `atomic capture` check reads every `upsert_thought` form in one
+schema-qualified catalog read and warns without the sentinel, naming 022 — a
+warning, not a refusal: captures work, and search is merely over-inclusive. The
+function is SECURITY INVOKER, so the DELETE runs as the calling role: a role
+that only ever captured chunklessly never needed DELETE on `thought_chunks`
+(007's 4-argument form and `update_thought` did), and does from here — the same
+check reads `has_table_privilege` for the connection's role and refuses to start
+without it, printing the GRANT. A missing 3-argument form names 022, its last
+definer, not 004 (whose body would drop 005's guard, 008's actor, 021's label
+and 022's rule); a missing 2-argument form names 005. Over PostgREST neither the
+body nor the privilege is reachable, and the check says so as a skip.
 
 **Verify, as the ticket asked.** `test-live.ts` [7]: a thought at `old-model`
 with two windows, found by its second; re-captured through the 3-argument form
-with a vector and a new label → no windows, no longer found by the old window's
-axis, found by the new vector's; a re-capture with no vector keeps the windows,
-vector and label whatever label it names. `test-chunking.ts` [5b]: a text over
-today's window and under the provider's batch, captured through the server as
-two windows and found by its ending; the same text embedded with the window at
-the batch makes no windows, written through the store leaves none, and is still
-found by its ending — by its whole-content vector now (the server snapshots its
-environment on its first request, so the grown window runs the embedding path
-with the new configuration, as the suite already does for a changed setting).
-`test-store-sql.ts` [6] and `test-store-postgrest.ts` [6]: the store's routing
-to the 3-argument form leaves no windows, on both stores. `test-schema.ts`
-[23]: the rule through a planted window (PGlite cannot run the 4-argument
-insert), the body's sentinel and 021's carried parts, the 4-argument form still
-013's, three overloads, 022 the last definer of `upsert_thought` — and the
-trap: 021 re-applied leaves the windows again, 022 re-applied removes them.
-`test-upgrade.ts` [5]: 022 onto a populated 021 — the defect shown at 021 and
-gone after, no column or signature changed, the window left before 022 left
-where it was, a re-apply a no-op. `test-preflight.ts` [5]: 021 re-applied over
-022 warns naming 022, 022 re-applied is ok. Suites after: schema 480 at both
-widths, live 307, upgrade 35, preflight 133, chunking 33, sql 61, postgrest 44.
+at the same model → the windows stay and the thought is found by the window and
+by the new vector; at another model → no windows, no longer found by the old
+window's axis, found by the new vector's; a re-capture with no vector keeps the
+windows, vector and label whatever label it names. `test-chunking.ts` [5b]: a
+text over today's window and under the provider's batch with a sentinel at
+each end — the whole-content vector on the first's axis, the second window
+alone on the other's, so the ending is answered by the window or not at all —
+captured through the server as two windows and found by both; the same text
+embedded with the window at the batch makes no windows, written through the
+store at the same model keeps the windows and the ending still answers, at
+another model leaves none and the ending no longer does (the server snapshots
+its environment on its first request, so the grown window runs the embedding
+path with the new configuration, as the suite already does for a changed
+setting). `test-store-sql.ts` [6] and `test-store-postgrest.ts` [6]: the
+store's routing to the 3-argument form keeps the windows at the same model and
+leaves none at another or over an unknown label, on both stores.
+`test-schema.ts` [23]: the rule through a planted window (PGlite cannot run the
+4-argument insert) — same model keeps, another removes, no model on either side
+removes, no vector keeps — the CTE and the block in the body with the sentinel
+and 021's carried parts, the 4-argument form still 013's, three overloads, 022
+the last definer of `upsert_thought`, and the trap: 021 re-applied leaves the
+windows again, 022 re-applied removes them. `test-upgrade.ts` [5]: 022 onto a
+populated 021 — the defect shown at 021, after 022 a same-model re-capture
+keeps the window and another model's removes it, no column or signature
+changed, the window left before 022 left where it was, a re-apply a no-op.
+`test-preflight.ts` [5]: 021 re-applied over 022 warns naming 022, 022
+re-applied is ok, the 3-argument form dropped is refused naming 022 and not
+004, and a capturing role without DELETE on `thought_chunks` is refused with
+the GRANT and starts once granted. Suites after: schema 484 at both widths,
+live 308, upgrade 36, preflight 137, chunking 35, sql 62, postgrest 44.
+
+**A first pass, triaged.** Its top finding was the rule itself: the first
+version deleted the windows on every vectored re-capture, and on the path the
+header names — a `server-portable`-windowed note re-saved from Claude Desktop
+at the *same* model — that lost the ending from search, silently, for a
+thought whose windows were still valid. The label vouches now (above). The
+rest: the DELETE runs as the calling role and nothing said so (the Safety
+block, and preflight's privilege check); over the default PostgREST store the
+check printed nothing rather than a skip; a missing 3-argument form sent the
+operator to 004; `to_regprocedure` resolved through the session's
+`search_path` (a NULL on PG16, a raise on PG15 that took every later check with
+it) where one schema-qualified read serves; the chunking test's two search
+assertions were satisfied by the whole-content vector alone; the live test
+raised the suite's floor on the width to 10; the preflight suite's first
+assertion matched the warn line too; a symbol rename had rewritten a comment;
+and [22]'s restore of `update_thought` re-ran 021 over 022's body, which the
+helper's own rule — pass both names — covers. Two findings were refuted by the
+pass itself: the `xmax` distinction (the probe is measured inside noise) and
+`content_fingerprint_of` in this body (SMD-1043's, said in the header).
 
 **Not done here.** Windows left before 022 — no backfill, since nothing can tell
 them from live ones; a `--job` pass is the remedy. SMD-1043's advisory lock in
-both inserting overloads redefines this body next and carries the block and the
-sentinel forward, as 022's header lists. `server/index.ts` is unchanged: the
-migration fixes its path.
+both inserting overloads redefines this body next and carries the CTE, the
+block and the sentinel forward, as 022's header lists. `server/index.ts` is
+unchanged: the migration fixes its path. The 4-argument form's body has no
+sentinel and no check; a hand re-apply of 007 over 013 would drop the context
+column from the chunk insert, which preflight's `chunk context` check reads
+from the rows rather than the body.
 
 ## Detached from the fork network
 

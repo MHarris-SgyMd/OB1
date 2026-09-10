@@ -248,17 +248,19 @@ console.log("\n[6] Re-capture replaces chunks instead of accumulating them");
     WHERE t.content = 'a long thought split into windows'`;
   assert(c.c === 1, `three windows replaced by one, not appended (${c.c})`);
   // 022: a re-capture with a vector and no chunks takes the 3-arg RPC, which
-  // until 022 left the windows of the vector it replaced.
+  // until 022 left the windows of the vector it replaced. The row's label is
+  // unknown here (no model was named above), so nothing vouches for them.
   await store.captureThought({
     content: "a long thought split into windows",
     payload: { metadata: {} },
     embedding: vec(2),
+    embeddingModel: "unit-test-model",
   });
   const [none] = await sql`
     SELECT count(*)::int AS c FROM thought_chunks ch
     JOIN thoughts t ON t.id = ch.thought_id
     WHERE t.content = 'a long thought split into windows'`;
-  assert(none.c === 0, `…and a re-capture with a vector and no chunks — the 3-arg RPC — leaves none (${none.c})`);
+  assert(none.c === 0, `…and a re-capture with a vector and no chunks — the 3-arg RPC — over a row whose label is unknown leaves none (${none.c})`);
   await sql.close();
 }
 
