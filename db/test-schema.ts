@@ -107,6 +107,11 @@ function lastDefinerOf(fn: string): string {
   if (!f) throw new Error(`no migration defines ${fn}`);
   return f;
 }
+/** How many functions of this name the schema holds — the overload count, five sections ask it. */
+const functionsNamed = async (name: string) =>
+  (await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = [...new Set(fns.map(lastDefinerOf))].sort();
   for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
@@ -1515,14 +1520,10 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
 
 console.log("\n[18] Migration 017 left upsert_thought, match_thoughts and search_thoughts_keyword alone");
 {
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
-  assert((await count("upsert_thought")) === 3, "all three upsert_thought overloads survive");
-  assert((await count("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
-  assert((await count("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
-  assert((await count("search_thoughts_hybrid")) === 1 && (await count("extract_search_needles")) === 1, "017 adds exactly its two functions");
+  assert((await functionsNamed("upsert_thought")) === 3, "all three upsert_thought overloads survive");
+  assert((await functionsNamed("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
+  assert((await functionsNamed("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 1 && (await functionsNamed("extract_search_needles")) === 1, "017 adds exactly its two functions");
   const vol = await db.query<{ p: string; v: string }>(
     `SELECT p.proname AS p, p.provolatile AS v FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE p.proname IN ('search_thoughts_hybrid', 'extract_search_needles') AND n.nspname = 'public'`);
@@ -1688,10 +1689,6 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
       `SELECT prorows, provolatile, prosrc, proconfig AS cfg FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0];
     return { ...r, settings: parseSetConfig(r.cfg) };
   };
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const MT_4 = "match_thoughts(vector, float, int, jsonb)"; // the form 020 dropped; 014 and 019 re-create it
   const KW = "search_thoughts_keyword(text, int, int, jsonb)";
@@ -1724,7 +1721,7 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const cteBlocks = (src: string) => [...src.matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]);
   const routing = (src: string) => /SELECT array_agg\(s\.id\) INTO v_ids[\s\S]*?\) s;/.exec(src)?.[0] ?? "";
   await reapply("014");
-  assert((await count("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
+  assert((await functionsNamed("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
   const mt014 = await proc(MT_4);
   assert(cteBlocks(mt.prosrc).length === 3 && cteBlocks(mt.prosrc).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
          "the three candidate CTEs of the shipped body are 014's, byte for byte");
@@ -1749,7 +1746,7 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const back = await proc(MT);
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
-  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed: 019 last defines
   // the keyword function, 020 match_thoughts. A successor that redefines either
   // fails here on purpose, and the expectations move with the clauses it must carry.
@@ -1780,11 +1777,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const proc = (await db.query<{ prorows: number; cfg: string[] | null; prosrc: string }>(
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
-  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
   const settings = parseSetConfig(proc.cfg);
   assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && Object.keys(settings).length === 2 && /ob1:filter-inside-scan/.test(proc.prosrc),
          "020 carries what 019 handed over: ROWS 10, exactly the two settings, the sentinel");
@@ -1862,7 +1855,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const fourArg = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q]);
   assert(fourArg.rows[0].c === 10, "a 4-argument call still resolves — the defaults, not a second overload");
   await db.exec(`DROP FUNCTION match_thoughts_019(vector, float, int, jsonb)`);
-  assert((await count("match_thoughts")) === 1, "the comparison function is gone again");
+  assert((await functionsNamed("match_thoughts")) === 1, "the comparison function is gone again");
 
   // ── The blend does something: with a weight the recent row comes first,
   // which needs the widened window — by similarity alone it is 61st.
@@ -2032,7 +2025,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   await db.exec(`REVOKE ALL ON FUNCTION ${MT_4} FROM PUBLIC`);
   await restoreShipped("match_thoughts");
   const revoked = await acl(MT);
-  assert(revoked !== "" && !hasPublic(revoked) && (await count("match_thoughts")) === 1, `a REVOKE FROM PUBLIC on the 4-argument form is carried to the new one (${revoked})`);
+  assert(revoked !== "" && !hasPublic(revoked) && (await functionsNamed("match_thoughts")) === 1, `a REVOKE FROM PUBLIC on the 4-argument form is carried to the new one (${revoked})`);
   // The other direction, and a grant that is not PUBLIC's: an explicit grant on
   // the old form appears on the new one — the second review pass found the
   // first draft of this case observing its own GRANT on the 6-argument form.
@@ -2064,7 +2057,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(hasPublic(await acl(MT_4)) || (await acl(MT_4)) === "", "the re-created 4-argument form has the defaults");
   await restoreShipped("match_thoughts");
   const kept = await acl(MT);
-  assert(!hasPublic(kept) && (await count("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
+  assert(!hasPublic(kept) && (await functionsNamed("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_reader`);
 }
@@ -2081,10 +2074,6 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await db.exec(`DELETE FROM thoughts`);
   const UT = UPDATE_THOUGHT_SIGNATURE;
   const UT_7 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)"; // the form 021 dropped; 018 re-creates it
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
   const rowOf = async (id: string) =>
     (await db.query<{ model: string | null; axis: number | null; metadata: Record<string, unknown> }>(
       `SELECT embedding_model AS model, array_position(embedding::real[], 1::real) - 1 AS axis, metadata FROM thoughts WHERE id = $1`, [id])).rows[0];
@@ -2147,7 +2136,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   assert((await audits()) === beforeLabel, "a label-only change is not an audit event either");
 
   // One function, eight parameters, 018's body by name; 010's trigger untouched.
-  assert((await count("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
+  assert((await functionsNamed("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
   const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
   assert(Number(proc?.n) === 8, `…of eight parameters (${proc?.n})`);
   for (const [re, what] of [
@@ -2159,7 +2148,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   }
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
-  assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
   assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("022") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
          `021 is the last definer of update_thought, 022 of upsert_thought (its 3-argument body carries 021's label) and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
@@ -2167,13 +2156,13 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
   // drops it again.
   await reapply("018");
-  assert((await count("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
+  assert((await functionsNamed("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
   let ambiguous = "";
   try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb)`, [labelled]); }
   catch (e) { ambiguous = (e as Error).message; }
   assert(/not unique/.test(ambiguous), `…after which a 7-argument call is "function is not unique" (${ambiguous.slice(0, 60)})`);
   await restoreShipped("update_thought", "upsert_thought");
-  assert((await count("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
+  assert((await functionsNamed("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
 
   // The ACL survives the DROP, as 020's does ([21]): 018's form back and
   // hardened, 021 applied for the first time, the new form's ACL read.
@@ -2202,7 +2191,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   // OR REPLACE puts its 3-argument upsert_thought back over 022's.
   await restoreShipped("update_thought", "upsert_thought");
   const kept = await acl(UT);
-  assert(!hasPublic(kept) && (await count("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
+  assert(!hasPublic(kept) && (await functionsNamed("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_editor`);
   await db.exec(`DELETE FROM thoughts`);
@@ -2223,10 +2212,6 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
 {
   await db.exec(`DELETE FROM thoughts`);
   const UP3 = "upsert_thought(text, jsonb, vector)";
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
   const bodyOf = async (sig: string) => (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].src;
   const capture = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
     (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r.id;
@@ -2287,7 +2272,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   const up4 = await bodyOf("upsert_thought(text, jsonb, vector, jsonb)");
   assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
          "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
-  assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
   assert(lastDefinerOf("upsert_thought").startsWith("022"), `022 is the last definer of upsert_thought (${lastDefinerOf("upsert_thought")})`);
 
   // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
@@ -2304,7 +2289,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   await capture("a long capture", { metadata: {}, embedding_model: "model-e" }, unit(7));
   row = await rowOf(id);
   assert(row.windows === 0 && row.model === "model-e", `…and the next re-capture at another model removes them (${row.windows} windows)`);
-  assert((await count("upsert_thought")) === 3, "…with three overloads throughout");
+  assert((await functionsNamed("upsert_thought")) === 3, "…with three overloads throughout");
   await db.exec(`DELETE FROM thoughts`);
 }
 

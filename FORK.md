@@ -3975,6 +3975,17 @@ name both writers. Two findings were trade-offs the tests already lock in, and
 are now said as such above rather than changed: an unknown row label removes
 the windows, and the label is a string.
 
+**Tidy-up, while the files were open.** No behaviour change. `test-schema.ts`
+asked "how many functions of this name" through five identical closures, one
+per section; `functionsNamed()` at file scope is the one copy (section [16]'s
+`count`, which takes a table and a WHERE clause, is a different helper and
+stays). Preflight's privilege query resolved `thought_chunks` twice; once, in a
+subquery. `test-upgrade.ts` [5]'s first
+assertion read the window count and the label twice each, the printed value a
+second read. Left: the chunk-count closures in the store and chunking suites
+count different rows by different joins, and a shared helper would carry the
+join as a parameter — more to read than it saves.
+
 **Not done here.** Windows left before 022 — no backfill, since nothing can tell
 them from live ones; a `--job` pass is the remedy, and a brain upgraded through
 021 that has not run a pass should run one before re-saving long notes from a

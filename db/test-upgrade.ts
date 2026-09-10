@@ -273,7 +273,9 @@ console.log("\n[5] Migration 022 onto a populated 021 — the chunks follow the 
 
   // At 021: the defect this migration removes, shown before it is applied.
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "new-model" }}::jsonb, ${vec(2)}::vector)`;
-  assert((await windows()) === 1 && (await label()) === "new-model", `at 021 a chunkless re-capture moves the vector and label and leaves the window under them (${await windows()} window at ${await label()})`);
+  let n = await windows();
+  let m = await label();
+  assert(n === 1 && m === "new-model", `at 021 a chunkless re-capture moves the vector and label and leaves the window under them (${n} window at ${m})`);
   assert(!/ob1:vector-replaces-chunks/.test(await body3()), "…and 021's 3-argument body carries no sentinel");
   const before = await shape(sql);
 
@@ -283,11 +285,11 @@ console.log("\n[5] Migration 022 onto a populated 021 — the chunks follow the 
   assert(before.columns === after.columns && before.functions === after.functions, "022 adds no column and changes no signature");
   assert((await windows()) === 1, "…and removes nothing on its own: the window left before it stays (no backfill — nothing can tell it from a live one)");
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "new-model" }}::jsonb, ${vec(3)}::vector)`;
-  let n = await windows();
+  n = await windows();
   assert(n === 1 && (await label()) === "new-model", `after 022 a re-capture at the model the row is labelled with keeps the window — the label vouches for it (${n} window)`);
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "newer-model" }}::jsonb, ${vec(3)}::vector)`;
   n = await windows();
-  const m = await label();
+  m = await label();
   assert(n === 0 && m === "newer-model", `…and one at another model removes the window as it moves the vector and label (${n} windows at ${m})`);
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: {}, embedding_model: "newer-model" }}::jsonb, ${vec(4)}::vector, ${chunks(5)}::jsonb)`;
   await sql`SELECT upsert_thought(${TEXT}, ${{ metadata: { k: 1 } }}::jsonb, NULL::vector)`;

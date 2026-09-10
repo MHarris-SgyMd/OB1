@@ -520,9 +520,10 @@ if (configFailed) {
         // RAISES for a relation it cannot see, and a raise here would land in
         // the catch below and take every later check with it.
         const [chunks] = await sql`
-          SELECT to_regclass('public.thought_chunks') IS NOT NULL AS present,
-                 CASE WHEN to_regclass('public.thought_chunks') IS NOT NULL THEN has_table_privilege('public.thought_chunks', 'DELETE') END AS can,
-                 current_user::text AS role, quote_ident(current_user::text) AS ident`;
+          SELECT t.present,
+                 CASE WHEN t.present THEN has_table_privilege('public.thought_chunks', 'DELETE') END AS can,
+                 current_user::text AS role, quote_ident(current_user::text) AS ident
+          FROM (SELECT to_regclass('public.thought_chunks') IS NOT NULL AS present) t`;
         if (!chunks.present) {
           add("chunk delete privilege", "skip", "not checked — thought_chunks does not exist (before migration 007)");
         } else if (!chunks.can) {
