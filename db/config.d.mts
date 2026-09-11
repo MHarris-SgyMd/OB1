@@ -198,3 +198,9 @@ export const SHARED_SETTING_SOURCES: string[];
 export const DB_LEVEL_SETTINGS_SQL: string;
 /** `["a=1"]` → `{a: "1"}`. */
 export function parseSetConfig(cfg: string[] | null | undefined): Record<string, string>;
+/**
+ * If the bare `vector` type does not resolve but pgvector is installed in some
+ * schema, append that schema to this session's search_path and return it;
+ * otherwise a no-op returning null. Session scope only — no ALTER DATABASE/ROLE.
+ */
+export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | null>;

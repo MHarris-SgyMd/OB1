@@ -73,7 +73,15 @@ they could not be wrong. Off Supabase every one is hand-written.
 So the container's entrypoint is `bun preflight.ts && exec bun index.ts`. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
-OpenRouter and checks the embedding width still matches `vector(1536)`.
+OpenRouter and checks the embedding width still matches the schema.
+
+One check that matters most on a managed database: `vector extension`. If the
+provider installed pgvector into a schema off the connection's `search_path`
+(Supabase uses `extensions`), the bare `vector` type does not resolve and every
+capture and search would fail with `type "vector" does not exist` on a database
+that has pgvector. Preflight fails with the schema it found and the exact
+`ALTER ROLE … SET search_path` (or `ALTER DATABASE`) to run — see `FORK.md`
+change 43.
 
 ## Using smoke.sh against a real deployment
 

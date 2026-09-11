@@ -208,6 +208,16 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # pgvector installed off the connection's search_path — how Supabase and
+      # several managed providers ship it. The runner heals its own session and
+      # preflight names the persistent fix. The test image installs pgvector into
+      # public, so this suite relocates it into a schema to reproduce the shape.
+      - name: pgvector off the search path
+        working-directory: db
+        run: bun test-search-path.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-latest

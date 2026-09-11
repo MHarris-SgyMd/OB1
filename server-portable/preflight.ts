@@ -90,6 +90,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 // nothing looks like one that passed — so the catch reports each of these
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
+  "vector extension",
   "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
@@ -486,6 +487,52 @@ if (configFailed) {
       try {
         const { SQL } = await import("bun");
         const sql = new SQL({ url: env.DATABASE_URL, max: 1 });
+
+        // Before anything reads the schema: can this connection resolve the
+        // bare `vector` type at all? pgvector installed into a schema off the
+        // search_path — how Supabase and several managed providers ship it
+        // (upstream #319) — makes `vector` and `vector_cosine_ops` unresolvable,
+        // so every capture and search fails with `type "vector" does not exist`
+        // on a database that demonstrably has pgvector. migrate.ts heals its own
+        // session; the server's connection is separate, so this is the check
+        // that catches the running server and names the persistent fix. A
+        // catalog read, not a `SELECT '[1]'::vector` cast: to_regtype returns
+        // NULL rather than raising when the type is off the path, so an
+        // off-path database reports cleanly here instead of raising into the
+        // catch below (which the schema-qualified reads that follow avoid for
+        // the same reason). First in DIRECT_CHECKS: a connection that fails
+        // outright raises here and this name carries the error.
+        // The extension's schema resolved once, and whether this role can even
+        // see into it: an off-path schema and a schema this role has no USAGE on
+        // both make the bare type unresolvable, but only the first is fixed by
+        // SET search_path — the second needs a GRANT, so the remedy has to tell
+        // them apart.
+        const [vec] = await sql`
+          SELECT to_regtype('vector') IS NOT NULL AS resolves,
+                 v.schema, quote_ident(v.schema) AS schema_ident,
+                 CASE WHEN v.schema IS NOT NULL THEN has_schema_privilege(v.schema, 'USAGE') END AS usage,
+                 current_user::text AS role, quote_ident(current_user) AS role_ident,
+                 current_database()::text AS db, quote_ident(current_database()) AS db_ident
+            FROM (SELECT (SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector') AS schema) v`;
+        const setPath = (verb: string, ident: string) => `${verb} ${ident} SET search_path = "$user", public, ${vec.schema_ident};`;
+        if (vec.resolves) {
+          add("vector extension", "ok", `the vector type resolves${vec.schema ? ` (pgvector in schema ${vec.schema})` : ""}`);
+        } else if (!vec.schema) {
+          // Not installed here at all — not this check's failure to raise:
+          // migration 001 runs CREATE EXTENSION, and the schema check below
+          // fails an un-migrated database with the migrate command. A skip, so
+          // it does not double as an alarming FAIL on a database about to be built.
+          add("vector extension", "skip", "pgvector is not installed in this database — migration 001 creates it, and the schema check covers an un-migrated database");
+        } else if (vec.usage === false) {
+          add("vector extension", "fail",
+              `pgvector is installed in schema "${vec.schema}", but role ${vec.role} has no USAGE on that schema, so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist' — SET search_path alone will not help here`,
+              `GRANT USAGE ON SCHEMA ${vec.schema_ident} TO ${vec.role_ident};  (as a role that can), then put it on the path: ${setPath("ALTER ROLE", vec.role_ident)}`);
+        } else {
+          add("vector extension", "fail",
+              `pgvector is installed in schema "${vec.schema}", which is not on this connection's search_path (role ${vec.role}, database ${vec.db}) — so the bare type "vector" does not resolve and every capture and search would fail with 'type "vector" does not exist'`,
+              `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
+        }
+
         // One schema-qualified read of every form, arity and body; no name or
         // type resolved through the session's search_path (to_regprocedure
         // returns NULL where `vector` is out of the path on PG16, and raises

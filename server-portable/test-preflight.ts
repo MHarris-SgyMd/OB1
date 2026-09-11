@@ -107,7 +107,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   const added = [...new Set([...block.matchAll(/add\("([^"]+)"/g)].map((m) => m[1]))];
   assert(JSON.stringify(added) === JSON.stringify(listed), `DIRECT_CHECKS names exactly the checks the direct-connection block adds, in the order it adds them (block: ${added.join(", ")})`);
   assert(listed.every((n) => r.out.includes(n)), `…and an unreachable database names every one of them (${listed.filter((n) => !r.out.includes(n)).join(", ") || "all named"})`);
-  assert(/atomic capture\s+.*could not verify/.test(r.out) && /fingerprint backfill\s+.*not checked — the direct connection failed before it/.test(r.out),
+  assert(/vector extension\s+.*could not verify/.test(r.out) && /atomic capture\s+.*not checked — the direct connection failed before it/.test(r.out),
          "…the first carrying the error and the later ones saying they were not reached");
 }
 

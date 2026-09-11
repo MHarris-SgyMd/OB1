@@ -12,7 +12,11 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 
 - [Bun](https://bun.sh) 1.4+
 - To apply against a real database: Postgres 15+ with the `vector` extension at 0.8.0+
-  available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted)
+  available (RDS, Aurora, Neon, Cloud SQL, Timescale, or self-hosted). If the
+  provider pre-installs pgvector into a schema off the connection's `search_path`
+  (Supabase uses `extensions`), the runner adds it to its own session so the
+  migrations apply, and preflight names the persistent fix for the server — see
+  the `test-search-path.ts` note under Testing.
 - To run `test-schema.ts`: nothing else. It uses PGlite, which is real PostgreSQL
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
@@ -784,12 +788,22 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 
 ## Testing
 
-Two suites, because one of them cannot reach everything.
+Two suites cover most of it, because one of them cannot reach everything, and a
+third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                    # 505 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 317 assertions, real server, throwaway container
+bun test-schema.ts                          # 505 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 317 assertions, real server, throwaway container
+./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
+
+`test-search-path.ts` relocates pgvector into a schema off the connection's
+`search_path` — how Supabase and several managed providers ship it, where
+`CREATE EXTENSION IF NOT EXISTS vector` no-ops and the bare `vector` type does
+not resolve — and asserts the runner heals its own session while preflight names
+the persistent fix. The test container installs pgvector into `public`, on the
+path, so nothing else in the matrix sees this; the suite restores it afterward,
+which `ci-parity.sh` needs since it shares one Postgres.
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
 the command and removes the container on exit. It prefers podman (including the
