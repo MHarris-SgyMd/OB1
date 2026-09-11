@@ -196,7 +196,7 @@ if (vectorSchema) {
     `  pgvector: installed in schema "${vectorSchema}", off this connection's search_path — added to this session so the migrations resolve the vector type`
   );
   console.log(
-    `            the running server needs it too: preflight's "vector extension" check names ALTER ROLE / ALTER DATABASE SET search_path`
+    `            (if a migration still fails on the vector type, this role lacks USAGE on ${vectorSchema}; the running server needs the path too — preflight's "vector extension" check names both fixes)`
   );
 }
 

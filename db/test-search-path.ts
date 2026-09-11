@@ -166,7 +166,29 @@ try {
            "…and the note that the fix coexists with the hnsw walk bounds");
   }
 
-  console.log("\n[5] The database-wide fix makes preflight pass, and coexists with the hnsw bounds");
+  console.log("\n[5] A role that cannot see the schema is told to GRANT, not to set the path");
+  {
+    // Off-path and no-USAGE both make the type unresolvable, but only the first
+    // is fixed by SET search_path. A fresh non-superuser has no USAGE on ext (a
+    // schema created by postgres grants none to PUBLIC), so preflight as that
+    // role must name the GRANT, not send it round the search_path loop.
+    const npw = "nousagepw";
+    await freshSession(async (sql) => {
+      await sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`);
+      await sql.unsafe(`CREATE ROLE ob1_nousage LOGIN PASSWORD '${npw}'`);
+      await sql.unsafe(`REVOKE USAGE ON SCHEMA ${SCHEMA} FROM ob1_nousage`); // insurance; PUBLIC has none anyway
+    });
+    const nurl = URL_.replace(/\/\/[^@]+@/, `//ob1_nousage:${npw}@`);
+    const r = await preflight({ DATABASE_URL: nurl });
+    assert(r.code === 1, `preflight as a role with no USAGE exits 1 (${r.code})`);
+    assert(new RegExp(`vector extension.*has no USAGE on that schema`, "s").test(r.out),
+           "…the vector extension check names the missing USAGE, not an off-path schema");
+    assert(new RegExp(`GRANT USAGE ON SCHEMA ${SCHEMA}`).test(r.out),
+           "…and the remedy is a GRANT, which SET search_path alone would not have fixed");
+    await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
+  }
+
+  console.log("\n[6] The database-wide fix makes preflight pass, and coexists with the hnsw bounds");
   {
     await freshSession(async (sql) => {
       const [{ db }] = await sql`SELECT current_database() AS db`;

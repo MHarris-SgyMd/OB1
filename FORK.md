@@ -4393,21 +4393,27 @@ extension` check — first in the direct-SQL block and in `DIRECT_CHECKS` — re
 the catalog (`to_regtype('vector')`, which returns NULL rather than raising when
 the type is off-path, so an off-path database reports cleanly instead of taking
 the later checks down with it) and, when the type does not resolve, **fails**
-naming the schema pgvector is in, the role and database, and the exact fix:
-`ALTER ROLE <role> SET search_path = …, <schema>` (least-scoped) or
-`ALTER DATABASE <db> SET search_path = …`. The remedy notes it adds a setting
-beside the `hnsw.*` walk bounds rather than replacing them — verified: after the
-fix, `pg_db_role_setting` carries `search_path` and the seeded
-`hnsw.max_scan_tuples` / `hnsw.scan_mem_multiplier` side by side.
+naming the schema pgvector is in, the role and database, and the exact fix. It
+tells apart the two ways the type goes unresolvable, because they take different
+fixes: an off-path schema wants `ALTER ROLE <role> SET search_path = …, <schema>`
+(least-scoped) or `ALTER DATABASE <db> SET search_path = …`; a schema this role
+has no `USAGE` on wants a `GRANT`, which `SET search_path` alone would not repair
+(`has_schema_privilege` distinguishes them). A database where pgvector is not
+installed at all is a **skip**, not a fail — migration 001 creates it, and the
+schema check already fails an un-migrated database. The search_path remedy notes
+it adds a setting beside the `hnsw.*` walk bounds rather than replacing them —
+verified: after the fix, `pg_db_role_setting` carries `search_path` and the
+seeded `hnsw.max_scan_tuples` / `hnsw.scan_mem_multiplier` side by side.
 
-**Verified.** `db/test-search-path.ts`, nineteen assertions against a real
+**Verified.** `db/test-search-path.ts`, twenty-two assertions against a real
 server, relocates pgvector into a schema off the path and asserts, in order: the
 type genuinely does not resolve for a fresh session while the extension is
 installed; the chain applies incrementally off-path (the upgrade shape, a row
 written between each migration) and `thoughts.embedding` carries the relocated
 type; `migrate.ts` exits 0, says it added the schema to its session, builds the
 schema, and a fresh session **still** cannot resolve `vector` (proving it did not
-ALTER the database); preflight exits 1 naming the schema and both remedies; and
+ALTER the database); preflight exits 1 naming the schema and both remedies; a
+role with no `USAGE` on that schema is told to `GRANT`, not to set the path; and
 `ALTER DATABASE … SET search_path` then makes preflight pass, with the hnsw bound
 sitting beside it. The suite restores pgvector to `public` in a `finally`, which
 `ci-parity.sh` needs since it shares one Postgres — the full parity run stays
