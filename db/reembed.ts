@@ -181,7 +181,12 @@
  * operator's call; nothing is written to the claim row about it. 018's lock
  * serialises edits only: a capture of the same text committing while a worker
  * fingerprints a legacy row still raises the unique violation, which lands as
- * a failed claim naming the constraint, and --retry-failed resolves it.
+ * a failed claim naming the constraint, and --retry-failed resolves it. Since
+ * migration 023 the corpus is fingerprinted once at upgrade — every legacy
+ * singleton, and the oldest of each group (created_at, then id) — so a pass
+ * finds NULL/fingerprinted pairs, and a NULL/NULL pair is a load that inserted
+ * into `thoughts` directly since; `SELECT backfill_content_fingerprints()`
+ * settles it the same way, and preflight's `fingerprint backfill` says when.
  *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the

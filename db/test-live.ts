@@ -449,6 +449,84 @@ console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, th
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[6c] The backfill holds the table: a capture and an edit wait for it, then merge and are told (migration 023)");
+{
+  await sql`DELETE FROM thoughts`;
+  const legacy = async (content: string, createdAt: string) =>
+    (await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES (${content}, NULL, ${unit(0)}::vector, ${createdAt}::timestamptz) RETURNING id`)[0].id as string;
+  const singleton = await legacy("A Legacy Singleton", "2024-01-01");
+  const twinOld = await legacy("Legacy Twin", "2024-01-01");
+  const twinNew = await legacy("legacy   twin", "2024-06-01");
+  type R = { ok: boolean; error?: string; duplicate_of?: string };
+  // reembed.ts --status is read-only and makes no provider call; the pairs
+  // list is the one query the backfill must leave meaning the same thing.
+  const statusEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_ })) if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|CHUNK_CONTEXT|LLM_API_KEY)$/.test(k)) statusEnv[k] = String(v);
+  const status = () => runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_!, "--status"], { env: statusEnv, cwd: HERE });
+  const before = await status();
+  assert(before.code === 0 && /1 group\(s\) of thoughts share one normalised text/.test(before.out), `before the backfill --status lists the twins as one group (exit ${before.code})`);
+
+  // One connection each, as [6b]: A holds the backfill's transaction open; B
+  // captures the singleton's text; C re-embeds the newer twin with its own
+  // text. Both must wait on the TABLE lock — B's INSERT (ROW EXCLUSIVE) and
+  // C's FOR UPDATE (ROW SHARE) conflict with EXCLUSIVE — and then act on the
+  // committed keys: B merges instead of inserting a second row, C is told
+  // duplicate_of instead of raising 23505 at its UPDATE.
+  const connA = new SQL({ url: URL_, max: 1 });
+  const connB = new SQL({ url: URL_, max: 1 });
+  const connC = new SQL({ url: URL_, max: 1 });
+  let releaseA: () => void = () => {};
+  const held = new Promise<void>((resolve) => { releaseA = resolve; });
+  let aWritten: number | undefined;
+  let aError = "";
+  const aDone = connA.begin(async (tx: SQL) => {
+    aWritten = Number((await tx`SELECT backfill_content_fingerprints() AS n`)[0].n);
+    await held;
+  }).catch((e: Error) => { aError = e.message; releaseA(); });
+  for (let i = 0; i < 250 && aWritten === undefined && aError === ""; i++) await Bun.sleep(20);
+  assert(aWritten === 2, `A runs the backfill inside an open transaction: the singleton and the older twin take their keys (${aError || aWritten})`);
+
+  let bError = "", cError = "";
+  let bPid = -1, cPid = -1;
+  const bDone = connB.begin(async (tx: SQL) => {
+    await tx`SET LOCAL statement_timeout = '5s'`;
+    bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT upsert_thought('a legacy  singleton', ${{ metadata: { k: 1 } }}::jsonb, ${unit(1)}::vector) AS r`) as { r: { id: string } }[])[0].r;
+  }).catch((e: Error) => { bError = e.message; return undefined; });
+  const cDone = connC.begin(async (tx: SQL) => {
+    await tx`SET LOCAL statement_timeout = '5s'`;
+    cPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+    return ((await tx`SELECT update_thought(${twinNew}::uuid, 'legacy   twin', NULL, ${unit(2)}::vector) AS r`) as { r: R }[])[0].r;
+  }).catch((e: Error) => { cError = e.message; return undefined; });
+
+  let waitingOnTable = 0;
+  for (let i = 0; i < 250 && waitingOnTable < 2; i++) {
+    await Bun.sleep(20);
+    if (bPid < 0 || cPid < 0) continue;
+    waitingOnTable = Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'relation' AND relation = 'thoughts'::regclass AND NOT granted AND pid IN (${bPid}, ${cPid})`)[0].n);
+  }
+  assert(waitingOnTable === 2, `B's INSERT and C's FOR UPDATE both wait on the table lock, not on the unique index (${waitingOnTable} relation waiter(s) for pids ${bPid}, ${cPid})`);
+
+  releaseA();
+  await aDone;
+  const bResult = await bDone;
+  const cResult = await cDone;
+  assert(bResult?.id === singleton, `once A commits, B's capture merges into the former singleton instead of inserting a second row (${bError.slice(0, 80) || bResult?.id})`);
+  assert(cResult?.ok === true && cResult.duplicate_of === twinOld, `…and C's edit is told duplicate_of the older twin rather than raising 23505 (${cError.slice(0, 80) || JSON.stringify(cResult)})`);
+  const state = (await sql`SELECT id, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis, metadata FROM thoughts`) as { id: string; fp: string | null; axis: number; metadata: Record<string, unknown> }[];
+  const s = state.find((r) => r.id === singleton)!, o = state.find((r) => r.id === twinOld)!, n = state.find((r) => r.id === twinNew)!;
+  assert(state.length === 3 && s.fp !== null && s.axis === 1 && (s.metadata as { k?: number }).k === 1, `three rows: the singleton carries its key and B's vector and metadata (axis ${s.axis})`);
+  assert(o.fp !== null && n.fp === null && n.axis === 2, `the older twin carries the key, the newer stays NULL with C's vector (axis ${n.axis})`);
+  const after = await status();
+  assert(after.code === 0 && /1 group\(s\) of thoughts share one normalised text/.test(after.out), "after the backfill --status lists the same one group — the pair is NULL/fingerprinted now, and the list means what it meant");
+  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+  assert(trg.e === "O", "…and the updated_at trigger is enabled again");
+  await connA.close();
+  await connB.close();
+  await connC.close();
+  await sql`DELETE FROM thoughts`;
+}
+
 console.log("\n[7] Chunk context survives capture, edit and a payload without it");
 {
   await sql`DELETE FROM thoughts`;

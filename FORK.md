@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Forty numbered changes on top of the pin. Seven fix defects found in an
+Forty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–40 are the numbered `###` sections** further down, which is
+sections. Changes **18–41 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -171,6 +171,7 @@ db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends r
 evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
 db/migrations/021_*.sql          # fix 38  (new file — thoughts.embedding_model: a vector carries the model that produced it; both writers carry it)
 db/migrations/022_*.sql          # fix 40  (new file — a re-capture's windows stay while the label vouches for them; the 3-argument upsert_thought redefined)
+db/migrations/023_*.sql          # fix 41  (new file — 003's missing backfill: every legacy singleton, and the oldest of each twin group, takes its fingerprint once)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -2374,7 +2375,7 @@ would have ended the suite before the tally; and the claim that "writers of one
 fingerprint are serialised" was scoped to what is true — edits, under READ
 COMMITTED, with `upsert_thought` uncovered — here, in the header, the COMMENT
 and `db/README.md`. To a ticket: the one-shot fingerprint backfill 003 never
-had (SMD-1042), feasible now that `content_fingerprint_of` exists and the
+had (SMD-1042, done in change 41), feasible now that `content_fingerprint_of` exists and the
 right fix for every legacy singleton a pass never visits, but a data migration
 with its own questions about a full-table hash inside one transaction.
 
@@ -2402,9 +2403,9 @@ To a ticket: taking the same lock in `upsert_thought` (SMD-1043), which would
 make "writes of one fingerprint are serialised" simply true and delete the
 disclaimers, but redefines two capture overloads on the hot path. Declined:
 not writing the fingerprint on an unchanged edit at all — it would leave every
-legacy singleton unfingerprinted until SMD-1042 ships, and a recapture would
+legacy singleton unfingerprinted until SMD-1042 ships (change 41), and a recapture would
 create a second row where 013 already merged; the header now states that
-arrival order is the ownership rule until SMD-1042 replaces it.
+arrival order is the ownership rule until SMD-1042 replaces it (change 41 does: oldest by `created_at`, then id).
 
 **A third pass, triaged: ten fixes, and the stop.** Nothing in the rule
 itself. Two were in the pass: "DUPLICATE_CONTENT cannot reach here" was false
@@ -3997,6 +3998,127 @@ unchanged: the migration fixes its path. The 4-argument form's body has no
 sentinel and no check; a hand re-apply of 007 over 013 would drop the context
 column from the chunk insert, which preflight's `chunk context` check reads
 from the rows rather than the body.
+
+### 41. 003's missing half — migration 023 fingerprints every legacy singleton, and the oldest of each twin group, once
+
+`db/migrations/023_content_fingerprint_backfill.sql` and
+`server-portable/preflight.ts` (Linear SMD-1042, filed by change 33's first
+review pass). Migration 003 added `content_fingerprint` with a partial unique
+index and no backfill, and its header gave no reason. Every row from before it
+carries NULL, and so does every row a load inserted around `upsert_thought` —
+the getting-started guide's hand-pasted schema is exactly such a brain. So a
+capture of a legacy row's text inserted a SECOND row: `ON CONFLICT` cannot see a
+NULL, the capture succeeded, search returned both, and every later capture of
+that text merged into the new row while the old one stayed. 018 states this and
+does not fix it; its only backfill is one row at a time, on the rows a re-embed
+pass visits, and a brain that never switches model keeps every pre-003 singleton
+unfingerprinted for ever. 018's header deferred the ownership rule here in so
+many words — "whichever edit committed first, until SMD-1042 states a rule
+(oldest by `created_at`) and applies it to the rest".
+
+**The rule: the oldest takes the key, when the key is free.** A row without a
+fingerprint takes `content_fingerprint_of(content)` (016's function, byte-
+identical to 003's inline rule) when no row holds that key and it is the oldest
+of the NULL rows that hash to it — `created_at`, then id, NULL `created_at` (a
+raw load may leave it) last: the order `reembed.ts`'s pairs list already prints a
+group in, so the first id it prints is the row that takes the key. A legacy
+singleton — the common case — is fingerprinted and a capture of its text merges
+into it from then on. True twins end with exactly one fingerprinted and the rest
+NULL, the state 018 leaves after a pass, so `duplicate_of` and the pairs list
+keep meaning what they meant. A NULL row whose key another row holds — the same
+text under a fingerprint, or a stale key left by a raw update of content (018's
+`fingerprint_held_by` case) — stays NULL: the key is taken, whatever the
+holder's text, and 018 decided that. No existing key is touched, right or stale.
+Not the community recipe's rule: `recipes/fingerprint-dedup-backfill` strips
+punctuation, possessives and plurals before hashing, so its fingerprints never
+match capture's; a brain that ran it holds stale keys, and 023 leaves them.
+
+**A function, so the remedy is one statement.** The rule lives in
+`backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, and the file
+calls it once. 021's backfill is an inline `DO` block; this one is a function
+because it is needed again — a load that inserts into `thoughts` directly after
+023 leaves NULL rows again, and the remedy is then `SELECT
+backfill_content_fingerprints();`, one statement preflight can name rather than
+a body to paste (the remedy shape SMD-1193 found wanting). Re-applying the file
+re-runs it and it writes nothing: it hashes only the rows whose fingerprint is
+NULL and whose key is free. `p_limit` is for the by-hand path — batches until it
+returns 0, and the `NOT EXISTS` sits inside the limited set so 0 means none
+remain; the migration itself takes the whole corpus.
+
+**One transaction, and the lock is the point.** The function's first statement
+is `LOCK TABLE thoughts IN EXCLUSIVE MODE`, held to commit, and the lock is what
+makes the rule exact. A concurrent `upsert_thought` of a legacy singleton's text
+cannot insert a fingerprinted row under the backfill and leave the UPDATE to
+raise 23505: the INSERT waits, then lands `ON CONFLICT` on the row 023 just
+fingerprinted and merges — the defect fixed in the same instant it would have
+struck. A concurrent `update_thought` — a re-embed pass reaching a legacy twin —
+waits at its `SELECT … FOR UPDATE`, because ROW SHARE conflicts with EXCLUSIVE,
+and its holder lookup then sees the committed key and answers `duplicate_of`.
+The trigger hold alone would take only SHARE ROW EXCLUSIVE, which ROW SHARE does
+not conflict with: under that lock the edit passes its lookup, waits at its
+UPDATE, and raises 23505 after the commit — the symptom 018 removed, back for
+the duration of the upgrade. Reads proceed throughout. A write in flight before
+the LOCK holds it up until that write commits, bounded by a transaction-local
+`lock_timeout` of 10 s, so an idle-in-transaction writer fails the migration
+(re-run it) rather than queueing every other writer behind the wait. The
+`updated_at` trigger is held off for the UPDATE as 021 holds it: the fingerprint
+is not an edit, and two rules read that column — 021's `updated_at <=
+finished_at` evidence and 018's `if_unchanged_since` guard. 008's audit trigger
+diffs content, metadata and the vector's presence, so a fingerprint-only UPDATE
+writes no audit row; 016's entity trigger fires on `UPDATE OF content` only.
+
+**What it costs.** `content_fingerprint` is indexed, so the UPDATE is never HOT:
+every row written is a new tuple entered into every index on `thoughts`, the
+HNSW index included — 021's backfill is not a precedent, `embedding_model` is
+unindexed and that UPDATE was HOT. Measured on the test container at 1,024
+dimensions, 20,000 legacy rows with random vectors beside 20,000 fingerprinted
+ones: the whole-corpus call 56 s — 2.8 ms a row, and the HNSW index is the cost,
+since the same call with that index dropped takes 0.34 s; a `p_limit` batch of
+1,000 1.7 s; the no-op re-run 9 ms. About five minutes of waiting writers per
+100,000 legacy rows. `migrate.ts` sets no `statement_timeout`, so a server
+default applies; the header says to apply the migration in a quiet window, and
+gives a brain with millions of legacy rows the batch path — the file by hand up
+to its final SELECT, the function in batches until it returns 0, then the
+migrator, whose call finds nothing and writes the ledger row.
+
+**Preflight.** `fingerprint backfill`, over a direct connection: a thought
+without a fingerprint whose text no row holds is a warning — naming 023 where the
+function does not exist, and where it does the one statement, as the table's
+owner (the function holds the trigger, so it needs the owner; preflight reads
+the owner from `pg_class`); NULL rows that each share their text with the row
+holding the key — twins, or a stale key — are ok, pointing at the pairs list;
+no NULL row is ok. The `EXISTS` stops at the first pending row, so a brain
+before 023 answers at once. Over PostgREST a skip, beside `atomic capture` and
+`chunk delete privilege`. A warning, not a failure: captures work, they double.
+
+**Verify, as the ticket asked.** `db/test-upgrade.ts` [6]: 023 onto a populated
+022 — at 022 a capture of a legacy row's text inserts a second row; after 023
+exactly the singletons and the older twin carry fingerprints, the row whose text
+a captured row holds stays NULL, no `updated_at` moves, no audit row, the
+trigger is enabled again, the schema gains one function and no column, a
+capture of the former singleton's text merges, and a re-apply writes nothing.
+`db/test-schema.ts` [24]: the rule through planted rows — a singleton, twins
+dated apart, a pair whose older row has no `created_at`, a row whose text a
+captured row holds, a row whose key a stale holder carries — three written, the
+rest NULL and the stale key untouched; a capture merges; an unchanged edit of
+the newer twin names the older as `duplicate_of`; `p_limit` batches, the third
+returning 0 with the blocked rows still there; [2] re-applies 023 as a no-op.
+`db/test-live.ts` [6c], on a real server: the backfill held open on one
+connection, a capture of the singleton's text and a re-embed of the newer twin
+on two others — `pg_locks` shows both waiting on the *relation* lock; once the
+first commits the capture returns the singleton's id and the edit is told
+`duplicate_of`, not 23505; `reembed.ts --status` lists the same one group before
+and after. `server-portable/test-preflight.ts` [5]: the warning with the
+one-statement remedy naming the owner, the ok once run, the twin as ok, and the
+function dropped as a warning naming the migration until 023 is re-applied.
+
+**Not done here.** SMD-1043's advisory lock in both inserting `upsert_thought`
+overloads — 023 redefines no function, and a capture racing an edit outside the
+backfill's transaction still ends as 018's header says. Deleting the extra twin
+stays the operator's call (`delete_thought`; the pairs list names them). 018's
+file is applied and hashed, so its disclaimers deferring to SMD-1042 stay as
+written; `db/README.md` is what moves. The function carries no sentinel — it is
+new and has no successor; SMD-1227 tables the sentinels.
 
 ## Detached from the fork network
 

@@ -303,4 +303,64 @@ console.log("\n[5] Migration 022 onto a populated 021 — the chunks follow the 
   await sql.close();
 }
 
+console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take their fingerprints once");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "023" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+  // A corpus from before 003, or loaded around upsert_thought: NULL
+  // fingerprints throughout, and one row captured through the writer.
+  const legacy = async (content: string, createdAt: string) =>
+    (await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES (${content}, NULL, ${vec}::vector, ${createdAt}::timestamptz) RETURNING id`)[0].id as string;
+  const rows = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c);
+  const fp = async (id: string) => (await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0].fp as string | null;
+  const fns = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'backfill_content_fingerprints'`)[0].c);
+  const doubled = await legacy("captured before 003", "2024-01-01");
+  const singleton = await legacy("another from before 003", "2024-01-01");
+  const twinOld = await legacy("Same Text", "2024-01-01");
+  const twinNew = await legacy("same   text", "2024-06-01");
+  await sql`SELECT upsert_thought('a fingerprinted note', '{"metadata":{}}'::jsonb, ${vec}::vector)`;
+  const owned = await legacy("A Fingerprinted Note", "2020-01-01");
+
+  // At 022: the defect this migration removes, shown before it is applied.
+  const before = await rows();
+  const [{ r: second }] = await sql`SELECT upsert_thought('captured  before 003', '{"metadata":{}}'::jsonb, ${vec}::vector) AS r`;
+  assert((second as { id: string }).id !== doubled && (await rows()) === before + 1, "at 022 a capture of a legacy row's text inserts a second row — ON CONFLICT cannot see a NULL");
+  assert((await fns()) === 0, "…and there is no backfill_content_fingerprints");
+  const stampsBefore = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  const shapeBefore = await shape(sql);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("023") });
+
+  const shapeAfter = await shape(sql);
+  const added = shapeAfter.functions.split("\n").filter((f) => !shapeBefore.functions.split("\n").includes(f));
+  assert(shapeBefore.columns === shapeAfter.columns && added.length === 1 && added[0] === "backfill_content_fingerprints(p_limit integer)",
+         `023 adds no column and one function, backfill_content_fingerprints (${added.join(", ")})`);
+  const stampsAfter = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "the backfill moves no row's updated_at — the fingerprint is not an edit");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
+  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
+  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
+  assert((await fp(singleton)) !== null, "a legacy singleton carries its fingerprint");
+  assert((await fp(twinOld)) !== null && (await fp(twinNew)) === null, "of the twins the older carries the key and the newer stays NULL");
+  assert((await fp(owned)) === null && (await fp(doubled)) === null, "a NULL row whose text a fingerprinted row holds stays NULL — the note captured through the writer, and the row 022 doubled, whose second copy holds the key");
+
+  // The mirror: the defect is gone for the rows this migration reached.
+  const [{ r: merged }] = await sql`SELECT upsert_thought('another  from before 003', '{"metadata":{"k":1}}'::jsonb, ${vec}::vector) AS r`;
+  assert((merged as { id: string }).id === singleton && (await rows()) === before + 1, "after 023 a capture of the former singleton's text merges into it — no second row");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("023") });
+  const [{ n: again }] = await sql`SELECT backfill_content_fingerprints() AS n`;
+  assert((await fns()) === 1 && Number(again) === 0 && (await rows()) === before + 1,
+         "re-applying 023 is a no-op: the function once, a further call writes nothing");
+  await sql.close();
+}
+
 report();

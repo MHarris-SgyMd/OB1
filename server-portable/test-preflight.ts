@@ -746,6 +746,31 @@ else {
     }
   }
 
+  // 003's missing half. A NULL-fingerprint row whose key no row holds is a
+  // capture doubled in waiting; 023's function writes it, and the remedy is
+  // that one statement — as the owner, since it holds the updated_at
+  // trigger. After it a NULL row is a twin, or blocked by a stale key: ok.
+  // Before 023 the same row's remedy is the migration.
+  await claims.unsafe("DELETE FROM thoughts");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a legacy singleton', NULL)");
+  const [{ owner }] = await claims`SELECT pg_get_userbyid(relowner)::text AS owner FROM pg_class WHERE oid = 'thoughts'::regclass`;
+  const pending = await run(SQL_ENV);
+  assert(pending.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, at least one whose text no row holds — rows written around upsert_thought since migration 023/.test(pending.out) && pending.out.includes(`As ${owner}: SELECT backfill_content_fingerprints();`),
+         `a NULL-fingerprint row whose key is free is a warning with the one-statement remedy, naming the owner (exit ${pending.code})`);
+  await claims.unsafe("SELECT backfill_content_fingerprints()");
+  assert(/fingerprint backfill\s+every thought carries a fingerprint/.test((await run(SQL_ENV)).out), "…which performs");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a  legacy singleton', NULL)");
+  const twin = await run(SQL_ENV);
+  assert(twin.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text with the row that holds it \(a twin, or a stale key\)/.test(twin.out),
+         "a NULL row whose text a fingerprinted row holds is a twin, not pending — ok, pointing at the pairs list");
+  await claims.unsafe("DROP FUNCTION backfill_content_fingerprints(integer)");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('another legacy singleton', NULL)");
+  const pre023 = await run(SQL_ENV);
+  assert(pre023.code === 0 && /fingerprint backfill\s+2 thought\(s\) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row/.test(pre023.out) && /Apply db\/migrations\/023_content_fingerprint_backfill\.sql\./.test(pre023.out),
+         "before 023 the same row is a warning whose remedy is the migration");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
+  assert(/fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text/.test((await run(SQL_ENV)).out), "…and 023 applied writes it and is ok again, the twin still listed");
+
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();
 

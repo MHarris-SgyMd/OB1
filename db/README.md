@@ -62,8 +62,8 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `483 assertions: 483 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports twenty-two migrations applied, and
+`bun test-schema.ts` prints `500 assertions: 500 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
 `\d thoughts` shows eight columns and six indexes — five of our own plus the
 primary key, which `\d` also lists. Five with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -94,6 +94,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
 | `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
 | `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `chunk delete privilege` refuses a role without DELETE on the table, printing the GRANT | This fork |
+| `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id — the order the pairs list prints) takes it while the rest stay NULL, the state 018 leaves after a pass; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s `FOR UPDATE` wait, readers do not; `lock_timeout` 10 s), which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. Run again by hand after a load that inserted into `thoughts` directly (`p_limit` for batches; 0 means none remain), which preflight's `fingerprint backfill` says when | This fork |
 
 ## What changed relative to the guide
 
@@ -356,8 +357,14 @@ failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
 adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
-the file's body rather than to apply a migration the migrator will skip. A one-shot backfill that fingerprints every legacy
-singleton without a re-embed is SMD-1042.
+the file's body rather than to apply a migration the migrator will skip.
+Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
+of each group (`created_at`, then id — the order this list prints), takes its
+fingerprint once at upgrade, under a table lock that makes a capture waiting on
+it merge rather than double. After it a row without a fingerprint is a twin, or
+blocked by a stale key, or was loaded around `upsert_thought` since — and
+`SELECT backfill_content_fingerprints()` settles the last kind the same way,
+when preflight's `fingerprint backfill` says so.
 
 **The head window, recorded.** A long thought is embedded whole and in windows;
 when the whole-content call fails, the head window's vector stands in for it
@@ -776,8 +783,8 @@ Both easy to leave out, and both produced confidently wrong numbers first:
 Two suites, because one of them cannot reach everything.
 
 ```bash
-bun test-schema.ts                    # 483 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts   # 308 assertions, real server, throwaway container
+bun test-schema.ts                    # 500 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts   # 317 assertions, real server, throwaway container
 ```
 
 `with-postgres.sh` starts `pgvector/pgvector:0.8.6-pg16`, exports `DATABASE_URL`, runs
@@ -824,6 +831,15 @@ container.
   removed the same scenario waits on the transaction id and raises `duplicate
   key value violates unique constraint "idx_thoughts_fingerprint"` — measured,
   which is why the assertion names the lock type.
+- **The backfill holds the table** (migration 023). [6c] plants a legacy
+  singleton and two twins, runs `backfill_content_fingerprints()` on one
+  connection inside an open transaction, and has a second capture the
+  singleton's text and a third re-embed the newer twin: `pg_locks` shows both
+  waiting on the *relation* lock; once the first commits the capture returns
+  the singleton's id — merged, not doubled — and the edit is told
+  `duplicate_of` the older twin rather than raising 23505. `reembed.ts
+  --status` lists the same one group before and after. `test-upgrade.ts` [6]
+  shows the doubling at 022 before applying 023 over it, then the merge.
 - **The windows stay while the label vouches for them** (migration 022). [7]
   captures a thought at `old-model` with two windows through the 4-argument
   form and finds it by its second window; re-captured with the same text
@@ -890,7 +906,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 483 properties, including:
+asserts 500 properties, including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1035,6 +1051,18 @@ asserts 483 properties, including:
   of `upsert_thought`; and the trap — 021 re-applied puts 021's body back and
   a re-capture at another model leaves the windows again, until 022 is
   re-applied
+- **every legacy singleton, and the oldest of each twin group, takes its
+  fingerprint once** (migration 023): rows planted with NULL fingerprints —
+  a singleton, twins dated apart, a pair whose older row has no `created_at`,
+  a row whose text a captured row already holds, a row whose key a stale
+  holder carries — and one call: the singleton, the older twin and the dated
+  raw row take their keys (three written), the rest stay NULL and the stale
+  key is untouched; no `updated_at` moves, no audit row, the trigger enabled
+  again; a capture of the former singleton's text merges into it, an
+  unchanged edit of the newer twin names the older as `duplicate_of`; a
+  second call writes nothing; `p_limit` bounds a batch and the third returns
+  0 with the blocked rows still there; one function; 023 re-applied re-runs
+  the call and moves nothing
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

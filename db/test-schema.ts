@@ -2293,4 +2293,77 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// Migration 023 — 003's missing backfill. Rows planted around upsert_thought
+// with NULL fingerprints, as a pre-003 brain or a raw load leaves them; then
+// the one call, and the rule: a singleton takes its key, the oldest of a twin
+// group takes it (created_at then id, NULL created_at last), a row whose key
+// another row holds — the same text under a fingerprint, or a stale key —
+// stays NULL. The concurrent half — a capture and an edit waiting on the
+// table lock — is db/test-live.ts [6c], which PGlite's single session
+// cannot run.
+console.log("\n[24] Migration 023: every legacy singleton, and the oldest of each twin group, takes its fingerprint once");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const legacy = async (content: string, createdAt: string | null) =>
+    (await db.query<{ id: string }>(
+      `INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES ($1, NULL, $2::vector, $3::timestamptz) RETURNING id`,
+      [content, unit(0), createdAt])).rows[0].id;
+  const fpOf = async (content: string) =>
+    (await db.query<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).rows[0].f;
+  const fp = async (id: string) =>
+    (await db.query<{ fp: string | null }>(`SELECT content_fingerprint AS fp FROM thoughts WHERE id = $1`, [id])).rows[0].fp;
+  const stamps = async () =>
+    JSON.stringify((await db.query<{ id: string; u: string }>(`SELECT id, updated_at::text AS u FROM thoughts ORDER BY id`)).rows);
+  const rows = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts`)).rows[0].c;
+  const audit = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
+  const backfill = async (limit: number | null = null) =>
+    (await db.query<{ n: number }>(`SELECT backfill_content_fingerprints($1) AS n`, [limit])).rows[0].n;
+
+  const singleton = await legacy("Only Once", "2024-01-01");
+  const twinOld = await legacy("Same Text", "2024-01-01");
+  const twinNew = await legacy("same   text", "2024-06-01");
+  const rawUndated = await legacy("Raw Load", null);
+  const rawDated = await legacy("raw  load", "2024-03-01");
+  const captured = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('a fingerprinted note', '{}'::jsonb) AS r`)).rows[0].r.id;
+  const owned = await legacy("A Fingerprinted Note", "2020-01-01");
+  const holder = await legacy("what it used to say", "2024-01-01");
+  await db.query(`UPDATE thoughts SET content_fingerprint = content_fingerprint_of('held key text') WHERE id = $1`, [holder]);
+  const blocked = await legacy("held key text", "2024-01-01");
+  const total = await rows();
+  const stampsBefore = await stamps();
+  const auditBefore = await audit();
+
+  const written = await backfill();
+  assert(written === 3, `the call writes the singleton, the oldest twin and the oldest dated raw row — three rows (${written})`);
+  assert((await fp(singleton)) === (await fpOf("Only Once")), "a legacy singleton takes its fingerprint");
+  assert((await fp(twinOld)) === (await fpOf("Same Text")) && (await fp(twinNew)) === null, "of two legacy twins the older takes the key and the newer stays NULL — the state 018 leaves after a pass");
+  assert((await fp(rawDated)) === (await fpOf("Raw Load")) && (await fp(rawUndated)) === null, "a row with no created_at sorts last: the dated twin takes the key");
+  assert((await fp(owned)) === null && (await fp(captured)) === (await fpOf("a fingerprinted note")), "a NULL row whose text a fingerprinted row already holds stays NULL, however old — the key is taken");
+  assert((await fp(blocked)) === null && (await fp(holder)) === (await fpOf("held key text")), "a NULL row whose key a STALE holder carries stays NULL, and the stale key is not touched — 018's fingerprint_held_by case, not re-decided here");
+  assert((await stamps()) === stampsBefore, "no row's updated_at moves — the fingerprint is not an edit");
+  assert((await audit()) === auditBefore, "…and no audit row is written: 008 diffs content, metadata and the vector's presence");
+  const [trg] = (await db.query<{ e: string }>(`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`)).rows;
+  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
+
+  // The defect, gone: a capture of the former singleton's text merges into it.
+  const merged = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('only  once', '{"metadata":{"k":1}}'::jsonb) AS r`)).rows[0].r.id;
+  assert(merged === singleton && (await rows()) === total, `a capture of a former singleton's text merges into it instead of inserting a second row (${await rows()} rows)`);
+  // 018 still agrees about the twins.
+  const edit = (await db.query<{ r: { ok: boolean; duplicate_of?: string } }>(
+    `SELECT update_thought($1::uuid, 'same   text', NULL::jsonb, $2::vector, NULL::jsonb, NULL::timestamptz) AS r`, [twinNew, unit(1)])).rows[0].r;
+  assert(edit.ok === true && edit.duplicate_of === twinOld, `an unchanged edit of the newer twin reports duplicate_of the older — the row this migration gave the key to (${JSON.stringify(edit)})`);
+  assert((await backfill()) === 0, "a second call writes nothing: only NULL rows whose key is free qualify");
+
+  // p_limit: batches for the by-hand path, and 0 means none remain — the
+  // NOT EXISTS is inside the limited set, so blocked rows never fill a batch.
+  await legacy("batch one", "2024-01-01");
+  await legacy("batch two", "2024-01-02");
+  assert((await backfill(1)) === 1 && (await backfill(1)) === 1 && (await backfill(1)) === 0, "p_limit bounds each call, and the third returns 0 with the two blocked rows still in the table");
+  assert((await functionsNamed("backfill_content_fingerprints")) === 1, "one backfill_content_fingerprints");
+  const stampsNow = await stamps();
+  await reapply("023");
+  assert((await stamps()) === stampsNow && (await backfill()) === 0, "023 re-applied re-runs the call, writes nothing and moves nothing");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();
