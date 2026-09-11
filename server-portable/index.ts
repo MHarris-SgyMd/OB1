@@ -480,6 +480,12 @@ function buildServer(principal: Principal): McpServer {
             const match = t.similarity == null ? "exact match, no vector" : `${(t.similarity * 100).toFixed(1)}% match`;
             const parts = [
               `--- Result ${i + 1} (${match}) ---`,
+              // The id, so update_thought and delete_thought can be aimed at a hit
+              // the caller never captured — without it those two tools reach only
+              // what capture_thought just returned. In the header group and cased
+              // `ID:` to match search_thoughts_keyword, which prints the id the
+              // same way for the same block format. SMD-1248.
+              `ID: ${t.id}`,
               `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
               `Type: ${m.type || "unknown"}`,
             ];
@@ -491,11 +497,6 @@ function buildServer(principal: Principal): McpServer {
             if (Array.isArray(m.action_items) && m.action_items.length)
               parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
             parts.push(`\n${t.content}`);
-            // The id last, so update_thought and delete_thought can be aimed at a
-            // hit the caller never captured. Without it those two tools reach only
-            // what capture_thought just returned; a trailing line keeps the prose
-            // shape the description promises. SMD-1248.
-            parts.push(`id: ${t.id}`);
             return parts.join("\n");
           }
         );
@@ -686,9 +687,10 @@ function buildServer(principal: Principal): McpServer {
           ) => {
             const m = t.metadata || {};
             const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-            // A trailing id line, as search_thoughts renders — it is what
-            // update_thought and delete_thought take. SMD-1248.
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   id: ${t.id}`;
+            // An `ID:` line, the same label the two search tools print — it is what
+            // update_thought and delete_thought take. This compact format has no
+            // header group, so it trails the content. SMD-1248.
+            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}`;
           }
         );
 
@@ -945,7 +947,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Update Thought",
       description:
-        "Correct or amend an existing thought by id. `search_thoughts` and `list_thoughts` print the id on an `id:` line under each hit, and `capture_thought` reports it when it saves — so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
+        "Correct or amend an existing thought by id. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves — so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -955,7 +957,7 @@ function buildServer(principal: Principal): McpServer {
         idempotentHint: true,
       },
       inputSchema: {
-        id: z.string().describe("UUID of the thought to update — the id on a search_thoughts or list_thoughts `id:` line, or the one capture_thought reported when it saved"),
+        id: z.string().describe("UUID of the thought to update — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
         content: z.string().min(1).optional()
           .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
         metadata_patch: z.record(z.string(), z.unknown()).optional()
@@ -1013,7 +1015,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Delete Thought",
       description:
-        "Permanently remove a thought by id, along with its search chunks. `search_thoughts` and `list_thoughts` print the id on an `id:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error.",
+        "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -1021,7 +1023,7 @@ function buildServer(principal: Principal): McpServer {
         idempotentHint: true,
       },
       inputSchema: {
-        id: z.string().describe("UUID of the thought to delete — the id on a search_thoughts or list_thoughts `id:` line, or the one capture_thought reported when it saved"),
+        id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved"),
       },
     },
     async ({ id }) => {

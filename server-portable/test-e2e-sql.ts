@@ -355,10 +355,13 @@ console.log("\n[8] the id a read prints round-trips to update_thought and delete
   // the row is found by its content, not by where it happens to rank.
   await call("capture_thought", { content: "kappa thought awaiting a correction" });
 
-  // search_thoughts → update_thought, aimed at the id search returned.
+  // search_thoughts → update_thought, aimed at the id search returned. The id is
+  // in the result's header block (as search_thoughts_keyword renders it), so pull
+  // it from the block that holds the captured text.
   const found = await call("search_thoughts", { query: "kappa awaiting correction", limit: 20, threshold: -1 });
-  const sMatch = found.match(/kappa thought awaiting a correction\nid: ([0-9a-f-]{36})/);
-  assert(sMatch, "search_thoughts prints an id line under its hit");
+  const sBlock = found.split("--- Result ").find((b) => /kappa thought awaiting a correction/.test(b)) ?? "";
+  const sMatch = sBlock.match(/\nID: ([0-9a-f-]{36})/);
+  assert(sMatch, "search_thoughts prints an ID line for its hit");
   const sid = sMatch![1];
 
   await call("update_thought", { id: sid, content: "kappa thought now corrected" });
@@ -368,8 +371,8 @@ console.log("\n[8] the id a read prints round-trips to update_thought and delete
 
   // list_thoughts → delete_thought, the same reach through the other read tool.
   const listed = await call("list_thoughts", { limit: 20 });
-  const lMatch = listed.match(/kappa thought now corrected\n\s*id: ([0-9a-f-]{36})/);
-  assert(lMatch, "list_thoughts prints an id line under its item");
+  const lMatch = listed.match(/kappa thought now corrected\n\s*ID: ([0-9a-f-]{36})/);
+  assert(lMatch, "list_thoughts prints an ID line under its item");
   const lid = lMatch![1];
   assert(lid === sid, "…and it is the same id search returned for the same thought");
 

@@ -4448,19 +4448,25 @@ ChatGPT citations. `capture_thought` was already given its id back for exactly
 this reason; the comment there says so in as many words. The reasoning was
 applied to the write path and not the read path.
 
-**A trailing `id: <uuid>` line per hit**, in both renderings — the smaller of the
-two shapes the ticket weighed. It keeps the prose contract the tool descriptions
-promise (JSON, as `search` uses, would rewrite the whole output and the prose
-assertions in `test-e2e-sql.ts`), and costs ~40 characters against a budget
-`search_thoughts` already manages with its `limit` and truncation note. The id
-sits last in each hit — after the content block in `search_thoughts`, on its own
-indented line under the item in `list_thoughts`. `list_thoughts` did not carry
-the id at all (`listThoughts` selected `content, metadata, created_at` in both
-stores and `ThoughtListItem` had no `id`), so the column was added to the two
-`SELECT`s and the shared type; `search_thoughts` already had `t.id` from the
-hybrid match. `update_thought` and `delete_thought` descriptions (and their `id`
-argument) now say where the id comes from — before this they described an id with
-no reachable source.
+**An `ID: <uuid>` line per hit**, in both renderings — a prose line, the smaller
+of the two shapes the ticket weighed (JSON, as `search` uses, would rewrite the
+whole output and the prose assertions in `test-e2e-sql.ts`), costing ~40
+characters against a budget `search_thoughts` already manages with its `limit`
+and truncation note. The label and placement follow the tree's own precedent:
+**`search_thoughts_keyword` already prints `ID: <uuid>` in its result header**,
+and it shares `search_thoughts`'s exact `--- Result N ---` block — so
+`search_thoughts` prints the id the same way, in the header group, and the three
+read tools now read alike. `list_thoughts`'s compact format has no header group,
+so its `ID:` line trails the item. `list_thoughts` did not carry the id at all
+(`listThoughts` selected `content, metadata, created_at` in both stores and
+`ThoughtListItem` had no `id`), so the column was added to the two `SELECT`s and
+the shared type; `search_thoughts` already had `t.id` from the hybrid match.
+`update_thought` and `delete_thought` descriptions (and their `id` argument) now
+name where the id comes from — before this they described an id with no reachable
+source. (The ticket suggested a *trailing* `id:` line; a first review pass moved
+it to the header and cased it `ID:` to match `search_thoughts_keyword`, since the
+divergence between three sibling read tools was a worse cost than the ticket's
+literal wording.)
 
 **Verified.** `test-e2e-sql.ts` gains a walk that could not be written before:
 capture a thought, find it through `search_thoughts`, `update_thought` aimed at
