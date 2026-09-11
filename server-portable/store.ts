@@ -141,6 +141,7 @@ export type ThoughtRecord = {
 };
 
 export type ThoughtListItem = {
+  id: string;
   content: string;
   metadata: Record<string, unknown>;
   created_at: string;

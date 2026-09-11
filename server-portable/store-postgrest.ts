@@ -133,7 +133,7 @@ export class PostgrestStore implements ThoughtStore {
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
     let q = this.client
       .from("thoughts")
-      .select("content, metadata, created_at")
+      .select("id, content, metadata, created_at")
       .order("created_at", { ascending: false })
       .limit(f.limit);
 

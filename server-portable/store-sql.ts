@@ -168,7 +168,7 @@ export class SqlStore implements ThoughtStore {
     const since = f.days ? new Date(Date.now() - f.days * 86_400_000).toISOString() : null;
 
     const rows = await this.sql`
-      SELECT content, metadata, created_at
+      SELECT id, content, metadata, created_at
       FROM thoughts
       WHERE (${f.type ?? null}::text  IS NULL OR metadata @> jsonb_build_object('type', ${f.type ?? null}::text))
         AND (${f.topic ?? null}::text IS NULL OR metadata @> jsonb_build_object('topics', jsonb_build_array(${f.topic ?? null}::text)))
@@ -178,6 +178,7 @@ export class SqlStore implements ThoughtStore {
       LIMIT ${f.limit}::int`;
 
     return rows.map((r: Record<string, unknown>) => ({
+      id: String(r.id),
       content: String(r.content),
       metadata: (r.metadata ?? {}) as Record<string, unknown>,
       created_at: new Date(r.created_at as string).toISOString(),
