@@ -4049,8 +4049,10 @@ waiting — each written unless a writer settled it while the call waited for th
 lock, and a row settled that way is no longer waiting — so a loop until 0 is
 exact. The scan runs before the lock, at ACCESS SHARE, into a temporary table
 dropped with the transaction; under the lock the rows found are re-checked by
-index, so a batch costs its writers the batch's own writes and never a rescan
-of every NULL row. The file's own call reads `ob1.backfill_limit` — NULL unset,
+index — still NULL, still the text that was hashed, the key still free — so a
+batch costs its writers the batch's own writes and never a rescan of every NULL
+row, and a raw edit of content in the window is never given a key for text it
+no longer holds. The file's own call reads `ob1.backfill_limit` — NULL unset,
 so the whole corpus by default.
 
 **One transaction, and the lock is the point.** Once the scan has found rows,
@@ -4073,9 +4075,11 @@ the LOCK holds it up until that write commits, bounded by a transaction-local
 re-check needs READ COMMITTED, which is the default and what `migrate.ts` runs
 at, as 018's header says of its lock; under REPEATABLE READ the unique index
 gives the answer instead — 23505, the file rolls back whole, a re-run succeeds.
-A re-embed pass running at the time parks every worker at `update_thought`'s
-`FOR UPDATE` for the lock's duration and their leases expire, so the header says
-to stop the pass first. The
+Every writer into a table that references `thoughts` waits on the lock — the
+foreign-key check takes ROW SHARE — so both 015 consumers park for its duration
+and their leases expire: a re-embed pass at `update_thought`'s `FOR UPDATE`, an
+entity-extraction worker at its insert. The header says to stop both first, or
+batch under the lease. The
 `updated_at` trigger is held off for the UPDATE as 021 holds it: the fingerprint
 is not an edit, and two rules read that column — 021's `updated_at <=
 finished_at` evidence and 018's `if_unchanged_since` guard. 008's audit trigger
@@ -4096,11 +4100,17 @@ gives a brain with millions of legacy rows the batch path without a hand-edited
 file: `ALTER ROLE <migrator> SET ob1.backfill_limit = '10000'`, the migrator
 (one batch, and the ledger row), then `SELECT backfill_content_fingerprints(10000)`
 until it returns 0 — preflight decides "pending" from the rows, not the ledger,
-and warns until the loop is done.
+and warns until the loop is done. Each call rehashes and sorts every NULL row
+still waiting before its LIMIT, so the loop's scanning is the square of the
+corpus over the batch — before the lock, blocking nothing, and the header gives
+the expression index that turns each call into an ordered walk, built for the
+loop and dropped after it.
 
 **Preflight.** `fingerprint backfill`, over a direct connection: a thought
 without a fingerprint whose text no row holds is a warning — naming 023 where the
-function does not exist, and where it does the one statement, as the table's
+function does not exist, and where it does the one statement and its batched
+form, claiming no cause it cannot read (a batched upgrade still running looks
+the same as a raw load), as the table's
 owner (the function holds the trigger, so it needs the owner; preflight reads
 the owner from `pg_class`), or — where the ledger already says 023 and the
 function is absent, a brain adopted with `--baseline` — the body by hand, since
@@ -4110,9 +4120,11 @@ list; no NULL row is ok, said as "missing", since a stale key on a row that has
 one doubles on capture too and is not read here. Presence is read from the
 catalog first, so a brain before 003 or 016 is a skip, not a raise; the
 `EXISTS` stops at the first pending row, so a brain before 023 answers at once.
-Over PostgREST a skip, beside `atomic capture` and `chunk delete privilege`,
-and if the catalog connection itself fails every check of the three that has
-not reported says so. A warning, not a failure: captures work, they double.
+Over PostgREST a skip, beside `atomic capture` and `chunk delete privilege`;
+and the direct-connection block's checks are now one list, so a connection that
+fails between two of them leaves the first unreported carrying the error and
+every later one saying it was not reached — never a second row for a check that
+already reported. A warning, not a failure: captures work, they double.
 
 **Verify, as the ticket asked.** `db/test-upgrade.ts` [6]: 023 onto a populated
 022 — at 022 a capture of a legacy row's text inserts a second row; after 023
@@ -4158,8 +4170,31 @@ check and `chunk delete privilege` — both say so now. To a ticket: a census of
 stale keys (a brain that ran the community recipe holds one on every row), which
 means hashing every fingerprinted row and belongs to a command, not a start.
 
-**Not done here.** SMD-1043's advisory lock in both inserting `upsert_thought`
-overloads — 023 redefines no function, and a capture racing an edit outside the
+**A second pass, triaged: nine fixes, one ticket, and the stop.** The top
+finding was in the first pass's own addition: the re-check under the lock asked
+whether the row was still NULL and the key still free, not whether the row's
+text still hashed to the key found — a raw edit of content in the window would
+have been given a stale key by the migration itself. It asks now. The pairs
+list's new mark grouped a stale-key holder with the NULL row it blocks and
+advised deleting the unmarked row, the only one carrying the text — the holder
+is marked STALE and the advice says re-save it, delete nothing; and "the next
+pass gives it to the oldest" was 018's arrival order misdescribed. The
+`fingerprint backfill` warning claimed the pending rows were loaded since 023,
+which a batched upgrade still running contradicts, and prescribed the unbounded
+call — neutral now, with the batched form beside it; its ledger probe raised
+for a role without SELECT on the ledger — guarded; its count of NULL rows was
+an unbounded heap scan on every start — bounded at 10,001. The outer catch
+still added `atomic capture` unconditionally and covered two names — one list
+of the block's checks drives it. The header named only a re-embed pass to stop,
+where every foreign-key writer waits — both 015 consumers now. The batch loop's
+scanning is the square of the corpus over the batch, unsaid — said, with the
+expression index that makes each call an ordered walk. To a ticket: a BEFORE
+INSERT trigger computing the fingerprint a raw INSERT omits, which closes the
+door 023 sweeps behind — a second mechanism, weighed in the header.
+
+**Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
+INSERT omits (a ticket, above). SMD-1043's advisory lock in both inserting
+`upsert_thought` overloads — 023 redefines no function, and a capture racing an edit outside the
 backfill's transaction still ends as 018's header says. Deleting the extra twin
 stays the operator's call (`delete_thought`; the pairs list names them). 018's
 file is applied and hashed, so its disclaimers deferring to SMD-1042 stay as

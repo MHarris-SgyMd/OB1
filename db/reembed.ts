@@ -187,8 +187,9 @@
  * finds NULL/fingerprinted pairs, and a NULL/NULL pair is a load that inserted
  * into `thoughts` directly since; `SELECT backfill_content_fingerprints()`
  * settles it the same way, and preflight's `fingerprint backfill` says when.
- * The list marks the row holding the key. Stop a pass before applying 023: its
- * workers would wait on the table lock and their leases expire.
+ * The list marks the row holding the key, and a holder whose key is stale as
+ * such. Stop a pass before applying 023: its workers would wait on the table
+ * lock and their leases expire.
  *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the
@@ -956,22 +957,36 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
     console.error("  (the duplicate report needs migration 016's content_fingerprint_of — not applied here)");
     return 0;
   }
+  // The groups first, hashing only the NULL rows; then the mark, hashing only
+  // the rows IN a group — a holder whose own text does not hash to its key
+  // holds it under OTHER text (018's fingerprint_held_by), and is grouped
+  // here with the NULL row it blocks, not with a twin.
   const rows = (await sql`
-    SELECT count(*) OVER ()::int AS total,
-           array_agg(id::text || CASE WHEN content_fingerprint IS NOT NULL THEN ' (holds the key)' ELSE '' END ORDER BY created_at, id) AS ids
-    FROM thoughts
-    GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
-    HAVING count(*) > 1
-    ORDER BY min(created_at)
-    LIMIT ${limit}`) as { total: number; ids: string[] }[];
+    WITH g AS (
+      SELECT count(*) OVER ()::int AS total, array_agg(id ORDER BY created_at, id) AS ids, min(created_at) AS first
+      FROM thoughts
+      GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
+      HAVING count(*) > 1
+      ORDER BY min(created_at)
+      LIMIT ${limit})
+    SELECT g.total,
+           array_agg(t.id::text || CASE WHEN t.content_fingerprint IS NULL THEN ''
+                                        WHEN t.content_fingerprint = content_fingerprint_of(t.content) THEN ' (holds the key)'
+                                        ELSE ' (holds the key under OTHER text — stale)' END ORDER BY u.ord) AS ids
+    FROM g CROSS JOIN LATERAL unnest(g.ids) WITH ORDINALITY AS u(id, ord)
+    JOIN thoughts t ON t.id = u.id
+    GROUP BY g.total, g.first, g.ids
+    ORDER BY g.first`) as { total: number; ids: string[] }[];
   if (!rows.length) return 0;
   const total = Number(rows[0].total);
   console.error(
     `\n  ${total} group(s) of thoughts share one normalised text — pairs from before migration 003's fingerprint, or a load that\n` +
       `  bypassed upsert_thought. Every row in a group is re-embedded; the one marked holds the key, so a later capture of that\n` +
-      `  text merges into it and not into the others (none marked: the next pass, or backfill_content_fingerprints(), gives it to\n` +
-      `  the oldest). Whether they should be one thought is the operator's call — delete_thought on an unmarked row keeps its text\n` +
-      `  in the audit row. ${total > limit ? `First ${limit}:` : ""}`
+      `  text merges into it and not into the others (none marked: backfill_content_fingerprints() gives it to the oldest; a pass\n` +
+      `  gives it to whichever row it re-embeds first). Whether twins should be one thought is the operator's call — delete_thought\n` +
+      `  on an unmarked twin keeps its text in the audit row. A holder marked STALE is not a twin: its key describes text it no\n` +
+      `  longer holds, and the unmarked row beside it is the only one carrying that text — re-save the holder's own text through\n` +
+      `  update_thought to free the key, and delete nothing. ${total > limit ? `First ${limit}:` : ""}`
   );
   for (const r of rows) console.error(`    ${r.ids.join("  =  ")}`);
   return total;

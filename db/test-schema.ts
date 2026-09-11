@@ -2334,7 +2334,7 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   const auditBefore = await audit();
 
   const written = await backfill();
-  assert(written === 3, `the call writes the singleton, the oldest twin and the oldest dated raw row — three rows (${written})`);
+  assert(written === 3, `the call finds and writes the singleton, the oldest twin and the oldest dated raw row — three rows (${written})`);
   assert((await fp(singleton)) === (await fpOf("Only Once")), "a legacy singleton takes its fingerprint");
   assert((await fp(twinOld)) === (await fpOf("Same Text")) && (await fp(twinNew)) === null, "of two legacy twins the older takes the key and the newer stays NULL — the state 018 leaves after a pass");
   assert((await fp(rawDated)) === (await fpOf("Raw Load")) && (await fp(rawUndated)) === null, "a row with no created_at sorts last: the dated twin takes the key");
@@ -2358,7 +2358,7 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   // NOT EXISTS is inside the limited set, so blocked rows never fill a batch.
   await legacy("batch one", "2024-01-01");
   await legacy("batch two", "2024-01-02");
-  assert((await backfill(1)) === 1 && (await backfill(1)) === 1 && (await backfill(1)) === 0, "p_limit bounds each call, and the third returns 0 with the two blocked rows still in the table");
+  assert((await backfill(1)) === 1 && (await backfill(1)) === 1 && (await backfill(1)) === 0, "p_limit bounds each call, and the third returns 0 with the rows another row blocks still NULL");
   let refused = "";
   try { await backfill(0); } catch (e) { refused = (e as Error).message; }
   assert(/p_limit must be at least 1/.test(refused), `p_limit 0 is refused before anything is locked — 0 is the answer, never the question (${refused.slice(0, 60)})`);

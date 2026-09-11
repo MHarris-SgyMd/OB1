@@ -468,23 +468,24 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
 
   // One connection each, as [6b]: A holds the backfill's transaction open; B
   // captures the singleton's text; C re-embeds the newer twin with its own
-  // text. Both must wait on the TABLE lock — B's INSERT (ROW EXCLUSIVE) and
-  // C's FOR UPDATE (ROW SHARE) conflict with EXCLUSIVE — and then act on the
-  // committed keys: B merges instead of inserting a second row, C is told
-  // duplicate_of instead of raising 23505 at its UPDATE.
+  // text. Both must wait on the TABLE lock — B at 022's FOR NO KEY UPDATE
+  // read before its INSERT, C at 018's FOR UPDATE, both ROW SHARE, which
+  // conflicts with EXCLUSIVE — and then act on the committed keys: B merges
+  // instead of inserting a second row, C is told duplicate_of instead of
+  // raising 23505 at its UPDATE.
   const connA = new SQL({ url: URL_, max: 1 });
   const connB = new SQL({ url: URL_, max: 1 });
   const connC = new SQL({ url: URL_, max: 1 });
   let releaseA: () => void = () => {};
   const held = new Promise<void>((resolve) => { releaseA = resolve; });
-  let aWritten: number | undefined;
+  let aFound: number | undefined;
   let aError = "";
   const aDone = connA.begin(async (tx: SQL) => {
-    aWritten = Number((await tx`SELECT backfill_content_fingerprints() AS n`)[0].n);
+    aFound = Number((await tx`SELECT backfill_content_fingerprints() AS n`)[0].n);
     await held;
   }).catch((e: Error) => { aError = e.message; releaseA(); });
-  for (let i = 0; i < 250 && aWritten === undefined && aError === ""; i++) await Bun.sleep(20);
-  assert(aWritten === 2, `A runs the backfill inside an open transaction: the singleton and the older twin take their keys (${aError || aWritten})`);
+  for (let i = 0; i < 250 && aFound === undefined && aError === ""; i++) await Bun.sleep(20);
+  assert(aFound === 2, `A runs the backfill inside an open transaction: the singleton and the older twin are found and take their keys (${aError || aFound})`);
 
   let bError = "", cError = "";
   let bPid = -1, cPid = -1;

@@ -109,8 +109,10 @@
 --       removed, back for the duration of the upgrade.
 --     * a write in flight before the LOCK holds it up until that write
 --       commits, and the UPDATE's own snapshot then sees the row: the row it
---       fingerprinted is no longer NULL, or the key it took is held, and the
---       candidate is skipped. Bounded: lock_timeout is set to 10 s for this
+--       fingerprinted is no longer NULL, or the key it took is held, or the
+--       text it changed no longer hashes to the key found — and the
+--       candidate is skipped, never given a key for text it does not hold.
+--       Bounded: lock_timeout is set to 10 s for this
 --       transaction (set_config with is_local, so it rolls back with the
 --       file), and an idle-in-transaction writer fails the migration — re-run
 --       it — rather than queueing every other writer behind the wait.
@@ -125,12 +127,15 @@
 --   23505, the migration fails and rolls back whole, and a re-run succeeds.
 --
 --   Reads (ACCESS SHARE) proceed throughout: search is not blocked, captures
---   and edits wait. A re-embed pass running at the time waits too — every
---   worker parks at update_thought's FOR UPDATE for the lock's duration, and
---   015's leases are stamped once per batch with no renewal, so on a large
---   corpus they expire and the rows are embedded again by another worker.
---   Stop the pass first: `reembed.ts --status` shows claimed rows, and the
---   pass resumes where it was.
+--   and edits wait. So does every writer into a table that REFERENCES
+--   thoughts(id) — the foreign-key check takes ROW SHARE on thoughts — which
+--   is both 015 consumers: a re-embed pass parks every worker at
+--   update_thought's FOR UPDATE, and an entity-extraction worker parks at its
+--   INSERT into thought_entities. 015's leases are stamped once per batch
+--   with no renewal, so on a large corpus they expire and the rows are done
+--   again by another worker. Stop both first — `reembed.ts --status` shows
+--   claimed rows, `extract-entities.ts` likewise — or batch under the lease
+--   (below); each resumes where it was.
 --
 --   The updated_at trigger is held off for the UPDATE, as 021's backfill
 --   holds it: the fingerprint is not an edit. 001's BEFORE UPDATE trigger
@@ -171,6 +176,17 @@
 --   The ledger then says 023 while rows are still waiting, and that is the
 --   ledger's job — the file was applied; preflight's `fingerprint backfill`
 --   decides from the rows, not the ledger, and warns until the loop is done.
+--   Each call hashes and sorts every NULL row still waiting before its LIMIT
+--   — a NULL row has no index, and DISTINCT ON cannot stop early — so the
+--   loop's scanning is the square of the corpus over the batch: at 17 µs a
+--   row, two million rows in batches of 10,000 is two hundred scans of up to
+--   34 s each, before the lock and blocking nothing, beside the writes the
+--   batch was chosen to bound. Larger batches divide it; and an index built
+--   for the loop and dropped after it makes each call an ordered walk:
+--     CREATE INDEX CONCURRENTLY ob1_fp_backfill_idx
+--       ON thoughts (content_fingerprint_of(content), created_at, id)
+--       WHERE content_fingerprint IS NULL;   -- 016's function is IMMUTABLE
+--   Not built here: the migration's own call scans once.
 --   migrate.ts sets no statement_timeout, so a server default applies to the
 --   UPDATE; on a large legacy brain, apply this migration in a quiet window.
 --
@@ -194,6 +210,15 @@
 --     which PUBLIC holds unless revoked.
 --   * Idempotent. CREATE OR REPLACE of one function; the call is a no-op when
 --     no row is left to write; COMMENT re-issued.
+--
+-- Not done here: closing the door
+--   A BEFORE INSERT trigger computing the fingerprint a raw INSERT omits
+--   (COALESCE(NEW.content_fingerprint, content_fingerprint_of(NEW.content)))
+--   would make a raw duplicate raise 23505 instead of doubling silently, and
+--   leave nothing for this function to find after a load. It is a second
+--   mechanism — a trigger on thoughts, a bypass for the fixtures that plant
+--   NULL rows on purpose, a decision about raw loads that WANT twins — and is
+--   a ticket, not this migration.
 --
 -- Prerequisites
 --   Migration 016 (content_fingerprint_of) and 018 (the rule this completes,
@@ -263,14 +288,18 @@ BEGIN
   ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 
   -- The rows found, re-checked under the lock by index: still without a
-  -- fingerprint, and the key still free — a writer that settled one while
-  -- this call waited has taken it off the list. READ COMMITTED: see the header.
+  -- fingerprint, still the text that was hashed (a raw UPDATE of content in
+  -- the window would otherwise be given a key for text it no longer holds —
+  -- a stale key minted here), and the key still free — a writer that settled
+  -- one while this call waited has taken it off the list. One sha256 per row
+  -- found, on a row fetched by primary key. READ COMMITTED: see the header.
   EXECUTE format($write$
     UPDATE thoughts t
        SET content_fingerprint = o.fp
       FROM %I o
      WHERE t.id = o.id
        AND t.content_fingerprint IS NULL
+       AND content_fingerprint_of(t.content) = o.fp
        AND NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = o.fp)
   $write$, v_found_table);
 

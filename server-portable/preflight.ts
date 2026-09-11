@@ -85,6 +85,16 @@ const EXPOSURE =
   "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
 const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
+// Every check the direct-connection block owns, in the order it reports them.
+// A throw anywhere in that block lands in one catch, and a check that prints
+// nothing looks like one that passed — so the catch reports each of these
+// that has not reported yet, rather than one name for whatever went wrong.
+const DIRECT_CHECKS = [
+  "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
+  "keyword search", "hybrid search", "search signatures", "edit signature", "filtered search",
+  "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
+  "updated_at trigger", "re-embed pass", "migration ledger",
+];
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
@@ -568,31 +578,43 @@ if (configFailed) {
           } else if (!t.hash_fn) {
             add("fingerprint backfill", "skip", "not checked — content_fingerprint_of does not exist (before migration 016)");
           } else {
-            const [{ nulls, pending }] = (await sql`
-              SELECT (SELECT count(*)::int FROM public.thoughts WHERE content_fingerprint IS NULL) AS nulls,
+            // A NULL row has no index (003's is partial the other way), so any
+            // question about them is a pass over the heap — as `schema`'s row
+            // count is. Bounded: the count stops at 10,001 and the EXISTS at
+            // the first pending row; the number is for the message only.
+            const [{ nulls: nullsRaw, pending }] = (await sql`
+              SELECT (SELECT count(*)::int FROM (SELECT 1 FROM public.thoughts WHERE content_fingerprint IS NULL LIMIT 10001) b) AS nulls,
                      EXISTS (
                        SELECT 1 FROM public.thoughts x
                         WHERE x.content_fingerprint IS NULL
                           AND NOT EXISTS (SELECT 1 FROM public.thoughts h WHERE h.content_fingerprint = public.content_fingerprint_of(x.content))
                      ) AS pending`) as { nulls: number; pending: boolean }[];
-            if (Number(nulls) === 0) {
+            const nulls = Number(nullsRaw) > 10000 ? "more than 10,000" : String(nullsRaw);
+            if (Number(nullsRaw) === 0) {
               add("fingerprint backfill", "ok", "no thought is missing a fingerprint (a stale key on a row that has one is not read here)");
             } else if (pending && !t.backfill_fn) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const ledgered = t.has_ledger
-                ? Number((await sql`SELECT count(*)::int AS c FROM public.schema_migrations WHERE name LIKE '023\\_%'`)[0].c) > 0
-                : false;
+              let ledgered = false;
+              if (t.has_ledger) {
+                try {
+                  ledgered = Number((await sql`SELECT count(*)::int AS c FROM public.schema_migrations WHERE name LIKE '023\\_%'`)[0].c) > 0;
+                } catch {
+                  /* no SELECT on the ledger for this role: the plain remedy */
+                }
+              }
               add("fingerprint backfill", "warn",
                   `${nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledgered
                     ? "The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand — the migrator will skip it as applied."
                     : "Apply db/migrations/023_content_fingerprint_backfill.sql.");
             } else if (pending) {
+              // Which rows these are cannot be read here: a batched upgrade
+              // still running, or a load around upsert_thought since 023.
               add("fingerprint backfill", "warn",
-                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — rows written around upsert_thought since migration 023: a capture of that text inserts a second row`,
-                  `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints();`);
+                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — 023's call has not reached them (a batched upgrade still running, or rows loaded around upsert_thought since): a capture of that text inserts a second row`,
+                  `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0.`);
             } else {
               add("fingerprint backfill", "ok", `${nulls} thought(s) without a fingerprint, each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
             }
@@ -1436,12 +1458,13 @@ if (configFailed) {
 
         await sql.close();
       } catch (e) {
-        // The connection, or a read before the first check, failed: every
-        // check this block owns that has not reported yet says so, since a
-        // check that prints nothing looks like one that passed.
-        add("atomic capture", "warn", `could not verify: ${(e as Error).message}`);
-        for (const name of ["chunk delete privilege", "fingerprint backfill"])
-          if (!results.some((r) => r.name === name)) add(name, "skip", `not checked — the catalog connection failed before it: ${(e as Error).message}`);
+        // The connection, or a read between two checks, failed: the first
+        // check that has not reported carries the error as a warning, and
+        // every later one says it was not reached — never a second row for a
+        // check that already reported, never silence for one that did not.
+        const missing = DIRECT_CHECKS.filter((name) => !results.some((r) => r.name === name));
+        if (missing.length) add(missing[0], "warn", `could not verify: ${(e as Error).message}`);
+        for (const name of missing.slice(1)) add(name, "skip", `not checked — the direct connection failed before it: ${(e as Error).message}`);
       }
     }
 
