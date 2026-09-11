@@ -1153,6 +1153,19 @@ app.options("*", (c) => {
   return c.text("ok", 200, corsHeaders);
 });
 
+// OAuth discovery is a 404, not an auth challenge. claude.ai fetches
+// /.well-known/oauth-protected-resource before opening a custom connector: 404
+// means "no OAuth here" and it proceeds on the key; anything else — a 401, our
+// 200 + JSON-RPC envelope, or the GET reaching the transport — sends it into a
+// Dynamic Client Registration it cannot complete. Upstream cannot fix this on
+// Supabase, where the gateway answers the path first (#340); we own the route
+// table. Ordered after the OPTIONS preflight and before the catch-all, so it
+// runs before authenticate() and the agent resolve — the answer is about the
+// server, not the caller, and a revoked key gets the same 404. Terminal for the
+// whole prefix: a future /.well-known/ route (real RFC 9728 metadata, say) must
+// be registered ABOVE this line or it never fires. FORK.md change 42.
+app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
+
 app.all("*", async (c) => {
   // Accept the access key via header OR URL query parameter. The query form stays
   // because Claude Desktop custom connectors are URL-only; scopes are what limit

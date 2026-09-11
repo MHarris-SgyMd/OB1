@@ -43,6 +43,9 @@ const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
 
+/** Every response the server sends, success or refusal, carries the permissive CORS header. */
+const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
+
 /** StreamableHTTPTransport answers with raw JSON or an SSE frame. */
 async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
   const text = await r.text();
@@ -86,7 +89,7 @@ console.log("\n[3] CORS preflight");
 {
   const r = await fetch(BASE, { method: "OPTIONS" });
   assert(r.status === 200, "OPTIONS → 200");
-  assert(r.headers.get("access-control-allow-origin") === "*", "allow-origin *");
+  assert(corsOk(r), "allow-origin *");
   assert(r.headers.has("access-control-allow-methods"), "allow-methods present");
 }
 
@@ -96,7 +99,7 @@ console.log("\n[4] Auth failure — the real unauthorizedResponse(), not a copy 
   // Deliberately 200: a bare 4xx makes strict MCP hosts treat auth failure as a
   // transport fault and drop the connection instead of surfacing it.
   assert(r.status === 200, "wrong key → HTTP 200, not 401");
-  assert(r.headers.get("access-control-allow-origin") === "*", "CORS present on auth failure");
+  assert(corsOk(r), "CORS present on auth failure");
   const b = await r.json();
   assert(b?.jsonrpc === "2.0", "JSON-RPC 2.0 envelope");
   assert(b?.error?.code === -32001, "error.code === -32001");
@@ -182,6 +185,53 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
+}
+
+console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #340)");
+{
+  // claude.ai fetches this document at the origin root, path as suffix, no key,
+  // and proceeds on the key only on a 404. FORK.md change 42 has the rest.
+  const discovery = "/.well-known/oauth-protected-resource";
+
+  // A probe that cannot hang or crash the suite: one 2 s abort that covers the
+  // body read too (a regressed route hands an authenticated GET to a stream that
+  // never closes — SMD-1259), a transport error reported by its own name, and
+  // the body parsed by the same mcpBody() as [4]–[10] then tested for the
+  // jsonrpc marker — a JSON body that is not an envelope must not count. Three
+  // asserts per row, always executed, so the count is stable green or red.
+  const probe = async (path: string, init: RequestInit = {}) => {
+    try {
+      const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
+      return { status: r.status as number | string, cors: corsOk(r), envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
+    } catch (e) {
+      return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
+    }
+  };
+
+  const rows: [string, string, RequestInit, number][] = [
+    ["bare document, no key", discovery, {}, 404],
+    ["path-suffixed form (the URL Supabase answered 401)", `${discovery}/functions/v1/open-brain-mcp`, {}, 404],
+    ["oauth-authorization-server", "/.well-known/oauth-authorization-server", {}, 404],
+    ["openid-configuration", "/.well-known/openid-configuration", {}, 404],
+    // The route runs before authenticate(): every caller shape gets the same
+    // answer, and a revoked key never reaches the agent registry. The ?key= row
+    // is the URL-only connector's shape; before this route it authenticated and
+    // was handed to the transport.
+    ["wrong key", discovery, { headers: { "x-brain-key": "wrong" } }, 404],
+    ["right key in header", discovery, { headers: { "x-brain-key": KEY } }, 404],
+    ["right key in ?key=", `${discovery}?key=${KEY}`, {}, 404],
+    // Not an MCP endpoint under any verb; the preflight a browser-hosted client
+    // sends first is still answered.
+    ["POST", discovery, { method: "POST", headers: AUTH, body: INIT }, 404],
+    ["OPTIONS preflight", discovery, { method: "OPTIONS" }, 200],
+  ];
+  for (const [label, path, init, expect] of rows) {
+    const p = await probe(path, init);
+    assert(p.status === expect, `${label} → ${expect} (${p.status})`);
+    assert(p.cors, `${label}: CORS present`);
+    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
+  }
+  // The MCP endpoint at / is untouched — [4] through [10] above.
 }
 
 server.stop();

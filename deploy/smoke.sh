@@ -10,6 +10,9 @@
 #
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
+#
+# Check 2 is the one a Supabase Edge Function deployment cannot pass; FORK.md
+# change 42 says why, and why that failure is real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,6 +35,17 @@ else
   exit 2
 fi
 
+# The base URL must be a URL: check 2 derives the origin from it, and a scheme-less
+# or query-carrying value would silently probe the wrong place.
+case "$BASE" in
+  *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
+  [Hh][Tt][Tt][Pp]://[!/]*|[Hh][Tt][Tt][Pp][Ss]://[!/]*) ;;
+  *) echo "base-url must be http://host[/path] or https://host[/path] (got: $BASE)" >&2; exit 2 ;;
+esac
+# No trailing slashes: "$BASE/" must be one slash for the POST checks, and check
+# 2's path suffix must not end in "/" or it probes a slash variant of the document.
+while [ "${BASE%/}" != "$BASE" ]; do BASE="${BASE%/}"; done
+
 [ -n "${KEY:-}" ] || { echo "No access key." >&2; exit 2; }
 
 pass=0; fail=0
@@ -47,6 +61,8 @@ rpc() {
 }
 # Responses may be raw JSON or an SSE frame.
 unwrap() { grep -E '^(data: )?\{' | sed 's/^data: //' | tail -1; }
+# HTTP status of a GET, following redirects as the MCP SDK client does.
+status() { curl -sL --max-redirs 5 --max-time 20 -o /dev/null -w '%{http_code}' "$@"; }
 
 echo "▸ $BASE"
 
@@ -57,12 +73,27 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 [ "$code" = "200" ] && ok "unauthenticated request → HTTP 200 with a JSON-RPC envelope" \
                     || bad "unauthenticated request → HTTP $code (expected 200)"
 
-# 2. Protocol handshake.
+# 2. OAuth discovery: claude.ai fetches this at the ORIGIN root (server path as a
+#    suffix, no key) before opening a connector, and proceeds on the key only on
+#    a 404. FORK.md change 42 has the rest, including the two deployment shapes
+#    that answer this path before the server does.
+origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
+suffix="${BASE#"$origin"}"
+disc="$origin/.well-known/oauth-protected-resource"
+miss=""
+for u in "$disc" ${suffix:+"$disc$suffix"}; do
+  code=$(status "$u")
+  [ "$code" = "404" ] || { miss="$u → HTTP $code"; break; }
+done
+[ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
+               || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
+
+# 3. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   | unwrap | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("protocolVersion",""))' 2>/dev/null)
 [ -n "$pv" ] && ok "initialize (protocol $pv)" || bad "initialize returned no protocolVersion"
 
-# 3. The full documented tool surface.
+# 4. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
 # Nine for a write key. update_thought and delete_thought are scope-gated, so a
@@ -70,7 +101,7 @@ tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 expected="capture_thought,delete_thought,fetch,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
 [ "$tools" = "$expected" ] && ok "all nine tools exposed" || bad "tool surface is '$tools'"
 
-# 4. A read that actually reaches the database. This is the check that catches a
+# 5. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
 stats=$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' \
   | unwrap | python3 -c 'import sys,json;d=json.load(sys.stdin);r=d.get("result",{});print(("ERROR: " if r.get("isError") else "")+r.get("content",[{}])[0].get("text",""))' 2>/dev/null | head -1)
@@ -80,12 +111,12 @@ case "$stats" in
   *)                   bad "thought_stats returned nothing usable" ;;
 esac
 
-# 5. A filtered read, which exercises a different query path.
+# 6. A filtered read, which exercises a different query path.
 listed=$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' \
   | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR" if r.get("isError") else "OK"))' 2>/dev/null)
 [ "$listed" = "OK" ] && ok "list_thoughts served" || bad "list_thoughts errored"
 
-# 6. Keyword search, which is the only read path that touches migration 012 and
+# 7. Keyword search, which is the only read path that touches migration 012 and
 #    the pg_trgm extension. It needs no embedding provider — the smoke stack has
 #    no real OPENROUTER_API_KEY — so unlike search_thoughts it can run here. A
 #    needle that cannot plausibly be in a fresh brain: zero hits is the pass, an

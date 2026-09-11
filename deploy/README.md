@@ -58,7 +58,7 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 
 `migrate` exits 0 having applied five migrations (it needs no `bun install` —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` prints `6 checks: 6 passed, 0 failed`.
+followed by `Started server`. `smoke.sh` prints `7 checks: 7 passed, 0 failed`.
 
 ## Why the server runs preflight before serving
 
@@ -86,9 +86,21 @@ It only needs a URL and a key, so the same check covers every target:
 Read-only — it never captures a thought, so it is safe against production. Exit 0
 if the deployment serves correctly, 1 otherwise.
 
+Give it the URL a connector would be given, without its `?key=` — the key is the
+second argument, and a query string is refused. Check 2 probes the **origin root**,
+which is where claude.ai looks for OAuth discovery before it will open a custom
+connector (with the server's path as a suffix, when the URL carries one). A server
+behind a path prefix needs its proxy to route `/.well-known/` to it, or to 404 it
+there, for that check to pass.
+
 ## What this does not cover
 
 - **TLS, backups, resource limits, log shipping.** Reference topology only.
+- **A Supabase Edge Function passing check 2.** On Supabase the API gateway answers
+  the OAuth discovery path with 401 before the function sees it, so the check
+  fails there — and the failure is real: the claude.ai connector will not open
+  against that deployment either (upstream
+  [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
