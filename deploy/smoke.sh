@@ -38,15 +38,15 @@ fi
 # The base URL must be a URL: check 2 derives the origin from it, and a scheme-less
 # or query-carrying value would silently probe the wrong place.
 case "$BASE" in
-  [Hh][Tt][Tt][Pp]://*|[Hh][Tt][Tt][Pp][Ss]://*) ;;
-  *) echo "base-url must start with http:// or https:// (got: $BASE)" >&2; exit 2 ;;
+  [Hh][Tt][Tt][Pp]://[!/]*|[Hh][Tt][Tt][Pp][Ss]://[!/]*) ;;
+  *) echo "base-url must be http://host[/path] or https://host[/path] (got: $BASE)" >&2; exit 2 ;;
 esac
 case "$BASE" in
   *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
 esac
-# One trailing slash at most: "$BASE/" must stay one slash for the POST checks,
-# and check 2's path suffix must not end in "/" or it probes the document twice.
-BASE="${BASE%/}"
+# No trailing slashes: "$BASE/" must be one slash for the POST checks, and check
+# 2's path suffix must not end in "/" or it probes a slash variant of the document.
+while [ "${BASE%/}" != "$BASE" ]; do BASE="${BASE%/}"; done
 
 [ -n "${KEY:-}" ] || { echo "No access key." >&2; exit 2; }
 
@@ -63,6 +63,8 @@ rpc() {
 }
 # Responses may be raw JSON or an SSE frame.
 unwrap() { grep -E '^(data: )?\{' | sed 's/^data: //' | tail -1; }
+# HTTP status of a GET, following redirects as the MCP SDK client does.
+status() { curl -sL --max-redirs 5 --max-time 20 -o /dev/null -w '%{http_code}' "$@"; }
 
 echo "▸ $BASE"
 
@@ -80,14 +82,13 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
 suffix="${BASE#"$origin"}"
 disc="$origin/.well-known/oauth-protected-resource"
-codes=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$disc")
-if [ -n "$suffix" ]; then
-  codes="$codes,$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$disc$suffix")"
-fi
-case "$codes" in
-  404|404,404) ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" ;;
-  *) bad "OAuth discovery at the origin root → HTTP $codes (expected 404; FORK.md change 42)" ;;
-esac
+miss=""
+for u in "$disc" ${suffix:+"$disc$suffix"}; do
+  code=$(status "$u")
+  [ "$code" = "404" ] || { miss="$u → HTTP $code"; break; }
+done
+[ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
+               || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
 
 # 3. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

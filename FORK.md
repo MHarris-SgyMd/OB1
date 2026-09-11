@@ -4290,18 +4290,16 @@ Local Claude Code over `x-brain-key` never asks, which is why it stayed
 invisible in development.
 
 **The change is one route.** `app.all("/.well-known/*", …)` returns `Not Found`
-404 with the CORS headers, registered after the `OPTIONS` preflight handler and
-before the catch-all, so a browser-hosted client that preflights the GET still
-gets its 200. It runs before `authenticate()` and before the agent resolve: the
-answer is a fact about the server, not about the caller, and a revoked key gets
-the same 404 as a good one. Method-independent, because the path is not an MCP
-endpoint under any verb. Terminal for the whole prefix: a later `/.well-known/`
-route must be registered above it, or it never fires — the comment says so.
+404 with the CORS headers, placed between the `OPTIONS` preflight handler and the
+catch-all so it runs before `authenticate()` and the agent resolve — the answer is
+a fact about the server, not the caller. The route's comment carries the two
+ordering rules (why it sits where it does, and that a later `/.well-known/` route
+must sit above it); they are not repeated here.
 
 **Verified.** `test-server.ts` [11], twenty-seven assertions against the real
 server: nine rows — four discovery paths including the exact one upstream saw
-Supabase answer, then the bare document with no key, a wrong key, the right key
-in the header and the right key in `?key=`, then POST and the OPTIONS preflight —
+Supabase answer, then the bare document under a wrong key, the right key in the
+header and the right key in `?key=`, then POST and the OPTIONS preflight —
 each asserted for status, CORS and a body that is not a JSON-RPC envelope, by the
 same rule [4]–[10] use. Every probe carries one 2-second abort that covers the
 body read, and a transport error is reported by its own name, so a regression
@@ -4309,8 +4307,9 @@ fails its assertions with a stable count instead of hanging on the catch-all's
 stream or crashing the suite; drilled by deleting the route. `deploy/smoke.sh`
 check 2 probes the **origin root** — where RFC 9728 puts the document and where
 claude.ai looks, with the server's path as a suffix when the URL carries one —
-with no key, as the connector does; the base URL must carry a scheme and no query
-string, or the script refuses it rather than derive the wrong origin. It is the
+with no key and following redirects, as the SDK client does, and naming the URL
+and code that missed; the base URL must carry a scheme and no query string, or
+the script refuses it rather than derive the wrong origin. It is the
 one check a Supabase deployment cannot pass, and that failure is real.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
@@ -4331,7 +4330,11 @@ That is a design decision, and it sits with the **method** axis the review passe
 found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
-#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one. A
+#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one.
+The concrete reason the path axis waits: a mount at `/` makes the connector URL
+the mount point, and a proxy that forwards under an unstripped prefix — the shape
+`deploy/README.md` already anticipates — would then 404 the MCP endpoint itself.
+That is a deployment-contract change, not a route. A
 server mounted under a path prefix needs its proxy to route `/.well-known/` to it
 or 404 it there: discovery lives at the origin root, so this route can only answer
 what reaches it. `SETUP.md` gains no per-client connection notes yet; the ticket

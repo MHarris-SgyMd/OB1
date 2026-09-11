@@ -193,13 +193,14 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   // A probe that cannot hang or crash the suite: one 2 s abort that covers the
   // body read too (a regressed route hands an authenticated GET to a stream that
   // never closes — SMD-1259), a transport error reported by its own name, and
-  // the same "is this an MCP body" rule as [4]–[10]. Three asserts per row,
-  // always executed, so the count is stable whether the run is green or red.
+  // the body parsed by the same mcpBody() as [4]–[10] then tested for the
+  // jsonrpc marker — a JSON body that is not an envelope must not count. Three
+  // asserts per row, always executed, so the count is stable green or red.
   const probe = async (path: string, init: RequestInit = {}) => {
     try {
       const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
       const cors = r.headers.get("access-control-allow-origin") === "*";
-      return { status: String(r.status), cors, envelope: (await mcpBody(r)) !== null };
+      return { status: String(r.status), cors, envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
     } catch (e) {
       return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
     }

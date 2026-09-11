@@ -86,7 +86,8 @@ It only needs a URL and a key, so the same check covers every target:
 Read-only — it never captures a thought, so it is safe against production. Exit 0
 if the deployment serves correctly, 1 otherwise.
 
-Give it the URL a connector would be given. Check 2 probes the **origin root**,
+Give it the URL a connector would be given, without its `?key=` — the key is the
+second argument, and a query string is refused. Check 2 probes the **origin root**,
 which is where claude.ai looks for OAuth discovery before it will open a custom
 connector (with the server's path as a suffix, when the URL carries one). A server
 behind a path prefix needs its proxy to route `/.well-known/` to it, or to 404 it
