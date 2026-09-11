@@ -34,6 +34,7 @@
  */
 
 import { SQL } from "bun";
+import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from "./config.mjs";
@@ -109,7 +110,7 @@ try {
     // applyMigrations self-heals its own session each call. A row is written
     // between migrations, so a migration that cannot cope with existing rows
     // off-path fails here rather than in production.
-    const files = (await import("node:fs")).readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")).sort();
+    const files = readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")).sort();
     let written = 0;
     await freshSession(async (sql) => {
       for (const file of files) {
@@ -185,7 +186,6 @@ try {
            "…the vector extension check names the missing USAGE, not an off-path schema");
     assert(new RegExp(`GRANT USAGE ON SCHEMA ${SCHEMA}`).test(r.out),
            "…and the remedy is a GRANT, which SET search_path alone would not have fixed");
-    await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
   }
 
   console.log("\n[6] The database-wide fix makes preflight pass, and coexists with the hnsw bounds");
@@ -218,7 +218,9 @@ try {
   }
 } finally {
   // ci-parity.sh shares one Postgres: leave pgvector in public and the database
-  // search_path and hnsw bounds cleared, whatever happened above.
+  // search_path and hnsw bounds cleared, and drop the role [5] mints, whatever
+  // happened above.
+  await freshSession((sql) => sql.unsafe(`DROP ROLE IF EXISTS ob1_nousage`));
   await restoreVectorToPublic(URL_);
   await dropSchema(URL_);
 }
