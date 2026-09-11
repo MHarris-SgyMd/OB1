@@ -1051,7 +1051,7 @@ asserts 505 properties, including:
   is unknown it removes them; one with no vector keeps windows, vector and
   label, and so does a 2-argument re-capture; a first capture has nothing to
   remove; the body carries the `ob1:vector-replaces-chunks` sentinel and
-  reads the row's label `FOR UPDATE` before the write; the 4-argument form is 013's; three overloads, 022 the last definer
+  reads the row's label `FOR NO KEY UPDATE` before the write; the 4-argument form is 013's; three overloads, 022 the last definer
   of `upsert_thought`; and the trap — 021 re-applied puts 021's body back and
   a re-capture at another model leaves the windows again, until 022 is
   re-applied

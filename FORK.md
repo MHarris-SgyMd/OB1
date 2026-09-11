@@ -4244,6 +4244,15 @@ row's own hash, which would make the stale-key state unrepresentable and retire
 the prose that explains it — a second mechanism, weighed in the header beside
 the fingerprint-computing one.
 
+**Tidy-up, while the files were open.** No behaviour change. `plantLegacyRow`
+and `updatedAtTriggerState` in `db/test-support.ts` for the fixture and the
+catalog probe two suites had verbatim; `test-schema.ts`'s `fpOf` at file scope
+instead of in two sections; the count `test-upgrade.ts` [6] and `test-schema.ts`
+[24] named "written" named "found", as the function documents it; one detail
+prefix for `fingerprint backfill`'s two warnings; and `db/README.md`'s 022 bullet
+saying `FOR UPDATE` where the body, its header and the test all say `FOR NO KEY
+UPDATE`.
+
 **Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
 INSERT omits, and its sibling that NULLs a stale key (tickets, above). SMD-1043's advisory lock in both inserting
 `upsert_thought` overloads — 023 redefines no function, and a capture racing an edit outside the

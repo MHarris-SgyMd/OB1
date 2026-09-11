@@ -110,6 +110,9 @@ function lastDefinerOf(fn: string): string {
   if (!f) throw new Error(`no migration defines ${fn}`);
   return f;
 }
+/** 016's rule, asked of the database rather than re-derived here; [19] and [24] each declared it. */
+const fpOf = async (content: string) =>
+  (await db.query<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).rows[0].f;
 /** How many functions of this name the schema holds — the overload count, five sections ask it. */
 const functionsNamed = async (name: string) =>
   (await db.query<{ c: number }>(
@@ -1570,8 +1573,6 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
     (await db.query<{ r: { ok: boolean; error?: string; duplicate_of?: string } }>(
       `SELECT update_thought($1::uuid, $2::text, $3::jsonb, $4::vector, NULL::jsonb, $5::timestamptz) AS r`,
       args)).rows[0].r;
-  const fpOf = async (content: string) =>
-    (await db.query<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).rows[0].f;
 
   // The first twin: its own text back, a new vector. It gains the fingerprint
   // 003 never backfilled.
@@ -2311,8 +2312,6 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
     (await db.query<{ id: string }>(
       `INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES ($1, NULL, $2::vector, $3::timestamptz) RETURNING id`,
       [content, unit(0), createdAt])).rows[0].id;
-  const fpOf = async (content: string) =>
-    (await db.query<{ f: string }>(`SELECT content_fingerprint_of($1) AS f`, [content])).rows[0].f;
   const fp = async (id: string) =>
     (await db.query<{ fp: string | null }>(`SELECT content_fingerprint AS fp FROM thoughts WHERE id = $1`, [id])).rows[0].fp;
   const stamps = async () =>
@@ -2336,8 +2335,8 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   const stampsBefore = await stamps();
   const auditBefore = await audit();
 
-  const written = await backfill();
-  assert(written === 3, `the call finds and writes the singleton, the oldest twin and the oldest dated raw row — three rows (${written})`);
+  const found = await backfill();
+  assert(found === 3, `the call finds and writes the singleton, the oldest twin and the oldest dated raw row — three rows (${found})`);
   assert((await fp(singleton)) === (await fpOf("Only Once")), "a legacy singleton takes its fingerprint");
   assert((await fp(twinOld)) === (await fpOf("Same Text")) && (await fp(twinNew)) === null, "of two legacy twins the older takes the key and the newer stays NULL — the state 018 leaves after a pass");
   assert((await fp(rawDated)) === (await fpOf("Raw Load")) && (await fp(rawUndated)) === null, "a row with no created_at sorts last: the dated twin takes the key");

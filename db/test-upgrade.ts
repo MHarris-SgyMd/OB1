@@ -22,7 +22,7 @@ import { SQL } from "bun";
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, requireDatabaseUrl, resetSchema } from "./test-support.ts";
+import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, updatedAtTriggerState } from "./test-support.ts";
 import { UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -222,8 +222,8 @@ console.log("\n[4] Migration 021 onto a populated 020 — the column, and the fu
   assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "labelling moves no row's updated_at — the label is a fact about a vector already there, not an edit");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
-  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
-  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
+  const trg = await updatedAtTriggerState(sql);
+  assert(trg === "O", `…and the updated_at trigger is enabled again afterwards (${trg})`);
 
   const models = Object.fromEntries(
     ((await sql`SELECT content, embedding_model AS m FROM thoughts`) as { content: string; m: string | null }[]).map((r) => [r.content, r.m])
@@ -311,8 +311,7 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
   // A corpus from before 003, or loaded around upsert_thought: NULL
   // fingerprints throughout, and one row captured through the writer.
-  const legacy = async (content: string, createdAt: string) =>
-    (await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES (${content}, NULL, ${vec}::vector, ${createdAt}::timestamptz) RETURNING id`)[0].id as string;
+  const legacy = (content: string, createdAt: string) => plantLegacyRow(sql, content, vec, createdAt);
   const rows = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c);
   const fp = async (id: string) => (await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0].fp as string | null;
   const fns = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'backfill_content_fingerprints'`)[0].c);
@@ -346,8 +345,8 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "the backfill moves no row's updated_at — the fingerprint is not an edit");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
-  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
-  assert(trg.e === "O", `…and the updated_at trigger is enabled again afterwards (${trg.e})`);
+  const trg = await updatedAtTriggerState(sql);
+  assert(trg === "O", `…and the updated_at trigger is enabled again afterwards (${trg})`);
   assert((await fp(singleton)) !== null, "a legacy singleton carries its fingerprint");
   assert((await fp(twinOld)) !== null && (await fp(twinNew)) === null, "of the twins the older carries the key and the newer stays NULL");
   assert((await fp(owned)) === null && (await fp(doubled)) === null, "a NULL row whose text a fingerprinted row holds stays NULL — the note captured through the writer, and the row 022 doubled, whose second copy holds the key");
@@ -357,8 +356,8 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   assert((merged as { id: string }).id === singleton && (await rows()) === before + 1, "after 023 a capture of the former singleton's text merges into it — no second row");
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("023") });
-  const [{ n: again }] = await sql`SELECT backfill_content_fingerprints() AS n`;
-  assert((await fns()) === 1 && Number(again) === 0 && (await rows()) === before + 1,
+  const [{ n: found }] = await sql`SELECT backfill_content_fingerprints() AS n`;
+  assert((await fns()) === 1 && Number(found) === 0 && (await rows()) === before + 1,
          "re-applying 023 is a no-op: the function once, a further call writes nothing");
   await sql.close();
 }

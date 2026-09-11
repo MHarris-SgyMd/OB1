@@ -608,6 +608,7 @@ if (configFailed) {
                      ) AS pending`) as { nulls: number; pending: boolean }[];
             const capped = Number(nullsRaw) > 10000;
             const nulls = capped ? "more than 10,000" : String(nullsRaw);
+            const waiting = `${nulls} thought(s) without a fingerprint, at least one whose text no row holds`;
             if (Number(nullsRaw) === 0) {
               add("fingerprint backfill", "ok", "no thought is missing a fingerprint (a stale key on a row that has one is not read here)");
             } else if (pending && !t.backfill_fn) {
@@ -616,7 +617,7 @@ if (configFailed) {
               // 023" would be a loop — the migrator skips a ledgered file.
               const byHand = "re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand, substituting NULL for {{BACKFILL_LIMIT}} — the migrator will skip it as applied.";
               add("fingerprint backfill", "warn",
-                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
+                  `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
                     ? `The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): ${byHand}`
                     : ledgerRead || Number(applied[0].c) === 0
@@ -626,7 +627,7 @@ if (configFailed) {
               // Which rows these are cannot be read here: a batched upgrade
               // still running, or a load around upsert_thought since 023.
               add("fingerprint backfill", "warn",
-                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — 023's call has not reached them (a batched upgrade still running, or rows loaded around upsert_thought since): a capture of that text inserts a second row`,
+                  `${waiting} — 023's call has not reached them (a batched upgrade still running, or rows loaded around upsert_thought since): a capture of that text inserts a second row`,
                   `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0, each call its own transaction.`);
             } else {
               add("fingerprint backfill", "ok", capped

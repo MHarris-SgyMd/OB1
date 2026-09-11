@@ -33,7 +33,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, runScript, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -452,8 +452,7 @@ console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, th
 console.log("\n[6c] The backfill holds the table: a capture and an edit wait for it, then merge and are told (migration 023)");
 {
   await sql`DELETE FROM thoughts`;
-  const legacy = async (content: string, createdAt: string) =>
-    (await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES (${content}, NULL, ${unit(0)}::vector, ${createdAt}::timestamptz) RETURNING id`)[0].id as string;
+  const legacy = (content: string, createdAt: string) => plantLegacyRow(sql, content, unit(0), createdAt);
   const singleton = await legacy("A Legacy Singleton", "2024-01-01");
   const twinOld = await legacy("Legacy Twin", "2024-01-01");
   const twinNew = await legacy("legacy   twin", "2024-06-01");
@@ -520,8 +519,7 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   assert(o.fp !== null && n.fp === null && n.axis === 2, `the older twin carries the key, the newer stays NULL with C's vector (axis ${n.axis})`);
   const after = await status();
   assert(after.code === 0 && /1 group\(s\) of thoughts share one normalised text/.test(after.out), "after the backfill --status lists the same one group — the pair is NULL/fingerprinted now, and the list means what it meant");
-  const [trg] = await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`;
-  assert(trg.e === "O", "…and the updated_at trigger is enabled again");
+  assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again");
   await connA.close();
   await connB.close();
   await connC.close();
