@@ -94,6 +94,8 @@ export const DEFAULT_TRGM_INDEX: boolean;
 export const TRGM_INDEX: boolean;
 /** Parse OB1_TRGM_INDEX; returns DEFAULT_TRGM_INDEX when unset or empty. */
 export function resolveTrgmIndex(raw: string | undefined): boolean;
+/** Parse OB1_BACKFILL_LIMIT: null when unset or empty, a whole number 1..2147483647 otherwise; throws naming the variable. */
+export function resolveBackfillLimit(raw: string | undefined): number | null;
 
 /**
  * Whether a capture generates a situating blurb per chunk before embedding it.
@@ -110,6 +112,8 @@ export function migrationValues(overrides?: {
   model?: string;
   trgm?: boolean;
   chunkContext?: boolean;
+  /** Rows migration 023's one call writes: NULL for every row waiting (the default), an integer for one batch. */
+  backfillLimit?: number | null;
 }): Record<string, string>;
 
 /** Substitute a migration template; throws on an unknown `{{VARIABLE}}`. */

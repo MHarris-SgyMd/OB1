@@ -480,6 +480,31 @@ export function resolveTrgmIndex(raw) {
 export const TRGM_INDEX = resolveTrgmIndex(ENV.OB1_TRGM_INDEX);
 
 /**
+ * How many rows migration 023's fingerprint backfill writes in the migrator's
+ * one call: unset, every row waiting (the default — one transaction, one
+ * lock); an integer, one batch of that many, for a brain with millions of
+ * legacy rows that finishes the rest by hand with the same function. Read by
+ * the migrator only, from its environment at that invocation — a `.env` beside
+ * it counts, so it does not belong in one — where a role-level setting would
+ * have batched every later run of every brain under that role, and a typo in
+ * it would have failed 023 with a message naming neither the setting nor the
+ * fix. Throws on a bad value; the migrator, not a server, is what calls it.
+ */
+export function resolveBackfillLimit(raw) {
+  if (raw === undefined || raw === "") return null;
+  // int4, as the function's parameter is: a larger literal would be typed
+  // bigint and match no overload, failing 023 with a message naming neither.
+  if (!/^[1-9][0-9]*$/.test(raw) || Number(raw) > 2147483647) {
+    throw new Error(`OB1_BACKFILL_LIMIT must be a whole number of rows, at least 1 and at most 2147483647, or unset for every row (got ${JSON.stringify(raw)})`);
+  }
+  return Number(raw);
+}
+// No module-scope constant: this module is imported by the servers, preflight
+// and reembed.ts, none of which run a migration, and a value only the migrator
+// reads must not be able to stop them at import. migrationValues() resolves it
+// where the migrator (and the schema tests) ask for the template's values.
+
+/**
  * Whether a capture generates a situating blurb for each of its chunks.
  *
  * OFF, and measured off rather than assumed off. `evals/eval-contextual.ts`
@@ -547,6 +572,8 @@ export const CHUNK_CONTEXT = resolveChunkContext(ENV.OB1_CHUNK_CONTEXT);
  * in a `.replace()` chain, it is a literal left in the SQL. This fork's recurring
  * defect is a value defined twice, and adding a third variable to three copies is
  * how that happens again.
+ *
+ * @param {{ dim?: number, model?: string, trgm?: boolean, chunkContext?: boolean, backfillLimit?: number | null }} overrides
  */
 export function migrationValues(overrides = {}) {
   return {
@@ -554,6 +581,8 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
+    // 023's one call: NULL is every row waiting; an integer, one batch.
+    BACKFILL_LIMIT: String((overrides.backfillLimit === undefined ? resolveBackfillLimit(ENV.OB1_BACKFILL_LIMIT) : overrides.backfillLimit) ?? "NULL"),
     // Not operator configuration — ALTER DATABASE owns that — but the one
     // definition of what 014 seeds, so the SQL, the migrator's remedy,
     // preflight's report and the schema test cannot disagree about it.

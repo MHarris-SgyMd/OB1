@@ -12,6 +12,7 @@
  */
 
 import { join, dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
@@ -90,6 +91,24 @@ console.log("\n[4] Unreachable database fails rather than hanging");
                         DATABASE_URL: "postgres://u:p@127.0.0.1:1/nope" });
   assert(r.code === 1, "a refused connection exits 1");
   assert(/schema/.test(r.out), "…and is reported against the schema check");
+  // The direct-connection block's checks are one list, DIRECT_CHECKS: a
+  // connection that fails before the first of them leaves each named — the
+  // first carrying the error, the rest as not reached — and the list is kept
+  // in step with the block's add() calls by reading the source, since nothing
+  // else would (a renamed or added check would otherwise be blamed or silent).
+  const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
+  const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const from = src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
+  const block = src.slice(from, to);
+  // First appearance in the source is the order the block reports in, and the
+  // catch blames the FIRST listed name not yet reported — so the list must be
+  // in that order, not merely the same set.
+  const added = [...new Set([...block.matchAll(/add\("([^"]+)"/g)].map((m) => m[1]))];
+  assert(JSON.stringify(added) === JSON.stringify(listed), `DIRECT_CHECKS names exactly the checks the direct-connection block adds, in the order it adds them (block: ${added.join(", ")})`);
+  assert(listed.every((n) => r.out.includes(n)), `…and an unreachable database names every one of them (${listed.filter((n) => !r.out.includes(n)).join(", ") || "all named"})`);
+  assert(/atomic capture\s+.*could not verify/.test(r.out) && /fingerprint backfill\s+.*not checked — the direct connection failed before it/.test(r.out),
+         "…the first carrying the error and the later ones saying they were not reached");
 }
 
 console.log("\n[5] Against a real database");
@@ -745,6 +764,40 @@ else {
       await dropCaptureRole();
     }
   }
+
+  // 003's missing half. A NULL-fingerprint row whose key no row holds is a
+  // capture doubled in waiting; 023's function writes it, and the remedy is
+  // that one statement — as the owner, since it holds the updated_at
+  // trigger. After it a NULL row is a twin, or blocked by a stale key: ok.
+  // Before 023 the same row's remedy is the migration.
+  await claims.unsafe("DELETE FROM thoughts");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a legacy singleton', NULL)");
+  const [{ owner }] = await claims`SELECT pg_get_userbyid(relowner)::text AS owner FROM pg_class WHERE oid = 'thoughts'::regclass`;
+  const pending = await run(SQL_ENV);
+  assert(pending.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, at least one whose text no row holds — 023's call has not reached them/.test(pending.out) && pending.out.includes(`As ${owner}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0, each call its own transaction.`),
+         `a NULL-fingerprint row whose key is free is a warning that claims no cause it cannot read, with the one-statement remedy and its batched form, naming the owner (exit ${pending.code})`);
+  await claims.unsafe("SELECT backfill_content_fingerprints()");
+  assert(/fingerprint backfill\s+no thought is missing a fingerprint \(a stale key on a row that has one is not read here\)/.test((await run(SQL_ENV)).out), "…which performs, and the ok says what it did not read");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a  legacy singleton', NULL)");
+  const twin = await run(SQL_ENV);
+  assert(twin.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text with the row that holds it \(a twin, or a stale key\)/.test(twin.out),
+         "a NULL row whose text a fingerprinted row holds is a twin, not pending — ok, pointing at the pairs list");
+  await claims.unsafe("DROP FUNCTION backfill_content_fingerprints(integer)");
+  await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('another legacy singleton', NULL)");
+  const pre023 = await run(SQL_ENV);
+  assert(pre023.code === 0 && /fingerprint backfill\s+2 thought\(s\) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row/.test(pre023.out) && /Apply db\/migrations\/023_content_fingerprint_backfill\.sql\./.test(pre023.out),
+         "before 023 the same row is a warning whose remedy is the migration");
+  // Adopted with --baseline: the ledger says 023, the function is absent, and
+  // "apply 023" would be a loop the migrator skips out of. The remedy is the
+  // body by hand, as reembed.ts says for 021.
+  await claims.unsafe("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
+  await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'baseline') ON CONFLICT DO NOTHING");
+  const baselined = await run(SQL_ENV);
+  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-run the body of db\/migrations\/023_content_fingerprint_backfill\.sql by hand, substituting NULL for \{\{BACKFILL_LIMIT\}\} — the migrator will skip it as applied\./.test(baselined.out),
+         "…and where the ledger already says 023 the remedy is the body by hand, not a migration the migrator would skip");
+  await claims.unsafe("DROP TABLE schema_migrations");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
+  assert(/fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text/.test((await run(SQL_ENV)).out), "…and 023 applied writes it and is ok again, the twin still listed");
 
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();

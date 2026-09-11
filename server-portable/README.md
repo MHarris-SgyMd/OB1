@@ -72,7 +72,12 @@ from before migration 022, under which a re-capture that makes no windows at
 another model leaves the previous vector's chunk rows behind, and that is a
 warning naming 022. `chunk delete privilege`: a role that cannot DELETE from
 `thought_chunks` — every chunk writer runs as its caller — is a failure with the
-GRANT as the remedy. Over PostgREST both are skips: neither is reachable there.
+GRANT as the remedy. `fingerprint backfill` (023): a thought without a fingerprint
+whose text no row holds is a capture doubled in waiting — a warning naming the
+migration, or after it the one statement `SELECT backfill_content_fingerprints();`
+as the table's owner; NULL rows that share their text with the row holding the
+key (twins, or a stale key) are ok. Over PostgREST all three are skips: none is
+reachable there.
 
 ## Choosing a data layer
 

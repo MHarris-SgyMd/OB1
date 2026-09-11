@@ -75,6 +75,7 @@ const FUNCTIONS = [
   "release_claims_for_worker(text, text)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
+  "backfill_content_fingerprints(integer)",
   "record_thought_entities(uuid, text, jsonb, jsonb, text, uuid)",
   "merge_entities(uuid, uuid)",
   "prune_orphan_entities()",
@@ -99,6 +100,8 @@ export type SchemaOptions = {
    * defined-twice failure this fork keeps removing.
    */
   trgm?: boolean;
+  /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
+  backfillLimit?: number | null;
 };
 
 /**
@@ -113,7 +116,7 @@ export type SchemaOptions = {
 export function substitute(sql: string, opts: SchemaOptions): string {
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, backfillLimit: opts.backfillLimit ?? null })
   );
 }
 
@@ -213,6 +216,24 @@ export async function applyMigrations(url: string, opts: SchemaOptions): Promise
   } finally {
     await admin.close();
   }
+}
+
+/**
+ * A row from before 003, or loaded around upsert_thought: NULL fingerprint, the
+ * vector and created_at given. test-live [6c] and test-upgrade [6] planted it
+ * verbatim (fourth review pass of SMD-1042).
+ */
+export async function plantLegacyRow(sql: SQL, content: string, vector: string, createdAt: string): Promise<string> {
+  return (await sql`INSERT INTO thoughts (content, content_fingerprint, embedding, created_at) VALUES (${content}, NULL, ${vector}::vector, ${createdAt}::timestamptz) RETURNING id`)[0].id as string;
+}
+
+/**
+ * 001's updated_at trigger's state from pg_trigger: 'O' is enabled. A backfill
+ * that holds the trigger must leave it so, and three sections asked the
+ * catalog the same way.
+ */
+export async function updatedAtTriggerState(sql: SQL): Promise<string> {
+  return String((await sql`SELECT tgenabled AS e FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_updated_at'`)[0].e);
 }
 
 /** The common case: drop everything, then apply from scratch. */
