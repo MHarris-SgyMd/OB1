@@ -187,11 +187,15 @@ export class PostgrestStore implements ThoughtStore {
     // stop at STATS_MAX_ROWS so a very large brain cannot exhaust the runtime's
     // time budget. When the cap stops the walk short, `aggregated < total` and
     // the tool says the breakdowns are partial rather than under-reporting them
-    // silently. (This is the pre-SMD-1249 tool logic, moved into the store that
-    // still needs it, with one addition: a JSON null inside a topics/people
-    // array is skipped, so this store and migration 024's function — which drops
-    // it with WHERE ... IS NOT NULL — render the same corpus identically. Without
-    // the guard the walk would coerce null to a literal "null" key.)
+    // silently. `total` and this walk are separate reads (as the tool's were
+    // before SMD-1249), so the note is best-effort under concurrent writes over
+    // the walk's window, not transactional. (This is the pre-SMD-1249 tool logic,
+    // moved into the store that still needs it, with one addition: a JSON null
+    // inside a topics/people array is skipped, so for well-formed metadata this
+    // store and migration 024's function — which drops it with WHERE ... IS NOT
+    // NULL — render the same top-10 breakdowns. Without the guard the walk would
+    // coerce null to a literal "null" key. Degenerate non-string metadata is not
+    // guaranteed to match the SQL path; see store.ts:ThoughtStats.)
     const total = await this.countThoughts();
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};

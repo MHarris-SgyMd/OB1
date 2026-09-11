@@ -159,13 +159,23 @@ export type ThoughtMeta = {
  * a contract for the full distribution. They differ by backend and deliberately:
  * the SQL store returns every `type` but only the top 10 `topics`/`people`
  * (migration 024 caps them in SQL); the PostgREST walk returns every key of all
- * three. Both render identically because the tool takes the top 10 regardless.
+ * three. For the metadata the capture path produces — a string `type`, `topics`
+ * and `people` as arrays of strings — the two backends render the same top-10
+ * breakdowns, which the tests assert. The guarantee stops at well-formed data:
+ * a non-string scalar `type` (`0`, `false`) or a non-string array element is
+ * degenerate metadata the capture path never writes, and the SQL text-coercion
+ * (`->>`, `jsonb_array_elements_text`) and the JS walk's truthiness/`String()`
+ * may key or drop it differently; likewise, when equal counts tie for the 10th
+ * slot, which of the tied keys shows is unspecified on both paths. Both remain
+ * a correct top-10 — this is not a byte-identical-output contract.
  *
  * `aggregated` is how many rows the breakdowns actually cover. On the SQL store
  * it equals `total`: one aggregate over the whole table (migration 024), never
  * capped. On the PostgREST store it is the reach of the capped page walk and can
  * be < total on a very large brain; the tool prints a truncation note only when
- * the two differ. See `statsSummary`.
+ * the two differ. `total` and the walk are separate reads there (as the tool's
+ * were before SMD-1249), so under concurrent writes across the ~100-page window
+ * the note is best-effort, not transactional. See `statsSummary`.
  */
 export type ThoughtStats = {
   total: number;
