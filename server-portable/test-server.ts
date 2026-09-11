@@ -186,65 +186,49 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
 
 console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #340)");
 {
-  // claude.ai fetches the discovery document before opening a custom connector —
-  // at the origin root, with the server's path as a suffix, and with no key. A
-  // 404 means "no OAuth here" and it proceeds on the key; anything else sends it
-  // into a Dynamic Client Registration it cannot complete.
+  // claude.ai fetches this document at the origin root, path as suffix, no key,
+  // and proceeds on the key only on a 404. FORK.md change 42 has the rest.
   const discovery = "/.well-known/oauth-protected-resource";
 
-  // A probe that cannot hang and cannot crash the suite. If the route regresses,
-  // an authenticated GET reaches the catch-all and the transport opens an SSE
-  // stream that never closes (SMD-1259). So: a 2 s abort, a timeout reported as
-  // a failed status assertion rather than an uncaught rejection, and the body
-  // read only on the expected status. Drilled by deleting the route: the block
-  // then prints its ✗ lines and report() still runs, in a few seconds.
-  const probe = async (path: string, init: RequestInit = {}): Promise<Response | null> => {
+  // A probe that cannot hang or crash the suite: one 2 s abort that covers the
+  // body read too (a regressed route hands an authenticated GET to a stream that
+  // never closes — SMD-1259), a transport error reported by its own name, and
+  // the same "is this an MCP body" rule as [4]–[10]. Three asserts per row,
+  // always executed, so the count is stable whether the run is green or red.
+  const probe = async (path: string, init: RequestInit = {}) => {
     try {
-      return await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
-    } catch {
-      return null;
+      const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
+      const cors = r.headers.get("access-control-allow-origin") === "*";
+      return { status: String(r.status), cors, envelope: (await mcpBody(r)) !== null };
+    } catch (e) {
+      return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
     }
   };
-  const got = (r: Response | null) => (r ? String(r.status) : "timeout");
 
-  // The path family: the path-suffixed form is the exact URL upstream's
-  // reporter saw Supabase answer with 401; the bare document is probed below.
-  for (const p of [
-    `${discovery}/functions/v1/open-brain-mcp`,
-    "/.well-known/oauth-authorization-server",
-    "/.well-known/openid-configuration",
-  ]) {
-    const r = await probe(p);
-    assert(r?.status === 404, `GET ${p} → 404 (${got(r)})`);
-  }
-
-  // The caller family, on the bare document. The route runs before
-  // authenticate(), so every shape gets the same answer — and a revoked key,
-  // which the catch-all would send to the agent registry, never reaches it.
-  // The ?key= row is the URL-only connector's shape; before this route it
-  // authenticated and was handed to the MCP transport.
-  const variants: [string, string, RequestInit][] = [
-    ["no key", "", {}],
-    ["wrong key", "", { headers: { "x-brain-key": "wrong" } }],
-    ["right key in header", "", { headers: { "x-brain-key": KEY } }],
-    ["right key in ?key=", `?key=${KEY}`, {}],
+  const rows: [string, string, RequestInit, number][] = [
+    ["bare document, no key", discovery, {}, 404],
+    ["path-suffixed form (the URL Supabase answered 401)", `${discovery}/functions/v1/open-brain-mcp`, {}, 404],
+    ["oauth-authorization-server", "/.well-known/oauth-authorization-server", {}, 404],
+    ["openid-configuration", "/.well-known/openid-configuration", {}, 404],
+    // The route runs before authenticate(): every caller shape gets the same
+    // answer, and a revoked key never reaches the agent registry. The ?key= row
+    // is the URL-only connector's shape; before this route it authenticated and
+    // was handed to the transport.
+    ["wrong key", discovery, { headers: { "x-brain-key": "wrong" } }, 404],
+    ["right key in header", discovery, { headers: { "x-brain-key": KEY } }, 404],
+    ["right key in ?key=", `${discovery}?key=${KEY}`, {}, 404],
+    // Not an MCP endpoint under any verb; the preflight a browser-hosted client
+    // sends first is still answered.
+    ["POST", discovery, { method: "POST", headers: AUTH, body: INIT }, 404],
+    ["OPTIONS preflight", discovery, { method: "OPTIONS" }, 200],
   ];
-  for (const [label, suffix, init] of variants) {
-    const r = await probe(`${discovery}${suffix}`, init);
-    assert(r?.status === 404, `${label} → 404 (${got(r)})`);
-    assert(r?.headers.get("access-control-allow-origin") === "*", `${label}: CORS present`);
-    if (r?.status === 404) assert(!(await r.text()).includes('"jsonrpc"'), `${label}: body is not a JSON-RPC envelope`);
+  for (const [label, path, init, expect] of rows) {
+    const p = await probe(path, init);
+    assert(p.status === String(expect), `${label} → ${expect} (${p.status})`);
+    assert(p.cors, `${label}: CORS present`);
+    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
   }
-
-  // Method-independent: not an MCP endpoint under any verb, and the preflight a
-  // browser-hosted client sends first is still answered.
-  const post = await probe(discovery, { method: "POST", headers: AUTH, body: INIT });
-  assert(post?.status === 404, `POST to the discovery path → 404 too (${got(post)})`);
-  const pre = await probe(discovery, { method: "OPTIONS" });
-  assert(pre?.status === 200, `OPTIONS on the discovery path still preflights → 200 (${got(pre)})`);
-
-  // The route is the only thing that changed: the MCP endpoint at / still
-  // authenticates the same requests the same way — [4] through [10] above.
+  // The MCP endpoint at / is untouched — [4] through [10] above.
 }
 
 server.stop();

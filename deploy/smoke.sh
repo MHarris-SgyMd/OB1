@@ -11,9 +11,8 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Check 2 (OAuth discovery) is the one a Supabase Edge Function deployment cannot
-# pass: the gateway answers that path before the function does, and the failure
-# is real — claude.ai will not connect to it either (FORK.md change 42).
+# Check 2 is the one a Supabase Edge Function deployment cannot pass; FORK.md
+# change 42 says why, and why that failure is real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -36,9 +35,17 @@ else
   exit 2
 fi
 
-# No trailing slash: "$BASE/" must be one slash. "//.well-known/…" misses the
-# discovery route and falls through to the catch-all, which authenticates it and
-# hangs on a stream (SMD-1259) — a false FAIL on check 2 after a 20 s wait.
+# The base URL must be a URL: check 2 derives the origin from it, and a scheme-less
+# or query-carrying value would silently probe the wrong place.
+case "$BASE" in
+  [Hh][Tt][Tt][Pp]://*|[Hh][Tt][Tt][Pp][Ss]://*) ;;
+  *) echo "base-url must start with http:// or https:// (got: $BASE)" >&2; exit 2 ;;
+esac
+case "$BASE" in
+  *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
+esac
+# One trailing slash at most: "$BASE/" must stay one slash for the POST checks,
+# and check 2's path suffix must not end in "/" or it probes the document twice.
 BASE="${BASE%/}"
 
 [ -n "${KEY:-}" ] || { echo "No access key." >&2; exit 2; }
@@ -66,15 +73,11 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 [ "$code" = "200" ] && ok "unauthenticated request → HTTP 200 with a JSON-RPC envelope" \
                     || bad "unauthenticated request → HTTP $code (expected 200)"
 
-# 2. OAuth discovery must be a 404. Before it opens a custom connector, claude.ai
-#    fetches the protected-resource metadata (RFC 9728) — at the ORIGIN root, with
-#    the server's path as a suffix, and with no key. A 404 means "no OAuth here"
-#    and it proceeds on the key; anything else sends it into an OAuth registration
-#    it cannot complete (upstream #340; FORK.md change 42). So the probe goes to
-#    the origin, not to $BASE, carries no key, and is exactly the request the
-#    connector makes. A server behind a path prefix needs its proxy to route
-#    /.well-known/ to it (or 404 it) for this to pass.
-origin=$(printf '%s' "$BASE" | sed -E 's#^(https?://[^/]+).*#\1#')
+# 2. OAuth discovery: claude.ai fetches this at the ORIGIN root (server path as a
+#    suffix, no key) before opening a connector, and proceeds on the key only on
+#    a 404. FORK.md change 42 has the rest, including the two deployment shapes
+#    that answer this path before the server does.
+origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
 suffix="${BASE#"$origin"}"
 disc="$origin/.well-known/oauth-protected-resource"
 codes=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$disc")
@@ -83,7 +86,7 @@ if [ -n "$suffix" ]; then
 fi
 case "$codes" in
   404|404,404) ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" ;;
-  *) bad "OAuth discovery at the origin root → HTTP $codes (expected 404: claude.ai will attempt OAuth registration and fail; a Supabase gateway answers this path before the function and cannot be fixed there)" ;;
+  *) bad "OAuth discovery at the origin root → HTTP $codes (expected 404; FORK.md change 42)" ;;
 esac
 
 # 3. Protocol handshake.

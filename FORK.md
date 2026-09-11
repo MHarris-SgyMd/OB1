@@ -4298,19 +4298,22 @@ the same 404 as a good one. Method-independent, because the path is not an MCP
 endpoint under any verb. Terminal for the whole prefix: a later `/.well-known/`
 route must be registered above it, or it never fires — the comment says so.
 
-**Verified.** `test-server.ts` [11], seventeen assertions against the real server:
-four discovery paths including the exact one upstream saw Supabase answer; no
-key, a wrong key, the right key in the header and the right key in `?key=`, each
-asserted for status, CORS and a body that is not a JSON-RPC envelope; POST is 404
-too; OPTIONS still preflights 200; [4]–[10] unchanged. Every probe carries a
-2-second abort and reads the body only on a 404, so a regression fails the
-assertions instead of hanging on the catch-all's stream. `deploy/smoke.sh`
+**Verified.** `test-server.ts` [11], twenty-seven assertions against the real
+server: nine rows — four discovery paths including the exact one upstream saw
+Supabase answer, then the bare document with no key, a wrong key, the right key
+in the header and the right key in `?key=`, then POST and the OPTIONS preflight —
+each asserted for status, CORS and a body that is not a JSON-RPC envelope, by the
+same rule [4]–[10] use. Every probe carries one 2-second abort that covers the
+body read, and a transport error is reported by its own name, so a regression
+fails its assertions with a stable count instead of hanging on the catch-all's
+stream or crashing the suite; drilled by deleting the route. `deploy/smoke.sh`
 check 2 probes the **origin root** — where RFC 9728 puts the document and where
 claude.ai looks, with the server's path as a suffix when the URL carries one —
-with no key, as the connector does; it also strips a trailing slash from the base
-URL, since `//.well-known/…` misses the route. It is the one check a Supabase
-deployment cannot pass, and that failure is real. `tsc --noEmit` is clean and
-the Workers bundle still builds (`wrangler deploy --dry-run`, 272 KiB gzipped).
+with no key, as the connector does; the base URL must carry a scheme and no query
+string, or the script refuses it rather than derive the wrong origin. It is the
+one check a Supabase deployment cannot pass, and that failure is real.
+`tsc --noEmit` is clean and the Workers bundle still builds
+(`wrangler deploy --dry-run`, 272 KiB gzipped).
 
 **Not verified: a live connector.** The only check that closes the ticket is a
 real claude.ai custom connector completing the handshake against a deployed fork
@@ -4320,13 +4323,15 @@ target would get; the known-issues entry below still stands.
 **Not done here.** Serving real RFC 9728 protected-resource metadata, or OAuth
 itself — #216 and PR #238 remain the real fix for the key riding in the URL; this
 change says only "there is no OAuth here", which is what the client needs to hear
-to proceed on a key. Refusing other non-MCP paths: the MCP endpoint is mounted at
-every path by design (the Supabase form is `/functions/v1/open-brain-mcp`, the
-compose form is `/`), so there is no "other path" to 404 without first choosing a
-mount point. The **method** axis is the real gap the review pass found — an
-authenticated GET anywhere costs an agent-registry resolve and then hangs on an
-SSE stream the per-request transport never closes (upstream #424; their PR #425
-answers GET with 405) — and it is SMD-1259, a second mechanism, not this one. A
+to proceed on a key. Refusing other non-MCP paths: `server-portable` mounts the
+transport at every path, and both shipped targets (compose, Workers) serve at
+`/`, so a mount point plus Hono's `notFound` is available and would make this
+route one case of a general rule rather than an exception above a catch-all.
+That is a design decision, and it sits with the **method** axis the review passes
+found — an authenticated GET anywhere costs an agent-registry resolve and then
+hangs on an SSE stream the per-request transport never closes, because the
+Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
+#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one. A
 server mounted under a path prefix needs its proxy to route `/.well-known/` to it
 or 404 it there: discovery lives at the origin root, so this route can only answer
 what reaches it. `SETUP.md` gains no per-client connection notes yet; the ticket
@@ -4505,7 +4510,7 @@ Deliberate. Recorded so nobody assumes they were missed.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
-  target is verified with the real bundler (252 KiB gzipped) and CI rebuilds it on
+  target is verified with the real bundler (272 KiB gzipped) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
 - **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and

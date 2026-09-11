@@ -334,7 +334,7 @@ no backups, no resource limits. For something durable:
 | | |
 | --- | --- |
 | **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `OB1_STORE=sql`, `DATABASE_URL`. The simplest data path. |
-| **Cloudflare Workers** | `server-portable` builds for Workers at ~256 KiB gzipped. Workers cannot pool Postgres connections, so pair it with PostgREST (`OB1_STORE=postgrest`) or add Hyperdrive. |
+| **Cloudflare Workers** | `server-portable` builds for Workers at ~272 KiB gzipped. Workers cannot pool Postgres connections, so pair it with PostgREST (`OB1_STORE=postgrest`) or add Hyperdrive. |
 | **Self-hosted Supabase** | If you want the Supabase stack without supabase.com. Zero code change — see `recipes/local-brain-no-mcp`. |
 
 ## Two things this does not fix
