@@ -43,6 +43,9 @@ const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
 
+/** Every response the server sends, success or refusal, carries the permissive CORS header. */
+const corsOk = (r: Response) => r.headers.get("access-control-allow-origin") === "*";
+
 /** StreamableHTTPTransport answers with raw JSON or an SSE frame. */
 async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
   const text = await r.text();
@@ -86,7 +89,7 @@ console.log("\n[3] CORS preflight");
 {
   const r = await fetch(BASE, { method: "OPTIONS" });
   assert(r.status === 200, "OPTIONS → 200");
-  assert(r.headers.get("access-control-allow-origin") === "*", "allow-origin *");
+  assert(corsOk(r), "allow-origin *");
   assert(r.headers.has("access-control-allow-methods"), "allow-methods present");
 }
 
@@ -96,7 +99,7 @@ console.log("\n[4] Auth failure — the real unauthorizedResponse(), not a copy 
   // Deliberately 200: a bare 4xx makes strict MCP hosts treat auth failure as a
   // transport fault and drop the connection instead of surfacing it.
   assert(r.status === 200, "wrong key → HTTP 200, not 401");
-  assert(r.headers.get("access-control-allow-origin") === "*", "CORS present on auth failure");
+  assert(corsOk(r), "CORS present on auth failure");
   const b = await r.json();
   assert(b?.jsonrpc === "2.0", "JSON-RPC 2.0 envelope");
   assert(b?.error?.code === -32001, "error.code === -32001");
@@ -199,8 +202,7 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   const probe = async (path: string, init: RequestInit = {}) => {
     try {
       const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
-      const cors = r.headers.get("access-control-allow-origin") === "*";
-      return { status: String(r.status), cors, envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
+      return { status: r.status as number | string, cors: corsOk(r), envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
     } catch (e) {
       return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
     }
@@ -225,7 +227,7 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   ];
   for (const [label, path, init, expect] of rows) {
     const p = await probe(path, init);
-    assert(p.status === String(expect), `${label} → ${expect} (${p.status})`);
+    assert(p.status === expect, `${label} → ${expect} (${p.status})`);
     assert(p.cors, `${label}: CORS present`);
     assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
   }

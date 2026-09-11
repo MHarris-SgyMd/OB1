@@ -38,11 +38,9 @@ fi
 # The base URL must be a URL: check 2 derives the origin from it, and a scheme-less
 # or query-carrying value would silently probe the wrong place.
 case "$BASE" in
+  *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
   [Hh][Tt][Tt][Pp]://[!/]*|[Hh][Tt][Tt][Pp][Ss]://[!/]*) ;;
   *) echo "base-url must be http://host[/path] or https://host[/path] (got: $BASE)" >&2; exit 2 ;;
-esac
-case "$BASE" in
-  *\?*) echo "base-url carries a query string; pass the key as the second argument, not in the URL" >&2; exit 2 ;;
 esac
 # No trailing slashes: "$BASE/" must be one slash for the POST checks, and check
 # 2's path suffix must not end in "/" or it probes a slash variant of the document.
