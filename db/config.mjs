@@ -999,3 +999,45 @@ export function parseSetConfig(cfg) {
   }
   return out;
 }
+
+/**
+ * Make the bare `vector` type resolve for THIS session, when pgvector is
+ * installed into a schema that is not on the connection's search_path.
+ *
+ * `CREATE EXTENSION IF NOT EXISTS vector` finds an extension already installed
+ * elsewhere and does nothing, and then `vector(N)` and `vector_cosine_ops` do
+ * not resolve — the `type "vector" does not exist` error on a database that
+ * demonstrably has pgvector (Supabase's `extensions` schema, and several managed
+ * providers, ship it this way; upstream #319). The migration chain is ours, so
+ * the fix is: resolve the extension's schema and append it to the session's
+ * search_path, once, before any migration runs. One place covers every
+ * migration, where schema-qualifying spreads across 001, 002, 014, 019, 020,
+ * 021 and every future one and fails the same way at the first missed site.
+ *
+ * This changes only the calling SESSION (`set_config(..., false)` is session
+ * scope and survives into each later transaction on the same connection); it
+ * does not `ALTER DATABASE` or `ALTER ROLE`, so it leaves no persistent change
+ * on the caller's database — the running server's own connection is a separate
+ * session, and preflight's `vector extension` check is what names the persistent
+ * fix (ALTER ROLE / ALTER DATABASE) for that. Appending a schema at the END of
+ * the path can only make more names resolve, never shadow one that already did.
+ *
+ * A no-op in the normal case: on a database where `vector` already resolves the
+ * query returns no row, and where pgvector is not installed at all it also
+ * returns none (migration 001 then creates it into the first schema on the
+ * path). Returns the schema it added, or null.
+ *
+ * Bun.sql only (a tagged-template client); PGlite loads pgvector into the path
+ * itself and does not need this.
+ */
+export async function alignVectorSearchPath(sql) {
+  const rows = await sql`
+    SELECT n.nspname AS schema
+      FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'vector' AND to_regtype('vector') IS NULL`;
+  const schema = rows[0]?.schema ?? null;
+  if (schema) {
+    await sql`SELECT set_config('search_path', current_setting('search_path') || ', ' || quote_ident(${schema}), false)`;
+  }
+  return schema;
+}

@@ -22,6 +22,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
+  alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
@@ -180,6 +181,24 @@ const PGVECTOR_REMEDY =
   "  and re-run. Migrations before it are applied and recorded; nothing needs undoing.";
 const floorMessage = (m: Migration) =>
   `\n  ${m.name} needs pgvector ${tooOldFor(m)} or later; this server's pgvector library is ${pgvectorLibrary}.\n${PGVECTOR_REMEDY}`;
+// pgvector may be installed into a schema off this connection's search_path —
+// how Supabase and several managed providers ship it (upstream #319). There,
+// `CREATE EXTENSION IF NOT EXISTS vector` finds it and does nothing, and then
+// 001's `vector({{EMBEDDING_DIM}})` fails with `type "vector" does not exist` on
+// a database that has pgvector. Put the schema on this session's path before any
+// migration runs; it survives into each per-migration transaction below. A no-op
+// where `vector` already resolves. This heals the migrating session only — the
+// server's own connection is separate, and preflight's `vector extension` check
+// names the persistent fix (ALTER ROLE / ALTER DATABASE) for it.
+const vectorSchema = await alignVectorSearchPath(sql);
+if (vectorSchema) {
+  console.log(
+    `  pgvector: installed in schema "${vectorSchema}", off this connection's search_path — added to this session so the migrations resolve the vector type`
+  );
+  console.log(
+    `            the running server needs it too: preflight's "vector extension" check names ALTER ROLE / ALTER DATABASE SET search_path`
+  );
+}
 
 let ran = 0;
 let skipped = 0;

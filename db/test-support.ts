@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,6 +206,11 @@ export async function dropSchema(url: string): Promise<void> {
 export async function applyMigrations(url: string, opts: SchemaOptions): Promise<void> {
   const admin = new SQL({ url, max: 1 });
   try {
+    // Same self-heal migrate.ts does: if pgvector is off this session's
+    // search_path (test-search-path.ts puts it there deliberately), add its
+    // schema so 001's bare `vector({{EMBEDDING_DIM}})` resolves. A no-op on the
+    // normal container, where pgvector installs into public.
+    await alignVectorSearchPath(admin);
     const files = readdirSync(MIGRATIONS)
       .filter((f) => f.endsWith(".sql"))
       .filter((f) => opts.only?.(f) ?? true)
@@ -240,6 +245,41 @@ export async function updatedAtTriggerState(sql: SQL): Promise<string> {
 export async function resetSchema(url: string, opts: SchemaOptions): Promise<void> {
   await dropSchema(url);
   await applyMigrations(url, opts);
+}
+
+/**
+ * Move pgvector into `schema`, off the database's default search_path, to
+ * reproduce how Supabase and several managed providers ship it (SMD-1247). The
+ * throwaway container installs it into `public`, on the path; this relocates it
+ * so `to_regtype('vector')` returns NULL for a session that does not add the
+ * schema. Call after dropSchema, so no table's column depends on the type mid-move.
+ *
+ * Leaves the database-level search_path untouched (still `"$user", public`), so
+ * a fresh connection genuinely cannot resolve `vector` — that is the condition
+ * under test. `restoreVectorToPublic` undoes it, which ci-parity.sh needs since
+ * one Postgres is shared across suites.
+ */
+export async function relocateVectorTo(url: string, schema: string): Promise<void> {
+  const admin = new SQL({ url, max: 1 });
+  try {
+    await admin.unsafe(`CREATE EXTENSION IF NOT EXISTS vector`);
+    await admin.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)}`);
+    await admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${quoteIdent(schema)}`);
+  } finally {
+    await admin.close();
+  }
+}
+
+/** Undo relocateVectorTo: pgvector back in public, any database search_path we set cleared. */
+export async function restoreVectorToPublic(url: string): Promise<void> {
+  const admin = new SQL({ url, max: 1 });
+  try {
+    const [{ db }] = await admin`SELECT current_database() AS db`;
+    await admin.unsafe(`ALTER EXTENSION vector SET SCHEMA public`);
+    await admin.unsafe(`ALTER DATABASE ${quoteIdent(db)} RESET search_path`);
+  } finally {
+    await admin.close();
+  }
 }
 
 /**
