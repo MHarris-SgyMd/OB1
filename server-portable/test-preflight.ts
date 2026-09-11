@@ -758,7 +758,7 @@ else {
   assert(pending.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, at least one whose text no row holds — rows written around upsert_thought since migration 023/.test(pending.out) && pending.out.includes(`As ${owner}: SELECT backfill_content_fingerprints();`),
          `a NULL-fingerprint row whose key is free is a warning with the one-statement remedy, naming the owner (exit ${pending.code})`);
   await claims.unsafe("SELECT backfill_content_fingerprints()");
-  assert(/fingerprint backfill\s+every thought carries a fingerprint/.test((await run(SQL_ENV)).out), "…which performs");
+  assert(/fingerprint backfill\s+no thought is missing a fingerprint \(a stale key on a row that has one is not read here\)/.test((await run(SQL_ENV)).out), "…which performs, and the ok says what it did not read");
   await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a  legacy singleton', NULL)");
   const twin = await run(SQL_ENV);
   assert(twin.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text with the row that holds it \(a twin, or a stale key\)/.test(twin.out),
@@ -768,6 +768,15 @@ else {
   const pre023 = await run(SQL_ENV);
   assert(pre023.code === 0 && /fingerprint backfill\s+2 thought\(s\) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row/.test(pre023.out) && /Apply db\/migrations\/023_content_fingerprint_backfill\.sql\./.test(pre023.out),
          "before 023 the same row is a warning whose remedy is the migration");
+  // Adopted with --baseline: the ledger says 023, the function is absent, and
+  // "apply 023" would be a loop the migrator skips out of. The remedy is the
+  // body by hand, as reembed.ts says for 021.
+  await claims.unsafe("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
+  await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'baseline') ON CONFLICT DO NOTHING");
+  const baselined = await run(SQL_ENV);
+  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-run the body of db\/migrations\/023_content_fingerprint_backfill\.sql by hand — the migrator will skip it as applied\./.test(baselined.out),
+         "…and where the ledger already says 023 the remedy is the body by hand, not a migration the migrator would skip");
+  await claims.unsafe("DROP TABLE schema_migrations");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
   assert(/fingerprint backfill\s+1 thought\(s\) without a fingerprint, each sharing its text/.test((await run(SQL_ENV)).out), "…and 023 applied writes it and is ok again, the twin still listed");
 

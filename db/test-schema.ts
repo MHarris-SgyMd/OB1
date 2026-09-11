@@ -2359,10 +2359,23 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   await legacy("batch one", "2024-01-01");
   await legacy("batch two", "2024-01-02");
   assert((await backfill(1)) === 1 && (await backfill(1)) === 1 && (await backfill(1)) === 0, "p_limit bounds each call, and the third returns 0 with the two blocked rows still in the table");
+  let refused = "";
+  try { await backfill(0); } catch (e) { refused = (e as Error).message; }
+  assert(/p_limit must be at least 1/.test(refused), `p_limit 0 is refused before anything is locked — 0 is the answer, never the question (${refused.slice(0, 60)})`);
   assert((await functionsNamed("backfill_content_fingerprints")) === 1, "one backfill_content_fingerprints");
+  // The file's own call reads ob1.backfill_limit: NULL unset (the whole
+  // corpus), a batch where a large brain set it for the migrator's role.
+  await legacy("batch three", "2024-01-03");
+  await legacy("batch four", "2024-01-04");
+  await db.exec(`SET ob1.backfill_limit = '1'`);
+  await reapply("023");
+  const nullBatches = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE 'batch %' AND content_fingerprint IS NULL`)).rows[0].c;
+  assert((await nullBatches()) === 1, "023 applied under ob1.backfill_limit = 1 writes one batch of one and leaves the other waiting");
+  await db.exec(`RESET ob1.backfill_limit`);
   const stampsNow = await stamps();
   await reapply("023");
-  assert((await stamps()) === stampsNow && (await backfill()) === 0, "023 re-applied re-runs the call, writes nothing and moves nothing");
+  assert((await nullBatches()) === 0 && (await stamps()) === stampsNow && (await backfill()) === 0,
+         "023 re-applied with the setting unset takes the rest, and a further call writes nothing and moves nothing");
   await db.exec(`DELETE FROM thoughts`);
 }
 

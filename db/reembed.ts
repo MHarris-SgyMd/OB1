@@ -187,6 +187,8 @@
  * finds NULL/fingerprinted pairs, and a NULL/NULL pair is a load that inserted
  * into `thoughts` directly since; `SELECT backfill_content_fingerprints()`
  * settles it the same way, and preflight's `fingerprint backfill` says when.
+ * The list marks the row holding the key. Stop a pass before applying 023: its
+ * workers would wait on the table lock and their leases expire.
  *
  * ── Failure policy ──────────────────────────────────────────────────────────
  * A thought the provider cannot embed is marked failed with the error and the
@@ -955,7 +957,8 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
     return 0;
   }
   const rows = (await sql`
-    SELECT count(*) OVER ()::int AS total, array_agg(id ORDER BY created_at, id)::text[] AS ids
+    SELECT count(*) OVER ()::int AS total,
+           array_agg(id::text || CASE WHEN content_fingerprint IS NOT NULL THEN ' (holds the key)' ELSE '' END ORDER BY created_at, id) AS ids
     FROM thoughts
     GROUP BY COALESCE(content_fingerprint, content_fingerprint_of(content))
     HAVING count(*) > 1
@@ -965,9 +968,10 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
   const total = Number(rows[0].total);
   console.error(
     `\n  ${total} group(s) of thoughts share one normalised text — pairs from before migration 003's fingerprint, or a load that\n` +
-      `  bypassed upsert_thought. Every row in a group is re-embedded; only one carries the fingerprint, so a later capture of that\n` +
-      `  text merges into it and not into the others. Whether they should be one thought is the operator's call — delete_thought\n` +
-      `  on the extra keeps its text in the audit row. ${total > limit ? `First ${limit}:` : ""}`
+      `  bypassed upsert_thought. Every row in a group is re-embedded; the one marked holds the key, so a later capture of that\n` +
+      `  text merges into it and not into the others (none marked: the next pass, or backfill_content_fingerprints(), gives it to\n` +
+      `  the oldest). Whether they should be one thought is the operator's call — delete_thought on an unmarked row keeps its text\n` +
+      `  in the audit row. ${total > limit ? `First ${limit}:` : ""}`
   );
   for (const r of rows) console.error(`    ${r.ids.join("  =  ")}`);
   return total;

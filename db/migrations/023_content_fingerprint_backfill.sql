@@ -42,9 +42,12 @@
 --
 --     * it is the OLDEST of the rows without a fingerprint that hash to it:
 --       ORDER BY created_at, id — NULL created_at (a raw load may leave it)
---       last, the id as the tiebreak. The same order db/reembed.ts's
---       duplicate report already lists a group in, so the first id it prints
---       is the row that takes the key here.
+--       last, the id as the tiebreak. db/reembed.ts's duplicate report lists
+--       a group in that order and marks the row holding the key, so what
+--       this migration decided is readable there afterwards: in a group that
+--       was all NULL, the first id printed is the one marked; in a group a
+--       fingerprinted row already held, that row keeps the key whatever its
+--       age, and the mark says which.
 --
 --   So a legacy singleton — the common case — is fingerprinted, and a capture
 --   of its text from now on merges into it. True twins (two or more NULL rows
@@ -58,7 +61,9 @@
 --   strips trailing punctuation, possessives and plurals before hashing, so
 --   the fingerprints it writes never match the ones capture computes; a brain
 --   that ran it holds stale keys in 018's sense, and this migration leaves
---   them where they are.
+--   them where they are. A stale key doubles on capture exactly as a NULL
+--   does, and nothing here or in preflight reports it — its census is a
+--   ticket, not this migration.
 --
 -- A function, so the remedy is one statement
 --   The rule lives in backfill_content_fingerprints(p_limit integer DEFAULT
@@ -69,16 +74,24 @@
 --   statement preflight's `fingerprint backfill` check can name, rather than
 --   a body to re-run by hand (the remedy shape SMD-1193 found wanting).
 --   Re-applying this file re-runs it, and it is a no-op when nothing is left
---   to write: it hashes only the rows whose fingerprint is NULL. p_limit is
---   for the by-hand path — an operator who wants short lock windows after a
---   raw load calls it in batches until it returns 0 — and the NOT EXISTS sits
---   INSIDE the limited set, so a batch counts only rows it will write and 0
---   means none remain. The migration itself takes the whole corpus.
+--   to write: it hashes only the rows whose fingerprint is NULL, and takes no
+--   lock at all when it finds none.
+--
+--   It returns the number of rows it found waiting — rows without a
+--   fingerprint whose key no row held when it looked. Each is written unless
+--   a writer settled it while the call waited for the lock (re-saved it,
+--   or captured its text into a row that now holds the key); a row settled
+--   that way is no longer waiting, so a result of 0 means none remain, and a
+--   loop that calls until 0 is exact. p_limit bounds one call to that many
+--   rows (at least 1; NULL is all of them). The scan that finds them runs
+--   BEFORE the table lock, at ACCESS SHARE, so a batch costs its writers only
+--   the batch's own writes, not a rescan of every NULL row — the rows found
+--   are re-checked under the lock by index, not by another scan.
 --
 -- One transaction, and the lock is the point
---   Under bun migrate.ts the file is one transaction. The function's first
---   statement is LOCK TABLE thoughts IN EXCLUSIVE MODE, held to commit, and
---   the lock is what makes the rule exact:
+--   Under bun migrate.ts the file is one transaction. Once the scan has found
+--   rows, the function takes LOCK TABLE thoughts IN EXCLUSIVE MODE, held to
+--   commit, and the lock is what makes the rule exact:
 --
 --     * a concurrent upsert_thought of a legacy singleton's text cannot
 --       insert a fingerprinted row under the backfill and leave the UPDATE to
@@ -95,16 +108,29 @@
 --       its UPDATE, and raise 23505 after the commit — the symptom 018
 --       removed, back for the duration of the upgrade.
 --     * a write in flight before the LOCK holds it up until that write
---       commits, and the UPDATE's own snapshot then sees the row in NOT
---       EXISTS. Bounded: lock_timeout is set to 10 s for this transaction
---       (set_config with is_local, so it rolls back with the file), and an
---       idle-in-transaction writer fails the migration — re-run it — rather
---       than queueing every other writer behind the wait.
+--       commits, and the UPDATE's own snapshot then sees the row: the row it
+--       fingerprinted is no longer NULL, or the key it took is held, and the
+--       candidate is skipped. Bounded: lock_timeout is set to 10 s for this
+--       transaction (set_config with is_local, so it rolls back with the
+--       file), and an idle-in-transaction writer fails the migration — re-run
+--       it — rather than queueing every other writer behind the wait.
+--
+--   That re-check needs READ COMMITTED — each statement takes a fresh
+--   snapshot, so the UPDATE runs after the waited-for commit and sees it —
+--   which is the default and what bun migrate.ts runs at (018's lock makes
+--   the same argument for the same reason). Under REPEATABLE READ or
+--   SERIALIZABLE (a role or database default, a pooler's setting) the snapshot
+--   predates the commit, the UPDATE writes the key the concurrent capture
+--   just took, and the unique index — not this function — gives the answer:
+--   23505, the migration fails and rolls back whole, and a re-run succeeds.
 --
 --   Reads (ACCESS SHARE) proceed throughout: search is not blocked, captures
---   and edits wait. Not batched inside the migration — a loop in one
---   transaction changes nothing about the locks, and a tool outside the
---   migrator would lose the ledger's word that the corpus is fingerprinted.
+--   and edits wait. A re-embed pass running at the time waits too — every
+--   worker parks at update_thought's FOR UPDATE for the lock's duration, and
+--   015's leases are stamped once per batch with no renewal, so on a large
+--   corpus they expire and the rows are embedded again by another worker.
+--   Stop the pass first: `reembed.ts --status` shows claimed rows, and the
+--   pass resumes where it was.
 --
 --   The updated_at trigger is held off for the UPDATE, as 021's backfill
 --   holds it: the fingerprint is not an edit. 001's BEFORE UPDATE trigger
@@ -116,23 +142,35 @@
 --   they cannot be separated however the file is run; preflight's `updated_at
 --   trigger` check still says so if a hand DISABLE is ever left behind.
 --
--- Cost
+-- Cost, and the batch path
 --   content_fingerprint is indexed, so the UPDATE is never HOT: every row
 --   written is a new tuple entered into every index on thoughts — the primary
 --   key, the HNSW index, the metadata GIN, created_at, the partial index, and
 --   011's trigram GIN where it was built. 021's backfill is not a precedent:
---   embedding_model is unindexed, so that UPDATE was HOT. The hash itself is
---   one sha256 per NULL row and one probe of the partial index per candidate.
+--   embedding_model is unindexed, so that UPDATE was HOT. The scan is one
+--   sha256 per NULL row and one probe of the partial index per candidate, and
+--   a NULL row has no index of its own (003's is partial the other way), so
+--   it is a sequential pass over the table — once per call, before the lock.
 --   Measured on the test container at 1,024 dimensions, 20,000 legacy rows
 --   with random vectors beside 20,000 fingerprinted ones, HNSW built by 001:
---   the whole-corpus call 56 s (2.8 ms a row — the index maintenance is the
---   cost: the same call with the HNSW index dropped, 0.34 s); a p_limit batch
---   of 1,000 1.7 s; the no-op re-run 9 ms. Per 100,000 legacy rows, about
---   five minutes of waiting writers. A brain with millions of legacy rows
---   should not take that in one transaction: run this file by hand up to but
---   not including its final SELECT (the function and its COMMENT), call
---   backfill_content_fingerprints(10000) in batches until it returns 0, then
---   `bun db/migrate.ts` — its call finds nothing and writes the ledger row.
+--   the whole-corpus call 59 s (3.0 ms a row — the index maintenance is the
+--   cost: the same call with the HNSW index dropped, 0.36 s); a p_limit batch
+--   of 1,000 2.0 s; the no-op re-run 8 ms, and it takes no lock. Per 100,000
+--   legacy rows, about five minutes of waiting writers.
+--
+--   A brain with millions of legacy rows should not take that in one lock.
+--   The call at the end of this file reads the setting ob1.backfill_limit —
+--   NULL when unset, so the default is the whole corpus — and a large brain
+--   sets it for the migrator's role before applying:
+--
+--     ALTER ROLE <migrator> SET ob1.backfill_limit = '10000';
+--     cd db && bun migrate.ts …           -- one batch, and the ledger row
+--     ALTER ROLE <migrator> RESET ob1.backfill_limit;
+--     SELECT backfill_content_fingerprints(10000);   -- until it returns 0
+--
+--   The ledger then says 023 while rows are still waiting, and that is the
+--   ledger's job — the file was applied; preflight's `fingerprint backfill`
+--   decides from the rows, not the ledger, and warns until the loop is done.
 --   migrate.ts sets no statement_timeout, so a server default applies to the
 --   UPDATE; on a large legacy brain, apply this migration in a quiet window.
 --
@@ -146,12 +184,14 @@
 --   * Additive. No column added, altered or dropped; no signature changed; no
 --     DELETE, no DROP. The one UPDATE writes a column that was NULL, to a
 --     value the partial unique index accepts (checked by NOT EXISTS under the
---     table lock), on rows chosen by the rule above.
+--     table lock), on rows chosen by the rule above. The rows found are held
+--     in a temporary table for the call, dropped with the transaction.
 --   * Privileges. SECURITY INVOKER, as every function in this fork. ALTER
 --     TABLE … DISABLE TRIGGER needs the table's owner — the migrator's role.
 --     A non-owner calling the function is refused with "must be owner of
 --     table thoughts", having written nothing; preflight names the owner in
---     its remedy.
+--     its remedy. Creating a temporary table needs TEMP on the database,
+--     which PUBLIC holds unless revoked.
 --   * Idempotent. CREATE OR REPLACE of one function; the call is a no-op when
 --     no row is left to write; COMMENT re-issued.
 --
@@ -173,12 +213,43 @@ RETURNS integer
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  v_written integer;
+  v_found integer;
+  -- One temporary table per call, named for the instant, dropped with the
+  -- transaction: two calls in one transaction do not collide, and nothing
+  -- here drops or empties a table by hand.
+  v_found_table text := format('ob1_fingerprint_candidates_%s', to_char(clock_timestamp(), 'YYYYMMDDHH24MISSUS'));
 BEGIN
+  IF p_limit IS NOT NULL AND p_limit < 1 THEN
+    RAISE EXCEPTION 'backfill_content_fingerprints: p_limit must be at least 1, or NULL for every row (got %)', p_limit
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
   -- Bounded wait for the table lock, for this transaction only: a writer idle
   -- in a transaction fails this call rather than queueing every other writer
   -- behind it. See "One transaction, and the lock is the point".
   PERFORM set_config('lock_timeout', '10s', true);
+
+  -- The scan, before the lock and at ACCESS SHARE — writers proceed. Of the
+  -- rows without a fingerprint whose key no row holds, the oldest per key:
+  -- created_at then id, NULL created_at last — the order db/reembed.ts lists
+  -- a duplicate group in. The NOT EXISTS is inside the limited set so that a
+  -- batch counts only rows it will write and a result of 0 means none remain.
+  EXECUTE format($scan$
+    CREATE TEMP TABLE %I ON COMMIT DROP AS
+    SELECT DISTINCT ON (c.fp) c.id, c.fp
+      FROM (
+        SELECT id, created_at, content_fingerprint_of(content) AS fp
+          FROM thoughts
+         WHERE content_fingerprint IS NULL
+      ) c
+     WHERE NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = c.fp)
+     ORDER BY c.fp, c.created_at, c.id
+     LIMIT %s
+  $scan$, v_found_table, coalesce(p_limit::text, 'ALL'));
+  EXECUTE format('SELECT count(*)::int FROM %I', v_found_table) INTO v_found;
+  IF v_found = 0 THEN
+    RETURN 0;
+  END IF;
 
   -- EXCLUSIVE, not the SHARE ROW EXCLUSIVE the trigger hold would take on its
   -- own: it conflicts with update_thought's FOR UPDATE (ROW SHARE) as well as
@@ -191,36 +262,28 @@ BEGIN
   -- both read it. Held off for the one statement, re-enabled below.
   ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 
-  UPDATE thoughts t
-     SET content_fingerprint = o.fp
-  FROM (
-    -- Of the rows without a fingerprint whose key no row holds, the oldest
-    -- per key: created_at then id, NULL created_at last — the order
-    -- db/reembed.ts lists a duplicate group in. The NOT EXISTS is inside the
-    -- limited set so that a batch counts only rows it writes and a result of
-    -- 0 means none remain.
-    SELECT DISTINCT ON (c.fp) c.id, c.fp
-      FROM (
-        SELECT id, created_at, content_fingerprint_of(content) AS fp
-          FROM thoughts
-         WHERE content_fingerprint IS NULL
-      ) c
-     WHERE NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = c.fp)
-     ORDER BY c.fp, c.created_at, c.id
-     LIMIT p_limit
-  ) o
-  WHERE t.id = o.id
-    AND t.content_fingerprint IS NULL;
-  GET DIAGNOSTICS v_written = ROW_COUNT;
+  -- The rows found, re-checked under the lock by index: still without a
+  -- fingerprint, and the key still free — a writer that settled one while
+  -- this call waited has taken it off the list. READ COMMITTED: see the header.
+  EXECUTE format($write$
+    UPDATE thoughts t
+       SET content_fingerprint = o.fp
+      FROM %I o
+     WHERE t.id = o.id
+       AND t.content_fingerprint IS NULL
+       AND NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = o.fp)
+  $write$, v_found_table);
 
   ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at;
-  RETURN v_written;
+  RETURN v_found;
 END;
 $$;
 
 COMMENT ON FUNCTION backfill_content_fingerprints(integer) IS
-  'Migration 003''s missing backfill (023): every thought without a content_fingerprint whose normalised text no other thought holds takes it, and of each group sharing one text the oldest (created_at, id) takes it while the rest stay NULL — the state 018 leaves after a pass. Locks thoughts IN EXCLUSIVE MODE for the transaction (writers wait, readers do not; lock_timeout 10s) and holds the updated_at trigger: the fingerprint is not an edit. Returns the rows written; p_limit bounds a batch, and 0 means none remain. Needs the table''s owner. Run again after a load that inserted into thoughts directly.';
+  'Migration 003''s missing backfill (023): every thought without a content_fingerprint whose normalised text no other thought holds takes it, and of each group sharing one text the oldest (created_at, id) takes it while the rest stay NULL — the state 018 leaves after a pass. Scans before the lock, then locks thoughts IN EXCLUSIVE MODE for the transaction (writers and update_thought''s FOR UPDATE wait, readers do not; lock_timeout 10s) and holds the updated_at trigger: the fingerprint is not an edit. Returns the rows found waiting — each written unless a writer settled it meanwhile — so 0 means none remain; p_limit (at least 1) bounds a call. Needs the table''s owner. Run again after a load that inserted into thoughts directly.';
 
--- Once, over the whole corpus. Re-applying the file re-runs it and it writes
--- nothing: only rows whose fingerprint is NULL and whose key is free qualify.
-SELECT backfill_content_fingerprints();
+-- Once, over the whole corpus — or one batch of ob1.backfill_limit rows where
+-- a large brain set it for the migrator's role (see "Cost, and the batch
+-- path"). Re-applying the file re-runs it and it writes nothing: only rows
+-- whose fingerprint is NULL and whose key is free qualify.
+SELECT backfill_content_fingerprints(nullif(current_setting('ob1.backfill_limit', true), '')::integer);

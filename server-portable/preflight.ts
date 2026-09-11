@@ -543,43 +543,58 @@ if (configFailed) {
         // directly — and the remedy is that one statement, as the table's
         // owner (it holds the updated_at trigger). A NULL row whose key
         // another row holds — a twin, or a stale key — is the state 018
-        // leaves after a pass, and stays. The EXISTS stops at the first
-        // pending row, so a brain before 023 answers at once; after it the
-        // NULL rows are few. Its own boundary: a throw here must not report
-        // as `atomic capture`.
+        // leaves after a pass, and stays. A stale key on a row that HAS one
+        // doubles on capture too, and is not read here: finding it means
+        // hashing every fingerprinted row on every start. The EXISTS stops
+        // at the first pending row, so a brain before 023 answers at once;
+        // after it the NULL rows are few. Presence first, from the catalog:
+        // the table or the column missing must be a skip, and a reference
+        // to either in the same statement would raise instead. Its own
+        // boundary: a throw here must not report as `atomic capture`.
         try {
           const [t] = (await sql`
-            SELECT (SELECT count(*)::int FROM public.thoughts WHERE content_fingerprint IS NULL) AS nulls,
+            SELECT to_regclass('public.thoughts') IS NOT NULL AS present,
+                   EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.thoughts')
+                            AND a.attname = 'content_fingerprint' AND NOT a.attisdropped) AS has_column,
                    EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                             WHERE p.proname = 'content_fingerprint_of' AND n.nspname = 'public') AS hash_fn,
                    EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                             WHERE p.proname = 'backfill_content_fingerprints' AND n.nspname = 'public') AS backfill_fn,
-                   pg_get_userbyid(c.relowner)::text AS owner
-              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relname = 'thoughts' AND n.nspname = 'public'`) as { nulls: number; hash_fn: boolean; backfill_fn: boolean; owner: string }[];
-          if (!t) {
-            add("fingerprint backfill", "skip", "not checked — thoughts does not exist");
+                   to_regclass('public.schema_migrations') IS NOT NULL AS has_ledger,
+                   (SELECT pg_get_userbyid(c.relowner)::text FROM pg_class c WHERE c.oid = to_regclass('public.thoughts')) AS owner`) as
+            { present: boolean; has_column: boolean; hash_fn: boolean; backfill_fn: boolean; has_ledger: boolean; owner: string | null }[];
+          if (!t.present || !t.has_column) {
+            add("fingerprint backfill", "skip", `not checked — ${t.present ? "thoughts.content_fingerprint does not exist (before migration 003)" : "thoughts does not exist"}`);
           } else if (!t.hash_fn) {
             add("fingerprint backfill", "skip", "not checked — content_fingerprint_of does not exist (before migration 016)");
-          } else if (Number(t.nulls) === 0) {
-            add("fingerprint backfill", "ok", "every thought carries a fingerprint");
           } else {
-            const [{ pending }] = (await sql`
-              SELECT EXISTS (
-                SELECT 1 FROM public.thoughts x
-                 WHERE x.content_fingerprint IS NULL
-                   AND NOT EXISTS (SELECT 1 FROM public.thoughts h WHERE h.content_fingerprint = public.content_fingerprint_of(x.content))
-              ) AS pending`) as { pending: boolean }[];
-            if (pending && !t.backfill_fn) {
+            const [{ nulls, pending }] = (await sql`
+              SELECT (SELECT count(*)::int FROM public.thoughts WHERE content_fingerprint IS NULL) AS nulls,
+                     EXISTS (
+                       SELECT 1 FROM public.thoughts x
+                        WHERE x.content_fingerprint IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM public.thoughts h WHERE h.content_fingerprint = public.content_fingerprint_of(x.content))
+                     ) AS pending`) as { nulls: number; pending: boolean }[];
+            if (Number(nulls) === 0) {
+              add("fingerprint backfill", "ok", "no thought is missing a fingerprint (a stale key on a row that has one is not read here)");
+            } else if (pending && !t.backfill_fn) {
+              // Ledger-aware, as reembed.ts is for 021: a brain adopted with
+              // --baseline says 023 while the function is absent, and "apply
+              // 023" would be a loop — the migrator skips a ledgered file.
+              const ledgered = t.has_ledger
+                ? Number((await sql`SELECT count(*)::int AS c FROM public.schema_migrations WHERE name LIKE '023\\_%'`)[0].c) > 0
+                : false;
               add("fingerprint backfill", "warn",
-                  `${t.nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
-                  "Apply db/migrations/023_content_fingerprint_backfill.sql.");
+                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
+                  ledgered
+                    ? "The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand — the migrator will skip it as applied."
+                    : "Apply db/migrations/023_content_fingerprint_backfill.sql.");
             } else if (pending) {
               add("fingerprint backfill", "warn",
-                  `${t.nulls} thought(s) without a fingerprint, at least one whose text no row holds — rows written around upsert_thought since migration 023: a capture of that text inserts a second row`,
-                  `As ${t.owner}: SELECT backfill_content_fingerprints();`);
+                  `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — rows written around upsert_thought since migration 023: a capture of that text inserts a second row`,
+                  `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints();`);
             } else {
-              add("fingerprint backfill", "ok", `${t.nulls} thought(s) without a fingerprint, each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
+              add("fingerprint backfill", "ok", `${nulls} thought(s) without a fingerprint, each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
             }
           }
         } catch (e) {
@@ -1421,7 +1436,12 @@ if (configFailed) {
 
         await sql.close();
       } catch (e) {
+        // The connection, or a read before the first check, failed: every
+        // check this block owns that has not reported yet says so, since a
+        // check that prints nothing looks like one that passed.
         add("atomic capture", "warn", `could not verify: ${(e as Error).message}`);
+        for (const name of ["chunk delete privilege", "fingerprint backfill"])
+          if (!results.some((r) => r.name === name)) add(name, "skip", `not checked — the catalog connection failed before it: ${(e as Error).message}`);
       }
     }
 

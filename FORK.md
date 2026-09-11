@@ -4020,8 +4020,9 @@ many words — "whichever edit committed first, until SMD-1042 states a rule
 fingerprint takes `content_fingerprint_of(content)` (016's function, byte-
 identical to 003's inline rule) when no row holds that key and it is the oldest
 of the NULL rows that hash to it — `created_at`, then id, NULL `created_at` (a
-raw load may leave it) last: the order `reembed.ts`'s pairs list already prints a
-group in, so the first id it prints is the row that takes the key. A legacy
+raw load may leave it) last: the order `reembed.ts`'s pairs list prints a group
+in — and the list now marks the row holding the key, so what 023 decided is
+readable there (a fingerprinted row keeps the key whatever its age). A legacy
 singleton — the common case — is fingerprinted and a capture of its text merges
 into it from then on. True twins end with exactly one fingerprinted and the rest
 NULL, the state 018 leaves after a pass, so `duplicate_of` and the pairs list
@@ -4043,10 +4044,18 @@ a body to paste (the remedy shape SMD-1193 found wanting). Re-applying the file
 re-runs it and it writes nothing: it hashes only the rows whose fingerprint is
 NULL and whose key is free. `p_limit` is for the by-hand path — batches until it
 returns 0, and the `NOT EXISTS` sits inside the limited set so 0 means none
-remain; the migration itself takes the whole corpus.
+remain (`p_limit` is at least 1; 0 is refused). It returns the rows it found
+waiting — each written unless a writer settled it while the call waited for the
+lock, and a row settled that way is no longer waiting — so a loop until 0 is
+exact. The scan runs before the lock, at ACCESS SHARE, into a temporary table
+dropped with the transaction; under the lock the rows found are re-checked by
+index, so a batch costs its writers the batch's own writes and never a rescan
+of every NULL row. The file's own call reads `ob1.backfill_limit` — NULL unset,
+so the whole corpus by default.
 
-**One transaction, and the lock is the point.** The function's first statement
-is `LOCK TABLE thoughts IN EXCLUSIVE MODE`, held to commit, and the lock is what
+**One transaction, and the lock is the point.** Once the scan has found rows,
+the function takes `LOCK TABLE thoughts IN EXCLUSIVE MODE`, held to commit — a
+no-op re-run takes no lock at all — and the lock is what
 makes the rule exact. A concurrent `upsert_thought` of a legacy singleton's text
 cannot insert a fingerprinted row under the backfill and leave the UPDATE to
 raise 23505: the INSERT waits, then lands `ON CONFLICT` on the row 023 just
@@ -4061,6 +4070,12 @@ the duration of the upgrade. Reads proceed throughout. A write in flight before
 the LOCK holds it up until that write commits, bounded by a transaction-local
 `lock_timeout` of 10 s, so an idle-in-transaction writer fails the migration
 (re-run it) rather than queueing every other writer behind the wait. The
+re-check needs READ COMMITTED, which is the default and what `migrate.ts` runs
+at, as 018's header says of its lock; under REPEATABLE READ the unique index
+gives the answer instead — 23505, the file rolls back whole, a re-run succeeds.
+A re-embed pass running at the time parks every worker at `update_thought`'s
+`FOR UPDATE` for the lock's duration and their leases expire, so the header says
+to stop the pass first. The
 `updated_at` trigger is held off for the UPDATE as 021 holds it: the fingerprint
 is not an edit, and two rules read that column — 021's `updated_at <=
 finished_at` evidence and 018's `if_unchanged_since` guard. 008's audit trigger
@@ -4072,24 +4087,32 @@ every row written is a new tuple entered into every index on `thoughts`, the
 HNSW index included — 021's backfill is not a precedent, `embedding_model` is
 unindexed and that UPDATE was HOT. Measured on the test container at 1,024
 dimensions, 20,000 legacy rows with random vectors beside 20,000 fingerprinted
-ones: the whole-corpus call 56 s — 2.8 ms a row, and the HNSW index is the cost,
-since the same call with that index dropped takes 0.34 s; a `p_limit` batch of
-1,000 1.7 s; the no-op re-run 9 ms. About five minutes of waiting writers per
-100,000 legacy rows. `migrate.ts` sets no `statement_timeout`, so a server
+ones: the whole-corpus call 59 s — 3.0 ms a row, and the HNSW index is the cost,
+since the same call with that index dropped takes 0.36 s; a `p_limit` batch of
+1,000 2.0 s; the no-op re-run 8 ms, taking no lock. About five minutes of
+waiting writers per 100,000 legacy rows. `migrate.ts` sets no `statement_timeout`, so a server
 default applies; the header says to apply the migration in a quiet window, and
-gives a brain with millions of legacy rows the batch path — the file by hand up
-to its final SELECT, the function in batches until it returns 0, then the
-migrator, whose call finds nothing and writes the ledger row.
+gives a brain with millions of legacy rows the batch path without a hand-edited
+file: `ALTER ROLE <migrator> SET ob1.backfill_limit = '10000'`, the migrator
+(one batch, and the ledger row), then `SELECT backfill_content_fingerprints(10000)`
+until it returns 0 — preflight decides "pending" from the rows, not the ledger,
+and warns until the loop is done.
 
 **Preflight.** `fingerprint backfill`, over a direct connection: a thought
 without a fingerprint whose text no row holds is a warning — naming 023 where the
 function does not exist, and where it does the one statement, as the table's
 owner (the function holds the trigger, so it needs the owner; preflight reads
-the owner from `pg_class`); NULL rows that each share their text with the row
-holding the key — twins, or a stale key — are ok, pointing at the pairs list;
-no NULL row is ok. The `EXISTS` stops at the first pending row, so a brain
-before 023 answers at once. Over PostgREST a skip, beside `atomic capture` and
-`chunk delete privilege`. A warning, not a failure: captures work, they double.
+the owner from `pg_class`), or — where the ledger already says 023 and the
+function is absent, a brain adopted with `--baseline` — the body by hand, since
+the migrator would skip the file; NULL rows that each share their text with the
+row holding the key — twins, or a stale key — are ok, pointing at the pairs
+list; no NULL row is ok, said as "missing", since a stale key on a row that has
+one doubles on capture too and is not read here. Presence is read from the
+catalog first, so a brain before 003 or 016 is a skip, not a raise; the
+`EXISTS` stops at the first pending row, so a brain before 023 answers at once.
+Over PostgREST a skip, beside `atomic capture` and `chunk delete privilege`,
+and if the catalog connection itself fails every check of the three that has
+not reported says so. A warning, not a failure: captures work, they double.
 
 **Verify, as the ticket asked.** `db/test-upgrade.ts` [6]: 023 onto a populated
 022 — at 022 a capture of a legacy row's text inserts a second row; after 023
@@ -4111,6 +4134,29 @@ first commits the capture returns the singleton's id and the edit is told
 and after. `server-portable/test-preflight.ts` [5]: the warning with the
 one-statement remedy naming the owner, the ok once run, the twin as ok, and the
 function dropped as a warning naming the migration until 023 is re-applied.
+
+**A first pass, triaged: ten fixes, one ticket.** The scan ran under the table
+lock, so the header's batch path for millions of rows rescanned every NULL row
+per batch, writers waiting — the scan now runs before the lock at ACCESS SHARE
+into a temporary table, and the rows found are re-checked under the lock by
+index. The header, the README and this section said the first id the pairs
+list prints is the row that takes the key, which is false where a fingerprinted
+row already held it — the list now marks the holder and the claim is scoped.
+The batch path itself was "run the file by hand up to its last line" — the call
+reads `ob1.backfill_limit` instead. `p_limit` 0 returned 0 with everything
+still waiting — refused, before the lock. The re-check's argument needs READ
+COMMITTED and did not say so; a re-embed pass running during the upgrade parks
+every worker until its leases expire, unsaid — both in the header now. In
+preflight: an ok that said "every thought carries a fingerprint" while a stale
+key doubles on capture as a NULL does, narrowed to "missing" with what is not
+read; the "apply 023" remedy on a `--baseline`d brain whose ledger already says
+023, now the body by hand as `reembed.ts` says for 021; a skip branch for a
+missing table that could not be reached, since the same statement referenced
+the table — presence read from the catalog first; and the block's outer catch
+reported only `atomic capture`, so a failed catalog connection silenced this
+check and `chunk delete privilege` — both say so now. To a ticket: a census of
+stale keys (a brain that ran the community recipe holds one on every row), which
+means hashing every fingerprinted row and belongs to a command, not a start.
 
 **Not done here.** SMD-1043's advisory lock in both inserting `upsert_thought`
 overloads — 023 redefines no function, and a capture racing an edit outside the
