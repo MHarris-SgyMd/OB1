@@ -109,7 +109,7 @@ else {
   const after = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(after.code === 0, "a migrated database passes");
   assert(/thoughts table reachable/.test(after.out), "…and confirms the table is reachable");
-  assert(/both upsert_thought overloads present/.test(after.out), "…and that atomic capture is available");
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(after.out), "…and that atomic capture is available, with the shipped body (a warn would also say \"present\")");
   assert(/no schema_migrations table/.test(after.out), "…and warns the schema was applied outside the runner");
   assert(/resolve_agent present/.test(after.out), "…and that the agent registry is available");
 
@@ -654,7 +654,9 @@ else {
   const noColumn = await run(SQL_ENV);
   assert(noColumn.code === 1 && /vector models\s+thoughts\.embedding_model does not exist/.test(noColumn.out) && /021_embedding_model_per_row\.sql/.test(noColumn.out),
          "the column missing under this server does not start, naming 021");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  // 021 and 022 together: 021's CREATE OR REPLACE puts its 3-argument
+  // upsert_thought back over 022's, which is the warning asserted below.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -673,14 +675,32 @@ else {
          "018 re-applied over 021 leaves two update_thought forms, and the start is refused naming the extra one");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
-  assert((await run(SQL_ENV)).code === 0, "…which 021 re-applied performs");
+  const reapplied021 = await run(SQL_ENV);
+  assert(reapplied021.code === 0, "…which 021 re-applied performs");
+  // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
+  // 022's: a chunkless re-capture would leave the previous vector's windows
+  // again. A warning naming 022 — captures work, search is over-inclusive.
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(021 re-applied by hand puts it back\)/.test(reapplied021.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql\./.test(reapplied021.out),
+         "021 re-applied over 022 leaves 021's 3-argument upsert_thought, and the start warns naming 022 rather than refusing");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them\s*$/m.test((await run(SQL_ENV)).out),
+         "…and 022 re-applied is the shipped body again, said as such");
+  // The 3-argument form gone from a 022 database: the remedy is the last
+  // definer, not 004 — whose body would drop 005's guard, 008's actor, 021's
+  // label and 022's rule.
+  await claims.unsafe("DROP FUNCTION upsert_thought(text, jsonb, vector)");
+  const noThree = await run(SQL_ENV);
+  assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/022_capture_replaces_chunks\.sql — the last definer of the 3-argument form/.test(noThree.out) && !/Apply db\/migrations\/004_/.test(noThree.out),
+         "the 3-argument form missing is a refusal whose remedy is 022, the last definer — not 004");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") });
+  assert((await run(SQL_ENV)).code === 0, "…which 022 re-applied performs");
   // A database whose update_thought predates 021.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
   assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 021; the server sends p_embedding_model/.test(pre021.out) && /Apply db\/migrations\/021_embedding_model_per_row\.sql\./.test(pre021.out),
          "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") });
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");
@@ -688,6 +708,43 @@ else {
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "before migration 015 there is nothing to read, and the check says so rather than warning");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+
+  // The chunk writers run as the calling role. A role that can read
+  // everything and write thoughts, but not delete from thought_chunks, would
+  // fail every edit with content and every re-capture at another model — so
+  // preflight refuses to start it, with the GRANT; granted, it starts. A
+  // role is cluster-wide and dropSchema does not touch it, so an interrupted
+  // run's leftover is dropped first and the fixture is cleaned up whatever
+  // happens inside it.
+  const CAPTURE_URL = LIVE.replace(/\/\/[^@]*@/, "//ob1_pf_capture:ob1pf@");
+  const dropCaptureRole = () => claims.unsafe(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_pf_capture') THEN
+      EXECUTE 'DROP OWNED BY ob1_pf_capture'; EXECUTE 'DROP ROLE ob1_pf_capture';
+    END IF; END $$`);
+  const [{ mayCreate }] = await claims`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`;
+  if (CAPTURE_URL === LIVE) {
+    skipRaw("a capturing role without DELETE on thought_chunks does not start", "DATABASE_URL carries no credentials to swap for the role's");
+  } else if (!mayCreate) {
+    skipRaw("a capturing role without DELETE on thought_chunks does not start", "the connection's role cannot CREATE ROLE");
+  } else {
+    await dropCaptureRole();
+    try {
+      await claims.unsafe("CREATE ROLE ob1_pf_capture LOGIN PASSWORD 'ob1pf'");
+      await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
+      await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
+      await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
+      const noDelete = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noDelete.code === 1 && /chunk delete privilege\s+this connection's role \(ob1_pf_capture\) cannot DELETE from thought_chunks/.test(noDelete.out) && /GRANT DELETE ON thought_chunks TO ob1_pf_capture;/.test(noDelete.out),
+             `a capturing role without DELETE on thought_chunks does not start, with the GRANT as the remedy (exit ${noDelete.code})`);
+      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 022's/.test(noDelete.out), "…while atomic capture, a separate fact, is ok for it");
+      await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
+      const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(granted.code === 0 && /chunk delete privilege\s+ob1_pf_capture can DELETE from thought_chunks/.test(granted.out),
+             `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+    } finally {
+      await dropCaptureRole();
+    }
+  }
 
   await claims.unsafe("DELETE FROM thoughts");
   await claims.close();

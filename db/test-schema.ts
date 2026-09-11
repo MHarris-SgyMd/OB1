@@ -107,6 +107,11 @@ function lastDefinerOf(fn: string): string {
   if (!f) throw new Error(`no migration defines ${fn}`);
   return f;
 }
+/** How many functions of this name the schema holds — the overload count, five sections ask it. */
+const functionsNamed = async (name: string) =>
+  (await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = [...new Set(fns.map(lastDefinerOf))].sort();
   for (const f of latest) await db.exec(subst(readFileSync(join(MIGRATIONS, f), "utf8")));
@@ -1515,14 +1520,10 @@ console.log("\n[17b] search_thoughts_hybrid: exact hits, the vector arm, and the
 
 console.log("\n[18] Migration 017 left upsert_thought, match_thoughts and search_thoughts_keyword alone");
 {
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
-  assert((await count("upsert_thought")) === 3, "all three upsert_thought overloads survive");
-  assert((await count("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
-  assert((await count("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
-  assert((await count("search_thoughts_hybrid")) === 1 && (await count("extract_search_needles")) === 1, "017 adds exactly its two functions");
+  assert((await functionsNamed("upsert_thought")) === 3, "all three upsert_thought overloads survive");
+  assert((await functionsNamed("match_thoughts")) === 1, "match_thoughts is untouched and unduplicated");
+  assert((await functionsNamed("search_thoughts_keyword")) === 1, "search_thoughts_keyword is untouched and unduplicated");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 1 && (await functionsNamed("extract_search_needles")) === 1, "017 adds exactly its two functions");
   const vol = await db.query<{ p: string; v: string }>(
     `SELECT p.proname AS p, p.provolatile AS v FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE p.proname IN ('search_thoughts_hybrid', 'extract_search_needles') AND n.nspname = 'public'`);
@@ -1688,10 +1689,6 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
       `SELECT prorows, provolatile, prosrc, proconfig AS cfg FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0];
     return { ...r, settings: parseSetConfig(r.cfg) };
   };
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const MT_4 = "match_thoughts(vector, float, int, jsonb)"; // the form 020 dropped; 014 and 019 re-create it
   const KW = "search_thoughts_keyword(text, int, int, jsonb)";
@@ -1724,7 +1721,7 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const cteBlocks = (src: string) => [...src.matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]);
   const routing = (src: string) => /SELECT array_agg\(s\.id\) INTO v_ids[\s\S]*?\) s;/.exec(src)?.[0] ?? "";
   await reapply("014");
-  assert((await count("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
+  assert((await functionsNamed("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
   const mt014 = await proc(MT_4);
   assert(cteBlocks(mt.prosrc).length === 3 && cteBlocks(mt.prosrc).join("\n---\n") === cteBlocks(mt014.prosrc).join("\n---\n"),
          "the three candidate CTEs of the shipped body are 014's, byte for byte");
@@ -1749,7 +1746,7 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const back = await proc(MT);
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
-  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed: 019 last defines
   // the keyword function, 020 match_thoughts. A successor that redefines either
   // fails here on purpose, and the expectations move with the clauses it must carry.
@@ -1780,11 +1777,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const MT = MATCH_THOUGHTS_SIGNATURE;
   const proc = (await db.query<{ prorows: number; cfg: string[] | null; prosrc: string }>(
     `SELECT prorows, proconfig AS cfg, prosrc FROM pg_proc WHERE oid = $1::regprocedure`, [MT])).rows[0];
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
-  assert((await count("match_thoughts")) === 1 && (await count("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
+  assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_hybrid")) === 1, "one match_thoughts, one search_thoughts_hybrid: 020 replaced both signatures rather than adding overloads");
   const settings = parseSetConfig(proc.cfg);
   assert(Number(proc.prorows) === 10 && settings["enable_seqscan"] === "off" && settings["hnsw.iterative_scan"] === "relaxed_order" && Object.keys(settings).length === 2 && /ob1:filter-inside-scan/.test(proc.prosrc),
          "020 carries what 019 handed over: ROWS 10, exactly the two settings, the sentinel");
@@ -1862,7 +1855,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   const fourArg = await db.query(`SELECT count(*)::int AS c FROM match_thoughts($1::vector, -1.0, 10, '{}'::jsonb)`, [Q]);
   assert(fourArg.rows[0].c === 10, "a 4-argument call still resolves — the defaults, not a second overload");
   await db.exec(`DROP FUNCTION match_thoughts_019(vector, float, int, jsonb)`);
-  assert((await count("match_thoughts")) === 1, "the comparison function is gone again");
+  assert((await functionsNamed("match_thoughts")) === 1, "the comparison function is gone again");
 
   // ── The blend does something: with a weight the recent row comes first,
   // which needs the widened window — by similarity alone it is 61st.
@@ -2032,7 +2025,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   await db.exec(`REVOKE ALL ON FUNCTION ${MT_4} FROM PUBLIC`);
   await restoreShipped("match_thoughts");
   const revoked = await acl(MT);
-  assert(revoked !== "" && !hasPublic(revoked) && (await count("match_thoughts")) === 1, `a REVOKE FROM PUBLIC on the 4-argument form is carried to the new one (${revoked})`);
+  assert(revoked !== "" && !hasPublic(revoked) && (await functionsNamed("match_thoughts")) === 1, `a REVOKE FROM PUBLIC on the 4-argument form is carried to the new one (${revoked})`);
   // The other direction, and a grant that is not PUBLIC's: an explicit grant on
   // the old form appears on the new one — the second review pass found the
   // first draft of this case observing its own GRANT on the 6-argument form.
@@ -2064,7 +2057,7 @@ console.log("\n[21] Migration 020: the recency blend — identical at weight 0, 
   assert(hasPublic(await acl(MT_4)) || (await acl(MT_4)) === "", "the re-created 4-argument form has the defaults");
   await restoreShipped("match_thoughts");
   const kept = await acl(MT);
-  assert(!hasPublic(kept) && (await count("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
+  assert(!hasPublic(kept) && (await functionsNamed("match_thoughts")) === 1, `a re-run of 020 over the two-form state drops the 4-argument form and leaves the hardened 6-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${MT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_reader`);
 }
@@ -2081,10 +2074,6 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await db.exec(`DELETE FROM thoughts`);
   const UT = UPDATE_THOUGHT_SIGNATURE;
   const UT_7 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)"; // the form 021 dropped; 018 re-creates it
-  const count = async (name: string) =>
-    (await db.query<{ c: number }>(
-      `SELECT count(*)::int AS c FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE p.proname = $1 AND n.nspname = 'public'`, [name])).rows[0].c;
   const rowOf = async (id: string) =>
     (await db.query<{ model: string | null; axis: number | null; metadata: Record<string, unknown> }>(
       `SELECT embedding_model AS model, array_position(embedding::real[], 1::real) - 1 AS axis, metadata FROM thoughts WHERE id = $1`, [id])).rows[0];
@@ -2147,7 +2136,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   assert((await audits()) === beforeLabel, "a label-only change is not an audit event either");
 
   // One function, eight parameters, 018's body by name; 010's trigger untouched.
-  assert((await count("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
+  assert((await functionsNamed("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
   const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
   assert(Number(proc?.n) === 8, `…of eight parameters (${proc?.n})`);
   for (const [re, what] of [
@@ -2159,21 +2148,21 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   }
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
-  assert((await count("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("021") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
-         `021 is the last definer of both writers and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("022") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
+         `021 is the last definer of update_thought, 022 of upsert_thought (its 3-argument body carries 021's label) and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
   // drops it again.
   await reapply("018");
-  assert((await count("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
+  assert((await functionsNamed("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
   let ambiguous = "";
   try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb)`, [labelled]); }
   catch (e) { ambiguous = (e as Error).message; }
   assert(/not unique/.test(ambiguous), `…after which a 7-argument call is "function is not unique" (${ambiguous.slice(0, 60)})`);
-  await restoreShipped("update_thought");
-  assert((await count("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
+  await restoreShipped("update_thought", "upsert_thought");
+  assert((await functionsNamed("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
 
   // The ACL survives the DROP, as 020's does ([21]): 018's form back and
   // hardened, 021 applied for the first time, the new form's ACL read.
@@ -2185,24 +2174,122 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await pre021();
   await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM PUBLIC`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT_7} TO ob1_test_editor WITH GRANT OPTION`);
-  await restoreShipped("update_thought");
+  await restoreShipped("update_thought", "upsert_thought");
   const granted = await acl(UT);
   assert(!hasPublic(granted) && /ob1_test_editor=X\*\//.test(granted), `a revoke and a grant with grant option on the 7-argument form are carried to the eight-argument one (${granted})`);
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ob1_test_editor`);
   await pre021();
   assert(/ob1_test_editor=X\//.test(await acl(UT_7)), "default privileges give a re-created 7-argument form EXECUTE for the role");
   await db.exec(`REVOKE ALL ON FUNCTION ${UT_7} FROM ob1_test_editor`);
-  await restoreShipped("update_thought");
+  await restoreShipped("update_thought", "upsert_thought");
   const stripped = await acl(UT);
   assert(!/ob1_test_editor/.test(stripped) && hasPublic(stripped), `a role the defaults grant to but the old form had revoked is revoked on the new form too (${stripped})`);
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM ob1_test_editor`);
   await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM PUBLIC`);
   await reapply("018");
-  await restoreShipped("update_thought");
+  // Both names: restoring update_thought re-runs 021 whole, and 021's CREATE
+  // OR REPLACE puts its 3-argument upsert_thought back over 022's.
+  await restoreShipped("update_thought", "upsert_thought");
   const kept = await acl(UT);
-  assert(!hasPublic(kept) && (await count("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
+  assert(!hasPublic(kept) && (await functionsNamed("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_editor`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 23. Migration 022 — the windows stay while the label vouches for them ────
+//
+// The 3-argument upsert_thought replaced the parent's vector and label on a
+// re-capture and left 007's chunk rows as they were: a thought captured with
+// windows and re-captured at another model through a path that made none
+// (the Edge server, a window that grew) was found by windows of a vector it no
+// longer had — and since 021 under a label that said it was at the new model.
+// The same re-capture at the SAME model leaves windows that are still that
+// model's vectors of this text, and 022 keeps those. The chunk row is planted
+// directly, as [8b] does: PGlite cannot run the 4-argument insert.
+
+console.log("\n[23] Migration 022: a re-capture's windows stay while the label vouches for them, and go when it does not");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const UP3 = "upsert_thought(text, jsonb, vector)";
+  const bodyOf = async (sig: string) => (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].src;
+  const capture = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r.id;
+  const rowOf = async (id: string) =>
+    (await db.query<{ model: string | null; axis: number | null; metadata: Record<string, unknown>; windows: number }>(
+      `SELECT embedding_model AS model, array_position(embedding::real[], 1::real) - 1 AS axis, metadata,
+              (SELECT count(*)::int FROM thought_chunks c WHERE c.thought_id = t.id) AS windows
+       FROM thoughts t WHERE id = $1`, [id])).rows[0];
+  const plant = (id: string) =>
+    db.query(`INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, 'window', $2::vector)`, [id, unit(1)]);
+
+  const id = await capture("a long capture", { metadata: {}, embedding_model: "model-a" }, unit(0));
+  await plant(id);
+  let row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-a" && row.axis === 0, `a thought at model-a with one window (${row.windows} window, ${row.model})`);
+
+  await capture("a long capture", { metadata: {}, embedding_model: "model-a" }, unit(1));
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-a" && row.axis === 1,
+         `a re-capture with a vector and no chunks at the SAME model moves the vector and keeps the windows — still that model's vectors of this text (${row.windows} window, axis ${row.axis})`);
+
+  await capture("a long capture", { metadata: {}, embedding_model: "model-b" }, unit(2));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === "model-b" && row.axis === 2,
+         `…at ANOTHER model it removes the windows as it moves the vector and label (${row.windows} windows, ${row.model}, axis ${row.axis})`);
+
+  await plant(id);
+  await capture("a long capture", { metadata: {} }, unit(3));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === null && row.axis === 3, `…and one naming no model removes them too: an unknown model vouches for nothing (${row.windows} windows, ${row.model})`);
+  await plant(id);
+  await capture("a long capture", { metadata: {}, embedding_model: "model-c" }, unit(4));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === "model-c", `…as does one arriving over a row whose label is unknown (${row.windows} windows)`);
+
+  await plant(id);
+  await capture("a long capture", { metadata: { k: 1 }, embedding_model: "model-z" }, null);
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-c" && row.axis === 4 && row.metadata.k === 1,
+         `a re-capture with NO vector keeps the windows with the vector and its label, whatever label it names (${row.windows} window, ${row.model})`);
+  await db.query(`SELECT upsert_thought('a long capture', '{"metadata":{"k":2}}'::jsonb)`);
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.metadata.k === 2, "…as does a metadata-only 2-argument re-capture");
+
+  const fresh = await capture("a fresh capture", { metadata: {} }, unit(5));
+  row = await rowOf(fresh);
+  assert(row.windows === 0 && row.axis === 5, "a first capture with a vector has nothing to remove and stores as before");
+
+  // The body: 021's, plus the locked read and the block. The rule itself is
+  // proved by the cases above; asserted here are the sentinel a successor must
+  // keep and the one fact behaviour cannot show — that the label is read from
+  // the row LOCKED, so the INSERT lands on the row whose label was read.
+  const up = await bodyOf(UP3);
+  assert(/ob1:vector-replaces-chunks/.test(up), "the 3-argument body carries the ob1:vector-replaces-chunks sentinel");
+  assert(/content_fingerprint = v_fingerprint FOR NO KEY UPDATE/.test(up) && !/WITH before AS/.test(up), "…and reads the row's label FOR NO KEY UPDATE — locked against update_thought, not against the foreign keys' KEY SHARE — not at the statement's snapshot");
+  assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up) && /ELSE EXCLUDED\.embedding_model END/.test(up),
+         "…carrying 005's guard, 008's actor and 021's label in the INSERT and the ON CONFLICT clause");
+  const up4 = await bodyOf("upsert_thought(text, jsonb, vector, jsonb)");
+  assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
+         "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
+  assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
+  assert(lastDefinerOf("upsert_thought").startsWith("022"), `022 is the last definer of upsert_thought (${lastDefinerOf("upsert_thought")})`);
+
+  // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
+  // defect with it — which is what preflight's `atomic capture` reads the
+  // sentinel for.
+  await reapply("021");
+  assert(!/ob1:vector-replaces-chunks/.test(await bodyOf(UP3)), "021 re-applied over 022 puts 021's body back — the sentinel is gone");
+  // The window the vectorless re-captures kept is still there.
+  await capture("a long capture", { metadata: {}, embedding_model: "model-d" }, unit(6));
+  row = await rowOf(id);
+  assert(row.windows === 1 && row.model === "model-d" && row.axis === 6, `…and a re-capture at another model leaves the windows under the moved vector again (${row.windows} window at model-d)`);
+  await restoreShipped("upsert_thought");
+  assert(/ob1:vector-replaces-chunks/.test(await bodyOf(UP3)), "022 re-applied: the sentinel is back");
+  await capture("a long capture", { metadata: {}, embedding_model: "model-e" }, unit(7));
+  row = await rowOf(id);
+  assert(row.windows === 0 && row.model === "model-e", `…and the next re-capture at another model removes them (${row.windows} windows)`);
+  assert((await functionsNamed("upsert_thought")) === 3, "…with three overloads throughout");
   await db.exec(`DELETE FROM thoughts`);
 }
 

@@ -461,6 +461,11 @@ if (configFailed) {
           add("edit signature", "skip", `could not probe update_thought over PostgREST (${(e as Error).message}); ${CATALOG_HINT}`);
         }
       }
+      // The 3-argument upsert_thought's body (022's sentinel) and the role's
+      // DELETE on thought_chunks are catalog facts; over PostgREST neither is
+      // reachable, and a check that prints nothing looks like one that passed.
+      add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's is read from the catalog; ${CATALOG_HINT}`);
+      add("chunk delete privilege", "skip", `not checked over PostgREST — whether the role can remove a thought's windows is read from the catalog; ${CATALOG_HINT}`);
     }
 
     // The atomic capture path needs migration 004. Its absence is not fatal — the
@@ -470,15 +475,64 @@ if (configFailed) {
       try {
         const { SQL } = await import("bun");
         const sql = new SQL({ url: env.DATABASE_URL, max: 1 });
-        const rows = await sql`
-          SELECT count(*)::int AS c FROM pg_proc p
+        // One schema-qualified read of every form, arity and body; no name or
+        // type resolved through the session's search_path (to_regprocedure
+        // returns NULL where `vector` is out of the path on PG16, and raises
+        // on PG15 — into the catch below, taking every later check with it).
+        const forms = (await sql`
+          SELECT p.pronargs::int AS n, p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`;
+          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
-        if (Number(rows[0].c) >= 2) add("atomic capture", "ok", "both upsert_thought overloads present");
-        else add("atomic capture", "fail", `${rows[0].c} upsert_thought overload(s) — the 3-arg form is missing`,
-                 "Apply db/migrations/004_upsert_thought_with_embedding.sql.");
+        const three = forms.find((f) => f.n === 3);
+        const two = forms.find((f) => f.n === 2);
+        // The 3-arg body's semantics are declared by a sentinel in the body
+        // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
+        // windows stay while the label vouches for them and go otherwise. 021
+        // re-applied by hand puts 021's body back — CREATE OR REPLACE, no
+        // error — and a chunkless re-capture at another model then leaves the
+        // previous vector's windows under the new one, found by search and
+        // named by nothing.
+        if (!three) {
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
+              "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs).");
+        } else if (!two) {
+          // This server never calls the 2-argument form; PostgREST callers by
+          // name and the two-step fallback do. A warning, and the remedy says
+          // "then 022": 005 redefines the 3-argument form too, with its body.
+          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do`,
+              "Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then 022 again — 005 redefines the 3-argument form as well, with a body from before 008, 021 and 022.");
+        } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
+          add("atomic capture", "warn",
+              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
+              "Apply db/migrations/022_capture_replaces_chunks.sql.");
+        } else {
+          add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them");
+        }
+
+        // A fact of its own, with its own remedy: every writer that replaces a
+        // thought's windows — 007's 4-argument form, update_thought, and since
+        // 022 the 3-argument form on a re-capture the label does not vouch for
+        // — runs as its caller, so the connection's role needs DELETE on
+        // thought_chunks whatever body is installed. Schema-qualified: the
+        // text form of has_table_privilege resolves through search_path and
+        // RAISES for a relation it cannot see, and a raise here would land in
+        // the catch below and take every later check with it.
+        const [chunks] = await sql`
+          SELECT t.present,
+                 CASE WHEN t.present THEN has_table_privilege('public.thought_chunks', 'DELETE') END AS can,
+                 current_user::text AS role, quote_ident(current_user::text) AS ident
+          FROM (SELECT to_regclass('public.thought_chunks') IS NOT NULL AS present) t`;
+        if (!chunks.present) {
+          add("chunk delete privilege", "skip", "not checked — thought_chunks does not exist (before migration 007)");
+        } else if (!chunks.can) {
+          add("chunk delete privilege", "fail",
+              `this connection's role (${chunks.role}) cannot DELETE from thought_chunks — the chunk writers run as their caller, so every edit with content, every capture with windows, and since 022 every re-capture with a vector the row's label does not vouch for would fail`,
+              `GRANT DELETE ON thought_chunks TO ${chunks.ident};`);
+        } else {
+          add("chunk delete privilege", "ok", `${chunks.role} can DELETE from thought_chunks (INSERT on it, and on thought_audit, are not checked here)`);
+        }
 
         /**
          * The audit trail, treated as fatal for the same reason migration 004 is:

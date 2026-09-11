@@ -281,6 +281,25 @@ console.log("\n[6] Dedup and merge behave as the tools expect");
 
   const merged = await store.getThought(again.id);
   assert(merged?.metadata.kind === "a" && merged?.metadata.extra === 1, "metadata merged rather than replaced");
+
+  // 022: a thought captured with windows, re-captured through this store with
+  // a vector and no chunks — the routing every chunkless capture takes —
+  // keeps them while the label vouches for them, and loses them otherwise.
+  const admin = new SQL({ url: URL_, max: 1 });
+  const windowed = await store.captureThought({
+    content: "a long thought, later short",
+    payload: { metadata: {} },
+    embedding: unit(1),
+    embeddingModel: "unit-test-model",
+    chunks: [{ content: "window one", embedding: unit(1) }, { content: "window two", embedding: unit(2) }],
+  });
+  const windows = async () => Number((await admin`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${windowed.id}`)[0].c);
+  assert((await windows()) === 2, "a capture with two windows writes both");
+  await store.captureThought({ content: "a long thought, later short", payload: { metadata: {} }, embedding: unit(3), embeddingModel: "unit-test-model" });
+  assert((await windows()) === 2, "a re-capture with a vector and no chunks at the same model — the 3-argument routing — keeps the windows (migration 022)");
+  await store.captureThought({ content: "a long thought, later short", payload: { metadata: {} }, embedding: unit(3), embeddingModel: "unit-test-model-2" });
+  assert((await windows()) === 0, "…and at another model leaves none behind");
+  await admin.close();
 }
 
 console.log("\n[7] Missing and malformed ids");
