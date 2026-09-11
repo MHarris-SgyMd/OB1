@@ -10,6 +10,10 @@
 #
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
+#
+# Check 2 (OAuth discovery) is the one a Supabase Edge Function deployment cannot
+# pass: the gateway answers that path before the function does, and the failure
+# is real — claude.ai will not connect to it either (FORK.md change 42).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -31,6 +35,11 @@ else
   echo "usage: $0 <base-url> <access-key>   (or create deploy/.env)" >&2
   exit 2
 fi
+
+# No trailing slash: "$BASE/" must be one slash. "//.well-known/…" misses the
+# discovery route and falls through to the catch-all, which authenticates it and
+# hangs on a stream (SMD-1259) — a false FAIL on check 2 after a 20 s wait.
+BASE="${BASE%/}"
 
 [ -n "${KEY:-}" ] || { echo "No access key." >&2; exit 2; }
 
@@ -57,16 +66,25 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 [ "$code" = "200" ] && ok "unauthenticated request → HTTP 200 with a JSON-RPC envelope" \
                     || bad "unauthenticated request → HTTP $code (expected 200)"
 
-# 2. OAuth discovery must be a 404. claude.ai fetches this path before it opens a
-#    custom connector; anything but 404 sends it into an OAuth registration it
-#    cannot complete (upstream #340). Checked with the key in the URL — the
-#    connector's own shape — so a deployment that authenticates the path instead
-#    of refusing it is caught. This is the check a Supabase deployment cannot
-#    pass, because the gateway answers the path before the function does.
-code=$(curl -sG --max-time 20 -o /dev/null -w '%{http_code}' --data-urlencode "key=$KEY" \
-  "$BASE/.well-known/oauth-protected-resource")
-[ "$code" = "404" ] && ok "OAuth discovery path → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
-                    || bad "OAuth discovery path → HTTP $code (expected 404; claude.ai will attempt OAuth registration and fail)"
+# 2. OAuth discovery must be a 404. Before it opens a custom connector, claude.ai
+#    fetches the protected-resource metadata (RFC 9728) — at the ORIGIN root, with
+#    the server's path as a suffix, and with no key. A 404 means "no OAuth here"
+#    and it proceeds on the key; anything else sends it into an OAuth registration
+#    it cannot complete (upstream #340; FORK.md change 42). So the probe goes to
+#    the origin, not to $BASE, carries no key, and is exactly the request the
+#    connector makes. A server behind a path prefix needs its proxy to route
+#    /.well-known/ to it (or 404 it) for this to pass.
+origin=$(printf '%s' "$BASE" | sed -E 's#^(https?://[^/]+).*#\1#')
+suffix="${BASE#"$origin"}"
+disc="$origin/.well-known/oauth-protected-resource"
+codes=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$disc")
+if [ -n "$suffix" ]; then
+  codes="$codes,$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "$disc$suffix")"
+fi
+case "$codes" in
+  404|404,404) ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" ;;
+  *) bad "OAuth discovery at the origin root → HTTP $codes (expected 404: claude.ai will attempt OAuth registration and fail; a Supabase gateway answers this path before the function and cannot be fixed there)" ;;
+esac
 
 # 3. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
