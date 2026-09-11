@@ -491,6 +491,11 @@ function buildServer(principal: Principal): McpServer {
             if (Array.isArray(m.action_items) && m.action_items.length)
               parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
             parts.push(`\n${t.content}`);
+            // The id last, so update_thought and delete_thought can be aimed at a
+            // hit the caller never captured. Without it those two tools reach only
+            // what capture_thought just returned; a trailing line keeps the prose
+            // shape the description promises. SMD-1248.
+            parts.push(`id: ${t.id}`);
             return parts.join("\n");
           }
         );
@@ -676,12 +681,14 @@ function buildServer(principal: Principal): McpServer {
 
         const results = data.map(
           (
-            t: { content: string; metadata: Record<string, unknown>; created_at: string },
+            t: { id: string; content: string; metadata: Record<string, unknown>; created_at: string },
             i: number
           ) => {
             const m = t.metadata || {};
             const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+            // A trailing id line, as search_thoughts renders — it is what
+            // update_thought and delete_thought take. SMD-1248.
+            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   id: ${t.id}`;
           }
         );
 
@@ -938,7 +945,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Update Thought",
       description:
-        "Correct or amend an existing thought by id. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
+        "Correct or amend an existing thought by id. The id is the `id:` line that `capture_thought`, `search_thoughts`, and `list_thoughts` print, so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -948,7 +955,7 @@ function buildServer(principal: Principal): McpServer {
         idempotentHint: true,
       },
       inputSchema: {
-        id: z.string().describe("UUID of the thought to update"),
+        id: z.string().describe("UUID of the thought to update, as printed on the `id:` line by capture_thought, search_thoughts, or list_thoughts"),
         content: z.string().min(1).optional()
           .describe("Replacement text. Omit to leave the text, embedding and chunks untouched"),
         metadata_patch: z.record(z.string(), z.unknown()).optional()
@@ -1006,7 +1013,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Delete Thought",
       description:
-        "Permanently remove a thought by id, along with its search chunks. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Use `list_thoughts` or `search` first to confirm the id.",
+        "Permanently remove a thought by id, along with its search chunks. The id is the `id:` line that `capture_thought`, `search_thoughts`, and `list_thoughts` print — read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -1014,7 +1021,7 @@ function buildServer(principal: Principal): McpServer {
         idempotentHint: true,
       },
       inputSchema: {
-        id: z.string().describe("UUID of the thought to delete"),
+        id: z.string().describe("UUID of the thought to delete, as printed on the `id:` line by capture_thought, search_thoughts, or list_thoughts"),
       },
     },
     async ({ id }) => {

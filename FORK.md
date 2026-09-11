@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Forty-three numbered changes on top of the pin. Seven fix defects found in an
+Forty-four numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–43 are the numbered `###` sections** further down, which is
+sections. Changes **18–44 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4430,6 +4430,49 @@ for the missed-site failure mode. `test-schema.ts` (PGlite) does not cover this:
 PGlite loads pgvector onto its own path and cannot reproduce the off-path shape.
 
 Upstream status: #319 open; the fix cannot land in their core schema. **Unfiled.**
+
+### 44. The read tools print the thought id, so `update_thought` and `delete_thought` can reach what a search found (SMD-1248)
+
+`search_thoughts` and `list_thoughts` rendered human-readable prose with no id
+in it — `search_thoughts` a `--- Result N (x% match) ---` block, `list_thoughts`
+a `N. [date] (type - tags)` line and the content. The id was on every row (the
+store selects it, and the ChatGPT-compat `search` tool returns `{id, title,
+url}`), but the two tools an agent actually reaches for to find a thought never
+emitted it. Upstream files this as
+[#457](https://github.com/NateBJones-Projects/OB1/issues/457), where it is only a
+citation annoyance because upstream has no edit or delete. **Here it disables two
+of our own tools:** we added `update_thought` and `delete_thought` in migration
+009 and both take an id, so a thought found by search could not be edited or
+deleted at all — the caller had to fall back to the compatibility tool meant for
+ChatGPT citations. `capture_thought` was already given its id back for exactly
+this reason; the comment there says so in as many words. The reasoning was
+applied to the write path and not the read path.
+
+**A trailing `id: <uuid>` line per hit**, in both renderings — the smaller of the
+two shapes the ticket weighed. It keeps the prose contract the tool descriptions
+promise (JSON, as `search` uses, would rewrite the whole output and the prose
+assertions in `test-e2e-sql.ts`), and costs ~40 characters against a budget
+`search_thoughts` already manages with its `limit` and truncation note. The id
+sits last in each hit — after the content block in `search_thoughts`, on its own
+indented line under the item in `list_thoughts`. `list_thoughts` did not carry
+the id at all (`listThoughts` selected `content, metadata, created_at` in both
+stores and `ThoughtListItem` had no `id`), so the column was added to the two
+`SELECT`s and the shared type; `search_thoughts` already had `t.id` from the
+hybrid match. `update_thought` and `delete_thought` descriptions (and their `id`
+argument) now say where the id comes from — before this they described an id with
+no reachable source.
+
+**Verified.** `test-e2e-sql.ts` gains a walk that could not be written before:
+capture a thought, find it through `search_thoughts`, `update_thought` aimed at
+the id the search printed, then a search that shows the edit; then `list_thoughts`
+→ `delete_thought` for the other read tool, asserting the id is the same one
+search returned. The existing prose assertions — zero-hit, absent-literal,
+truncation, the compat pair — all still hold (69 assertions pass). Store
+conformance (`test-store-sql`, 62) and the server unit suite (71) stay green;
+`tsc --noEmit` is clean.
+
+Upstream status: #457 open; a citation-only issue there, a disabled-tool issue
+here. **Unfiled.**
 
 ## Detached from the fork network
 
