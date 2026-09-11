@@ -57,12 +57,23 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 [ "$code" = "200" ] && ok "unauthenticated request → HTTP 200 with a JSON-RPC envelope" \
                     || bad "unauthenticated request → HTTP $code (expected 200)"
 
-# 2. Protocol handshake.
+# 2. OAuth discovery must be a 404. claude.ai fetches this path before it opens a
+#    custom connector; anything but 404 sends it into an OAuth registration it
+#    cannot complete (upstream #340). Checked with the key in the URL — the
+#    connector's own shape — so a deployment that authenticates the path instead
+#    of refusing it is caught. This is the check a Supabase deployment cannot
+#    pass, because the gateway answers the path before the function does.
+code=$(curl -sG --max-time 20 -o /dev/null -w '%{http_code}' --data-urlencode "key=$KEY" \
+  "$BASE/.well-known/oauth-protected-resource")
+[ "$code" = "404" ] && ok "OAuth discovery path → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
+                    || bad "OAuth discovery path → HTTP $code (expected 404; claude.ai will attempt OAuth registration and fail)"
+
+# 3. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   | unwrap | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("protocolVersion",""))' 2>/dev/null)
 [ -n "$pv" ] && ok "initialize (protocol $pv)" || bad "initialize returned no protocolVersion"
 
-# 3. The full documented tool surface.
+# 4. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
 # Nine for a write key. update_thought and delete_thought are scope-gated, so a
@@ -70,7 +81,7 @@ tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 expected="capture_thought,delete_thought,fetch,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
 [ "$tools" = "$expected" ] && ok "all nine tools exposed" || bad "tool surface is '$tools'"
 
-# 4. A read that actually reaches the database. This is the check that catches a
+# 5. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
 stats=$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' \
   | unwrap | python3 -c 'import sys,json;d=json.load(sys.stdin);r=d.get("result",{});print(("ERROR: " if r.get("isError") else "")+r.get("content",[{}])[0].get("text",""))' 2>/dev/null | head -1)
@@ -80,12 +91,12 @@ case "$stats" in
   *)                   bad "thought_stats returned nothing usable" ;;
 esac
 
-# 5. A filtered read, which exercises a different query path.
+# 6. A filtered read, which exercises a different query path.
 listed=$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' \
   | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR" if r.get("isError") else "OK"))' 2>/dev/null)
 [ "$listed" = "OK" ] && ok "list_thoughts served" || bad "list_thoughts errored"
 
-# 6. Keyword search, which is the only read path that touches migration 012 and
+# 7. Keyword search, which is the only read path that touches migration 012 and
 #    the pg_trgm extension. It needs no embedding provider — the smoke stack has
 #    no real OPENROUTER_API_KEY — so unlike search_thoughts it can run here. A
 #    needle that cannot plausibly be in a fresh brain: zero hits is the pass, an

@@ -184,6 +184,57 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);
 }
 
+console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #340)");
+{
+  // claude.ai fetches the first of these before opening a custom connector. A
+  // 404 means "no OAuth here" and it proceeds on the key; anything else sends
+  // it into a Dynamic Client Registration it cannot complete. The second is the
+  // exact path the upstream reporter saw Supabase's gateway answer with 401.
+  const paths = [
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/functions/v1/open-brain-mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+  ];
+  for (const p of paths) {
+    const r = await fetch(`${BASE}${p}`);
+    assert(r.status === 404, `GET ${p} → 404`);
+  }
+
+  // The answer does not depend on the caller. The route runs before
+  // authenticate(), so no key, a wrong key and the right key all get the same
+  // 404 — and a revoked key, which the catch-all would send to the agent
+  // registry, never reaches it.
+  const p = "/.well-known/oauth-protected-resource";
+  const variants: [string, RequestInit][] = [
+    ["no key", {}],
+    ["wrong key", { headers: { "x-brain-key": "wrong" } }],
+    ["right key in header", { headers: { "x-brain-key": KEY } }],
+  ];
+  for (const [label, init] of variants) {
+    const r = await fetch(`${BASE}${p}`, init);
+    assert(r.status === 404, `${label} → 404`);
+    const text = await r.text();
+    assert(!text.includes('"jsonrpc"'), `${label}: body is not a JSON-RPC envelope`);
+  }
+
+  // The connector's own shape: the key in the URL. Before this route, that
+  // authenticated and handed the GET to the MCP transport.
+  const viaUrl = await fetch(`${BASE}${p}?key=${KEY}`);
+  assert(viaUrl.status === 404, "right key in ?key= (the connector shape) → 404");
+  assert(viaUrl.headers.get("access-control-allow-origin") === "*", "CORS present on the 404");
+
+  // Method-independent: it is not an MCP endpoint under any verb, and the
+  // preflight that a browser-hosted client sends first is still answered.
+  const post = await fetch(`${BASE}${p}`, { method: "POST", headers: AUTH, body: INIT });
+  assert(post.status === 404, "POST to the discovery path → 404 too");
+  const pre = await fetch(`${BASE}${p}`, { method: "OPTIONS" });
+  assert(pre.status === 200, "OPTIONS on the discovery path still preflights → 200");
+
+  // And the route is the only thing that changed: the MCP endpoint at / still
+  // authenticates the same requests the same way — [4] through [10] above.
+}
+
 server.stop();
 
 report();

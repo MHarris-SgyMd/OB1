@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Forty-one numbered changes on top of the pin. Seven fix defects found in an
+Forty-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–41 are the numbered `###` sections** further down, which is
+sections. Changes **18–42 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4262,6 +4262,65 @@ file is applied and hashed, so its disclaimers deferring to SMD-1042 stay as
 written; `db/README.md` is what moves. The function carries no sentinel — it is
 new and has no successor; SMD-1227 tables the sentinels.
 
+### 42. OAuth discovery is a 404 — `/.well-known/*` is answered before the auth catch-all, so the claude.ai connector proceeds on the key (SMD-1246)
+
+Before it opens a custom connector, claude.ai fetches
+`/.well-known/oauth-protected-resource` (RFC 9728). A **404** there means "no
+OAuth here, treat the resource as public", and the connector proceeds on the key
+it was given. A **401** means "protected", and the client falls back to OAuth 2.1
+Dynamic Client Registration (RFC 7591) — which, against a server with no OAuth,
+fails with *"Couldn't register with Open Brain's sign-in service."* Upstream
+[#340](https://github.com/NateBJones-Projects/OB1/issues/340) (2026-09-05)
+diagnosed this on the Supabase path: the API gateway special-cases that one path
+and answers 401 before the Edge Function sees the request, so nothing inside
+`open-brain-mcp` can fix it, and the reporter's verified workaround is a
+Cloudflare Worker in front that returns 404 for the prefix.
+
+`server-portable` had the same defect by a different door. `app.all("*")` caught
+every path, so the discovery GET went through `authenticate()`. With no key it
+got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an MCP
+request and wrong for this one. With `?key=` in the URL, which is the connector's
+own shape, it authenticated, cost an agent-registry resolve, and was handed to
+`StreamableHTTPTransport`. Neither is 404. Nothing exercised the path: no test
+named `.well-known`, and `deploy/smoke.sh` only ever POSTed to the endpoint.
+Local Claude Code over `x-brain-key` never asks, which is why it stayed
+invisible in development.
+
+**The change is one route.** `app.all("/.well-known/*", …)` returns `Not Found`
+404 with the CORS headers, registered after the `OPTIONS` preflight handler and
+before the catch-all, so a browser-hosted client that preflights the GET still
+gets its 200. It runs before `authenticate()` and before the agent resolve: the
+answer is a fact about the server, not about the caller, and a revoked key gets
+the same 404 as a good one. Method-independent, because the path is not an MCP
+endpoint under any verb.
+
+**Verified.** `test-server.ts` [11], fourteen assertions against the real server:
+four discovery paths including the exact one upstream saw Supabase answer; no
+key, a wrong key, the right key in the header and the right key in `?key=`; the
+body is never a JSON-RPC envelope; CORS present; POST is 404 too; OPTIONS still
+preflights 200; [4]–[10] unchanged. `deploy/smoke.sh` check 2 asserts the 404
+with the key URL-encoded into the query, so every deployment is checked in the
+connector's own shape — it is also the one check a Supabase deployment cannot
+pass. `tsc --noEmit` is clean and the Workers bundle still builds
+(`wrangler deploy --dry-run`, 272 KiB gzipped).
+
+**Not verified: a live connector.** The only check that closes the ticket is a
+real claude.ai custom connector completing the handshake against a deployed fork
+server. That has not been run. It is also the first live exercise the Workers
+target would get; the known-issues entry below still stands.
+
+**Not done here.** Serving real RFC 9728 protected-resource metadata, or OAuth
+itself — #216 and PR #238 remain the real fix for the key riding in the URL; this
+change says only "there is no OAuth here", which is what the client needs to hear
+to proceed on a key. Refusing other non-MCP paths: a probe of `/` still costs an
+agent-registry resolve, but the MCP endpoint is mounted at every path by design
+(the Supabase form is `/functions/v1/open-brain-mcp`, the compose form is `/`), so
+there is no "other path" to 404 without first choosing a mount point, which is a
+different decision. `SETUP.md` gains no per-client connection notes yet; the
+ticket names them as a follow-on once a connector has been seen to work.
+
+Upstream status: #340 open; the fix cannot land in their server. **Unfiled.**
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -4414,8 +4473,11 @@ Deliberate. Recorded so nobody assumes they were missed.
   not even registered for it. Upstream
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216) and
   [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) remain
-  the real fix. **Still treat a connection URL as a credential**, and give
-  URL-embedded clients read scope.
+  the real fix. Change 42 is adjacent, not a substitute: it makes the claude.ai
+  connector *reach* the key path at all (upstream
+  [#340](https://github.com/NateBJones-Projects/OB1/issues/340)) by answering
+  OAuth discovery with 404; it does not change what the key is. **Still treat a
+  connection URL as a credential**, and give URL-embedded clients read scope.
 - **The upstream PR gate can be bypassed with a title.** A PR titled `[docs] …`
   (or touching no contribution directory) exits before the credential scan runs.
   Only matters if we start accepting PRs into this fork.

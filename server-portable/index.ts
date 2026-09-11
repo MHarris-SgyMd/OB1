@@ -1153,6 +1153,32 @@ app.options("*", (c) => {
   return c.text("ok", 200, corsHeaders);
 });
 
+// OAuth discovery must be a 404, not an auth challenge.
+//
+// Before it opens a custom connector, claude.ai fetches
+// /.well-known/oauth-protected-resource (RFC 9728). A 404 there means "no OAuth
+// here, treat the resource as public", and the connector proceeds on the key it
+// was given. Anything else the client reads as "protected" — a 401 above all,
+// but equally our 200 + JSON-RPC envelope, or the GET falling through to the
+// MCP transport — and it falls back to OAuth Dynamic Client Registration
+// (RFC 7591), which fails with "Couldn't register with Open Brain's sign-in
+// service". Local Claude Code over x-brain-key never asks, which is why the
+// catch-all answering this path stayed invisible in development.
+//
+// Upstream cannot fix this: on Supabase the API gateway answers that one path
+// with 401 before the Edge Function ever sees it, and the reporter's verified
+// workaround is a Cloudflare Worker in front that 404s the prefix
+// (https://github.com/NateBJones-Projects/OB1/issues/340). We own the route
+// table, so the Worker is one line here. No key check and no agent resolve: the
+// answer is a fact about the server, not about the caller, and a revoked key
+// must get the same 404 as a good one.
+//
+// Registered after the CORS preflight and before the catch-all, so a browser-
+// hosted client that preflights the discovery GET still gets its OPTIONS 200.
+// This says "no OAuth"; serving real protected-resource metadata is a different
+// decision and is not made here.
+app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
+
 app.all("*", async (c) => {
   // Accept the access key via header OR URL query parameter. The query form stays
   // because Claude Desktop custom connectors are URL-only; scopes are what limit
