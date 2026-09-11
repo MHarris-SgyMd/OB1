@@ -1774,9 +1774,11 @@ console.log("\n[12] thought_stats_summary() equals the page walk, proves the old
       ('s4', '{"type":"new"}'::jsonb,                                      now() - interval '2 min'),
       ('s5', '{"type":"new","topics":"notarray","people":["Ada"]}'::jsonb, now() - interval '1 min')`);
 
-  // The application walk, exactly as the tool once did it and the PostgREST store
-  // still does — page metadata newest-first and tally, optionally stopping at a
-  // cap. This is the reference the SQL function must reproduce.
+  // The application walk the PostgREST store runs (store-postgrest.ts) — page
+  // metadata newest-first and tally, optionally stopping at a cap, with the same
+  // null-element guard that store and migration 024 both apply. This is the
+  // reference the SQL function must reproduce, and it is faithful to the
+  // PostgREST path too, so [12] covers both stores' aggregation.
   const walk = async (cap = Infinity) => {
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};

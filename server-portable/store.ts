@@ -154,9 +154,12 @@ export type ThoughtMeta = {
 
 /**
  * What thought_stats renders: the corpus total, its date range, and the counts
- * by type, topic and person. `types`/`topics`/`people` are full count maps — the
- * tool does its own sort-and-top-10, so a store may return more than ten and the
- * output is unchanged.
+ * by type, topic and person. The tool sorts each map and renders its own top 10,
+ * so a store need only return at least that many, in any order — the maps are not
+ * a contract for the full distribution. They differ by backend and deliberately:
+ * the SQL store returns every `type` but only the top 10 `topics`/`people`
+ * (migration 024 caps them in SQL); the PostgREST walk returns every key of all
+ * three. Both render identically because the tool takes the top 10 regardless.
  *
  * `aggregated` is how many rows the breakdowns actually cover. On the SQL store
  * it equals `total`: one aggregate over the whole table (migration 024), never

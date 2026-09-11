@@ -187,8 +187,11 @@ export class PostgrestStore implements ThoughtStore {
     // stop at STATS_MAX_ROWS so a very large brain cannot exhaust the runtime's
     // time budget. When the cap stops the walk short, `aggregated < total` and
     // the tool says the breakdowns are partial rather than under-reporting them
-    // silently. (This is the pre-SMD-1249 tool logic, unchanged, moved into the
-    // store that still needs it.)
+    // silently. (This is the pre-SMD-1249 tool logic, moved into the store that
+    // still needs it, with one addition: a JSON null inside a topics/people
+    // array is skipped, so this store and migration 024's function — which drops
+    // it with WHERE ... IS NOT NULL — render the same corpus identically. Without
+    // the guard the walk would coerce null to a literal "null" key.)
     const total = await this.countThoughts();
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};
@@ -206,9 +209,9 @@ export class PostgrestStore implements ThoughtStore {
         const m = (r.metadata || {}) as Record<string, unknown>;
         if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
         if (Array.isArray(m.topics))
-          for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
+          for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
         if (Array.isArray(m.people))
-          for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+          for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
       }
 
       // Ordered newest-first, so the first row of the first page is the newest

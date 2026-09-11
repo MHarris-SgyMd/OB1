@@ -90,11 +90,13 @@ AS $$
   type_counts AS (
     SELECT coalesce(jsonb_object_agg(t, cnt), '{}'::jsonb) AS types
     FROM (
+      -- No LIMIT here (every distinct type is returned, unlike the top-10
+      -- topic/people arms) and no ORDER BY: jsonb_object_agg does not preserve
+      -- order and the tool re-sorts, so ordering the whole set would be dead work.
       SELECT metadata->>'type' AS t, count(*) AS cnt
       FROM thoughts
       WHERE coalesce(metadata->>'type', '') <> ''
       GROUP BY metadata->>'type'
-      ORDER BY count(*) DESC
     ) s
   ),
   -- topics and people are string arrays. Unnest ONLY when the value is actually

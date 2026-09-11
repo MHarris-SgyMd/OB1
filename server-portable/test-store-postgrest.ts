@@ -325,11 +325,20 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
     payload: { metadata: { type: "statmark", topics: ["stattopic"], people: ["StatPerson"] } },
     embedding: vec(7),
   });
+  // A JSON null inside a topics array: the walk must drop it, exactly as
+  // migration 024's function does, so the two stores render the same corpus
+  // identically rather than this store emitting a spurious "null" bucket.
+  await store.captureThought({
+    content: "a thought whose topics array carries a null element",
+    payload: { metadata: { type: "statmark", topics: ["stattopic", null] } },
+    embedding: vec(7),
+  });
   const s = await store.statsSummary();
   assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
   assert(s.aggregated === s.total, "a corpus under the cap is fully covered — the tool prints no truncation note");
-  assert(s.types["statmark"] === 1, `the unique type is tallied once (${JSON.stringify(s.types)})`);
-  assert(s.topics["stattopic"] === 1, "the unique topic unnests from the array once");
+  assert(s.types["statmark"] === 2, `the unique type is tallied across both rows (${JSON.stringify(s.types)})`);
+  assert(s.topics["stattopic"] === 2, "the unique topic unnests from both arrays");
+  assert(!("null" in s.topics), "a null array element is dropped, not counted as a \"null\" topic");
   assert(s.people["StatPerson"] === 1, "the unique person unnests from the array once");
   assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range spans the corpus");
 }
