@@ -501,12 +501,14 @@ if (configFailed) {
         // 019, 020 for the search functions; 023 for the fingerprint backfill).
         // A role without SELECT on the ledger, or no ledger, reads as none.
         let ledger = new Set<string>();
+        let ledgerRead = false;
         if (Number(applied[0].c) > 0) {
           try {
             const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%' OR name LIKE '020\\_%' OR name LIKE '023\\_%'`;
             ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
+            ledgerRead = true;
           } catch {
-            /* no SELECT on the ledger for this role */
+            /* no SELECT on the ledger for this role: a remedy that depends on it says so */
           }
         }
         const three = forms.find((f) => f.n === 3);
@@ -590,13 +592,13 @@ if (configFailed) {
           } else if (!t.hash_fn) {
             add("fingerprint backfill", "skip", "not checked — content_fingerprint_of does not exist (before migration 016)");
           } else {
-            // A NULL row has no index (003's is partial the other way), so any
-            // question about them is a pass over the heap — as `schema`'s row
-            // count is — and the hash behind "pending" is 17 µs a row. Both
-            // are bounded to the first 10,001 NULL rows, so a start costs the
-            // same on a brain with a million twins as on one with ten; past
-            // the bound the ok says how far it looked. The number is for the
-            // message only.
+            // Since 023 the rows without a key have their own partial index
+            // (ob1_fp_backfill_idx), so this is an index walk; before it, a
+            // pass over the heap, as `schema`'s row count is. The hash behind
+            // "pending" is 17 µs a row, so both are bounded to 10,001 NULL
+            // rows — a start costs the same on a brain with a million twins as
+            // on one with ten — and past the bound the ok says what it did not
+            // read. The number is for the message only.
             const [{ nulls: nullsRaw, pending }] = (await sql`
               WITH b AS (SELECT content FROM public.thoughts WHERE content_fingerprint IS NULL LIMIT 10001)
               SELECT (SELECT count(*)::int FROM b) AS nulls,
@@ -612,12 +614,14 @@ if (configFailed) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const ledgered = ledger.has("023");
+              const byHand = "re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand, substituting NULL for {{BACKFILL_LIMIT}} — the migrator will skip it as applied.";
               add("fingerprint backfill", "warn",
                   `${nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
-                  ledgered
-                    ? "The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand — the migrator will skip it as applied."
-                    : "Apply db/migrations/023_content_fingerprint_backfill.sql.");
+                  ledger.has("023")
+                    ? `The ledger says 023 but backfill_content_fingerprints is absent (adopted with --baseline): ${byHand}`
+                    : ledgerRead || Number(applied[0].c) === 0
+                      ? "Apply db/migrations/023_content_fingerprint_backfill.sql."
+                      : `Apply db/migrations/023_content_fingerprint_backfill.sql — or, if the ledger already records 023 (this role cannot read schema_migrations), ${byHand}`);
             } else if (pending) {
               // Which rows these are cannot be read here: a batched upgrade
               // still running, or a load around upsert_thought since 023.
@@ -625,7 +629,9 @@ if (configFailed) {
                   `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — 023's call has not reached them (a batched upgrade still running, or rows loaded around upsert_thought since): a capture of that text inserts a second row`,
                   `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0, each call its own transaction.`);
             } else {
-              add("fingerprint backfill", "ok", `${nulls} thought(s) without a fingerprint, ${capped ? "the first 10,000 " : ""}each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
+              add("fingerprint backfill", "ok", capped
+                ? "more than 10,000 thought(s) without a fingerprint; of 10,001 sampled, none is waiting — each shares its text with the row that holds it (a twin, or a stale key); the rest were not read, and SELECT backfill_content_fingerprints() settles them if any is (it writes nothing when none is) — reembed.ts --status lists the groups"
+                : `${nulls} thought(s) without a fingerprint, each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
             }
           }
         } catch (e) {

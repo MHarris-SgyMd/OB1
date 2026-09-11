@@ -60,7 +60,9 @@ const MIGRATIONS = join(HERE, "migrations");
 function subst(sql: string, trgm = DEFAULT_TRGM_INDEX): string {
   return substituteMigration(
     sql,
-    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm })
+    // backfillLimit pinned: the shell's OB1_BACKFILL_LIMIT must not change what
+    // this suite applies ([24] asks for a batch by passing it explicitly).
+    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm, backfillLimit: null })
   );
 }
 
@@ -2376,8 +2378,12 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   assert((await nullBatches()) === 1, "023 applied with OB1_BACKFILL_LIMIT=1 writes one batch of one and leaves the other waiting");
   let badLimit = "";
   try { resolveBackfillLimit("10k"); } catch (e) { badLimit = (e as Error).message; }
-  assert(/OB1_BACKFILL_LIMIT must be a whole number/.test(badLimit) && resolveBackfillLimit("") === null && resolveBackfillLimit("25") === 25,
-         "a limit that is not a whole number is refused naming the variable; unset is every row");
+  let bigLimit = "";
+  try { resolveBackfillLimit("3000000000"); } catch (e) { bigLimit = (e as Error).message; }
+  assert(/OB1_BACKFILL_LIMIT must be a whole number/.test(badLimit) && /at most 2147483647/.test(bigLimit) && resolveBackfillLimit("") === null && resolveBackfillLimit("25") === 25,
+         "a limit that is not a whole number, or past int4, is refused naming the variable; unset is every row");
+  const idx = (await db.query<{ d: string }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'ob1_fp_backfill_idx'`)).rows[0]?.d ?? "";
+  assert(/content_fingerprint_of\(content\)/.test(idx) && /WHERE \(content_fingerprint IS NULL\)/.test(idx), `the partial expression index over the rows without a key is built (${idx.slice(0, 80)})`);
   const stampsNow = await stamps();
   await reapply("023");
   assert((await nullBatches()) === 0 && (await stamps()) === stampsNow && (await backfill()) === 0,

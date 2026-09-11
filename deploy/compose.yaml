@@ -80,6 +80,10 @@ services:
       # migrate.ts calls validateEmbeddingConfig, which reads this. Without it the
       # runner and the server could disagree about whether a width is legal.
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
+      # Migration 023's one backfill call: unset is every row waiting; a number
+      # is one batch, for a brain with millions of legacy rows that finishes by
+      # hand (023's header). Same no-fallback rule as above.
+      OB1_BACKFILL_LIMIT: ${OB1_BACKFILL_LIMIT:-}
     # No `bun install`: migrate.ts imports only Bun built-ins and node: modules.
     # The one dependency in db/package.json is pglite, used solely by the tests.
     # This also keeps the mount read-only — `bun install` would need to write

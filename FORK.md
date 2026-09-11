@@ -171,7 +171,7 @@ db/migrations/020_*.sql          # fix 37  (new file — match_thoughts blends r
 evals/eval-recency.ts            # fix 37  (new file — what a weight costs on the corpus, and the window against an exact oracle)
 db/migrations/021_*.sql          # fix 38  (new file — thoughts.embedding_model: a vector carries the model that produced it; both writers carry it)
 db/migrations/022_*.sql          # fix 40  (new file — a re-capture's windows stay while the label vouches for them; the 3-argument upsert_thought redefined)
-db/migrations/023_*.sql          # fix 41  (new file — 003's missing backfill: every legacy singleton, and the oldest of each twin group, takes its fingerprint once)
+db/migrations/023_*.sql          # fix 41  (new file — 003's missing backfill: every legacy singleton, and the oldest of each twin group, takes its fingerprint once; ob1_fp_backfill_idx)
 server-portable/embed.ts         # fix 29  (new file — the capture's embedding path, lifted from index.ts)
 server-portable/test-chunk-context.ts # fix 27 (new file)
 evals/lib.ts                     # fix 20  (new file — shared embedding path)
@@ -4053,8 +4053,9 @@ index — still NULL, still the text that was hashed, the key still free — so 
 batch costs its writers the batch's own writes and never a rescan of every NULL
 row, and a raw edit of content in the window is never given a key for text it
 no longer holds. The file's own call takes `{{BACKFILL_LIMIT}}` — NULL unless
-`OB1_BACKFILL_LIMIT` is set for that one run of the migrator, the channel
-`{{TRGM_INDEX}}` already uses, validated in `config.mjs`.
+`OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation, the
+channel `{{TRGM_INDEX}}` already uses, validated in `config.mjs` and forwarded by
+the compose migrate service.
 
 **One transaction, and the lock is the point.** Once the scan has found rows,
 the function takes `LOCK TABLE thoughts IN EXCLUSIVE MODE`, held to commit — a
@@ -4101,11 +4102,13 @@ gives a brain with millions of legacy rows the batch path without a hand-edited
 file: `OB1_BACKFILL_LIMIT=10000 bun migrate.ts` (one batch, and the ledger row),
 then `SELECT backfill_content_fingerprints(10000)` until it returns 0, each call
 its own transaction — preflight decides "pending" from the rows, not the ledger,
-and warns until the loop is done. Each call rehashes and sorts every NULL row
-still waiting before its LIMIT, so the loop's scanning is the square of the
-corpus over the batch — before the lock, blocking nothing, and the header gives
-the expression index that turns each call into an ordered walk, built for the
-loop and dropped after it.
+and warns until the loop is done. The migration builds `ob1_fp_backfill_idx`, a
+partial expression index on `(content_fingerprint_of(content), created_at, id)
+WHERE content_fingerprint IS NULL`: the scan is an ordered walk of exactly the
+rows waiting, a batch's LIMIT stops it early instead of every call rehashing and
+sorting every NULL row still waiting, preflight's probe on every start reads it
+rather than the heap, and on a fingerprinted brain it is empty — `upsert_thought`
+always writes the key, and the backfill moves rows out of it.
 
 **Preflight.** `fingerprint backfill`, over a direct connection: a thought
 without a fingerprint whose text no row holds is a warning — naming 023 where the
@@ -4215,8 +4218,34 @@ once per NULL row rather than once per key — after `DISTINCT ON` now. And the
 list itself is kept in step with the block by a test that reads the source and
 proves an unreachable database names every check.
 
+**A fourth pass, triaged: nine fixes, one ticket, and the stop held.** The top
+finding was in the third pass's own addition: the batch-limit resolver ran at
+module scope in `config.mjs`, which the servers, preflight and `reembed.ts` all
+import — a malformed value for a migrator-only setting would have stopped every
+one of them at import, the gate meant to name the problem first. It resolves
+inside `migrationValues()` now, where only the migrator and the schema tests
+ask; it caps at int4, since a larger literal typed bigint would have matched no
+overload; the test harnesses pin it, since the shell's value changed what a
+suite applied; the compose migrate service forwards it and `.env.example` names
+it, since under compose the documented path had silently done nothing; the
+migrator prints the value in force; and "run-scoped" says what it means — the
+environment at that invocation, a `.env` beside the migrator included. The
+`--baseline` remedy said "re-run the body", whose last line is the template
+placeholder — it says to substitute NULL, and says so too where the role cannot
+read the ledger, instead of a remedy the migrator would skip. The capped ok
+claimed "the first 10,000" and stayed ok while a waiting row could sit beyond
+the sample — it says what it sampled, what it did not read, and the statement
+that settles it. The check list's test guarded set equality where the catch
+depends on order — order now, with the anchors asserted. And the partial
+expression index the header prescribed as a hand step is built by the
+migration: the steady-state cost of the probe on every start was a heap pass,
+and is an index walk. To a ticket: a trigger that NULLs a key not equal to its
+row's own hash, which would make the stale-key state unrepresentable and retire
+the prose that explains it — a second mechanism, weighed in the header beside
+the fingerprint-computing one.
+
 **Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
-INSERT omits (a ticket, above). SMD-1043's advisory lock in both inserting
+INSERT omits, and its sibling that NULLs a stale key (tickets, above). SMD-1043's advisory lock in both inserting
 `upsert_thought` overloads — 023 redefines no function, and a capture racing an edit outside the
 backfill's transaction still ends as 018's header says. Deleting the extra twin
 stays the operator's call (`delete_thought`; the pairs list names them). 018's

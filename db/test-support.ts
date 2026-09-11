@@ -100,6 +100,8 @@ export type SchemaOptions = {
    * defined-twice failure this fork keeps removing.
    */
   trgm?: boolean;
+  /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
+  backfillLimit?: number | null;
 };
 
 /**
@@ -114,7 +116,7 @@ export type SchemaOptions = {
 export function substitute(sql: string, opts: SchemaOptions): string {
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, backfillLimit: opts.backfillLimit ?? null })
   );
 }
 

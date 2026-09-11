@@ -166,11 +166,15 @@
 --
 --   A brain with millions of legacy rows should not take that in one lock.
 --   The call at the end of this file takes {{BACKFILL_LIMIT}} — the migrator
---   substitutes NULL, every row waiting, unless OB1_BACKFILL_LIMIT is set for
---   that one run (db/config.mjs validates it: a whole number, at least 1, or
---   the migrator refuses naming the variable). Run-scoped on purpose: a
---   role-level setting would batch every later run under that role, on every
---   brain. A large brain applies with the variable set, then finishes by hand:
+--   substitutes NULL, every row waiting, unless OB1_BACKFILL_LIMIT is in its
+--   environment at that invocation (db/config.mjs validates it: a whole
+--   number, 1 to 2147483647, or the migrator refuses naming the variable; it
+--   prints the value in force). Per invocation on purpose — a role-level
+--   setting would batch every later run under that role, on every brain — and
+--   the environment includes a `.env` beside the migrator, so the variable
+--   belongs on the command line, not in one; under deploy/compose.yaml the
+--   migrate service forwards it. A large brain applies with the variable set,
+--   then finishes by hand:
 --
 --     OB1_BACKFILL_LIMIT=10000 bun migrate.ts …   -- one batch, and the ledger row
 --     SELECT backfill_content_fingerprints(10000);   -- until it returns 0
@@ -182,17 +186,20 @@
 --   The ledger then says 023 while rows are still waiting, and that is the
 --   ledger's job — the file was applied; preflight's `fingerprint backfill`
 --   decides from the rows, not the ledger, and warns until the loop is done.
---   Each call hashes and sorts every NULL row still waiting before its LIMIT
---   — a NULL row has no index, and DISTINCT ON cannot stop early — so the
---   loop's scanning is the square of the corpus over the batch: at 17 µs a
---   row, two million rows in batches of 10,000 is two hundred scans of up to
---   34 s each, before the lock and blocking nothing, beside the writes the
---   batch was chosen to bound. Larger batches divide it; and an index built
---   for the loop and dropped after it makes each call an ordered walk:
---     CREATE INDEX CONCURRENTLY ob1_fp_backfill_idx
---       ON thoughts (content_fingerprint_of(content), created_at, id)
---       WHERE content_fingerprint IS NULL;   -- 016's function is IMMUTABLE
---   Not built here: the migration's own call scans once.
+--   The rows without a key have an index from this migration on:
+--   ob1_fp_backfill_idx, on (content_fingerprint_of(content), created_at, id)
+--   WHERE content_fingerprint IS NULL — 016's function is IMMUTABLE, so the
+--   expression is indexable. It is what makes the rest of this cheap: the
+--   scan is an ordered walk of exactly the rows waiting, so DISTINCT ON
+--   streams and a batch's LIMIT stops it early instead of every call hashing
+--   and sorting every NULL row still waiting (the square of the corpus over
+--   the batch, at 17 µs a row); preflight's `fingerprint backfill`, asked on
+--   every server start, reads the index instead of passing over the heap; and
+--   on a fully fingerprinted brain the index is empty, since upsert_thought
+--   always writes the key and this function moves rows OUT of it — a raw load
+--   is the one writer that puts rows in, one sha256 each at insert. Built in
+--   the migration's transaction (as 011 builds its GIN), which hashes every
+--   NULL row once: the same pass the backfill's own scan then does not need.
 --   migrate.ts sets no statement_timeout, so a server default applies to the
 --   UPDATE; on a large legacy brain, apply this migration in a quiet window.
 --
@@ -203,19 +210,21 @@
 --   thought_audit, no row in the work queue, no updated_at moved.
 --
 -- Safety
---   * Additive. No column added, altered or dropped; no signature changed; no
---     DELETE, no DROP. The one UPDATE writes a column that was NULL, to a
---     value the partial unique index accepts (checked by NOT EXISTS under the
---     table lock), on rows chosen by the rule above. The rows found are held
---     in a temporary table for the call, dropped with the transaction.
+--   * Additive. One partial expression index added; no column added, altered
+--     or dropped; no signature changed; no DELETE, no DROP. The one UPDATE
+--     writes a column that was NULL, to a value the partial unique index
+--     accepts (checked by NOT EXISTS under the table lock), on rows chosen by
+--     the rule above. The rows found are held in a temporary table for the
+--     call, dropped with the transaction.
 --   * Privileges. SECURITY INVOKER, as every function in this fork. ALTER
 --     TABLE … DISABLE TRIGGER needs the table's owner — the migrator's role.
 --     A non-owner calling the function is refused with "must be owner of
 --     table thoughts", having written nothing; preflight names the owner in
 --     its remedy. Creating a temporary table needs TEMP on the database,
 --     which PUBLIC holds unless revoked.
---   * Idempotent. CREATE OR REPLACE of one function; the call is a no-op when
---     no row is left to write; COMMENT re-issued.
+--   * Idempotent. CREATE INDEX IF NOT EXISTS; CREATE OR REPLACE of one
+--     function; the call is a no-op when no row is left to write; COMMENT
+--     re-issued.
 --
 -- Not done here: closing the door
 --   A BEFORE INSERT trigger computing the fingerprint a raw INSERT omits
@@ -224,7 +233,12 @@
 --   leave nothing for this function to find after a load. It is a second
 --   mechanism — a trigger on thoughts, a bypass for the fixtures that plant
 --   NULL rows on purpose, a decision about raw loads that WANT twins — and is
---   a ticket, not this migration.
+--   a ticket, not this migration. So is its sibling: a trigger that NULLs a
+--   key not equal to content_fingerprint_of(NEW.content) on INSERT or an
+--   UPDATE of content, which would make a STALE key unrepresentable — no
+--   writer stores one on purpose — and retire 018's fingerprint_held_by, the
+--   STALE mark above and the caveat in preflight; it, too, is a second
+--   mechanism with fixtures to unpick, and a ticket.
 --
 -- Prerequisites
 --   Migration 016 (content_fingerprint_of) and 018 (the rule this completes,
@@ -236,8 +250,16 @@
 --   fingerprint; of each group that shares one text, the oldest carries it
 --   and the rest read NULL. A capture of a former singleton's text merges
 --   into it. updated_at and thought_audit are as they were. Preflight's
---   `fingerprint backfill` reports no row pending.
+--   `fingerprint backfill` reports no row pending. `\d thoughts` shows one
+--   more index, ob1_fp_backfill_idx, near-empty from here on.
 -- ============================================================================
+
+-- The rows without a key, indexed by the key they would take, oldest first —
+-- see "Cost, and the batch path". Partial the other way from 003's index, so
+-- on a fingerprinted brain it holds nothing.
+CREATE INDEX IF NOT EXISTS ob1_fp_backfill_idx
+  ON thoughts (content_fingerprint_of(content), created_at, id)
+  WHERE content_fingerprint IS NULL;
 
 CREATE OR REPLACE FUNCTION backfill_content_fingerprints(p_limit integer DEFAULT NULL)
 RETURNS integer
@@ -282,7 +304,7 @@ BEGIN
      ORDER BY d.fp
      LIMIT %s
   $scan$, v_found_table, coalesce(p_limit::text, 'ALL'));
-  EXECUTE format('SELECT count(*)::int FROM %I', v_found_table) INTO v_found;
+  GET DIAGNOSTICS v_found = ROW_COUNT;
   IF v_found = 0 THEN
     RETURN 0;
   END IF;

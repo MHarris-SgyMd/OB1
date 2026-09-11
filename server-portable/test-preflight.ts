@@ -98,10 +98,14 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const block = src.slice(src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), src.indexOf("const missing = DIRECT_CHECKS.filter"));
+  const from = src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
+  const block = src.slice(from, to);
+  // First appearance in the source is the order the block reports in, and the
+  // catch blames the FIRST listed name not yet reported — so the list must be
+  // in that order, not merely the same set.
   const added = [...new Set([...block.matchAll(/add\("([^"]+)"/g)].map((m) => m[1]))];
-  const drift = added.filter((n) => !listed.includes(n)).concat(listed.filter((n) => !added.includes(n)));
-  assert(listed.length === 18 && drift.length === 0, `DIRECT_CHECKS names exactly the checks the direct-connection block adds (${drift.join(", ") || "no drift"})`);
+  assert(JSON.stringify(added) === JSON.stringify(listed), `DIRECT_CHECKS names exactly the checks the direct-connection block adds, in the order it adds them (block: ${added.join(", ")})`);
   assert(listed.every((n) => r.out.includes(n)), `…and an unreachable database names every one of them (${listed.filter((n) => !r.out.includes(n)).join(", ") || "all named"})`);
   assert(/atomic capture\s+.*could not verify/.test(r.out) && /fingerprint backfill\s+.*not checked — the direct connection failed before it/.test(r.out),
          "…the first carrying the error and the later ones saying they were not reached");
@@ -789,7 +793,7 @@ else {
   await claims.unsafe("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
   await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'baseline') ON CONFLICT DO NOTHING");
   const baselined = await run(SQL_ENV);
-  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-run the body of db\/migrations\/023_content_fingerprint_backfill\.sql by hand — the migrator will skip it as applied\./.test(baselined.out),
+  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-run the body of db\/migrations\/023_content_fingerprint_backfill\.sql by hand, substituting NULL for \{\{BACKFILL_LIMIT\}\} — the migrator will skip it as applied\./.test(baselined.out),
          "…and where the ledger already says 023 the remedy is the body by hand, not a migration the migrator would skip");
   await claims.unsafe("DROP TABLE schema_migrations");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
