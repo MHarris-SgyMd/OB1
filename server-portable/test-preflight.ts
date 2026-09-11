@@ -197,6 +197,25 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
   const sigsOk = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(sigsOk.code === 0 && /search signatures.*the forms the servers call since migration 020, one of each/s.test(sigsOk.out), "with 020 re-applied both signatures are the ones the servers call, one of each");
+  assert(/stats summary.*thought_stats_summary present/s.test(sigsOk.out), "…and a fully migrated database reports thought_stats_summary present (migration 024)");
+
+  /**
+   * Migration 024's function, the same shape of check on the SQL path: on the
+   * SQL store thought_stats calls thought_stats_summary(), so a database that
+   * stops at 023 serves that one tool broken while everything else is fine
+   * (SMD-1249). LIVE is fully healthy here (sigsOk exited 0), so dropping only
+   * this function isolates the fail to it.
+   */
+  const noStats = new SQL({ url: LIVE, max: 1 });
+  await noStats.unsafe("DROP FUNCTION IF EXISTS thought_stats_summary()");
+  await noStats.close();
+  const missingStats = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(missingStats.code === 1, "a database missing migration 024 does not start");
+  assert(/thought_stats_summary is missing/.test(missingStats.out), "…and names the function thought_stats depends on");
+  assert(/024_thought_stats_summary\.sql/.test(missingStats.out), "…with the migration to apply");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("024") });
+  const withStats = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(withStats.code === 0 && /stats summary.*present/s.test(withStats.out), "…and reports it present once applied, the database healthy again");
 
   /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later

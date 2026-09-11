@@ -314,5 +314,25 @@ console.log("\n[7] resolveAgent's RPC argument shape, and the id it produces");
   await sql.close();
 }
 
+console.log("\n[8] statsSummary aggregates the corpus through the page walk this store owns (SMD-1249)");
+{
+  // The SQL store aggregates in one statement (migration 024); PostgREST cannot,
+  // so it keeps the capped page walk, and this is where that walk is exercised.
+  // Unique markers, so the counts are exact against a corpus other sections have
+  // already filled.
+  await store.captureThought({
+    content: "a thought that marks the stats corpus",
+    payload: { metadata: { type: "statmark", topics: ["stattopic"], people: ["StatPerson"] } },
+    embedding: vec(7),
+  });
+  const s = await store.statsSummary();
+  assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+  assert(s.aggregated === s.total, "a corpus under the cap is fully covered — the tool prints no truncation note");
+  assert(s.types["statmark"] === 1, `the unique type is tallied once (${JSON.stringify(s.types)})`);
+  assert(s.topics["stattopic"] === 1, "the unique topic unnests from the array once");
+  assert(s.people["StatPerson"] === 1, "the unique person unnests from the array once");
+  assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range spans the corpus");
+}
+
 await store.close();
 report();

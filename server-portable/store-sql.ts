@@ -37,6 +37,7 @@ import type {
   ThoughtMatch,
   RecencyOpts,
   ThoughtMeta,
+  ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
   UpdateResult,
@@ -188,6 +189,34 @@ export class SqlStore implements ThoughtStore {
   async countThoughts(): Promise<number> {
     const rows = await this.sql`SELECT count(*)::int AS c FROM thoughts`;
     return Number(rows[0].c);
+  }
+
+  async statsSummary(): Promise<ThoughtStats> {
+    // Migration 024: the whole corpus aggregated in one statement. No page walk,
+    // no cap — Postgres reads the table directly, so `aggregated` is the total
+    // and the tool never prints a truncation note on this path. (The PostgREST
+    // store still walks and can truncate; that is the divergence the interface
+    // documents.) jsonb comes back from Bun.sql already parsed into JS values.
+    const rows = await this.sql`SELECT thought_stats_summary() AS s`;
+    const s = (rows[0]?.s ?? {}) as {
+      total?: number;
+      first_ts?: string | null;
+      last_ts?: string | null;
+      types?: Record<string, number>;
+      topics?: Record<string, number>;
+      people?: Record<string, number>;
+    };
+    const total = Number(s.total ?? 0);
+    const iso = (t: string | null | undefined) => (t ? new Date(t).toISOString() : null);
+    return {
+      total,
+      oldest: iso(s.first_ts),
+      newest: iso(s.last_ts),
+      types: s.types ?? {},
+      topics: s.topics ?? {},
+      people: s.people ?? {},
+      aggregated: total,
+    };
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {
