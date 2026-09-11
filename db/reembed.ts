@@ -185,8 +185,9 @@
  * migration 023 the corpus is fingerprinted once at upgrade — every legacy
  * singleton, and the oldest of each group (created_at, then id) — so a pass
  * finds NULL/fingerprinted pairs, and a NULL/NULL pair is a load that inserted
- * into `thoughts` directly since; `SELECT backfill_content_fingerprints()`
- * settles it the same way, and preflight's `fingerprint backfill` says when.
+ * into `thoughts` directly since, or twins a stale holder blocked; `SELECT
+ * backfill_content_fingerprints()` settles the first kind the same way, and
+ * preflight's `fingerprint backfill` says when.
  * The list marks the row holding the key, and a holder whose key is stale as
  * such. Stop a pass before applying 023: its workers would wait on the table
  * lock and their leases expire.
@@ -985,8 +986,9 @@ async function printDuplicateGroups(limit = 10): Promise<number> {
       `  text merges into it and not into the others (none marked: backfill_content_fingerprints() gives it to the oldest; a pass\n` +
       `  gives it to whichever row it re-embeds first). Whether twins should be one thought is the operator's call — delete_thought\n` +
       `  on an unmarked twin keeps its text in the audit row. A holder marked STALE is not a twin: its key describes text it no\n` +
-      `  longer holds, and the unmarked row beside it is the only one carrying that text — re-save the holder's own text through\n` +
-      `  update_thought to free the key, and delete nothing. ${total > limit ? `First ${limit}:` : ""}`
+      `  longer holds, and the unmarked row(s) beside it carry that text — re-save the holder's own text through update_thought\n` +
+      `  to free the key, then backfill_content_fingerprints() gives it to the oldest of them; whether several of them are twins\n` +
+      `  of each other is the operator's call, as above. ${total > limit ? `First ${limit}:` : ""}`
   );
   for (const r of rows) console.error(`    ${r.ids.join("  =  ")}`);
   return total;

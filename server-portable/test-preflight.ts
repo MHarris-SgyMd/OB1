@@ -12,6 +12,7 @@
  */
 
 import { join, dirname } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
@@ -90,6 +91,20 @@ console.log("\n[4] Unreachable database fails rather than hanging");
                         DATABASE_URL: "postgres://u:p@127.0.0.1:1/nope" });
   assert(r.code === 1, "a refused connection exits 1");
   assert(/schema/.test(r.out), "…and is reported against the schema check");
+  // The direct-connection block's checks are one list, DIRECT_CHECKS: a
+  // connection that fails before the first of them leaves each named — the
+  // first carrying the error, the rest as not reached — and the list is kept
+  // in step with the block's add() calls by reading the source, since nothing
+  // else would (a renamed or added check would otherwise be blamed or silent).
+  const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
+  const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  const block = src.slice(src.indexOf('if (built.kind === "sql" && env.DATABASE_URL) {'), src.indexOf("const missing = DIRECT_CHECKS.filter"));
+  const added = [...new Set([...block.matchAll(/add\("([^"]+)"/g)].map((m) => m[1]))];
+  const drift = added.filter((n) => !listed.includes(n)).concat(listed.filter((n) => !added.includes(n)));
+  assert(listed.length === 18 && drift.length === 0, `DIRECT_CHECKS names exactly the checks the direct-connection block adds (${drift.join(", ") || "no drift"})`);
+  assert(listed.every((n) => r.out.includes(n)), `…and an unreachable database names every one of them (${listed.filter((n) => !r.out.includes(n)).join(", ") || "all named"})`);
+  assert(/atomic capture\s+.*could not verify/.test(r.out) && /fingerprint backfill\s+.*not checked — the direct connection failed before it/.test(r.out),
+         "…the first carrying the error and the later ones saying they were not reached");
 }
 
 console.log("\n[5] Against a real database");
@@ -755,7 +770,7 @@ else {
   await claims.unsafe("INSERT INTO thoughts (content, content_fingerprint) VALUES ('a legacy singleton', NULL)");
   const [{ owner }] = await claims`SELECT pg_get_userbyid(relowner)::text AS owner FROM pg_class WHERE oid = 'thoughts'::regclass`;
   const pending = await run(SQL_ENV);
-  assert(pending.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, at least one whose text no row holds — 023's call has not reached them/.test(pending.out) && pending.out.includes(`As ${owner}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0.`),
+  assert(pending.code === 0 && /fingerprint backfill\s+1 thought\(s\) without a fingerprint, at least one whose text no row holds — 023's call has not reached them/.test(pending.out) && pending.out.includes(`As ${owner}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0, each call its own transaction.`),
          `a NULL-fingerprint row whose key is free is a warning that claims no cause it cannot read, with the one-statement remedy and its batched form, naming the owner (exit ${pending.code})`);
   await claims.unsafe("SELECT backfill_content_fingerprints()");
   assert(/fingerprint backfill\s+no thought is missing a fingerprint \(a stale key on a row that has one is not read here\)/.test((await run(SQL_ENV)).out), "…which performs, and the ok says what it did not read");

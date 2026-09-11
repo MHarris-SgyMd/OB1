@@ -480,6 +480,25 @@ export function resolveTrgmIndex(raw) {
 export const TRGM_INDEX = resolveTrgmIndex(ENV.OB1_TRGM_INDEX);
 
 /**
+ * How many rows migration 023's fingerprint backfill writes in the migrator's
+ * one call: unset, every row waiting (the default — one transaction, one
+ * lock); an integer, one batch of that many, for a brain with millions of
+ * legacy rows that finishes the rest by hand with the same function. Read by
+ * the migrator only, for that one run — a role-level setting would have
+ * batched every later run of every brain under that role, and a typo in it
+ * would have failed 023 with a message naming neither the setting nor the fix.
+ */
+export function resolveBackfillLimit(raw) {
+  if (raw === undefined || raw === "") return null;
+  if (!/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(`OB1_BACKFILL_LIMIT must be a whole number of rows, at least 1, or unset for every row (got ${JSON.stringify(raw)})`);
+  }
+  return Number(raw);
+}
+
+export const BACKFILL_LIMIT = resolveBackfillLimit(ENV.OB1_BACKFILL_LIMIT);
+
+/**
  * Whether a capture generates a situating blurb for each of its chunks.
  *
  * OFF, and measured off rather than assumed off. `evals/eval-contextual.ts`
@@ -554,6 +573,8 @@ export function migrationValues(overrides = {}) {
     EMBEDDING_MODEL: overrides.model ?? EMBEDDING_MODEL,
     TRGM_INDEX: String(overrides.trgm ?? TRGM_INDEX),
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
+    // 023's one call: NULL is every row waiting; an integer, one batch.
+    BACKFILL_LIMIT: String((overrides.backfillLimit === undefined ? BACKFILL_LIMIT : overrides.backfillLimit) ?? "NULL"),
     // Not operator configuration — ALTER DATABASE owns that — but the one
     // definition of what 014 seeds, so the SQL, the migrator's remedy,
     // preflight's report and the schema test cannot disagree about it.

@@ -75,7 +75,8 @@
 --   a body to re-run by hand (the remedy shape SMD-1193 found wanting).
 --   Re-applying this file re-runs it, and it is a no-op when nothing is left
 --   to write: it hashes only the rows whose fingerprint is NULL, and takes no
---   lock at all when it finds none.
+--   table lock when it finds none (the scan's ACCESS SHARE and one empty
+--   temporary table, to the end of the transaction, are all it leaves).
 --
 --   It returns the number of rows it found waiting — rows without a
 --   fingerprint whose key no row held when it looked. Each is written unless
@@ -164,15 +165,20 @@
 --   legacy rows, about five minutes of waiting writers.
 --
 --   A brain with millions of legacy rows should not take that in one lock.
---   The call at the end of this file reads the setting ob1.backfill_limit —
---   NULL when unset, so the default is the whole corpus — and a large brain
---   sets it for the migrator's role before applying:
+--   The call at the end of this file takes {{BACKFILL_LIMIT}} — the migrator
+--   substitutes NULL, every row waiting, unless OB1_BACKFILL_LIMIT is set for
+--   that one run (db/config.mjs validates it: a whole number, at least 1, or
+--   the migrator refuses naming the variable). Run-scoped on purpose: a
+--   role-level setting would batch every later run under that role, on every
+--   brain. A large brain applies with the variable set, then finishes by hand:
 --
---     ALTER ROLE <migrator> SET ob1.backfill_limit = '10000';
---     cd db && bun migrate.ts …           -- one batch, and the ledger row
---     ALTER ROLE <migrator> RESET ob1.backfill_limit;
+--     OB1_BACKFILL_LIMIT=10000 bun migrate.ts …   -- one batch, and the ledger row
 --     SELECT backfill_content_fingerprints(10000);   -- until it returns 0
 --
+--   Each call its own transaction — one statement under autocommit, never a
+--   loop inside one transaction or DO block: the lock is held to commit, so a
+--   loop in one transaction holds it across the whole corpus, which is the
+--   one thing the batch exists to avoid.
 --   The ledger then says 023 while rows are still waiting, and that is the
 --   ledger's job — the file was applied; preflight's `fingerprint backfill`
 --   decides from the rows, not the ledger, and warns until the loop is done.
@@ -257,18 +263,23 @@ BEGIN
   -- The scan, before the lock and at ACCESS SHARE — writers proceed. Of the
   -- rows without a fingerprint whose key no row holds, the oldest per key:
   -- created_at then id, NULL created_at last — the order db/reembed.ts lists
-  -- a duplicate group in. The NOT EXISTS is inside the limited set so that a
-  -- batch counts only rows it will write and a result of 0 means none remain.
+  -- a duplicate group in. The holder probe runs once per distinct key, after
+  -- DISTINCT ON, and inside the limited set so that a batch counts only rows
+  -- it will write and a result of 0 means none remain.
   EXECUTE format($scan$
     CREATE TEMP TABLE %I ON COMMIT DROP AS
-    SELECT DISTINCT ON (c.fp) c.id, c.fp
+    SELECT d.id, d.fp
       FROM (
-        SELECT id, created_at, content_fingerprint_of(content) AS fp
-          FROM thoughts
-         WHERE content_fingerprint IS NULL
-      ) c
-     WHERE NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = c.fp)
-     ORDER BY c.fp, c.created_at, c.id
+        SELECT DISTINCT ON (c.fp) c.id, c.fp
+          FROM (
+            SELECT id, created_at, content_fingerprint_of(content) AS fp
+              FROM thoughts
+             WHERE content_fingerprint IS NULL
+          ) c
+         ORDER BY c.fp, c.created_at, c.id
+      ) d
+     WHERE NOT EXISTS (SELECT 1 FROM thoughts h WHERE h.content_fingerprint = d.fp)
+     ORDER BY d.fp
      LIMIT %s
   $scan$, v_found_table, coalesce(p_limit::text, 'ALL'));
   EXECUTE format('SELECT count(*)::int FROM %I', v_found_table) INTO v_found;
@@ -309,10 +320,10 @@ END;
 $$;
 
 COMMENT ON FUNCTION backfill_content_fingerprints(integer) IS
-  'Migration 003''s missing backfill (023): every thought without a content_fingerprint whose normalised text no other thought holds takes it, and of each group sharing one text the oldest (created_at, id) takes it while the rest stay NULL — the state 018 leaves after a pass. Scans before the lock, then locks thoughts IN EXCLUSIVE MODE for the transaction (writers and update_thought''s FOR UPDATE wait, readers do not; lock_timeout 10s) and holds the updated_at trigger: the fingerprint is not an edit. Returns the rows found waiting — each written unless a writer settled it meanwhile — so 0 means none remain; p_limit (at least 1) bounds a call. Needs the table''s owner. Run again after a load that inserted into thoughts directly.';
+  'Migration 003''s missing backfill (023): every thought without a content_fingerprint whose normalised text no other thought holds takes it, and of each group sharing one text the oldest (created_at, id) takes it while the rest stay NULL — the state 018 leaves after a pass. Scans before the lock, then locks thoughts IN EXCLUSIVE MODE for the transaction (writers and update_thought''s FOR UPDATE wait, readers do not; lock_timeout 10s) and holds the updated_at trigger: the fingerprint is not an edit. Returns the rows found waiting — each written unless a writer settled it meanwhile — so 0 means none remain; p_limit (at least 1) bounds a call, each call its own transaction (never a loop inside one: the lock is held to commit). Needs the table''s owner. Run again after a load that inserted into thoughts directly.';
 
--- Once, over the whole corpus — or one batch of ob1.backfill_limit rows where
--- a large brain set it for the migrator's role (see "Cost, and the batch
--- path"). Re-applying the file re-runs it and it writes nothing: only rows
--- whose fingerprint is NULL and whose key is free qualify.
-SELECT backfill_content_fingerprints(nullif(current_setting('ob1.backfill_limit', true), '')::integer);
+-- Once, over the whole corpus — NULL — or one batch of OB1_BACKFILL_LIMIT rows
+-- where a large brain set it for this one run of the migrator (see "Cost, and
+-- the batch path"). Re-applying the file re-runs it and it writes nothing:
+-- only rows whose fingerprint is NULL and whose key is free qualify.
+SELECT backfill_content_fingerprints({{BACKFILL_LIMIT}});

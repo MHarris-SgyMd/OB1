@@ -496,6 +496,19 @@ if (configFailed) {
           WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
+        // Which of the migrations that have a ledger-aware remedy the ledger
+        // records — read ONCE, here, for every check below that asks (014,
+        // 019, 020 for the search functions; 023 for the fingerprint backfill).
+        // A role without SELECT on the ledger, or no ledger, reads as none.
+        let ledger = new Set<string>();
+        if (Number(applied[0].c) > 0) {
+          try {
+            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%' OR name LIKE '020\\_%' OR name LIKE '023\\_%'`;
+            ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
+          } catch {
+            /* no SELECT on the ledger for this role */
+          }
+        }
         const three = forms.find((f) => f.n === 3);
         const two = forms.find((f) => f.n === 2);
         // The 3-arg body's semantics are declared by a sentinel in the body
@@ -570,9 +583,8 @@ if (configFailed) {
                             WHERE p.proname = 'content_fingerprint_of' AND n.nspname = 'public') AS hash_fn,
                    EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
                             WHERE p.proname = 'backfill_content_fingerprints' AND n.nspname = 'public') AS backfill_fn,
-                   to_regclass('public.schema_migrations') IS NOT NULL AS has_ledger,
                    (SELECT pg_get_userbyid(c.relowner)::text FROM pg_class c WHERE c.oid = to_regclass('public.thoughts')) AS owner`) as
-            { present: boolean; has_column: boolean; hash_fn: boolean; backfill_fn: boolean; has_ledger: boolean; owner: string | null }[];
+            { present: boolean; has_column: boolean; hash_fn: boolean; backfill_fn: boolean; owner: string | null }[];
           if (!t.present || !t.has_column) {
             add("fingerprint backfill", "skip", `not checked — ${t.present ? "thoughts.content_fingerprint does not exist (before migration 003)" : "thoughts does not exist"}`);
           } else if (!t.hash_fn) {
@@ -580,30 +592,27 @@ if (configFailed) {
           } else {
             // A NULL row has no index (003's is partial the other way), so any
             // question about them is a pass over the heap — as `schema`'s row
-            // count is. Bounded: the count stops at 10,001 and the EXISTS at
-            // the first pending row; the number is for the message only.
+            // count is — and the hash behind "pending" is 17 µs a row. Both
+            // are bounded to the first 10,001 NULL rows, so a start costs the
+            // same on a brain with a million twins as on one with ten; past
+            // the bound the ok says how far it looked. The number is for the
+            // message only.
             const [{ nulls: nullsRaw, pending }] = (await sql`
-              SELECT (SELECT count(*)::int FROM (SELECT 1 FROM public.thoughts WHERE content_fingerprint IS NULL LIMIT 10001) b) AS nulls,
+              WITH b AS (SELECT content FROM public.thoughts WHERE content_fingerprint IS NULL LIMIT 10001)
+              SELECT (SELECT count(*)::int FROM b) AS nulls,
                      EXISTS (
-                       SELECT 1 FROM public.thoughts x
-                        WHERE x.content_fingerprint IS NULL
-                          AND NOT EXISTS (SELECT 1 FROM public.thoughts h WHERE h.content_fingerprint = public.content_fingerprint_of(x.content))
+                       SELECT 1 FROM b x
+                        WHERE NOT EXISTS (SELECT 1 FROM public.thoughts h WHERE h.content_fingerprint = public.content_fingerprint_of(x.content))
                      ) AS pending`) as { nulls: number; pending: boolean }[];
-            const nulls = Number(nullsRaw) > 10000 ? "more than 10,000" : String(nullsRaw);
+            const capped = Number(nullsRaw) > 10000;
+            const nulls = capped ? "more than 10,000" : String(nullsRaw);
             if (Number(nullsRaw) === 0) {
               add("fingerprint backfill", "ok", "no thought is missing a fingerprint (a stale key on a row that has one is not read here)");
             } else if (pending && !t.backfill_fn) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              let ledgered = false;
-              if (t.has_ledger) {
-                try {
-                  ledgered = Number((await sql`SELECT count(*)::int AS c FROM public.schema_migrations WHERE name LIKE '023\\_%'`)[0].c) > 0;
-                } catch {
-                  /* no SELECT on the ledger for this role: the plain remedy */
-                }
-              }
+              const ledgered = ledger.has("023");
               add("fingerprint backfill", "warn",
                   `${nulls} thought(s) without a fingerprint, at least one whose text no row holds: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledgered
@@ -614,9 +623,9 @@ if (configFailed) {
               // still running, or a load around upsert_thought since 023.
               add("fingerprint backfill", "warn",
                   `${nulls} thought(s) without a fingerprint, at least one whose text no row holds — 023's call has not reached them (a batched upgrade still running, or rows loaded around upsert_thought since): a capture of that text inserts a second row`,
-                  `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0.`);
+                  `As ${t.owner ?? "the table's owner"}: SELECT backfill_content_fingerprints(); — or, keeping each lock short, SELECT backfill_content_fingerprints(10000); until it returns 0, each call its own transaction.`);
             } else {
-              add("fingerprint backfill", "ok", `${nulls} thought(s) without a fingerprint, each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
+              add("fingerprint backfill", "ok", `${nulls} thought(s) without a fingerprint, ${capped ? "the first 10,000 " : ""}each sharing its text with the row that holds it (a twin, or a stale key) — reembed.ts --status lists the groups`);
             }
           }
         } catch (e) {
@@ -759,13 +768,6 @@ if (configFailed) {
             WHERE p.proname = 'search_thoughts_hybrid' AND n.nspname = 'public'
             ORDER BY (p.pronargs = 7) DESC, p.oid`;
           const kw = await sql`SELECT p.prorows AS rows FROM pg_proc p WHERE p.oid = to_regprocedure('public.search_thoughts_keyword(text, integer, integer, jsonb)')`;
-          let ledger = new Set<string>();
-          try {
-            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%' OR name LIKE '020\\_%'`;
-            ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
-          } catch {
-            /* no ledger */
-          }
           catalog = {
             mt: mtRows.map((r: { cfg: string[] | null; src: string; rows: number; nargs: number; sig: string }) => ({ cfg: (r.cfg ?? []).join(","), settings: parseSetConfig(r.cfg) as Record<string, string>, src: String(r.src ?? ""), rows: Number(r.rows ?? 0), nargs: Number(r.nargs), sig: String(r.sig) })),
             hy: hyRows.map((r: { nargs: number; sig: string }) => ({ nargs: Number(r.nargs), sig: String(r.sig) })),
@@ -1009,7 +1011,9 @@ if (configFailed) {
         try {
           if (catalog instanceof Error) throw catalog;
           const { mt, kwRows, ledger } = catalog;
-          if (mt.length) {
+          if (!mt.length) {
+            add("candidate scan", "skip", "not checked — match_thoughts is not defined (filtered search says so)");
+          } else {
             const seqOff = mt[0].settings["enable_seqscan"] === "off";
             const rows = mt[0].rows;
             const kwOff = kwRows !== null && kwRows !== 25;
@@ -1175,6 +1179,13 @@ if (configFailed) {
               "Same width, different family: existing vectors are not comparable to new ones. Re-embed.");
         } else if (recorded.embedding_dim) {
           add("embedding contract", "ok", `${recorded.embedding_model} @ ${recorded.embedding_dim} dimensions, matching`);
+        }
+        // The chain above reports nothing for a record without a width — 006's table
+        // present but its embedding_dim row gone, or a record written by a tool that
+        // set only the model — and a check that prints nothing looks like one that passed.
+        if (!recorded.embedding_dim && results.every((r) => r.name !== "embedding contract")) {
+          add("embedding contract", "warn", `ob1_config records no embedding_dim${recorded.embedding_model ? ` (only embedding_model = ${recorded.embedding_model})` : ""} — the width the schema was built for is unrecorded, so nothing here can compare it to OB1_EMBEDDING_DIM=${embDim}`,
+              "Apply db/migrations/006_embedding_config.sql, or record the width: INSERT INTO ob1_config (key, value) VALUES ('embedding_dim', '<width>').");
         }
 
         /**
@@ -1464,6 +1475,7 @@ if (configFailed) {
         // check that already reported, never silence for one that did not.
         const missing = DIRECT_CHECKS.filter((name) => !results.some((r) => r.name === name));
         if (missing.length) add(missing[0], "warn", `could not verify: ${(e as Error).message}`);
+        else add("direct connection", "warn", `every check reported, then the connection failed to close: ${(e as Error).message}`);
         for (const name of missing.slice(1)) add(name, "skip", `not checked — the direct connection failed before it: ${(e as Error).message}`);
       }
     }

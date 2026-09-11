@@ -4052,8 +4052,9 @@ dropped with the transaction; under the lock the rows found are re-checked by
 index — still NULL, still the text that was hashed, the key still free — so a
 batch costs its writers the batch's own writes and never a rescan of every NULL
 row, and a raw edit of content in the window is never given a key for text it
-no longer holds. The file's own call reads `ob1.backfill_limit` — NULL unset,
-so the whole corpus by default.
+no longer holds. The file's own call takes `{{BACKFILL_LIMIT}}` — NULL unless
+`OB1_BACKFILL_LIMIT` is set for that one run of the migrator, the channel
+`{{TRGM_INDEX}}` already uses, validated in `config.mjs`.
 
 **One transaction, and the lock is the point.** Once the scan has found rows,
 the function takes `LOCK TABLE thoughts IN EXCLUSIVE MODE`, held to commit — a
@@ -4097,9 +4098,9 @@ since the same call with that index dropped takes 0.36 s; a `p_limit` batch of
 waiting writers per 100,000 legacy rows. `migrate.ts` sets no `statement_timeout`, so a server
 default applies; the header says to apply the migration in a quiet window, and
 gives a brain with millions of legacy rows the batch path without a hand-edited
-file: `ALTER ROLE <migrator> SET ob1.backfill_limit = '10000'`, the migrator
-(one batch, and the ledger row), then `SELECT backfill_content_fingerprints(10000)`
-until it returns 0 — preflight decides "pending" from the rows, not the ledger,
+file: `OB1_BACKFILL_LIMIT=10000 bun migrate.ts` (one batch, and the ledger row),
+then `SELECT backfill_content_fingerprints(10000)` until it returns 0, each call
+its own transaction — preflight decides "pending" from the rows, not the ledger,
 and warns until the loop is done. Each call rehashes and sorts every NULL row
 still waiting before its LIMIT, so the loop's scanning is the square of the
 corpus over the batch — before the lock, blocking nothing, and the header gives
@@ -4191,6 +4192,28 @@ scanning is the square of the corpus over the batch, unsaid — said, with the
 expression index that makes each call an ordered walk. To a ticket: a BEFORE
 INSERT trigger computing the fingerprint a raw INSERT omits, which closes the
 door 023 sweeps behind — a second mechanism, weighed in the header.
+
+**A third pass, triaged: ten fixes, and the stop held.** The top finding was
+again in the previous pass's own addition: the check list the outer catch now
+reads blamed the wrong check when one of the block's checks could end without
+reporting — `candidate scan` where `match_thoughts` is undefined, `embedding
+contract` where `ob1_config` has no width row — so both report now, and an error
+after every check has reported is no longer dropped. The batch limit was a
+persistent role-level setting read unvalidated — a typo failed the migration
+with a message naming neither, and a forgotten RESET batched every later run
+under that role — so it is `OB1_BACKFILL_LIMIT`, the migrator's run-scoped
+substitution channel, validated in `config.mjs`. The `fingerprint backfill`
+probe hashed every NULL row on every start in the steady state 023 leaves —
+bounded to the first 10,001, and the ok says how far it looked; its ledger
+presence and read were a third copy of a fact the block already held — one read,
+hoisted, that every ledger-aware remedy shares. The pairs list's advice for a
+stale holder assumed one unmarked row where twins a stale holder blocked are
+two — reworded, and the header says so. Each batch call must be its own
+transaction and the header, COMMENT and remedy did not say so — they do; "takes
+no lock at all" was imprecise — it takes no table lock. The holder probe ran
+once per NULL row rather than once per key — after `DISTINCT ON` now. And the
+list itself is kept in step with the block by a test that reads the source and
+proves an unreachable database names every check.
 
 **Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
 INSERT omits (a ticket, above). SMD-1043's advisory lock in both inserting
