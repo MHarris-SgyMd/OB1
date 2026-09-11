@@ -681,10 +681,9 @@ function buildServer(principal: Principal): McpServer {
         }
 
         const results = data.map(
-          (
-            t: { id: string; content: string; metadata: Record<string, unknown>; created_at: string },
-            i: number
-          ) => {
+          (t, i) => {
+            // `data` is ThoughtListItem[] — id, content, metadata, created_at all
+            // inferred, as the search_thoughts map is written.
             const m = t.metadata || {};
             const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
             // An `ID:` line, the same label the two search tools print — it is what
