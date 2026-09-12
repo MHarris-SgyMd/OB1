@@ -408,6 +408,33 @@ console.log("\n[9] Provenance: capture writes it, the read methods walk it, and 
   assert((await store.traceProvenance({ id: "not-a-uuid" })).length === 0, "traceProvenance of a malformed id is empty, not an error");
   assert((await store.findDerivatives({ id: "not-a-uuid" })).length === 0, "findDerivatives of a malformed id is empty, not an error");
   assert(Object.keys(await store.supersededAmong(["not-a-uuid"])).length === 0, "supersededAmong drops malformed ids");
+
+  // Boyscout (SMD-1253 review): the two thin spots the passes named but held.
+  //
+  // (a) supersededAmong's id tiebreak. Two thoughts supersede one id; force
+  // their created_at equal (a batch import in one transaction does this via
+  // now()), and the winner must be the higher id — deterministically, and the
+  // same one the PostgREST store's (created_at, id) DESC order picks.
+  const admin3 = new SQL({ url: URL_, max: 1 });
+  const old = await store.captureThought({ content: "tiebreak: the superseded original", payload: { metadata: {} }, embedding: unit(0) });
+  const newA = await store.captureThought({ content: "tiebreak: replacement A", payload: { metadata: {} }, embedding: unit(1), supersedes: old.id });
+  const newB = await store.captureThought({ content: "tiebreak: replacement B", payload: { metadata: {} }, embedding: unit(2), supersedes: old.id });
+  await admin3`UPDATE thoughts SET created_at = now() WHERE id = ANY(${admin3.array([newA.id, newB.id], "TEXT")}::uuid[])`;
+  const tie = await store.supersededAmong([old.id]);
+  const higher = newA.id > newB.id ? newA.id : newB.id;
+  assert(tie[old.id] === higher, `on an equal-created_at tie the higher id wins deterministically (${tie[old.id]?.slice(0, 8)} = ${higher.slice(0, 8)})`);
+  await admin3.close();
+
+  // (b) the cycle flag through the store's row mapper (test-live proves it at
+  // the SQL level; this exercises `cycle: r.cycle === true` in the mapper). A
+  // cycle cannot form through the validated write path, so force it by hand.
+  const a = await store.captureThought({ content: "cycle A", payload: { metadata: {} }, embedding: unit(3) });
+  const b = await store.captureThought({ content: "cycle B", payload: { metadata: {} }, embedding: unit(4), derivedFrom: [a.id] });
+  const admin4 = new SQL({ url: URL_, max: 1 });
+  await admin4`UPDATE thoughts SET derived_from = ${[b.id]}::jsonb WHERE id = ${a.id}`;
+  await admin4.close();
+  const walk = await store.traceProvenance({ id: b.id, maxDepth: 10 });
+  assert(walk.some((n) => n.cycle === true), "traceProvenance surfaces the cycle flag through the store mapper");
 }
 
 await store.close();
