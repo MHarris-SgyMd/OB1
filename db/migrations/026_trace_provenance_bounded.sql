@@ -230,7 +230,7 @@ BEGIN
         ) AS p
       ) AS edge
       JOIN thoughts parent ON parent.id = edge.parent_id_text::uuid
-      ORDER BY (parent.id = ANY(v_seen)) ASC, parent.id ASC
+      ORDER BY is_cycle ASC, parent.id ASC   -- tree edges before repeat markers, then by id
       LIMIT (v_node_cap - v_emitted);
     GET DIAGNOSTICS v_rows = ROW_COUNT;
     v_emitted := v_emitted + v_rows;

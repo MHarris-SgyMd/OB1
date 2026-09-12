@@ -4709,8 +4709,8 @@ from every node of the next, so root→leaf paths = `fanout^depth`, distinct nod
 | fan-out 6, 10 layers — 61 nodes, ~60M paths | did not finish — killed by a 20 s guard timeout | ~3.8 ms |
 
 Two things there: the speed (`fanout^depth` paths → linear in the reachable
-graph), and a **completeness** fix — the
-old outer `LIMIT` counted duplicate paths, so on a dense graph it capped out among
+graph), and a **completeness** fix — the old outer `LIMIT` counted duplicate
+paths, so on a dense graph it capped out among
 shallow repeats and never surfaced the deep distinct ancestors; the new walk emits
 each derivation edge once, so under one row budget it reaches every distinct node
 when the edges fit the cap (fan-out 4: 117 edge-rows for 33 nodes, under 250) and
