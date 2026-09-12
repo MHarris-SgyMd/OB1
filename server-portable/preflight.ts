@@ -803,10 +803,16 @@ if (configFailed) {
          * learns why the labels never appear.)
          */
         const prov = await sql`
-          SELECT count(*)::int AS c FROM pg_proc p
+          SELECT
+            count(*) FILTER (WHERE p.proname = 'trace_provenance')::int AS t,
+            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f
+          FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname IN ('trace_provenance', 'find_derivatives') AND n.nspname = 'public'`;
-        if (Number(prov[0].c) >= 2) add("provenance", "ok", "trace_provenance and find_derivatives present");
+        // Per function, not a combined count: a double-overload of one plus the
+        // other absent must still fail, as the sibling signature checks do
+        // (review pass 1, SMD-1253).
+        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) add("provenance", "ok", "trace_provenance and find_derivatives present");
         else add("provenance", "fail",
                  "migration 025's provenance functions are missing, but capture_thought accepts derived_from/supersedes (silently dropped by the pre-025 upsert_thought) and search labels superseded hits",
                  "Apply db/migrations/025_thought_provenance.sql.");

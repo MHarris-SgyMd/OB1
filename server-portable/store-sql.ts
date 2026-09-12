@@ -395,7 +395,7 @@ export class SqlStore implements ThoughtStore {
         SELECT DISTINCT ON (supersedes) supersedes AS old_id, id AS new_id
         FROM thoughts
         WHERE supersedes = ANY(${this.sql.array(valid, "TEXT")}::uuid[])
-        ORDER BY supersedes, created_at DESC`;
+        ORDER BY supersedes, created_at DESC, id DESC`;
       const out: Record<string, string> = {};
       for (const r of rows) out[String((r as Record<string, unknown>).old_id)] = String((r as Record<string, unknown>).new_id);
       return out;

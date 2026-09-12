@@ -427,11 +427,16 @@ export class PostgrestStore implements ThoughtStore {
         .from("thoughts")
         .select("id, supersedes, created_at")
         .in("supersedes", valid)
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false });
       if (error) return {};
       const out: Record<string, string> = {};
       for (const r of (data ?? []) as { id: string; supersedes: string }[]) {
-        if (!(r.supersedes in out)) out[r.supersedes] = r.id; // first = newest, order is desc
+        // First per supersedes wins; the (created_at, id) DESC order makes that
+        // the newest — with the id tiebreak so a created_at tie (two rows
+        // superseding one id in one transaction share now()) is deterministic
+        // and agrees with the SQL store's DISTINCT ON (review pass 1, SMD-1253).
+        if (!(r.supersedes in out)) out[r.supersedes] = r.id;
       }
       return out;
     } catch {

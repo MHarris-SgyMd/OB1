@@ -405,9 +405,19 @@ BEGIN
         v_derived;
     END IF;
     -- Normalise "[]" and JSON null alike to SQL NULL, so an empty array does
-    -- not read as "derived from nothing" distinct from "not derived".
+    -- not read as "derived from nothing" distinct from "not derived". A
+    -- non-empty array is canonicalised: lowercased (the regex accepts either
+    -- case, but the GIN containment find_derivatives uses is byte-exact, so an
+    -- uppercase element would be invisible to the down-walk while the up-walk's
+    -- ::uuid cast still saw it — the two directions must agree) and de-duplicated
+    -- (a repeated source is one edge). Order is not meaningful, so sort for a
+    -- stable stored value. Review pass 1, SMD-1253.
     IF jsonb_array_length(v_derived) = 0 THEN
       v_derived := NULL;
+    ELSE
+      SELECT to_jsonb(array_agg(DISTINCT lower(e) ORDER BY lower(e)))
+        INTO v_derived
+        FROM jsonb_array_elements_text(v_derived) AS e;
     END IF;
   ELSE
     v_derived := NULL;  -- JSON null or absent.
@@ -527,6 +537,10 @@ AS $$
 DECLARE
   -- Clamp the walk. A recursive CTE over a cycle or a fan-out is the one place
   -- a read can run away; the caps bound it regardless of what the caller asks.
+  -- Cycles are bounded (the visited guard + depth); the node cap bounds OUTPUT.
+  -- A cycle-free but DENSE DAG can still materialise many paths before the cap
+  -- (UNION ALL, outer LIMIT) — no shipped writer produces one; bounding that
+  -- work is SMD-1288.
   v_max_depth int := GREATEST(1, LEAST(COALESCE(p_max_depth, 3), 10));
   v_node_cap  int := GREATEST(1, LEAST(COALESCE(p_node_cap, 250), 2000));
 BEGIN
@@ -561,11 +575,21 @@ BEGIN
       w.visited || parent.id,
       parent.id = ANY(w.visited)
     FROM walk w
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      -- The CHECK guarantees array-or-null, but guard anyway: a hand-written row
-      -- must not raise inside a read.
-      CASE WHEN jsonb_typeof(w.derived_from) = 'array' THEN w.derived_from ELSE '[]'::jsonb END
-    ) AS p(parent_id_text)
+    -- The CHECK guarantees array-or-null, and upsert_thought validates elements,
+    -- but a row written by anything else (direct SQL, COPY, a future writer)
+    -- could hold a non-array or a non-UUID element. Coerce a non-array to '[]'
+    -- and keep only UUID-shaped elements BEFORE the ::uuid cast, so a
+    -- hand-written bad element is skipped rather than raising inside the read
+    -- (the promise this comment used to make but the bare cast broke — review
+    -- pass 1, SMD-1253). The regex-filtered cast still resolves parent by its
+    -- primary key, so the walk stays index-driven.
+    CROSS JOIN LATERAL (
+      SELECT e AS parent_id_text
+      FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(w.derived_from) = 'array' THEN w.derived_from ELSE '[]'::jsonb END
+      ) AS e
+      WHERE e ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ) AS p
     JOIN thoughts parent ON parent.id = p.parent_id_text::uuid
     WHERE w.depth < v_max_depth AND NOT w.cycle
   )

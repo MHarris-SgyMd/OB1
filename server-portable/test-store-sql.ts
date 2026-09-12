@@ -378,6 +378,19 @@ console.log("\n[9] Provenance: capture writes it, the read methods walk it, and 
   assert(sup[parent.id] === child.id, "supersededAmong maps the superseded source to its replacement");
   assert(!(child.id in sup), "…and does not mark the replacement itself");
 
+  // An empty derived_from is "not derived", not "derived from nothing": it
+  // normalises to a NULL column, end to end (review pass 1).
+  const emptyProv = await store.captureThought({
+    content: "provenance empty: an array that says nothing",
+    payload: { metadata: {} },
+    embedding: unit(7),
+    derivedFrom: [],
+  });
+  const admin2 = new SQL({ url: URL_, max: 1 });
+  const emptyRow = (await admin2`SELECT derived_from FROM thoughts WHERE id = ${emptyProv.id}`)[0] as { derived_from: unknown };
+  await admin2.close();
+  assert(emptyRow.derived_from === null, `an empty derivedFrom stores as NULL, not [] (${JSON.stringify(emptyRow.derived_from)})`);
+
   // validation lives at the write: a derived_from element that is not an
   // existing thought is refused, so a synthesis cannot claim a source it lacks.
   let bad = "";

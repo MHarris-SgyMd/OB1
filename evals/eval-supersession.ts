@@ -169,6 +169,17 @@ const oldAboveNew = label.filter((x, i) => {
   return ro !== -1 && (rn === -1 || ro < rn);
 }).length;
 
+// The exclude machinery must actually do what it claims: remove every
+// superseded row label-only returned, and never remove a current one. Without
+// these the one-directional metric assertions below would survive an exclude
+// filter that dropped the wrong rows (review pass 1).
+const supersededReturned = label.filter((x, i) => x.ranked.includes(twinTopics[i].superseded!)).length;
+const supersededSurviving = exclude.filter((x, i) => x.ranked.includes(twinTopics[i].superseded!)).length;
+const currentDropped = exclude.filter((x, i) => !x.ranked.includes(twinTopics[i].current)).length;
+assert(supersededReturned > 0, "label-only returns superseded rows (so there is something to exclude)");
+assert(supersededSurviving === 0, "exclude removes every superseded row label-only returned");
+assert(currentDropped === 0, "exclude never removes the current version");
+
 const pct = (m: Metrics) => `MRR ${m.mrr.toFixed(3)}  R@1 ${(m.r1 * 100).toFixed(0)}%`;
 console.log(`  the stale twin outranks its replacement in ${oldAboveNew}/${twinTopics.length} topics (a coin-flip, by construction)\n`);
 console.log(`  relevance = TOPICAL (any version of the topic counts — the fork's title→body task)`);
@@ -178,17 +189,28 @@ console.log(`  relevance = CURRENT (only the non-superseded version counts — t
 console.log(`     label-only : ${pct(currentLabel)}`);
 console.log(`     exclude    : ${pct(currentExcl)}   Δ MRR ${(currentExcl.mrr - currentLabel.mrr >= 0 ? "+" : "") + (currentExcl.mrr - currentLabel.mrr).toFixed(3)}\n`);
 
-// ── The CONTROL: a corpus with NO twins — the two policies must be identical ──
+// ── The CONTROL: a corpus with NO twins — nothing is superseded, so the two
+// policies are identical. The check that can actually FAIL is that seeding
+// without twins leaves zero superseded rows (a seed bug that created a twin
+// here would be caught) and that the exclude set computed FROM THIS corpus is
+// empty — not filtered against the previous corpus's stale ids, which would be
+// a vacuous no-op (review pass 1). ──
 await sql`DELETE FROM thoughts`;
 const plain = await seedCorpus(sql, false);
+const plainSuperseded = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
+assert(plainSuperseded === 0, "CONTROL: seeding without twins leaves zero superseded rows");
+// The set the exclude policy would remove, computed from THIS corpus, is empty,
+// so exclude and label-only are provably the same list for every query.
+const plainSupersededIds = new Set(
+  (await sql`SELECT id::text AS id FROM thoughts WHERE id IN (SELECT supersedes FROM thoughts WHERE supersedes IS NOT NULL)`)
+    .map((r: Record<string, unknown>) => String(r.id)));
 let controlOk = true;
 for (const t of plain) {
   const rows = await sql`SELECT id::text AS id FROM match_thoughts(${axisQuery(t.axis)}::vector, -1.0, 10, ${{}}::jsonb)`;
   const ranked = rows.map((r: Record<string, unknown>) => String(r.id));
-  // No superseded ids exist, so the exclude filter is a no-op.
-  if (JSON.stringify(ranked) !== JSON.stringify(ranked.filter((id) => !supersededIds.has(id)))) controlOk = false;
+  if (JSON.stringify(ranked) !== JSON.stringify(ranked.filter((id) => !plainSupersededIds.has(id)))) controlOk = false;
 }
-assert(controlOk, "CONTROL: with no superseded twins, exclude and label-only return the same rows");
+assert(plainSupersededIds.size === 0 && controlOk, "CONTROL: with no superseded rows, exclude and label-only return the same rows");
 
 // ── The verdict ──────────────────────────────────────────────────────────────
 const topicalMoves = Math.abs(topicalExcl.mrr - topicalLabel.mrr) > 0.005;

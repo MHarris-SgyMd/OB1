@@ -225,12 +225,14 @@ else {
    * stops at 024 must not start. LIVE is healthy here, so dropping only the two
    * read functions isolates the fail to this check.
    */
+  // Drop only ONE of the two, so the check's per-function count is what fails,
+  // not a combined >=2 that a double-overload of the survivor could satisfy
+  // (review pass 1).
   const noProv = new SQL({ url: LIVE, max: 1 });
-  await noProv.unsafe("DROP FUNCTION IF EXISTS trace_provenance(uuid, int, int)");
   await noProv.unsafe("DROP FUNCTION IF EXISTS find_derivatives(uuid, int)");
   await noProv.close();
   const missingProv = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(missingProv.code === 1, "a database missing migration 025 does not start");
+  assert(missingProv.code === 1, "a database missing one of migration 025's functions does not start");
   assert(/provenance.*functions are missing/s.test(missingProv.out), "…and names the provenance functions the write path depends on");
   assert(/025_thought_provenance\.sql/.test(missingProv.out), "…with the migration to apply");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") });
