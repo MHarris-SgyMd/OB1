@@ -28,9 +28,11 @@ import type {
   Actor,
   AgentResolution,
   CaptureResult,
+  Derivative,
   ListFilters,
   MutationError,
   MutationResult,
+  ProvenanceNode,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
@@ -47,6 +49,13 @@ import type {
 function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
+
+/**
+ * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
+ * column/argument, not a not-found; the read methods treat it as no-match so a
+ * bad id from an MCP client gets a clean answer, not a Postgres error string.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
@@ -146,7 +155,7 @@ export class SqlStore implements ThoughtStore {
     // `id` is a uuid column, so a malformed value is a cast error rather than a
     // not-found. Treat it as not-found: an MCP client passing a bad id should get
     // a clean answer, not a Postgres error string.
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+    if (!UUID_RE.test(id)) return null;
 
     const rows = await this.sql`
       SELECT id, content, metadata, created_at, updated_at
@@ -242,6 +251,8 @@ export class SqlStore implements ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
     embeddingModel?: string;
+    derivedFrom?: string[];
+    supersedes?: string;
   }): Promise<CaptureResult> {
     // One statement. No two-step fallback and no PGRST202 handling: over SQL a
     // missing function is a migration failure, and silently degrading to a
@@ -268,7 +279,10 @@ export class SqlStore implements ThoughtStore {
     // The model rides the same way (021): upsert_thought writes
     // p_payload.embedding_model beside the vector, and an envelope without the
     // key leaves the row's label unknown.
-    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel);
+    // 025: derived_from / supersedes ride it too; upsert_thought validates
+    // derived_from and refuses a bad one — see store.ts's captureEnvelope.
+    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes });
 
     const rows = chunks.length
       ? await this.sql`
@@ -333,6 +347,61 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT resolve_agent(${opts.keyHash}::text, ${opts.label}::text, ${opts.scope ?? null}::text) AS r`;
     return normaliseAgentResolution(rows[0]?.r);
+  }
+
+  async traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]> {
+    if (!UUID_RE.test(opts.id)) return [];
+    // Migration 025. NULLs pass the function's own defaults (and its clamps).
+    const rows = await this.sql`
+      SELECT thought_id, depth, parent_id, content, type, source_type, derivation_method, created_at, cycle
+      FROM trace_provenance(${opts.id}::uuid, ${opts.maxDepth ?? null}::int, ${opts.nodeCap ?? null}::int)`;
+    return rows.map((r: Record<string, unknown>) => ({
+      thoughtId: String(r.thought_id),
+      depth: Number(r.depth),
+      parentId: r.parent_id ? String(r.parent_id) : null,
+      content: String(r.content),
+      type: r.type == null ? null : String(r.type),
+      sourceType: r.source_type == null ? null : String(r.source_type),
+      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
+      created_at: new Date(r.created_at as string).toISOString(),
+      cycle: r.cycle === true,
+    }));
+  }
+
+  async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
+    if (!UUID_RE.test(opts.id)) return [];
+    const rows = await this.sql`
+      SELECT id, content, type, source_type, derivation_method, created_at
+      FROM find_derivatives(${opts.id}::uuid, ${opts.limit ?? null}::int)`;
+    return rows.map((r: Record<string, unknown>) => ({
+      id: String(r.id),
+      content: String(r.content),
+      type: r.type == null ? null : String(r.type),
+      sourceType: r.source_type == null ? null : String(r.source_type),
+      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
+      created_at: new Date(r.created_at as string).toISOString(),
+    }));
+  }
+
+  async supersededAmong(ids: string[]): Promise<Record<string, string>> {
+    const valid = ids.filter((id) => UUID_RE.test(id));
+    if (valid.length === 0) return {};
+    // For each hit that a newer thought supersedes, the newest such thought.
+    // Best-effort: a database without migration 025 has no `supersedes` column,
+    // so a failure here must not break the search that called it — the label is
+    // an enhancement, and preflight's `provenance` check names the missing 025.
+    try {
+      const rows = await this.sql`
+        SELECT DISTINCT ON (supersedes) supersedes AS old_id, id AS new_id
+        FROM thoughts
+        WHERE supersedes = ANY(${this.sql.array(valid, "TEXT")}::uuid[])
+        ORDER BY supersedes, created_at DESC`;
+      const out: Record<string, string> = {};
+      for (const r of rows) out[String((r as Record<string, unknown>).old_id)] = String((r as Record<string, unknown>).new_id);
+      return out;
+    } catch {
+      return {};
+    }
   }
 
   async close(): Promise<void> {

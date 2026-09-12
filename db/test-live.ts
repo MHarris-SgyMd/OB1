@@ -1841,6 +1841,83 @@ console.log("\n[12] thought_stats_summary() equals the page walk, proves the old
   assert(JSON.stringify(empty.types) === "{}" && JSON.stringify(empty.topics) === "{}" && JSON.stringify(empty.people) === "{}", "…and empty breakdown maps, not null");
 }
 
+console.log("\n[13] Provenance through the real write path: the chain traces both ways, a deleted parent behaves as 008/009 say, and a bad reference is refused (migration 025)");
+{
+  // Round-trip through upsert_thought, as 016's eval does — not a raw INSERT.
+  // A three-thought chain: grandparent ← parent ← child, and the child also
+  // supersedes the parent.
+  const cap = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: meta, ...(prov ?? {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string }).id;
+
+  const gp = await cap("provenance grandparent: the raw note", { type: "observation" }, 0);
+  const parent = await cap("provenance parent: a first digest", { type: "synthesis", derivation_method: "synthesis" }, 1, { derived_from: [gp] });
+  const child = await cap("provenance child: a digest of the digest", { type: "synthesis", derivation_method: "synthesis" }, 2, { derived_from: [parent], supersedes: parent });
+
+  // The columns read back as written (round-trip).
+  const row = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
+  assert(JSON.stringify(row.derived_from) === JSON.stringify([parent]) && row.supersedes === parent, "capture wrote derived_from and supersedes to the columns");
+
+  // trace UP: child(0) → parent(1) → grandparent(2), the whole chain.
+  const up = await sql`SELECT thought_id, depth, parent_id, cycle FROM trace_provenance(${child}::uuid)`;
+  const byId = Object.fromEntries(up.map((r: Record<string, unknown>) => [r.thought_id, r]));
+  assert(Number(byId[child]?.depth) === 0 && Number(byId[parent]?.depth) === 1 && Number(byId[gp]?.depth) === 2,
+         `trace_provenance walks the full chain up (child 0, parent 1, grandparent 2) — got ${up.map((r: Record<string, unknown>) => `${(r.thought_id as string).slice(0,4)}@${r.depth}`).join(",")}`);
+  assert(String(byId[parent]?.parent_id) === child && String(byId[gp]?.parent_id) === parent, "…each node parented by the thought that derived from it");
+  assert(up.every((r: Record<string, unknown>) => r.cycle === false), "…and no node is a cycle on an acyclic chain");
+
+  // trace DOWN: each level's one derivative.
+  const derGp = await sql`SELECT id FROM find_derivatives(${gp}::uuid)`;
+  const derParent = await sql`SELECT id FROM find_derivatives(${parent}::uuid)`;
+  assert(derGp.length === 1 && String(derGp[0].id) === parent, "find_derivatives finds the parent below the grandparent");
+  assert(derParent.length === 1 && String(derParent[0].id) === child, "…and the child below the parent — the chain traces both directions");
+
+  // The cycle guard. A cycle cannot form through the validated write path (each
+  // derived_from element must already exist), so it is forced by a raw UPDATE —
+  // exactly the hand-written row the guard exists for. grandparent now derives
+  // from child, closing gp → child → parent → gp.
+  await sql`UPDATE thoughts SET derived_from = ${[child]}::jsonb WHERE id = ${gp}`;
+  const cyc = await sql`SELECT thought_id, cycle FROM trace_provenance(${child}::uuid, 10)`;
+  assert(cyc.some((r: Record<string, unknown>) => r.cycle === true), "a forced cycle is flagged, not looped forever");
+  assert(cyc.length <= 6, `…and the walk terminates (${cyc.length} nodes, capped)`);
+  await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${gp}`; // break the forced cycle again
+
+  // A deleted parent behaves as 008/009 say: the hard delete removes the row and
+  // its content survives in the append-only audit; the self-FK SET NULLs the
+  // child's pointer (009 stays "delete is always allowed"); and 025's extended
+  // audit trigger records BOTH — the delete, and the child's supersedes clearing.
+  const auditBefore = Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  await sql`DELETE FROM thoughts WHERE id = ${parent}`;
+  const childAfter = (await sql`SELECT count(*)::int AS c, max(supersedes::text) AS s, max(derived_from::text) AS d FROM thoughts WHERE id = ${child}`)[0];
+  assert(Number(childAfter.c) === 1, "the child survives its parent's deletion");
+  assert(childAfter.s === null, "…its supersedes is SET NULL, not left dangling and not cascaded to a delete");
+  assert(childAfter.d === JSON.stringify([parent]), "…while derived_from keeps the id: it is a historical record, not a live FK");
+
+  const del = (await sql`SELECT diff FROM thought_audit WHERE thought_id = ${parent} AND action = 'delete'`)[0];
+  assert(del !== undefined, "the delete is audited (008)");
+  assert((del.diff as Record<string, unknown>).previous_content === "provenance parent: a first digest", "…with the prior content in full, so the row is recoverable");
+  assert("previous_derived_from" in (del.diff as Record<string, unknown>) && "previous_supersedes" in (del.diff as Record<string, unknown>), "…and 025 keeps the prior provenance in the recovery record");
+
+  const childUpdate = await sql`SELECT diff FROM thought_audit WHERE thought_id = ${child} AND action = 'update' AND diff ? 'supersedes'`;
+  assert(childUpdate.length === 1, "the SET NULL is itself audited on the child — an update the pre-025 diff could not see");
+  const sd = (childUpdate[0].diff as { supersedes: { before: string | null; after: string | null } }).supersedes;
+  assert(sd.before === parent && sd.after === null, `…recording supersedes cleared from the parent to null (${sd.before?.slice(0,4)} → ${sd.after})`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c) > auditBefore, "audit grew, it was not silent");
+
+  // Validation is at the write path — a non-existent reference is refused, and
+  // no row is written for it.
+  let missing = "";
+  try { await cap("provenance orphan: derived from nothing real", {}, 3, { derived_from: ["11111111-1111-1111-1111-111111111111"] }); }
+  catch (e) { missing = (e as Error).message; }
+  assert(/does not exist/.test(missing), `a derived_from naming no thought is refused (${missing.slice(0, 60)})`);
+  let nonUuid = "";
+  try { await cap("provenance junk: derived from junk", {}, 3, { derived_from: ["nope"] }); }
+  catch (e) { nonUuid = (e as Error).message; }
+  assert(/only thought UUID strings/.test(nonUuid), "…and a non-UUID element is refused before any write");
+  assert(Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE content LIKE 'provenance orphan%' OR content LIKE 'provenance junk%'`)[0].c) === 0, "…and neither refused capture left a row");
+
+  await sql`DELETE FROM thoughts`;
+}
+
 await sql.close();
 
 report();

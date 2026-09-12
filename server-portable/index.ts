@@ -465,6 +465,13 @@ function buildServer(principal: Principal): McpServer {
           };
         }
 
+        // 025 (SMD-1253): which of these hits a newer thought has superseded,
+        // and by which. One extra query; the labelling half of the retrieval
+        // decision (the ranking change is gated on eval-supersession.ts). A hit
+        // ranked beside the version that replaced it is the failure this ticket
+        // is about — say so on the row rather than let it pass as current.
+        const superseded = await (await db()).supersededAmong(data.map((t) => t.id));
+
         const results = data.map(
           (t, i) => {
             const m = t.metadata || {};
@@ -479,9 +486,14 @@ function buildServer(principal: Principal): McpServer {
               // `ID:` to match search_thoughts_keyword, which prints the id the
               // same way for the same block format. SMD-1248.
               `ID: ${t.id}`,
+            ];
+            // 025: mark a hit a newer thought replaces, and name the replacement,
+            // so the reader is not left ranking a superseded version as current.
+            if (superseded[t.id]) parts.push(`⚠ Superseded by a newer thought — ID ${superseded[t.id]}`);
+            parts.push(
               `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
               `Type: ${m.type || "unknown"}`,
-            ];
+            );
             if (t.matchedNeedles.length) parts.push(`Contains: ${t.matchedNeedles.join(", ")}`);
             if (Array.isArray(m.topics) && m.topics.length)
               parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
@@ -673,6 +685,10 @@ function buildServer(principal: Principal): McpServer {
           return { content: [{ type: "text" as const, text: "No thoughts found." }] };
         }
 
+        // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
+        // and name the replacement — the same label search_thoughts prints.
+        const superseded = await (await db()).supersededAmong(data.map((t) => t.id));
+
         const results = data.map(
           (t, i) => {
             // `data` is ThoughtListItem[] — id, content, metadata, created_at all
@@ -682,7 +698,8 @@ function buildServer(principal: Principal): McpServer {
             // An `ID:` line, the same label the two search tools print — it is what
             // update_thought and delete_thought take. This compact format has no
             // header group, so it trails the content. SMD-1248.
-            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}`;
+            const mark = superseded[t.id] ? `\n   ⚠ Superseded by a newer thought — ID ${superseded[t.id]}` : "";
+            return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}\n   ID: ${t.id}${mark}`;
           }
         );
 
@@ -795,9 +812,16 @@ function buildServer(principal: Principal): McpServer {
       },
       inputSchema: {
         content: z.string().describe("The thought to capture — a clear, standalone statement that will make sense when retrieved later by any AI"),
+        // Migration 025 (SMD-1253). Both optional; a first-hand capture sets
+        // neither. Validated at the write — an id that is not an existing thought
+        // is refused, so a synthesis cannot claim a source it does not have.
+        derived_from: z.array(z.string()).optional()
+          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result)."),
+        supersedes: z.string().optional()
+          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded."),
       },
     },
-    async ({ content }) => {
+    async ({ content, derived_from, supersedes }) => {
       try {
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
@@ -831,6 +855,11 @@ function buildServer(principal: Principal): McpServer {
           // one the embedder used, not the one ob1_config records: they differ
           // exactly while a re-embed to another model is under way.
           embeddingModel: embedded.model,
+          // 025: provenance, if the caller named any. upsert_thought validates
+          // derived_from and refuses a bad reference, so a malformed value
+          // fails the capture with a clear message rather than storing a lie.
+          derivedFrom: derived_from,
+          supersedes,
         });
 
         if (captured.embeddingFailed) {

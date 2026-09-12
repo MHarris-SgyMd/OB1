@@ -170,6 +170,10 @@ console.log("\n[3] thoughts table matches docs/01-getting-started.md");
     content_fingerprint: "text",
     // 021: the model that produced `embedding`; NULL is unknown. See [22].
     embedding_model: "text",
+    // 025: what this thought was derived from (array of source ids) and which
+    // thought it replaces (self-FK). Both nullable. SMD-1253. See [25].
+    derived_from: "jsonb",
+    supersedes: "uuid",
   };
   for (const [col, type] of Object.entries(expected)) {
     assert(shape[col] === type, `${col} is ${type}${shape[col] === type ? "" : ` (got ${shape[col]})`}`);
@@ -199,6 +203,14 @@ console.log("\n[4] Indexes exist with the right access methods");
     /WHERE \(content_fingerprint IS NOT NULL\)/.test(fp),
     "…and partial, so pre-fingerprint rows do not collide on NULL"
   );
+
+  // 025 (SMD-1253): the two provenance indexes. derived_from is searched by
+  // containment (find_derivatives, `@>`), so GIN; supersedes is a partial btree
+  // over only the rows that point at a predecessor.
+  assert(/USING gin/.test(byName["idx_thoughts_derived_from"] ?? ""), "idx_thoughts_derived_from is GIN");
+  const sup = byName["idx_thoughts_supersedes"] ?? "";
+  assert(sup !== "", "idx_thoughts_supersedes exists");
+  assert(/WHERE \(supersedes IS NOT NULL\)/.test(sup), "…and is partial on supersedes IS NOT NULL");
 
   // Present by default since SMD-944, because search_thoughts_keyword is a core
   // query that reaches it. Before that this assertion was its exact inverse, and
@@ -2153,8 +2165,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("022") && lastDefinerOf("thoughts_write_audit").startsWith("010"),
-         `021 is the last definer of update_thought, 022 of upsert_thought (its 3-argument body carries 021's label) and 010 still of the audit trigger (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("025") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
+         `021 is the last definer of update_thought, 025 of upsert_thought (its 3-argument body carries 022's chunk rule and 021's label) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
@@ -2277,7 +2289,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
          "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("upsert_thought").startsWith("022"), `022 is the last definer of upsert_thought (${lastDefinerOf("upsert_thought")})`);
+  assert(lastDefinerOf("upsert_thought").startsWith("025"), `025 is the last definer of upsert_thought (it carries 022's body and adds the provenance envelope) (${lastDefinerOf("upsert_thought")})`);
 
   // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
   // defect with it — which is what preflight's `atomic capture` reads the
@@ -2387,6 +2399,73 @@ console.log("\n[24] Migration 023: every legacy singleton, and the oldest of eac
   await reapply("023");
   assert((await nullBatches()) === 0 && (await stamps()) === stampsNow && (await backfill()) === 0,
          "023 re-applied with the variable unset takes the rest, and a further call writes nothing and moves nothing");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 25. Migration 025: derivation and supersession are recorded, and the self-FK clears not cascades ──
+
+console.log("\n[25] Migration 025: derived_from / supersedes, their constraints, and the read-back functions");
+{
+  // The self-FK's delete action. confdeltype 'n' = SET NULL — the one that keeps
+  // a superseded thought hard-deletable (009) while its successor survives. 'c'
+  // (CASCADE) would delete the successor; 'r'/'a' (RESTRICT/NO ACTION) would
+  // refuse the delete. See migration 025 departure 4.
+  const fk = (await db.query<{ deltype: string; deltype_full: string }>(
+    `SELECT confdeltype AS deltype FROM pg_constraint WHERE conname = 'thoughts_supersedes_fkey'`)).rows[0];
+  assert(fk?.deltype === "n", `supersedes is a self-FK ON DELETE SET NULL (confdeltype ${fk?.deltype})`);
+
+  // The array-shape CHECK. Element-level UUID + existence is upsert_thought's,
+  // not a constraint (departure 3).
+  const chk = (await db.query<{ c: number }>(
+    `SELECT count(*)::int AS c FROM pg_constraint WHERE conname = 'thoughts_derived_from_is_array' AND contype = 'c'`)).rows[0].c;
+  assert(chk === 1, "derived_from carries the array-shape CHECK");
+
+  // The read-back functions exist, one of each, at their shipped arity.
+  assert((await functionsNamed("trace_provenance")) === 1, "trace_provenance is defined");
+  assert((await functionsNamed("find_derivatives")) === 1, "find_derivatives is defined");
+  const tp = (await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = 'trace_provenance(uuid, int, int)'::regprocedure`)).rows[0];
+  assert(Number(tp?.n) === 3, `…trace_provenance takes (uuid, int, int) (${tp?.n} args)`);
+  const fd = (await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = 'find_derivatives(uuid, int)'::regprocedure`)).rows[0];
+  assert(Number(fd?.n) === 2, `…find_derivatives takes (uuid, int) (${fd?.n} args)`);
+
+  // The write path validates derived_from — the choke point, or an untrusted
+  // hole (departure 3). A non-UUID element is refused; an array of existing ids
+  // is accepted and read back both ways. The capture path always carries a
+  // vector, so this uses the 3-argument form; the 2-argument legacy overload
+  // (003) is not a capture path and is left as it was.
+  const cap = async (content: string, env: Record<string, unknown>, at: number) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify(env), unit(at)])).rows[0].r.id;
+  const parent = await cap("a source observation", { metadata: { type: "observation" } }, 0);
+  let bad = "";
+  try { await cap("a synthesis of nonsense", { metadata: {}, derived_from: ["not-a-uuid"] }, 1); }
+  catch (e) { bad = (e as Error).message; }
+  assert(/derived_from must contain only thought UUID strings/.test(bad), "a non-UUID derived_from element is refused at the write");
+  let missing = "";
+  try { await cap("a synthesis of a ghost", { metadata: {}, derived_from: ["11111111-1111-1111-1111-111111111111"] }, 2); }
+  catch (e) { missing = (e as Error).message; }
+  assert(/derived_from references a thought that does not exist/.test(missing), "…and a derived_from that names no existing thought is refused");
+
+  const child = await cap("a synthesis of the source",
+    { metadata: { type: "synthesis", derivation_method: "synthesis" }, derived_from: [parent], supersedes: parent }, 3);
+  const up = (await db.query<{ df: unknown; s: string }>(`SELECT derived_from AS df, supersedes AS s FROM thoughts WHERE id = $1`, [child])).rows[0];
+  assert(Array.isArray(up.df) && (up.df as string[])[0] === parent && up.s === parent, "a validated capture writes derived_from and supersedes");
+  const anc = await db.query<{ thought_id: string; depth: number }>(`SELECT thought_id, depth FROM trace_provenance($1::uuid)`, [child]);
+  assert(anc.rows.some((r) => r.thought_id === child && r.depth === 0) && anc.rows.some((r) => r.thought_id === parent && r.depth === 1),
+         "trace_provenance walks UP to the source");
+  const der = await db.query<{ id: string }>(`SELECT id FROM find_derivatives($1::uuid)`, [parent]);
+  assert(der.rows.some((r) => r.id === child), "find_derivatives walks DOWN to the synthesis");
+
+  // The self-FK's SET NULL: deleting the source clears the successor's pointer,
+  // the successor survives, and the derived_from GIN row is left as-is (the
+  // ancestor id lingers there deliberately — derived_from is a historical
+  // record, not a live FK; only supersedes is enforced). Full delete behaviour
+  // (the audit row) is db/test-live.ts's, against a real Postgres.
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [parent]);
+  const after = (await db.query<{ c: number; s: string | null }>(
+    `SELECT count(*)::int AS c, max(supersedes::text) AS s FROM thoughts WHERE id = $1`, [child])).rows[0];
+  assert(after.c === 1 && after.s === null, "deleting the superseded source nulls the successor's supersedes and leaves it standing");
+
   await db.exec(`DELETE FROM thoughts`);
 }
 

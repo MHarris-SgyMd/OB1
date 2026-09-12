@@ -340,6 +340,63 @@ console.log("\n[8] Errors surface rather than being swallowed");
   await broken.close();
 }
 
+console.log("\n[9] Provenance: capture writes it, the read methods walk it, and the label lookup finds it (migration 025)");
+{
+  const parent = await store.captureThought({
+    content: "provenance source: the original observation",
+    payload: { metadata: { type: "observation", source: "mcp" } },
+    embedding: unit(4),
+  });
+  const child = await store.captureThought({
+    content: "provenance synthesis: a digest of the observation",
+    payload: { metadata: { type: "synthesis", derivation_method: "synthesis", source: "mcp" } },
+    embedding: unit(5),
+    derivedFrom: [parent.id],
+    supersedes: parent.id,
+  });
+
+  const back = await store.getThought(child.id);
+  assert(back !== null, "the synthesis reads back");
+
+  // trace UP: depth 0 is the child, depth 1 the source.
+  const anc = await store.traceProvenance({ id: child.id });
+  assert(anc.some((n) => n.thoughtId === child.id && n.depth === 0), "traceProvenance returns the thought itself at depth 0");
+  const src = anc.find((n) => n.thoughtId === parent.id);
+  assert(src?.depth === 1 && src.parentId === child.id, "…and its source at depth 1, parented by the child");
+  // derivation_method is read from each node's metadata: the synthesis child has
+  // one, the plain observation source does not.
+  const self = anc.find((n) => n.thoughtId === child.id);
+  assert(self?.derivationMethod === "synthesis" && src?.derivationMethod === null,
+         `…derivation_method comes from metadata (child ${self?.derivationMethod}, source ${src?.derivationMethod})`);
+
+  // find DOWN: the source's one derivative is the synthesis.
+  const der = await store.findDerivatives({ id: parent.id });
+  assert(der.length === 1 && der[0].id === child.id, `findDerivatives walks down to the synthesis (${der.length} found)`);
+
+  // the label lookup: the source is superseded, by the child; the child is not.
+  const sup = await store.supersededAmong([parent.id, child.id]);
+  assert(sup[parent.id] === child.id, "supersededAmong maps the superseded source to its replacement");
+  assert(!(child.id in sup), "…and does not mark the replacement itself");
+
+  // validation lives at the write: a derived_from element that is not an
+  // existing thought is refused, so a synthesis cannot claim a source it lacks.
+  let bad = "";
+  try {
+    await store.captureThought({
+      content: "provenance liar: derived from a ghost",
+      payload: { metadata: {} },
+      embedding: unit(6),
+      derivedFrom: ["11111111-1111-1111-1111-111111111111"],
+    });
+  } catch (e) { bad = (e as Error).message; }
+  assert(/does not exist/.test(bad), `a derived_from naming no thought is refused at the write (${bad.slice(0, 60)})`);
+
+  // a malformed id is a clean no-match on the read methods, not a cast error.
+  assert((await store.traceProvenance({ id: "not-a-uuid" })).length === 0, "traceProvenance of a malformed id is empty, not an error");
+  assert((await store.findDerivatives({ id: "not-a-uuid" })).length === 0, "findDerivatives of a malformed id is empty, not an error");
+  assert(Object.keys(await store.supersededAmong(["not-a-uuid"])).length === 0, "supersededAmong drops malformed ids");
+}
+
 await store.close();
 
 report();
