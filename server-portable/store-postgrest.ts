@@ -25,10 +25,22 @@ import type {
   ThoughtMatch,
   RecencyOpts,
   ThoughtMeta,
+  ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
   UpdateResult,
 } from "./store.ts";
+
+// thought_stats aggregation for the PostgREST path. PostgREST returns at most
+// 1000 rows per select and cannot aggregate server-side, so stats must page
+// explicitly and tally in memory or they silently describe only the newest
+// page. STATS_MAX_ROWS bounds the work — the Workers/Edge runtime this store
+// serves has a wall-clock budget a very large brain could exhaust — and hitting
+// it is reported, never hidden. The SQL store has none of this: migration 024
+// does the whole corpus in one statement (see store-sql.ts). Moved here from the
+// tool in SMD-1249, so the cap lives with the only path that still needs it.
+const STATS_PAGE_SIZE = 1000;
+const STATS_MAX_ROWS = 100_000;
 
 export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
@@ -167,6 +179,55 @@ export class PostgrestStore implements ThoughtStore {
       .range(offset, offset + limit - 1);
     if (error) throw new Error(error.message);
     return (data ?? []) as ThoughtMeta[];
+  }
+
+  async statsSummary(): Promise<ThoughtStats> {
+    // `count` is the whole corpus; the walk below tallies the breakdowns. Page
+    // explicitly and tally as we go so we never hold the corpus in memory, and
+    // stop at STATS_MAX_ROWS so a very large brain cannot exhaust the runtime's
+    // time budget. When the cap stops the walk short, `aggregated < total` and
+    // the tool says the breakdowns are partial rather than under-reporting them
+    // silently. `total` and this walk are separate reads (as the tool's were
+    // before SMD-1249), so the note is best-effort under concurrent writes over
+    // the walk's window, not transactional. (This is the pre-SMD-1249 tool logic,
+    // moved into the store that still needs it, with one addition: a JSON null
+    // inside a topics/people array is skipped, so for well-formed metadata this
+    // store and migration 024's function — which drops it with WHERE ... IS NOT
+    // NULL — render the same top-10 breakdowns. Without the guard the walk would
+    // coerce null to a literal "null" key. Degenerate non-string metadata is not
+    // guaranteed to match the SQL path; see store.ts:ThoughtStats.)
+    const total = await this.countThoughts();
+    const types: Record<string, number> = {};
+    const topics: Record<string, number> = {};
+    const people: Record<string, number> = {};
+
+    let aggregated = 0;
+    let newest: string | null = null;
+    let oldest: string | null = null;
+
+    for (let offset = 0; offset < STATS_MAX_ROWS; offset += STATS_PAGE_SIZE) {
+      const page = await this.pageThoughtMeta(offset, STATS_PAGE_SIZE);
+      if (page.length === 0) break;
+
+      for (const r of page) {
+        const m = (r.metadata || {}) as Record<string, unknown>;
+        if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
+        if (Array.isArray(m.topics))
+          for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
+        if (Array.isArray(m.people))
+          for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
+      }
+
+      // Ordered newest-first, so the first row of the first page is the newest
+      // overall and the last row of the final page is the oldest.
+      if (newest === null) newest = page[0].created_at;
+      oldest = page[page.length - 1].created_at;
+      aggregated += page.length;
+
+      if (page.length < STATS_PAGE_SIZE) break; // short page — corpus exhausted
+    }
+
+    return { total, oldest, newest, types, topics, people, aggregated };
   }
 
   async captureThought(opts: {

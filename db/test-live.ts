@@ -1756,6 +1756,91 @@ console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (mig
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[12] thought_stats_summary() equals the page walk, proves the old cap truncated, and full-scans as its header says (migration 024)");
+{
+  // Seed a known corpus, oldest → newest, chosen to exercise every arm:
+  //   - two types, so a newest-only prefix misses one (the truncation proof);
+  //   - a topic on three rows and another on one (the count aggregation);
+  //   - a JSON null inside a topics array (s3), which must be dropped, not
+  //     crash jsonb_object_agg on a NULL key;
+  //   - topics that is NOT an array (s5, a bare string), which must be skipped,
+  //     not raise from jsonb_array_elements_text — the tool's Array.isArray guard;
+  //   - a row with no topics/people at all (s4).
+  await sql.unsafe(`
+    INSERT INTO thoughts (content, metadata, created_at) VALUES
+      ('s1', '{"type":"old","topics":["x","y"],"people":["Ada"]}'::jsonb, now() - interval '5 min'),
+      ('s2', '{"type":"old","topics":["x"],"people":["Bob"]}'::jsonb,     now() - interval '4 min'),
+      ('s3', '{"type":"old","topics":["x",null]}'::jsonb,                 now() - interval '3 min'),
+      ('s4', '{"type":"new"}'::jsonb,                                      now() - interval '2 min'),
+      ('s5', '{"type":"new","topics":"notarray","people":["Ada"]}'::jsonb, now() - interval '1 min')`);
+
+  // The application walk the PostgREST store runs (store-postgrest.ts) — page
+  // metadata newest-first and tally, optionally stopping at a cap, with the same
+  // null-element guard that store and migration 024 both apply. This is the
+  // reference the SQL function must reproduce, and it is faithful to the
+  // PostgREST path too, so [12] covers both stores' aggregation.
+  const walk = async (cap = Infinity) => {
+    const types: Record<string, number> = {};
+    const topics: Record<string, number> = {};
+    const people: Record<string, number> = {};
+    let aggregated = 0;
+    const PAGE = 2; // small, so paging is actually exercised
+    for (let off = 0; off < cap; off += PAGE) {
+      const page = await sql`SELECT metadata FROM thoughts ORDER BY created_at DESC LIMIT ${Math.min(PAGE, cap - off)}::int OFFSET ${off}::int`;
+      if (page.length === 0) break;
+      for (const r of page) {
+        const m = (r.metadata || {}) as Record<string, unknown>;
+        if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
+        if (Array.isArray(m.topics)) for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
+        if (Array.isArray(m.people)) for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
+      }
+      aggregated += page.length;
+      if (page.length < PAGE) break;
+    }
+    return { types, topics, people, aggregated };
+  };
+
+  const fn = (await sql`SELECT thought_stats_summary() AS s`)[0].s as {
+    total: number; first_ts: string | null; last_ts: string | null;
+    types: Record<string, number>; topics: Record<string, number>; people: Record<string, number>;
+  };
+  const full = await walk();
+
+  assert(fn.total === 5, `function counts the whole corpus (${fn.total})`);
+  assert(full.aggregated === 5, "the uncapped walk covers the whole corpus");
+  assert(JSON.stringify(fn.types) === JSON.stringify(full.types), `types agree with the walk (${JSON.stringify(fn.types)} vs ${JSON.stringify(full.types)})`);
+  assert(JSON.stringify(fn.topics) === JSON.stringify(full.topics), `topics agree with the walk (${JSON.stringify(fn.topics)} vs ${JSON.stringify(full.topics)})`);
+  assert(JSON.stringify(fn.people) === JSON.stringify(full.people), `people agree with the walk (${JSON.stringify(fn.people)} vs ${JSON.stringify(full.people)})`);
+  assert(fn.types.old === 3 && fn.types.new === 2, "type counts are exact across two types");
+  assert(fn.topics.x === 3 && fn.topics.y === 1, "topic counts unnest and aggregate, null element dropped");
+  assert(!("notarray" in fn.topics), "a non-array topics value is skipped, not unnested char-by-char or raised");
+  assert(fn.people.Ada === 2 && fn.people.Bob === 1, "people counts aggregate across rows");
+  assert(fn.first_ts !== null && fn.last_ts !== null && fn.first_ts < fn.last_ts, "first/last span the corpus, oldest before newest");
+
+  // The old cap was a real correctness cliff: a walk that stops before the end
+  // reports breakdowns from an arbitrary newest prefix beside a true total. Cap
+  // at 2 (the two newest, both type 'new') and the 'old' type vanishes, while
+  // the function still sees all three. That divergence is exactly what happened
+  // past 100,000 rows before this migration — proven here without seeding 100k.
+  const capped = await walk(2);
+  assert(capped.aggregated === 2, "a walk capped at 2 covers only two rows");
+  assert(capped.types.old === undefined && fn.types.old === 3, "…and its breakdowns disagree with the whole-corpus function — the truncation was real");
+
+  // The plan, as migration 024's header claims: the topic/people unnest is a
+  // full scan of thoughts, and that is accepted for a once-called summary.
+  const plan = (await sql.unsafe(
+    `EXPLAIN SELECT count(*) FROM thoughts, jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata->'topics')='array' THEN metadata->'topics' ELSE '[]'::jsonb END)`
+  )).map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+  assert(/Seq Scan on thoughts/.test(plan), `the unnest arm is a full scan, as the header records (${plan.split("\n")[0]})`);
+
+  // Empty corpus: a total of zero, every map empty, no date range.
+  await sql`DELETE FROM thoughts`;
+  const empty = (await sql`SELECT thought_stats_summary() AS s`)[0].s as typeof fn;
+  assert(empty.total === 0, "empty corpus totals zero");
+  assert(empty.first_ts === null && empty.last_ts === null, "…with a null date range, not an error");
+  assert(JSON.stringify(empty.types) === "{}" && JSON.stringify(empty.topics) === "{}" && JSON.stringify(empty.people) === "{}", "…and empty breakdown maps, not null");
+}
+
 await sql.close();
 
 report();

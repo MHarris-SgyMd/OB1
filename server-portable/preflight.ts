@@ -92,7 +92,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "search signatures", "edit signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "migration ledger",
 ];
@@ -766,6 +766,27 @@ if (configFailed) {
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
                  "Apply the migrations through db/migrations/020_match_thoughts_recency.sql (017_search_thoughts_hybrid.sql defines it; 020 redefines it with the arguments the server sends).");
+
+        /**
+         * Migration 024's function. On the SQL path thought_stats calls
+         * thought_stats_summary() to aggregate the whole corpus in one statement
+         * (SMD-1249); a database that stops at 023 has the tool registered but no
+         * function behind it, so every thought_stats call fails with `function
+         * thought_stats_summary() does not exist` while the other tools work —
+         * the same shape the keyword and hybrid checks above convert to a startup
+         * message. A fail, not a warn: the absence breaks the tool, it does not
+         * degrade it. (Only the SQL store calls it — the PostgREST store still
+         * walks pages — and this whole block is SQL-only, so the check is where
+         * it belongs.)
+         */
+        const stats = await sql`
+          SELECT count(*)::int AS c FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = 'thought_stats_summary' AND n.nspname = 'public'`;
+        if (Number(stats[0].c) >= 1) add("stats summary", "ok", "thought_stats_summary present");
+        else add("stats summary", "fail",
+                 "thought_stats_summary is missing, but thought_stats calls it on the SQL path — every thought_stats call would fail",
+                 "Apply db/migrations/024_thought_stats_summary.sql.");
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,

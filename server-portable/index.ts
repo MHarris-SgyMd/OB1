@@ -126,13 +126,6 @@ function citationBase(): string {
   return env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts";
 }
 
-// thought_stats pagination. Supabase caps an unbounded select at 1000 rows, so
-// stats must page explicitly or they silently describe only the newest page.
-// STATS_MAX_ROWS bounds the work so a very large brain cannot exhaust the Edge
-// Function's time budget; hitting it is reported in the output, never hidden.
-const STATS_PAGE_SIZE = 1000;
-const STATS_MAX_ROWS = 100_000;
-
 // How a capture becomes vectors — chunking, the blurb rule, the prompt
 // template, the whole-content-then-head-window fallback, the width check — is
 // embed.ts, shared with db/reembed.ts so a re-embed produces exactly what a
@@ -724,49 +717,14 @@ function buildServer(principal: Principal): McpServer {
     async () => {
       try {
         const store = await db();
-        const count = await store.countThoughts();
 
-        // Supabase caps an unbounded select at 1000 rows by default, so a single
-        // query silently aggregates only the newest page while `count` above
-        // reports the whole corpus — the two halves of the response then describe
-        // different datasets with no indication. Page explicitly instead, and
-        // tally as we go so we never hold the corpus in memory.
-        const types: Record<string, number> = {};
-        const topics: Record<string, number> = {};
-        const people: Record<string, number> = {};
-
-        let aggregated = 0;
-        let newest: string | null = null;
-        let oldest: string | null = null;
-        let truncated = false;
-
-        for (let offset = 0; ; offset += STATS_PAGE_SIZE) {
-          if (offset >= STATS_MAX_ROWS) {
-            truncated = true;
-            break;
-          }
-
-          const page = await store.pageThoughtMeta(offset, STATS_PAGE_SIZE);
-
-          if (page.length === 0) break;
-
-          for (const r of page) {
-            const m = (r.metadata || {}) as Record<string, unknown>;
-            if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-            if (Array.isArray(m.topics))
-              for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-            if (Array.isArray(m.people))
-              for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
-          }
-
-          // Ordered newest-first, so the first row seen is the newest overall and
-          // the last row of the final page is the oldest.
-          if (newest === null) newest = page[0].created_at;
-          oldest = page[page.length - 1].created_at;
-          aggregated += page.length;
-
-          if (page.length < STATS_PAGE_SIZE) break; // short page — corpus exhausted
-        }
+        // The store aggregates. On the SQL path that is migration 024's
+        // thought_stats_summary() over the whole corpus in one statement; on
+        // PostgREST it is the capped page walk. Either way we get the total, the
+        // date range, and the count maps, plus how many rows the breakdowns
+        // actually cover — this tool only renders them. (See store.ts:ThoughtStats.)
+        const { total, oldest, newest, types, topics, people, aggregated } =
+          await store.statsSummary();
 
         const sort = (o: Record<string, number>): [string, number][] =>
           Object.entries(o)
@@ -774,7 +732,7 @@ function buildServer(principal: Principal): McpServer {
             .slice(0, 10);
 
         const lines: string[] = [
-          `Total thoughts: ${count}`,
+          `Total thoughts: ${total}`,
           `Date range: ${
             newest && oldest
               ? new Date(oldest).toLocaleDateString() +
@@ -784,12 +742,14 @@ function buildServer(principal: Principal): McpServer {
           }`,
         ];
 
-        // Never report aggregates as corpus-wide when they are not. If we stopped
-        // at the safety cap, say so rather than quietly under-reporting.
-        if (truncated) {
+        // Never report aggregates as corpus-wide when they are not. The SQL path
+        // covers the whole corpus (aggregated === total) and this never fires; a
+        // capped PostgREST walk that stopped short says so rather than quietly
+        // under-reporting.
+        if (aggregated < total) {
           lines.push(
-            `Note: breakdowns below cover the ${aggregated.toLocaleString()} most recent thoughts ` +
-              `(safety cap ${STATS_MAX_ROWS.toLocaleString()}), not all ${count?.toLocaleString() ?? "?"}.`
+            `Note: breakdowns below cover the ${aggregated.toLocaleString()} most recent thoughts, ` +
+              `not all ${total.toLocaleString()}.`
           );
         }
 

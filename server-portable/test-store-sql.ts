@@ -269,6 +269,21 @@ console.log("\n[5] Stats counting and paging");
   assert(p1[0].created_at >= p2[p2.length - 1].created_at, "ordering is stable across pages");
 }
 
+console.log("\n[5b] statsSummary aggregates the whole corpus in one SQL call (migration 024)");
+{
+  // The seeded corpus is a mix: three rows carry `kind` and no `type`/`topics`/
+  // `people`, one row (the [4] listThoughts seed) carries type:"note",
+  // topics:[alpha,beta], people:[Ada]. So this also covers rows with no arrays.
+  const s = await store.statsSummary();
+  assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+  assert(s.aggregated === s.total, "the SQL path covers the whole corpus — never truncates");
+  assert(s.types["note"] === 1, `type tally is exact (${JSON.stringify(s.types)})`);
+  assert(s.topics["alpha"] === 1 && s.topics["beta"] === 1, "topics unnest from the array");
+  assert(s.people["Ada"] === 1, "people unnest from the array");
+  assert(Object.keys(s.topics).length === 2, "a row with no topics array contributes none");
+  assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range is a real span");
+}
+
 console.log("\n[6] Dedup and merge behave as the tools expect");
 {
   const before = await store.countThoughts();

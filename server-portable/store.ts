@@ -152,6 +152,41 @@ export type ThoughtMeta = {
   created_at: string;
 };
 
+/**
+ * What thought_stats renders: the corpus total, its date range, and the counts
+ * by type, topic and person. The tool sorts each map and renders its own top 10,
+ * so a store need only return at least that many, in any order — the maps are not
+ * a contract for the full distribution. They differ by backend and deliberately:
+ * the SQL store returns every `type` but only the top 10 `topics`/`people`
+ * (migration 024 caps them in SQL); the PostgREST walk returns every key of all
+ * three. For the metadata the capture path produces — a string `type`, `topics`
+ * and `people` as arrays of strings — the two backends render the same top-10
+ * breakdowns, which the tests assert. The guarantee stops at well-formed data:
+ * a non-string scalar `type` (`0`, `false`) or a non-string array element is
+ * degenerate metadata the capture path never writes, and the SQL text-coercion
+ * (`->>`, `jsonb_array_elements_text`) and the JS walk's truthiness/`String()`
+ * may key or drop it differently; likewise, when equal counts tie for the 10th
+ * slot, which of the tied keys shows is unspecified on both paths. Both remain
+ * a correct top-10 — this is not a byte-identical-output contract.
+ *
+ * `aggregated` is how many rows the breakdowns actually cover. On the SQL store
+ * it equals `total`: one aggregate over the whole table (migration 024), never
+ * capped. On the PostgREST store it is the reach of the capped page walk and can
+ * be < total on a very large brain; the tool prints a truncation note only when
+ * the two differ. `total` and the walk are separate reads there (as the tool's
+ * were before SMD-1249), so under concurrent writes across the ~100-page window
+ * the note is best-effort, not transactional. See `statsSummary`.
+ */
+export type ThoughtStats = {
+  total: number;
+  oldest: string | null;
+  newest: string | null;
+  types: Record<string, number>;
+  topics: Record<string, number>;
+  people: Record<string, number>;
+  aggregated: number;
+};
+
 export type ListFilters = {
   limit: number;
   type?: string;
@@ -367,7 +402,23 @@ export interface ThoughtStore {
   /** Exact row count of the whole corpus. */
   countThoughts(): Promise<number>;
 
-  /** One page of metadata for aggregation, newest first. */
+  /**
+   * Everything thought_stats needs, aggregated by the store. The two backends
+   * differ, and this is one of the places the interface says so:
+   *   - SQL (store-sql.ts) runs migration 024's thought_stats_summary() — the
+   *     whole corpus in one statement, `aggregated === total`, no cap.
+   *   - PostgREST (store-postgrest.ts) has no server-side aggregation, so it
+   *     walks pageThoughtMeta in pages up to a safety cap and tallies in memory;
+   *     `aggregated` is that reach and may be < total, which the tool surfaces.
+   */
+  statsSummary(): Promise<ThoughtStats>;
+
+  /**
+   * One page of metadata for aggregation, newest first. The PostgREST
+   * `statsSummary` walks this; the SQL store keeps it as a primitive
+   * (test-store-sql covers it) even though its own `statsSummary` no longer
+   * needs it.
+   */
   pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]>;
 
   /**
