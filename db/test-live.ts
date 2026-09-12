@@ -1932,6 +1932,56 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node expanded once, diamonds keep every edge, no path explosion (migration 026, SMD-1288)");
+{
+  const cap = async (content: string, at: number, derived?: string[]) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { type: "synthesis" }, ...(derived ? { derived_from: derived } : {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string }).id;
+
+  // A dense, cycle-free DAG built through the real write path: WIDTH nodes per
+  // layer for DEPTH layers, each node deriving from EVERY node of the next-deeper
+  // layer, plus a root over layer 1. Root→leaf paths = WIDTH^DEPTH; distinct
+  // nodes = WIDTH*DEPTH+1. The per-path 025 walk materialised a row per PATH (and
+  // spent its cap on shallow repeats); 026 expands each node once. Bottom-up,
+  // because upsert_thought validates that every derived_from element exists.
+  const WIDTH = 3, DEPTH = 4;
+  let k = 0;
+  let deeper: string[] = [];
+  const layers: string[][] = [];  // layers[0] = the layer just under root; layers[DEPTH-1] = the leaves.
+  for (let layer = DEPTH; layer >= 1; layer--) {
+    const here: string[] = [];
+    for (let w = 0; w < WIDTH; w++) here.push(await cap(`dense L${layer} n${w}`, k++, deeper.length ? deeper : undefined));
+    layers.unshift(here);
+    deeper = here;
+  }
+  const root = await cap("dense root", k++, deeper);
+  const distinctNodes = WIDTH * DEPTH + 1;
+  const paths = WIDTH ** DEPTH;
+
+  const walk = await sql`SELECT thought_id, depth, parent_id, cycle FROM trace_provenance(${root}::uuid, ${DEPTH})`;
+  const nodeSet = new Set(walk.map((r: Record<string, unknown>) => r.thought_id as string));
+  assert(nodeSet.size === distinctNodes, `every distinct ancestor is reached, deep layers included (${nodeSet.size} of ${distinctNodes})`);
+  // The work bound as a row-count proxy: a per-path walk emits ~sum(WIDTH^d) rows,
+  // far above the ${paths} leaf paths; the walk-global walk emits one row per
+  // derivation EDGE — well under the path count — and never re-expands a node.
+  assert(walk.length < paths, `no path explosion: ${walk.length} rows, not the ${paths} root→leaf paths a per-path walk would count`);
+  assert(walk.every((r: Record<string, unknown>) => r.cycle === false), "an acyclic dense DAG has no cycle rows — diamonds included");
+
+  // The diamond: a leaf is a source of EVERY node of the layer above it, so it is
+  // reached at its one true depth from WIDTH distinct parents. Each derivation
+  // edge is kept (025's per-path parent info), though the node is EXPANDED once —
+  // the whole point of the walk-global set. cycle stays false: a same-level
+  // convergence is not a cycle.
+  const leaf = layers[DEPTH - 1][0];
+  const leafRows = walk.filter((r: Record<string, unknown>) => r.thought_id === leaf);
+  const leafParents = new Set(leafRows.map((r: Record<string, unknown>) => r.parent_id as string));
+  assert(leafRows.length === WIDTH && leafParents.size === WIDTH,
+    `a shared ancestor keeps an edge from each of its ${WIDTH} parents (${leafRows.length} edges, ${leafParents.size} distinct parents)`);
+  assert(leafRows.every((r: Record<string, unknown>) => Number(r.depth) === DEPTH && r.cycle === false),
+    "…at its true depth, none flagged a cycle");
+
+  await sql`DELETE FROM thoughts`;
+}
+
 await sql.close();
 
 report();
