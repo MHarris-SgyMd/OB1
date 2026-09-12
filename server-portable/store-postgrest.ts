@@ -16,9 +16,11 @@ import type {
   Actor,
   AgentResolution,
   CaptureResult,
+  Derivative,
   ListFilters,
   MutationError,
   MutationResult,
+  ProvenanceNode,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
@@ -41,6 +43,9 @@ import type {
 // tool in SMD-1249, so the cap lives with the only path that still needs it.
 const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
+
+/** Canonical hyphenated uuid; a malformed id is treated as no-match by the 025 read methods. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
@@ -237,6 +242,8 @@ export class PostgrestStore implements ThoughtStore {
     chunks?: { content: string; embedding: number[]; context?: string }[];
     actor?: Actor;
     embeddingModel?: string;
+    derivedFrom?: string[];
+    supersedes?: string;
   }): Promise<CaptureResult> {
     // Preferred: content, metadata and embedding in one statement, so a failure
     // cannot leave a committed row with a NULL embedding — stored but invisible
@@ -251,7 +258,9 @@ export class PostgrestStore implements ThoughtStore {
     // a NULL actor: present, plausible, and wrong.
     // The model rides the same way (021); an envelope without the key leaves
     // the row's label unknown.
-    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel);
+    // 025: derived_from / supersedes ride it too, validated by upsert_thought.
+    const envelope = captureEnvelope(opts.payload, opts.actor, opts.embeddingModel,
+      { derivedFrom: opts.derivedFrom, supersedes: opts.supersedes });
 
     const { data: atomic, error: atomicError } = await this.client.rpc("upsert_thought", {
       p_content: opts.content,
@@ -363,6 +372,76 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return normaliseAgentResolution(data);
+  }
+
+  async traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]> {
+    if (!UUID_RE.test(opts.id)) return [];
+    // Migration 025's function is plain (no SECURITY DEFINER/service_role), so
+    // PostgREST reaches it over rpc like every other. NULL args take its defaults.
+    const { data, error } = await this.client.rpc("trace_provenance", {
+      p_thought_id: opts.id,
+      p_max_depth: opts.maxDepth ?? null,
+      p_node_cap: opts.nodeCap ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+      thoughtId: String(r.thought_id),
+      depth: Number(r.depth),
+      parentId: r.parent_id ? String(r.parent_id) : null,
+      content: String(r.content),
+      type: r.type == null ? null : String(r.type),
+      sourceType: r.source_type == null ? null : String(r.source_type),
+      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
+      created_at: new Date(r.created_at as string).toISOString(),
+      cycle: r.cycle === true,
+    }));
+  }
+
+  async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
+    if (!UUID_RE.test(opts.id)) return [];
+    const { data, error } = await this.client.rpc("find_derivatives", {
+      p_thought_id: opts.id,
+      p_limit: opts.limit ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+      id: String(r.id),
+      content: String(r.content),
+      type: r.type == null ? null : String(r.type),
+      sourceType: r.source_type == null ? null : String(r.source_type),
+      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
+      created_at: new Date(r.created_at as string).toISOString(),
+    }));
+  }
+
+  async supersededAmong(ids: string[]): Promise<Record<string, string>> {
+    const valid = ids.filter((id) => UUID_RE.test(id));
+    if (valid.length === 0) return {};
+    // No DISTINCT ON over PostgREST; fetch the newer rows and reduce in JS,
+    // keeping the newest per superseded id. Best-effort: a pre-025 schema has no
+    // `supersedes` column and the select errors — the label is an enhancement,
+    // so return {} and let preflight's `provenance` check name the fix rather
+    // than break the search that called this.
+    try {
+      const { data, error } = await this.client
+        .from("thoughts")
+        .select("id, supersedes, created_at")
+        .in("supersedes", valid)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false });
+      if (error) return {};
+      const out: Record<string, string> = {};
+      for (const r of (data ?? []) as { id: string; supersedes: string }[]) {
+        // First per supersedes wins; the (created_at, id) DESC order makes that
+        // the newest — with the id tiebreak so a created_at tie (two rows
+        // superseding one id in one transaction share now()) is deterministic
+        // and agrees with the SQL store's DISTINCT ON (review pass 1, SMD-1253).
+        if (!(r.supersedes in out)) out[r.supersedes] = r.id;
+      }
+      return out;
+    } catch {
+      return {};
+    }
   }
 
   async close(): Promise<void> {

@@ -218,6 +218,29 @@ else {
   assert(withStats.code === 0 && /stats summary.*present/s.test(withStats.out), "…and reports it present once applied, the database healthy again");
 
   /**
+   * Migration 025's provenance functions (SMD-1253). capture_thought accepts
+   * derived_from/supersedes, but the pre-025 upsert_thought drops those envelope
+   * keys silently, and trace_provenance/find_derivatives (and the search label)
+   * are absent — a recording tool taking input it cannot honour. A database that
+   * stops at 024 must not start. LIVE is healthy here, so dropping one read
+   * function isolates the fail to this check — and proves the per-function count
+   * (a combined >= 2 would miss one missing function; review pass 1).
+   */
+  // Drop only ONE of the two, so the check's per-function count is what fails,
+  // not a combined >=2 that a double-overload of the survivor could satisfy
+  // (review pass 1).
+  const noProv = new SQL({ url: LIVE, max: 1 });
+  await noProv.unsafe("DROP FUNCTION IF EXISTS find_derivatives(uuid, int)");
+  await noProv.close();
+  const missingProv = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(missingProv.code === 1, "a database missing one of migration 025's functions does not start");
+  assert(/provenance.*functions are missing/s.test(missingProv.out), "…and names the provenance functions the write path depends on");
+  assert(/025_thought_provenance\.sql/.test(missingProv.out), "…with the migration to apply");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") });
+  const withProv = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(withProv.code === 0 && /provenance.*present/s.test(withProv.out), "…and reports it present once applied, the database healthy again");
+
+  /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
    * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
    * event: same signature, no iterative scan. A warning, because every search

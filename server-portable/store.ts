@@ -195,6 +195,35 @@ export type ListFilters = {
   days?: number;
 };
 
+/**
+ * One node of a derivation chain, from migration 025's trace_provenance. The
+ * walk goes UP: depth 0 is the thought asked about, depth 1 its direct sources,
+ * and so on. `type`, `sourceType` and `derivationMethod` come from metadata
+ * (the migration keeps them there rather than as columns). `cycle` is true on a
+ * node the walk has already seen — returned once, not re-expanded.
+ */
+export type ProvenanceNode = {
+  thoughtId: string;
+  depth: number;
+  parentId: string | null;
+  content: string;
+  type: string | null;
+  sourceType: string | null;
+  derivationMethod: string | null;
+  created_at: string;
+  cycle: boolean;
+};
+
+/** One thought derived directly from a given one (migration 025's find_derivatives, the walk DOWN). */
+export type Derivative = {
+  id: string;
+  content: string;
+  type: string | null;
+  sourceType: string | null;
+  derivationMethod: string | null;
+  created_at: string;
+};
+
 export type CaptureResult = {
   id: string;
   /** Set when the row was written but its embedding could not be attached. */
@@ -298,12 +327,21 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
 export function captureEnvelope(
   payload: { metadata: Record<string, unknown> },
   actor: Actor | undefined,
-  embeddingModel: string | undefined
+  embeddingModel: string | undefined,
+  /**
+   * Migration 025 (SMD-1253): what this thought was derived from, and which it
+   * supersedes. Rides the envelope like the actor and the model, so both stores
+   * send it identically and upsert_thought validates it in one place. Absent
+   * keys mean "no provenance"; upsert_thought refuses a malformed derived_from.
+   */
+  provenance?: { derivedFrom?: string[]; supersedes?: string }
 ): Record<string, unknown> {
   return {
     ...payload,
     ...(actor ? { actor: actorPayload(actor) } : {}),
     ...(embeddingModel !== undefined ? { embedding_model: embeddingModel } : {}),
+    ...(provenance?.derivedFrom !== undefined ? { derived_from: provenance.derivedFrom } : {}),
+    ...(provenance?.supersedes !== undefined ? { supersedes: provenance.supersedes } : {}),
   };
 }
 
@@ -454,6 +492,15 @@ export interface ThoughtStore {
      * is. Rides in the payload envelope on both stores, as the actor does.
      */
     embeddingModel?: string;
+    /**
+     * Migration 025 (SMD-1253). `derivedFrom` is the source thoughts a derived
+     * artifact (digest, synthesis, consolidation) was built from — an array of
+     * existing thought ids, validated by upsert_thought or the write is refused.
+     * `supersedes` is the one prior thought this one replaces. Both ride the
+     * envelope; both absent is an ordinary first-hand capture.
+     */
+    derivedFrom?: string[];
+    supersedes?: string;
   }): Promise<CaptureResult>;
 
   /**
@@ -488,6 +535,28 @@ export interface ThoughtStore {
    * speaking PostgREST needs the same identity a Bun deployment gets.
    */
   resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
+
+  /**
+   * Migration 025's read-back. traceProvenance walks UP the derived_from chain
+   * (ancestors, depth 0 = the thought itself); findDerivatives looks DOWN it
+   * (what was derived from this, one level). Both backends run the SQL functions
+   * — plain, ungranted, so PostgREST can call them too — and both are
+   * cycle-guarded and capped in SQL. No MCP tool exposes them yet; they back
+   * db/test-live.ts and a future read API.
+   */
+  traceProvenance(opts: { id: string; maxDepth?: number; nodeCap?: number }): Promise<ProvenanceNode[]>;
+  findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]>;
+
+  /**
+   * Of the given thought ids, which have been superseded, mapped to the newest
+   * thought that supersedes each. One query over the `supersedes` column (025).
+   * The read tools use it to LABEL a search hit a newer thought has replaced —
+   * the guaranteed-shipping half of the retrieval decision (SMD-1253); the
+   * ranking change is gated on eval-supersession.ts. Empty when nothing given or
+   * nothing superseded; best-effort, so a pre-025 database returns an empty map
+   * rather than breaking search — preflight's `provenance` check names the fix.
+   */
+  supersededAmong(ids: string[]): Promise<Record<string, string>>;
 
   close(): Promise<void>;
 }

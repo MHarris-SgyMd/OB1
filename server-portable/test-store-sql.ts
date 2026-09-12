@@ -340,6 +340,103 @@ console.log("\n[8] Errors surface rather than being swallowed");
   await broken.close();
 }
 
+console.log("\n[9] Provenance: capture writes it, the read methods walk it, and the label lookup finds it (migration 025)");
+{
+  const parent = await store.captureThought({
+    content: "provenance source: the original observation",
+    payload: { metadata: { type: "observation", source: "mcp" } },
+    embedding: unit(4),
+  });
+  const child = await store.captureThought({
+    content: "provenance synthesis: a digest of the observation",
+    payload: { metadata: { type: "synthesis", derivation_method: "synthesis", source: "mcp" } },
+    embedding: unit(5),
+    derivedFrom: [parent.id],
+    supersedes: parent.id,
+  });
+
+  const back = await store.getThought(child.id);
+  assert(back !== null, "the synthesis reads back");
+
+  // trace UP: depth 0 is the child, depth 1 the source.
+  const anc = await store.traceProvenance({ id: child.id });
+  assert(anc.some((n) => n.thoughtId === child.id && n.depth === 0), "traceProvenance returns the thought itself at depth 0");
+  const src = anc.find((n) => n.thoughtId === parent.id);
+  assert(src?.depth === 1 && src.parentId === child.id, "…and its source at depth 1, parented by the child");
+  // derivation_method is read from each node's metadata: the synthesis child has
+  // one, the plain observation source does not.
+  const self = anc.find((n) => n.thoughtId === child.id);
+  assert(self?.derivationMethod === "synthesis" && src?.derivationMethod === null,
+         `…derivation_method comes from metadata (child ${self?.derivationMethod}, source ${src?.derivationMethod})`);
+
+  // find DOWN: the source's one derivative is the synthesis.
+  const der = await store.findDerivatives({ id: parent.id });
+  assert(der.length === 1 && der[0].id === child.id, `findDerivatives walks down to the synthesis (${der.length} found)`);
+
+  // the label lookup: the source is superseded, by the child; the child is not.
+  const sup = await store.supersededAmong([parent.id, child.id]);
+  assert(sup[parent.id] === child.id, "supersededAmong maps the superseded source to its replacement");
+  assert(!(child.id in sup), "…and does not mark the replacement itself");
+
+  // An empty derived_from is "not derived", not "derived from nothing": it
+  // normalises to a NULL column, end to end (review pass 1).
+  const emptyProv = await store.captureThought({
+    content: "provenance empty: an array that says nothing",
+    payload: { metadata: {} },
+    embedding: unit(7),
+    derivedFrom: [],
+  });
+  const admin2 = new SQL({ url: URL_, max: 1 });
+  const emptyRow = (await admin2`SELECT derived_from FROM thoughts WHERE id = ${emptyProv.id}`)[0] as { derived_from: unknown };
+  await admin2.close();
+  assert(emptyRow.derived_from === null, `an empty derivedFrom stores as NULL, not [] (${JSON.stringify(emptyRow.derived_from)})`);
+
+  // validation lives at the write: a derived_from element that is not an
+  // existing thought is refused, so a synthesis cannot claim a source it lacks.
+  let bad = "";
+  try {
+    await store.captureThought({
+      content: "provenance liar: derived from a ghost",
+      payload: { metadata: {} },
+      embedding: unit(6),
+      derivedFrom: ["11111111-1111-1111-1111-111111111111"],
+    });
+  } catch (e) { bad = (e as Error).message; }
+  assert(/does not exist/.test(bad), `a derived_from naming no thought is refused at the write (${bad.slice(0, 60)})`);
+
+  // a malformed id is a clean no-match on the read methods, not a cast error.
+  assert((await store.traceProvenance({ id: "not-a-uuid" })).length === 0, "traceProvenance of a malformed id is empty, not an error");
+  assert((await store.findDerivatives({ id: "not-a-uuid" })).length === 0, "findDerivatives of a malformed id is empty, not an error");
+  assert(Object.keys(await store.supersededAmong(["not-a-uuid"])).length === 0, "supersededAmong drops malformed ids");
+
+  // Boyscout (SMD-1253 review): the two thin spots the passes named but held.
+  //
+  // (a) supersededAmong's id tiebreak. Two thoughts supersede one id; force
+  // their created_at equal (a batch import in one transaction does this via
+  // now()), and the winner must be the higher id — deterministically, and the
+  // same one the PostgREST store's (created_at, id) DESC order picks.
+  const admin3 = new SQL({ url: URL_, max: 1 });
+  const old = await store.captureThought({ content: "tiebreak: the superseded original", payload: { metadata: {} }, embedding: unit(0) });
+  const newA = await store.captureThought({ content: "tiebreak: replacement A", payload: { metadata: {} }, embedding: unit(1), supersedes: old.id });
+  const newB = await store.captureThought({ content: "tiebreak: replacement B", payload: { metadata: {} }, embedding: unit(2), supersedes: old.id });
+  await admin3`UPDATE thoughts SET created_at = now() WHERE id = ANY(${admin3.array([newA.id, newB.id], "TEXT")}::uuid[])`;
+  const tie = await store.supersededAmong([old.id]);
+  const higher = newA.id > newB.id ? newA.id : newB.id;
+  assert(tie[old.id] === higher, `on an equal-created_at tie the higher id wins deterministically (${tie[old.id]?.slice(0, 8)} = ${higher.slice(0, 8)})`);
+  await admin3.close();
+
+  // (b) the cycle flag through the store's row mapper (test-live proves it at
+  // the SQL level; this exercises `cycle: r.cycle === true` in the mapper). A
+  // cycle cannot form through the validated write path, so force it by hand.
+  const a = await store.captureThought({ content: "cycle A", payload: { metadata: {} }, embedding: unit(3) });
+  const b = await store.captureThought({ content: "cycle B", payload: { metadata: {} }, embedding: unit(4), derivedFrom: [a.id] });
+  const admin4 = new SQL({ url: URL_, max: 1 });
+  await admin4`UPDATE thoughts SET derived_from = ${[b.id]}::jsonb WHERE id = ${a.id}`;
+  await admin4.close();
+  const walk = await store.traceProvenance({ id: b.id, maxDepth: 10 });
+  assert(walk.some((n) => n.cycle === true), "traceProvenance surfaces the cycle flag through the store mapper");
+}
+
 await store.close();
 
 report();

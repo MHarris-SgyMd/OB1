@@ -92,7 +92,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "search signatures", "edit signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "migration ledger",
 ];
@@ -787,6 +787,35 @@ if (configFailed) {
         else add("stats summary", "fail",
                  "thought_stats_summary is missing, but thought_stats calls it on the SQL path — every thought_stats call would fail",
                  "Apply db/migrations/024_thought_stats_summary.sql.");
+
+        /**
+         * Migration 025's provenance functions (SMD-1253). trace_provenance and
+         * find_derivatives back the store's read methods, and 025 also teaches
+         * upsert_thought to write derived_from/supersedes and the search tools to
+         * label a superseded hit. A database that stops at 024 has the OLD
+         * upsert_thought, which ignores the derived_from/supersedes envelope keys
+         * SILENTLY — a capture that names a source or a supersession is accepted
+         * and the provenance dropped — and lacks the read/label functions. A
+         * fail, not a warn: the write path accepts input it cannot honour, the
+         * exact silent-and-wrong shape this fork removes. (SQL-only, like the
+         * checks around it; the store's label lookup is best-effort so search
+         * itself survives a pre-025 schema — this check is how the operator
+         * learns why the labels never appear.)
+         */
+        const prov = await sql`
+          SELECT
+            count(*) FILTER (WHERE p.proname = 'trace_provenance')::int AS t,
+            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname IN ('trace_provenance', 'find_derivatives') AND n.nspname = 'public'`;
+        // Per function, not a combined count: a double-overload of one plus the
+        // other absent must still fail, as the sibling signature checks do
+        // (review pass 1, SMD-1253).
+        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) add("provenance", "ok", "trace_provenance and find_derivatives present");
+        else add("provenance", "fail",
+                 "migration 025's provenance functions are missing, but capture_thought accepts derived_from/supersedes (silently dropped by the pre-025 upsert_thought) and search labels superseded hits",
+                 "Apply db/migrations/025_thought_provenance.sql.");
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,

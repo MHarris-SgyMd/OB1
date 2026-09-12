@@ -343,5 +343,46 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   assert(s.oldest !== null && s.newest !== null && s.oldest <= s.newest, "date range spans the corpus");
 }
 
+console.log("\n[9] Provenance rides the envelope and reads back over PostgREST too (migration 025)");
+{
+  const { id: parent } = await store.captureThought({
+    content: "postgrest provenance source",
+    payload: { metadata: { type: "observation" } },
+    embedding: vec(4),
+  });
+  const { id: child } = await store.captureThought({
+    content: "postgrest provenance synthesis",
+    payload: { metadata: { type: "synthesis", derivation_method: "synthesis" } },
+    embedding: vec(5),
+    derivedFrom: [parent],
+    supersedes: parent,
+  });
+
+  // The RPC argument shapes for the two read functions, verified on this store —
+  // the reason this suite exists (the default store speaks PostgREST).
+  const anc = await store.traceProvenance({ id: child });
+  assert(anc.some((n) => n.thoughtId === parent && n.depth === 1), "traceProvenance's rpc shape returns the source at depth 1");
+  const der = await store.findDerivatives({ id: parent });
+  assert(der.some((d) => d.id === child), "findDerivatives's rpc shape returns the synthesis");
+
+  // The label lookup is a .from().in().order() here, not an rpc; its reduce must
+  // keep the newest per superseded id and agree with the SQL store's DISTINCT ON.
+  const sup = await store.supersededAmong([parent, child]);
+  assert(sup[parent] === child, "supersededAmong maps the source to its replacement over PostgREST");
+  assert(!(child in sup), "…and not the replacement itself");
+
+  // Validation is the SQL function's, so it fires identically on this path.
+  let bad = "";
+  try {
+    await store.captureThought({
+      content: "postgrest provenance liar",
+      payload: { metadata: {} },
+      embedding: vec(6),
+      derivedFrom: ["11111111-1111-1111-1111-111111111111"],
+    });
+  } catch (e) { bad = (e as Error).message; }
+  assert(/does not exist/.test(bad), `a derived_from naming no thought is refused over PostgREST too (${bad.slice(0, 60)})`);
+}
+
 await store.close();
 report();
