@@ -72,7 +72,12 @@ async function load(sql: SQL, n: number): Promise<void> {
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
 }
 
-/** The page walk, faithful to store-postgrest.ts: page metadata newest-first, tally in TS. */
+/**
+ * The page walk, faithful to store-postgrest.ts: page metadata newest-first and
+ * tally in TS, null array elements skipped as that store does. The maps are
+ * intentionally built and discarded — the point is to time the same work the
+ * real walk pays for, which is what makes the comparison honest.
+ */
 async function walk(sql: SQL): Promise<{ ms: number; roundTrips: number }> {
   const t0 = performance.now();
   const types: Record<string, number> = {};
@@ -86,8 +91,8 @@ async function walk(sql: SQL): Promise<{ ms: number; roundTrips: number }> {
     for (const r of page) {
       const m = (r.metadata || {}) as Record<string, unknown>;
       if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-      if (Array.isArray(m.topics)) for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-      if (Array.isArray(m.people)) for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+      if (Array.isArray(m.topics)) for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
+      if (Array.isArray(m.people)) for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
     }
     if (page.length < PAGE) break;
   }
