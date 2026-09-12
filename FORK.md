@@ -4687,12 +4687,17 @@ because the CTE cannot share a visited set across sibling branches. So
 **migration 026** redefines `trace_provenance` as an iterative, level-by-level
 breadth-first walk in plpgsql carrying a **walk-global `seen` set**: a node enters
 `seen` — and so the frontier — at most once, so its `derived_from` is scanned at
-most once. The walk is now **O(V + E)** over the reachable subgraph, not
-`O(fanout^depth)`, and the loop stops the moment the node cap is reached, so a
-graph larger than the cap costs the cap, not the graph. (The ticket's option 1 — a
-walk-global visited via a different shape — plus option 2, terminate past
-`node_cap`. Option 3, a `statement_timeout` backstop, is declined: once the bound
-is structural, a timeout would mask a regression, not add a guarantee.)
+most once: the **multiplicative `fanout^depth` blow-up is gone**. The residual
+work is the reachable edges, each paying a membership test against the `seen` set
+(`= ANY`), whose size the node cap bounds — linear in the graph, not exponential
+in its depth. (Not the strict `O(V+E)` a hashed visited set would give — an array
+membership check is `O(|seen|)` per edge — but `|seen|` is cap-bounded and it
+measures fine: a 2,000-way fan-out traces in ~8 ms.) The loop also stops the
+moment the node cap is reached, so a graph larger than the cap costs the cap, not
+the graph. (The ticket's option 1 — a walk-global visited via a different shape —
+plus option 2, terminate past `node_cap`. Option 3, a `statement_timeout`
+backstop, is declined: once the blow-up is structurally gone and the loop is
+cap-terminated, a timeout would mask a regression, not add a guarantee.)
 
 **Measured**, one shared Postgres, via `db/measure-1288.ts` (each layer derives
 from every node of the next, so root→leaf paths = `fanout^depth`, distinct nodes =
@@ -4703,7 +4708,8 @@ from every node of the next, so root→leaf paths = `fanout^depth`, distinct nod
 | fan-out 4, 8 layers — 33 nodes, ~65,536 paths | ~202 ms, cap spent on duplicate *shallow* paths (deep layers never reached) | ~3.4 ms, 117 edge-rows covering **all 33** distinct nodes |
 | fan-out 6, 10 layers — 61 nodes, ~60M paths | did not finish — killed by a 20 s guard timeout | ~3.8 ms |
 
-Two things there: the speed (`fanout^depth → V+E`), and a **completeness** fix — the
+Two things there: the speed (`fanout^depth` paths → linear in the reachable
+graph), and a **completeness** fix — the
 old outer `LIMIT` counted duplicate paths, so on a dense graph it capped out among
 shallow repeats and never surfaced the deep distinct ancestors; the new walk emits
 each derivation edge once and reaches every node within the cap.
@@ -4711,7 +4717,11 @@ each derivation edge once and reaches every node within the cap.
 **The output contract holds** (Verify): same signature, same `RETURNS TABLE`, same
 clamps. The linear chain still returns child@0 / parent@1 / grandparent@2, all
 `cycle=false`; a forced cycle still yields a `cycle=true` row and a bounded count
-(`test-live` [13], kept verbatim). The `cycle` flag is refined to fit a
+(`test-live` [13], kept verbatim). One deliberate ordering change: rows stay
+depth-ascending, but within a depth 026 emits tree edges before repeat markers
+(then by id) rather than 025's pure id order, so a truncating node cap keeps real
+ancestors over repeat markers; no caller depends on within-depth order (no MCP
+tool exposes the walk yet). The `cycle` flag is refined to fit a
 global-visited walk and is *more* correct on a DAG: a **diamond** (two direct
 sources sharing a grandparent — the common dense shape) reaches the shared ancestor
 twice within one level, and because `seen` is a start-of-level snapshot both edges

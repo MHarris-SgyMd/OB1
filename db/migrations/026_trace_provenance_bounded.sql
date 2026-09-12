@@ -31,12 +31,17 @@
 --   it. So trace_provenance becomes an ITERATIVE, level-by-level breadth-first
 --   walk in plpgsql that carries a WALK-GLOBAL `v_seen` set. A node enters
 --   v_seen — and so the frontier — at most once, so its derived_from is scanned
---   at most once. The walk is now O(V + E) over the REACHABLE subgraph, not
---   O(fanout^depth); and the loop stops the moment the node cap is reached, so a
---   graph larger than the cap costs the cap, not the graph. (The ticket's option
---   1, a walk-global visited via a different shape, plus option 2, terminate
---   past node_cap. Option 3, a statement_timeout backstop, is declined: once the
---   bound is structural — O(V+E), cap-terminated — a timeout would only mask a
+--   at most once: the MULTIPLICATIVE fanout^depth blow-up is gone. The remaining
+--   work is the reachable EDGES, each paying a membership test against the seen
+--   set (`= ANY(v_seen)`) whose size the node cap bounds — linear in the graph,
+--   not exponential in its depth. (Not the strict O(V+E) a hashed visited set
+--   would give; an array membership check is O(|seen|) per edge, but |seen| is
+--   cap-bounded and it measures fine — a 2,000-way fan-out traces in ~8 ms.) The
+--   loop also stops the moment the node cap is reached, so a graph larger than
+--   the cap costs the cap, not the graph. (The ticket's option 1, a walk-global
+--   visited via a different shape, plus option 2, terminate past node_cap.
+--   Option 3, a statement_timeout backstop, is declined: once the blow-up is
+--   structurally gone and the loop is cap-terminated, a timeout would only mask a
 --   regression, not add a guarantee.)
 --
 --   Measured before/after on the same dense DAG, one shared Postgres, via
@@ -52,7 +57,8 @@
 --       OLD: did not finish — killed by a 20 s guard timeout.
 --       NEW: ~3.8 ms.
 --
---   Two things to read there. The speed (fanout^depth → V+E), and the
+--   Two things to read there. The speed (fanout^depth paths → linear in the
+--   reachable graph), and the
 --   completeness: the old outer LIMIT bounded OUTPUT by counting duplicate
 --   paths, so on a dense graph it capped out among shallow repeats and never
 --   surfaced the deep distinct ancestors; the new walk emits each derivation
@@ -63,7 +69,13 @@
 --   Same signature, same RETURNS TABLE, same clamps (depth 1..10, nodes
 --   1..2000). The linear chain still returns child@0, parent@1, grandparent@2,
 --   every row cycle=false, each parented by the thought that derived from it. A
---   forced cycle still yields a cycle=true row and a bounded row count. The
+--   forced cycle still yields a cycle=true row and a bounded row count. One
+--   deliberate ordering change: 025 returned rows ORDER BY (depth, thought_id);
+--   026 is depth-ascending too, but WITHIN a depth it emits tree edges
+--   (cycle=false) before repeat markers (cycle=true), then by id — so that when
+--   a small node cap truncates a level, real ancestors are kept over repeat
+--   markers rather than dropped by id order. No caller depends on within-depth
+--   order (no MCP tool exposes this yet); the meaningful order, depth, holds. The
 --   `cycle` flag's meaning is refined to fit a global-visited walk, and is more
 --   correct on a DAG than the per-path flag was:
 --
@@ -109,8 +121,9 @@
 -- Expected outcome
 --   trace_provenance returns the same ancestor set as before on every well-formed
 --   chain, but expands each reachable node once — a dense DAG that made the old
---   walk materialise fanout^depth paths now costs O(V + E), and any walk stops at
---   the node cap. find_derivatives is unchanged.
+--   walk materialise fanout^depth paths now scans each node's derived_from once
+--   (work linear in the reachable graph), and any walk stops at the node cap.
+--   find_derivatives is unchanged.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION trace_provenance(
@@ -171,8 +184,9 @@ BEGIN
   -- One iteration per depth level. Expand the whole frontier together, emit its
   -- parents, then keep only the not-yet-seen parents as the next frontier. A
   -- node enters v_seen (and the frontier) at most once, so its derived_from is
-  -- scanned at most once: O(V + E), not O(fanout^depth). The loop also ends the
-  -- moment the cap is reached.
+  -- scanned at most once — the multiplicative fanout^depth blow-up is gone (the
+  -- per-edge cost is a membership test against v_seen, whose size the cap bounds).
+  -- The loop also ends the moment the cap is reached.
   WHILE v_depth < v_max_depth
         AND v_frontier IS NOT NULL AND array_length(v_frontier, 1) > 0
         AND v_emitted < v_node_cap LOOP
@@ -241,4 +255,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION trace_provenance(uuid, int, int) IS
-  'Walks UP the derived_from chain from a thought (depth 0) to its ancestors. Iterative breadth-first with a WALK-GLOBAL seen set: each reachable node is expanded once, so the walk is O(V+E), not O(fanout^depth) on a dense DAG (migration 026 / SMD-1288). Depth clamped 1-10, node count clamped 1-2000, and the walk stops at the cap. cycle=true marks an edge to an already-discovered node (a real back-edge, or a DAG re-convergence at a greater depth) — it is returned once and not re-expanded; a same-level diamond stays cycle=false from each parent. type/source_type/derivation_method come from metadata.';
+  'Walks UP the derived_from chain from a thought (depth 0) to its ancestors. Iterative breadth-first with a WALK-GLOBAL seen set: each reachable node is expanded once, so a dense DAG no longer expands multiplicatively to fanout^depth paths — the walk is linear in the reachable graph (migration 026 / SMD-1288). Depth clamped 1-10, node count clamped 1-2000, and the walk stops at the cap. cycle=true marks an edge to an already-discovered node (a real back-edge, or a DAG re-convergence at a greater depth) — it is returned once and not re-expanded; a same-level diamond stays cycle=false from each parent. type/source_type/derivation_method come from metadata.';

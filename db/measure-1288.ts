@@ -5,7 +5,8 @@
  * trace_provenance (025) walked the derived_from chain with a per-path recursive
  * CTE; on a dense DAG the UNION ALL materialised ~fanout^depth PATHS before the
  * outer LIMIT could trim. 026 replaces it with a walk-global breadth-first walk
- * that expands each node once — O(V + E). This script builds one dense, cycle-free
+ * that expands each node once (linear in the reachable graph, not fanout^depth).
+ * This script builds one dense, cycle-free
  * DAG and times the OLD body against the NEW one on it, so the header's
  * before/after is a measurement, not a claim. It is not part of ci-parity (it
  * needs a real Postgres and deliberately provokes a timeout), the same standing
@@ -93,10 +94,10 @@ for (const c of cases) {
 
   // OLD: re-apply 025's trace_provenance body (CREATE OR REPLACE) to get the
   // per-path recursive CTE back, measure, then restore 026.
-  await sql.unsafe(file("025_thought_provenance.sql").match(/CREATE OR REPLACE FUNCTION trace_provenance[\s\S]*?\$\$;/)![0]);
+  await sql.unsafe(file("025_thought_provenance.sql").match(/^CREATE OR REPLACE FUNCTION trace_provenance[\s\S]*?\$\$;/m)![0]);
   const old = await timeCall(root, c.depth, 20000);
   console.log(`OLD (025 per-path CTE):    ${old.timedOut ? "TIMED OUT (killed at 20 s)" : old.ms.toFixed(1) + " ms"}, returned ${old.rows === null ? "—" : old.rows} rows`);
-  await sql.unsafe(file("026_trace_provenance_bounded.sql").match(/CREATE OR REPLACE FUNCTION trace_provenance[\s\S]*?\$\$;/)![0]);
+  await sql.unsafe(file("026_trace_provenance_bounded.sql").match(/^CREATE OR REPLACE FUNCTION trace_provenance[\s\S]*?\$\$;/m)![0]);
 
   if (!neu.timedOut && !old.timedOut && old.rows !== null) {
     console.log(`ratio: OLD/NEW ≈ ${(old.ms / Math.max(neu.ms, 0.01)).toFixed(0)}×; both returned ${neu.rows === old.rows ? "the SAME " + neu.rows + " nodes" : "DIFFERENT counts (" + old.rows + " vs " + neu.rows + ")"}`);

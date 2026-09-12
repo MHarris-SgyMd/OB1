@@ -1960,10 +1960,15 @@ console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node e
   const walk = await sql`SELECT thought_id, depth, parent_id, cycle FROM trace_provenance(${root}::uuid, ${DEPTH})`;
   const nodeSet = new Set(walk.map((r: Record<string, unknown>) => r.thought_id as string));
   assert(nodeSet.size === distinctNodes, `every distinct ancestor is reached, deep layers included (${nodeSet.size} of ${distinctNodes})`);
-  // The work bound as a row-count proxy: a per-path walk emits ~sum(WIDTH^d) rows,
-  // far above the ${paths} leaf paths; the walk-global walk emits one row per
-  // derivation EDGE — well under the path count — and never re-expands a node.
-  assert(walk.length < paths, `no path explosion: ${walk.length} rows, not the ${paths} root→leaf paths a per-path walk would count`);
+  // The work bound, pinned EXACTLY, not by the weak `< paths` proxy: because each
+  // node is expanded once, the walk emits the root plus one row per derivation
+  // EDGE and no more. This DAG has WIDTH root→L1 edges and WIDTH*WIDTH edges into
+  // each of the DEPTH-1 deeper layers. A regression that re-expanded a shared
+  // node — the exact defect 026 exists to prevent — would emit that node's
+  // subtree edges again and overshoot this count, so the equality is the guard.
+  const edges = WIDTH + WIDTH * WIDTH * (DEPTH - 1);
+  assert(walk.length === 1 + edges,
+    `no re-expansion: exactly ${1 + edges} rows (root + ${edges} edges), not the ${paths} paths a per-path walk would count — got ${walk.length}`);
   assert(walk.every((r: Record<string, unknown>) => r.cycle === false), "an acyclic dense DAG has no cycle rows — diamonds included");
 
   // The diamond: a leaf is a source of EVERY node of the layer above it, so it is
@@ -1978,7 +1983,40 @@ console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node e
     `a shared ancestor keeps an edge from each of its ${WIDTH} parents (${leafRows.length} edges, ${leafParents.size} distinct parents)`);
   assert(leafRows.every((r: Record<string, unknown>) => Number(r.depth) === DEPTH && r.cycle === false),
     "…at its true depth, none flagged a cycle");
+  await sql`DELETE FROM thoughts`;
 
+  // Cross-depth re-convergence (no cycle): a node reachable by a SHORT and a LONG
+  // path. 026 discovers it at its shallowest depth and expands it once there; the
+  // deeper re-encounter is flagged cycle=true — the documented imprecision of a
+  // walk-global set (it cannot tell a re-convergence from a real cycle without the
+  // per-path ancestry that is the blow-up itself). It only over-flags a repeat: no
+  // distinct ancestor is dropped, and none of D's own ancestors go missing because
+  // D was expanded from the short path.
+  const dd = await cap("recon D", 0);                  // depth 1 (short) and 3 (long)
+  const bb = await cap("recon B", 1, [dd]);
+  const aa = await cap("recon A", 2, [bb]);
+  const rr = await cap("recon root", 3, [aa, dd]);     // root derives from A and D
+  const recon = await sql`SELECT thought_id, depth, cycle FROM trace_provenance(${rr}::uuid, 10)`;
+  assert(new Set(recon.map((x: Record<string, unknown>) => x.thought_id)).size === 4, "every node of a re-converging DAG is reached (root, A, B, D)");
+  const dRows = recon.filter((x: Record<string, unknown>) => x.thought_id === dd);
+  assert(dRows.some((x: Record<string, unknown>) => Number(x.depth) === 1 && x.cycle === false), "…the shared node is expanded once at its SHALLOWEST depth (1), cycle=false");
+  assert(dRows.some((x: Record<string, unknown>) => Number(x.depth) === 3 && x.cycle === true), "…and its deeper re-encounter is flagged cycle=true, not looped");
+  assert(recon.some((x: Record<string, unknown>) => x.thought_id === bb), "…and B — reachable only through the long path — is still present (no ancestor dropped)");
+  await sql`DELETE FROM thoughts`;
+
+  // The node cap keeps real ancestors over repeat markers. A chain d←c←b←a with a
+  // forced back-edge a→d (a cycle); trace from d with a cap of 4 fills the four
+  // real ancestors (d@0,c@1,b@2,a@3) and the loop stops before the depth-4 cycle
+  // marker is emitted — the cap spends itself on ancestors, not on the repeat.
+  const ca = await cap("cap a", 0);
+  const cb = await cap("cap b", 1, [ca]);
+  const cc = await cap("cap c", 2, [cb]);
+  const cd = await cap("cap d", 3, [cc]);
+  await sql`UPDATE thoughts SET derived_from = ${[cd]}::jsonb WHERE id = ${ca}`;  // a→d closes the cycle
+  const capped = await sql`SELECT thought_id, cycle FROM trace_provenance(${cd}::uuid, 10, 4)`;
+  assert(capped.length === 4 && capped.every((x: Record<string, unknown>) => x.cycle === false),
+    `a small node cap keeps the ${capped.length} real ancestors and drops the repeat marker (${capped.filter((x: Record<string, unknown>) => x.cycle === true).length} cycle rows)`);
+  await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${ca}`;  // break the cycle
   await sql`DELETE FROM thoughts`;
 }
 
