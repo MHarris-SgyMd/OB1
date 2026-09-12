@@ -2428,6 +2428,26 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
   const fd = (await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = 'find_derivatives(uuid, int)'::regprocedure`)).rows[0];
   assert(Number(fd?.n) === 2, `…find_derivatives takes (uuid, int) (${fd?.n} args)`);
 
+  // 026 (SMD-1288) redefines trace_provenance to bound its WORK: the per-path
+  // recursive CTE (whose visited guard bounds cycles and whose outer LIMIT
+  // bounds output, but neither the intermediate work) becomes an iterative,
+  // walk-global breadth-first walk that expands each node once. The shape must
+  // actually have changed — no `WITH RECURSIVE` — and the body must carry the
+  // ob1:provenance-walk-bounded sentinel a successor has to keep.
+  assert(lastDefinerOf("trace_provenance").startsWith("026"),
+    `026 is the last definer of trace_provenance (it bounds the walk's work) (${lastDefinerOf("trace_provenance")})`);
+  // An earlier section's restoreShipped("upsert_thought") re-ran the whole 025
+  // file (025 is upsert_thought's last definer), and 025 still carries the OLD
+  // trace_provenance body — so re-applying it reverted 026's here. Restore the
+  // shipped (026) body before inspecting it. This is the fork's own trap in
+  // miniature: CREATE OR REPLACE takes the whole file, so re-applying an earlier
+  // migration out of order clobbers a later redefinition (production applies
+  // 001→026 in order and is unaffected).
+  await restoreShipped("trace_provenance");
+  const tpBody = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'trace_provenance(uuid, int, int)'::regprocedure`)).rows[0].s;
+  assert(/ob1:provenance-walk-bounded/.test(tpBody), "trace_provenance carries the ob1:provenance-walk-bounded sentinel");
+  assert(!/WITH\s+RECURSIVE/i.test(tpBody), "…and no longer uses a recursive CTE — the walk-global shape SMD-1288 required");
+
   // The write path validates derived_from — the choke point, or an untrusted
   // hole (departure 3). A non-UUID element is refused; an array of existing ids
   // is accepted and read back both ways. The capture path always carries a
