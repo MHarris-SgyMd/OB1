@@ -222,8 +222,9 @@ else {
    * derived_from/supersedes, but the pre-025 upsert_thought drops those envelope
    * keys silently, and trace_provenance/find_derivatives (and the search label)
    * are absent — a recording tool taking input it cannot honour. A database that
-   * stops at 024 must not start. LIVE is healthy here, so dropping only the two
-   * read functions isolates the fail to this check.
+   * stops at 024 must not start. LIVE is healthy here, so dropping one read
+   * function isolates the fail to this check — and proves the per-function count
+   * (a combined >= 2 would miss one missing function; review pass 1).
    */
   // Drop only ONE of the two, so the check's per-function count is what fails,
   // not a combined >=2 that a double-overload of the survivor could satisfy

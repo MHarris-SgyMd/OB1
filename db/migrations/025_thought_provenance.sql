@@ -478,12 +478,17 @@ BEGIN
         -- caller's with a new one — NULL if the caller named none.
         embedding_model = CASE WHEN EXCLUDED.embedding IS NULL THEN thoughts.embedding_model
                                ELSE EXCLUDED.embedding_model END,
-        -- 025: a re-capture of the same text may ADD provenance it did not have,
-        -- but never clears it — a bare re-capture (EXCLUDED NULL) keeps what is
-        -- there. Removing or changing provenance is update_thought's job (a
-        -- follow-up), not a side effect of the dedup path.
-        derived_from = COALESCE(EXCLUDED.derived_from, thoughts.derived_from),
-        supersedes   = COALESCE(EXCLUDED.supersedes,   thoughts.supersedes)
+        -- 025: a re-capture of the same text may ADD provenance the row did not
+        -- have, but never CHANGES or clears what is there — the EXISTING value
+        -- wins (COALESCE(thoughts.x, EXCLUDED.x)), so it fills a NULL and is
+        -- otherwise left alone. A dedup of identical content is not the place to
+        -- rewrite an established derivation; removing or changing provenance is
+        -- update_thought's job (a follow-up), and would be audited. (Review pass
+        -- 2: the arguments were the other way round, which let a re-capture with
+        -- a different derived_from silently overwrite — the "changing" this
+        -- comment says it does not do.)
+        derived_from = COALESCE(thoughts.derived_from, EXCLUDED.derived_from),
+        supersedes   = COALESCE(thoughts.supersedes,   EXCLUDED.supersedes)
   RETURNING id INTO v_id;
 
   -- ob1:vector-replaces-chunks — a CONTRACT SENTINEL, not prose (the 014

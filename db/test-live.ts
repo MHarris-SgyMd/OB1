@@ -1857,6 +1857,20 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   const row = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
   assert(JSON.stringify(row.derived_from) === JSON.stringify([parent]) && row.supersedes === parent, "capture wrote derived_from and supersedes to the columns");
 
+  // ON CONFLICT is add-only: a re-capture of the child's exact text (a dedup)
+  // that names DIFFERENT provenance does not overwrite the established
+  // derivation — the existing value wins; changing it is update_thought's job
+  // (review pass 2). A re-capture of a first-hand thought CAN fill provenance
+  // it did not have.
+  await cap("provenance child: a digest of the digest", { type: "synthesis" }, 2, { derived_from: [gp], supersedes: gp });
+  const kept = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
+  assert(JSON.stringify(kept.derived_from) === JSON.stringify([parent]) && kept.supersedes === parent, "a re-capture with different provenance keeps the original, it does not overwrite");
+  const plain = await cap("provenance plain: a first-hand note", { type: "note" }, 6);
+  assert((await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from === null, "a first-hand capture has null derived_from");
+  // Derives from `child` (not gp/parent, whose derivative counts are asserted below).
+  await cap("provenance plain: a first-hand note", { type: "note" }, 6, { derived_from: [child] });
+  assert(JSON.stringify((await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from) === JSON.stringify([child]), "…and a re-capture fills provenance the row did not have (add-only, not no-op)");
+
   // trace UP: child(0) → parent(1) → grandparent(2), the whole chain.
   const up = await sql`SELECT thought_id, depth, parent_id, cycle FROM trace_provenance(${child}::uuid)`;
   const byId = Object.fromEntries(up.map((r: Record<string, unknown>) => [r.thought_id, r]));
