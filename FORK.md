@@ -4712,7 +4712,12 @@ Two things there: the speed (`fanout^depth` paths → linear in the reachable
 graph), and a **completeness** fix — the
 old outer `LIMIT` counted duplicate paths, so on a dense graph it capped out among
 shallow repeats and never surfaced the deep distinct ancestors; the new walk emits
-each derivation edge once and reaches every node within the cap.
+each derivation edge once, so under one row budget it reaches every distinct node
+when the edges fit the cap (fan-out 4: 117 edge-rows for 33 nodes, under 250) and
+otherwise reaches far deeper than the old shallow duplicates did (fan-out 6 has
+~330 edges, so the 250-row cap stops it partway — many layers below where the old
+walk's third-layer duplicates ran out). The cap bounds returned rows (one per
+edge), not distinct nodes.
 
 **The output contract holds** (Verify): same signature, same `RETURNS TABLE`, same
 clamps. The linear chain still returns child@0 / parent@1 / grandparent@2, all

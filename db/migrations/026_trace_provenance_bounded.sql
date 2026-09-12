@@ -62,12 +62,18 @@
 --   completeness: the old outer LIMIT bounded OUTPUT by counting duplicate
 --   paths, so on a dense graph it capped out among shallow repeats and never
 --   surfaced the deep distinct ancestors; the new walk emits each derivation
---   edge once and reaches every node within the cap. The ratios are a property
---   of the shape, not of one machine. (Recorded again in FORK.md's 026 section.)
+--   edge once, so under one budget it reaches every distinct node when the edges
+--   fit the cap (the fan-out-4 case: 117 edge-rows for 33 nodes, under the 250
+--   cap) and otherwise reaches FAR deeper than the old shallow duplicates did
+--   (the fan-out-6 case has ~330 edges, so the 250-row cap stops it partway — but
+--   many layers deeper than the old walk's third-layer duplicates). The ratios
+--   are a property of the shape, not of one machine. (Recorded again in FORK.md's
+--   026 section.)
 --
 -- What the output contract keeps (Verify: the 025 guarantees still hold)
---   Same signature, same RETURNS TABLE, same clamps (depth 1..10, nodes
---   1..2000). The linear chain still returns child@0, parent@1, grandparent@2,
+--   Same signature, same RETURNS TABLE, same clamps (depth 1..10; the second
+--   caps RETURNED ROWS at 1..2000 — one row per ancestor edge, as 025's outer
+--   LIMIT did). The linear chain still returns child@0, parent@1, grandparent@2,
 --   every row cycle=false, each parented by the thought that derived from it. A
 --   forced cycle still yields a cycle=true row and a bounded row count. One
 --   deliberate ordering change: 025 returned rows ORDER BY (depth, thought_id);
@@ -255,4 +261,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION trace_provenance(uuid, int, int) IS
-  'Walks UP the derived_from chain from a thought (depth 0) to its ancestors. Iterative breadth-first with a WALK-GLOBAL seen set: each reachable node is expanded once, so a dense DAG no longer expands multiplicatively to fanout^depth paths — the walk is linear in the reachable graph (migration 026 / SMD-1288). Depth clamped 1-10, node count clamped 1-2000, and the walk stops at the cap. cycle=true marks an edge to an already-discovered node (a real back-edge, or a DAG re-convergence at a greater depth) — it is returned once and not re-expanded; a same-level diamond stays cycle=false from each parent. type/source_type/derivation_method come from metadata.';
+  'Walks UP the derived_from chain from a thought (depth 0) to its ancestors. Iterative breadth-first with a WALK-GLOBAL seen set: each reachable node is expanded once, so a dense DAG no longer expands multiplicatively to fanout^depth paths — the walk is linear in the reachable graph (migration 026 / SMD-1288). Depth clamped 1-10; the second cap clamps RETURNED ROWS 1-2000 — one row per ancestor edge, so a node reached by several edges counts several times, and a dense graph with more edges than the cap stops partway (reaching every distinct node only when the edges fit). cycle=true marks an edge to an already-discovered node (a real back-edge, or a DAG re-convergence at a greater depth): it is not re-expanded, though like any edge it is emitted once per incoming edge; a same-level diamond stays cycle=false from each parent. type/source_type/derivation_method come from metadata.';
