@@ -2543,6 +2543,26 @@ console.log("\n[26] Migration 027: search_thoughts_hybrid admits relative to the
     `SELECT content FROM search_thoughts_hybrid($1::vector, 'a plain question with no identifiers', 0.5, 10, '{}'::jsonb)`, [unit(0)])).rows;
   assert(abs.length === 0, `a caller can still impose a hard absolute floor (0.5 excludes every sub-floor row here, got ${abs.length})`);
 
+  // A mixed query (a needle + words). The keyword arm is floor-exempt, but the
+  // yardstick for the vector rows is the vector arm's top, so an incidental
+  // keyword hit does not raise the bar and trim a genuine low-cosine vector row.
+  // Here the needle hit and the top vector row are the same row at 0.30; a
+  // needle-free vector row at 0.18 (≥ 0.5×0.30) is still admitted, and a 0.08
+  // row is trimmed.
+  await db.exec(`DELETE FROM thoughts`);
+  await db.query(`SELECT upsert_thought('SMD-100 the honda note', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.30, 0.9539)]);
+  await db.query(`SELECT upsert_thought('a long transcript about the car', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.18, 0.9837)]);
+  await db.query(`SELECT upsert_thought('an unrelated note', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.08, 0.9968)]);
+  const mixed = (await db.query<{ content: string; matched_needles: string[] }>(
+    `SELECT content, matched_needles FROM search_thoughts_hybrid($1::vector, 'which car did I buy SMD-100', 0.0, 10, '{}'::jsonb)`, [unit(0)])).rows;
+  const mnames = mixed.map((r) => r.content);
+  assert(mnames.includes("SMD-100 the honda note") && mnames.includes("a long transcript about the car") && !mnames.includes("an unrelated note"),
+    `a keyword hit does not raise the bar: the needle row and the low-cosine vector row within half of the vector top are both kept, the 0.08 row trimmed (${mnames.join(" | ")})`);
+  assert(mixed.find((r) => r.content === "SMD-100 the honda note")?.matched_needles.join() === "SMD-100",
+    "the needle row reports its matched needle");
+  assert(mixed.find((r) => r.content === "a long transcript about the car")?.matched_needles.length === 0,
+    "the low-cosine vector row is admitted by the relative cutoff, not by any needle");
+
   await db.exec(`DELETE FROM thoughts`);
 }
 

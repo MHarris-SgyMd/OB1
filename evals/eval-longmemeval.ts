@@ -226,7 +226,7 @@ async function score(): Promise<void> {
       run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
     },
     {
-      key: "hybrid@-1", label: "hybrid, threshold -1 (pre-027: no floor; post-027: relative cutoff only)",
+      key: "hybrid@-1", label: "hybrid, threshold -1 — no floor of any kind (027 treats a negative threshold as the raw ranked list)",
       run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
     },
     {

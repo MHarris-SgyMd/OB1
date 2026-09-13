@@ -67,8 +67,8 @@ CREATE OR REPLACE FUNCTION search_thoughts_hybrid(
   match_count      int     DEFAULT 10,
   filter           jsonb   DEFAULT '{}'::jsonb,
   -- Passed through to match_thoughts (020); the vector arm's rank is then the
-  -- blended order. Defaulted, and the 5-argument function is DROPPED above for
-  -- the reason 020's header gives.
+  -- blended order. The 5-argument form was dropped once, in 020; 027 is a plain
+  -- CREATE OR REPLACE of this 7-argument signature (it preserves the ACL).
   recency_weight   float   DEFAULT 0.0,
   half_life_days   float   DEFAULT 90.0
 )
@@ -274,8 +274,12 @@ BEGIN
     FROM scored s
   ),
   -- The top candidate's raw cosine, the yardstick the relative cutoff below
-  -- measures against. NULL when no scored row has a vector (a pure keyword
-  -- query), and then only keyword hits are admitted.
+  -- measures against. Taken over ALL candidates, which is the vector arm's top:
+  -- a keyword-only hit (in via a needle, not the vector window) cannot exceed
+  -- it, because any row scoring above the window's minimum is already IN the
+  -- window — so a floor-exempt keyword hit never raises the bar for the vector
+  -- rows. NULL when no scored row has a vector (a pure keyword query), and then
+  -- only keyword hits are admitted.
   topsim AS (SELECT max(sim) AS top FROM blended)
   SELECT
     s.cid, s.content, s.metadata, s.created_at,
