@@ -1865,6 +1865,146 @@ percent of the table, and the migration's contract is a re-ranking of the
 nearest candidates, not an exact blended ranking. What an opted-in caller pays
 is in `db/bench-plan.ts`'s recency arm.
 
+## LongMemEval: the fork on a public benchmark, and the floor it exposed
+
+`eval-longmemeval.ts`, run as `bun run longmemeval` (SMD-1039, the second
+corpus). Needs Ollama, a Postgres you keep for the run (not the throwaway — the
+load is hours and resumable), `DATABASE_URL`, and `OB1_EVAL_LME` naming
+`longmemeval_s.json` from the
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) release (278 MB). The
+session→thought map lands in `/tmp` unless `OB1_EVAL_LME_MAP` moves it.
+
+Every number above this section is measured on one corpus, and SMD-1039 records
+what that costs: the 441-issue tracker is lexically cohesive, the baseline
+reaches recall@10 0.98 on it, and every retrieval add-on since has come out
+neutral. LongMemEval-S (Wu et al., ICLR 2025) is the public benchmark the agent
+memory field reports on — GBrain, MemPalace and a dozen others publish a number
+on it — and it has the failure modes a tracker lacks: 133 multi-session
+questions need two or more sessions in the top five, 133 temporal questions
+turn on dates, 78 knowledge-update questions have a stale and a current answer
+both in the history.
+
+### What was measured
+
+Retrieval only, no reader model, the way GBrain publishes it. 500 questions,
+each over its own history of ~50 chat sessions (~115k tokens); the 30
+abstention questions are skipped as the official scorer skips them, leaving
+470. **Strict recall_all@k** counts a question only when *every* gold session
+is among the top-k distinct sessions; any-hit is shown beside it as the
+diagnostic it is.
+
+The load goes through the shipped write path, not a re-creation of it: one
+thought per session, windows from `server-portable/chunk.ts`'s `chunkContent`,
+the document prompt from `db/config.mjs`, the 4-argument `upsert_thought` with
+the 021 envelope. 19,829 distinct session ids (25,112 memberships — a session
+sits in several histories), 19,825 rows after 003's fingerprint folded four
+twins, 56,267 chunk rows; median session 2,589 tokens, p90 4,253, and 15,737 of
+them long enough to chunk. The session's date leads its text, as a pasted
+transcript's would.
+
+Isolation is the product's own filter path: each row carries every question id
+it belongs to in `metadata.lme_q`, and a question searches with
+`{"lme_q": ["<qid>"]}` — jsonb array containment, through the filter inside the
+scan (014). **The control:** every returned row must be one the loader wrote,
+and every session it stands for must be in that question's history; a run
+that fails either prints no table. It passed on all 2,820 calls.
+
+Load: 11,303 s for 19,564 sessions at `qwen3-embedding:0.6b@1024` (1.73
+sessions/s, ~4,400 content tokens/s, embedding requests batched 32 inputs).
+Scoring: 10 s for 470 questions × 3 arms × 2 k; **1.3 ms per search call**,
+mean, over 19,825 rows with a filter that admits ~50.
+
+### Results, 2026-09-13, `qwen3-embedding:0.6b@1024`
+
+Strict recall_all@5, any-hit@5 in parentheses. `hybrid@0.5` is
+`search_thoughts_hybrid` at the threshold `search_thoughts` and `search` send
+today; `hybrid@-1` the same fusion with no cosine floor; `vector@-1` is
+`match_thoughts` alone.
+
+| question type | n | hybrid@0.5 | hybrid@-1 | vector@-1 |
+| --- | --- | --- | --- | --- |
+| single-session-user | 64 | 46.9% (46.9%) | 95.3% (95.3%) | 95.3% (95.3%) |
+| single-session-assistant | 56 | 100.0% (100.0%) | 100.0% (100.0%) | 100.0% (100.0%) |
+| single-session-preference | 30 | 56.7% (56.7%) | 96.7% (96.7%) | 96.7% (96.7%) |
+| multi-session | 121 | 33.1% (66.1%) | 79.3% (96.7%) | 79.3% (96.7%) |
+| temporal-reasoning | 127 | 28.3% (60.6%) | 78.7% (92.9%) | 79.5% (92.9%) |
+| knowledge-update | 72 | 47.2% (77.8%) | 98.6% (100.0%) | 98.6% (100.0%) |
+| **ALL** | **470** | **45.3%** (67.2%) | **87.7%** (96.2%) | **87.9%** (96.2%) |
+
+At k=10 the no-floor arms reach 94.9% strict (98.3% any-hit); the shipped
+floor stays at 45.5%, because the rows it removed are not at rank 6–10, they
+are gone.
+
+Beside the field, same metric, same 470 questions:
+
+| system | strict recall_all@5 | notes |
+| --- | --- | --- |
+| GBrain v0.48.4 | 95.53% | Voyage-4 1024d, `rerank-2.5` on, graph boosts |
+| GBrain, reranker off | 93.40% | |
+| MemPalace hybrid v4 + LLM rerank | 90.0% | reproduced by gbrain-evals |
+| **this fork, no floor, `qwen3-embedding:0.6b`** | **87.7%** | local 639 MB model, no reranker |
+| MemPalace raw (ChromaDB) | 85.7% | reproduced by gbrain-evals |
+| LongMemEval paper, flat retrievers | ~71% | Stella V5 / BM25 |
+| **this fork as shipped, threshold 0.5** | **45.3%** | |
+
+### What it says
+
+**The 0.5 floor is a defect on long captures, and it was invisible until now
+(SMD-1300).** 937 of the 940 shipped-threshold calls returned fewer rows than
+asked. A short question against a 2,600-token session scores 0.2–0.4 cosine on
+this model — the gold row for "What degree did I graduate with?" sits at 0.19
+on its whole-content vector — so the floor removes the right answer, not
+noise. The one slice it leaves alone is single-session-assistant, where the
+gold is the assistant's own long answer and scores high; single-session-user
+falls from 95.3% to 46.9%. That is query–document length asymmetry, not model
+quality, and nothing on the tracker corpus could show it: a 125-token issue
+and its title clear 0.5 with room. `search` (ChatGPT compat) cannot even be
+told a threshold. The ticket asks for the floor to be decided by measurement
+across both corpora, and for a relative cutoff to be weighed against the
+absolute one.
+
+**The keyword arm contributes nothing here.** `hybrid@-1` and `vector@-1`
+agree to the row on every slice but one, where the vector arm is a question
+ahead. The needle rule (012, 017) is built for identifiers, and LongMemEval's
+questions — like most questions a person asks a brain — carry none. GBrain's
+BM25 arm earns points on this benchmark that ours does not; whether that is
+worth a tsvector arm here is a measurement for another day, and this harness
+is where it would be made.
+
+**Where the misses are.** Multi-session (79.3%) and temporal-reasoning
+(78.7%) carry almost all of them. Multi-session needs two or three sessions in
+five and k=10 recovers most (92.6%): the second gold session is close behind,
+which is the case a reranker or a larger candidate window addresses.
+Temporal questions ask about dates the session text carries only as a
+leading line; the vector does not weight them. Knowledge-update is 98.6%:
+both the stale and the current session are retrieved, which is the retrieval
+half of the problem SMD-1294 (consolidation) exists for.
+
+**Where this sits.** Roughly 5.7 points below GBrain without its reranker and
+7.8 below with it, on a 639 MB local model with no reranker and no hosted
+call, at 1.3 ms a query. Between MemPalace's raw store and its reranked hybrid.
+The paper's flat retrievers are 17 points behind. The 4b default model's row
+is pending; its run is ~5× the embedding time.
+
+### Caveats
+
+* One model so far. `qwen3-embedding:4b@1024`, the fork's default, is the row
+  that matters and is running; the 0.6b is the value pick from the model table
+  in `../SETUP.md`.
+* The date is prepended to each session's text. Without it temporal questions
+  are unanswerable by any retriever; with it, the harness has made a choice a
+  capture path would have to make too. It helps the temporal slice and is
+  neutral elsewhere.
+* Isolation is exact but the pool is shared: 19,825 rows with a ~50-row filter
+  is a harsher planner case than a 50-row brain, and the 1.3 ms says the 014
+  path handles it. It is not what a 50-session brain would measure for
+  latency; it is what it would measure for recall.
+* No reranker arm. The cascade (above) was measured flat on the tracker; this
+  corpus is where it would be re-derived, and `eval-cascade.ts` is the harness
+  for that.
+* Three-arm, two-k design; per-question rank data is not kept. A follow-up
+  that wants MRR or the rank of the missed gold session extends `score()`.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform
