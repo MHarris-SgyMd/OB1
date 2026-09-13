@@ -215,11 +215,18 @@ async function score(): Promise<void> {
   const filterFor = (q: Question) => ({ lme_q: [q.question_id] });
   const arms: Arm[] = [
     {
-      key: "hybrid@0.5", label: "hybrid, threshold 0.5 (search_thoughts today)",
+      key: "hybrid@0.5", label: "hybrid, threshold 0.5 (what search_thoughts sent before SMD-1300)",
       run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.5, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
     },
     {
-      key: "hybrid@-1", label: "hybrid, no cosine floor",
+      // SMD-1300 / migration 027: the tools now send a threshold of 0, and the
+      // function admits relative to the top match. This is the SHIPPED arm once
+      // 027 is applied; against a pre-027 database it is the plain no-floor call.
+      key: "hybrid@0 (027)", label: "hybrid, threshold 0 — the relative cutoff governs (search_thoughts today)",
+      run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
+    },
+    {
+      key: "hybrid@-1", label: "hybrid, threshold -1 (pre-027: no floor; post-027: relative cutoff only)",
       run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
     },
     {
@@ -239,8 +246,15 @@ async function score(): Promise<void> {
   };
   const misses: string[] = [];
   let outside = 0;
-  /** Calls that returned fewer rows than asked — the threshold cut the history short. */
-  let short = 0;
+  /**
+   * Calls that returned fewer rows than asked, per arm. Under the old absolute
+   * floor this was the bug's signature (the floor cut the history to nothing).
+   * Under 027's relative cutoff a short call is usually the cutoff trimming
+   * filler, so `shortLost` — short calls that ALSO missed a gold session — is
+   * the honest one to watch: it should stay near zero while `short` need not.
+   */
+  const shortByArm = new Map<string, number>();
+  const shortLostByArm = new Map<string, number>();
   let queryMs = 0;
   const t0 = Date.now();
 
@@ -268,10 +282,13 @@ async function score(): Promise<void> {
           if (!here.length) outside++;
           for (const sid of here) if (!sids.includes(sid)) sids.push(sid);
         }
-        if (ids.length < Math.min(k, hay.size)) short++;
         const top = new Set(sids.slice(0, k));
         const strict = [...gold].every((g) => top.has(g));
         const any = [...gold].some((g) => top.has(g));
+        if (ids.length < Math.min(k, hay.size)) {
+          shortByArm.set(arm.key, (shortByArm.get(arm.key) ?? 0) + 1);
+          if (!strict) shortLostByArm.set(arm.key, (shortLostByArm.get(arm.key) ?? 0) + 1);
+        }
         bump(`${arm.key}|${k}|${q.question_type}`, strict, any);
         bump(`${arm.key}|${k}|ALL`, strict, any);
         if (arm.key === "hybrid@0.5" && k === 5 && !strict) misses.push(`${q.question_type}  ${q.question_id}  ${q.question.slice(0, 80)}`);
@@ -282,7 +299,9 @@ async function score(): Promise<void> {
 
   if (outside) throw new Error(`CONTROL FAILED: ${outside} results came from outside the question's history; the filter did not isolate.`);
   console.log(`\n✓ control: every result was inside its question's history (${use.length} questions × ${arms.length} arms × ${KS.length} k)`);
-  console.log(`  ${(queryMs / (use.length * arms.length * KS.length)).toFixed(1)} ms per search call, mean; ${short} calls returned fewer rows than asked`);
+  console.log(`  ${(queryMs / (use.length * arms.length * KS.length)).toFixed(1)} ms per search call, mean`);
+  console.log(`  short calls (returned < rows asked) — short / of-those-missing-a-gold, per arm, both k:`);
+  for (const a of arms) console.log(`    ${a.key}: ${shortByArm.get(a.key) ?? 0} / ${shortLostByArm.get(a.key) ?? 0}`);
 
   const types = ["single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update", "ALL"];
   const pct = (a: number, b: number) => (b ? `${((100 * a) / b).toFixed(1)}%` : "—");

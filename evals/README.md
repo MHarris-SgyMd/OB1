@@ -1986,6 +1986,43 @@ call, at 1.3 ms a query. Between MemPalace's raw store and its reranked hybrid.
 The paper's flat retrievers are 17 points behind. The 4b default model's row
 is pending; its run is ~5× the embedding time.
 
+### The floor, decided by measurement (SMD-1300), and the fix
+
+The two endpoints above (0.5 → 45.3%, −1 → 87.7%) said the floor was the defect;
+they did not say what to replace it with. `sweep-floor.ts` swept the admission
+rule — absolute thresholds and a cutoff relative to the top candidate — over the
+same 470 questions, bucketed by gold-document length. Strict recall_all@5:
+
+| admission rule | ALL | <1k | 1k–3k | >3k | mean rows |
+| --- | --- | --- | --- | --- | --- |
+| absolute 0.5 (shipped before) | 45.3% | 100% | 78.9% | 36.1% | 1.1 |
+| absolute 0.3 | 85.7% | 100% | 98.6% | 82.6% | 4.2 |
+| no floor (−1) | 87.7% | 100% | 100% | 84.7% | 5.0 |
+| **relative, f = 0.5** | **87.4%** | 100% | 100% | 84.4% | 4.3 |
+| relative, f = 0.6 | 86.2% | 100% | 100% | 82.8% | 3.7 |
+| relative, f = 0.7 | 82.1% | 100% | 100% | 77.8% | 2.9 |
+
+Two things the endpoints alone could not show. First, the damage is **entirely on
+long documents** — the `<1k` bucket is 100% under every rule, so no single
+absolute constant can be right for both lengths, which is the case against merely
+lowering it. Second, **`f = 0.5` ties the no-floor recall** (87.4% vs 87.7%) while
+returning fewer rows (4.3 vs 5.0) — it trims filler without dropping gold. `f ≥
+0.6` starts costing recall.
+
+So migration 027 replaces the absolute floor with the **relative** cutoff at
+`f = 0.5`: admit the top match and every row within half of its raw cosine
+(keyword hits exempt; a negative `match_threshold` disables it for the raw ranked
+list). The tools send `match_threshold` 0, so the cutoff governs. Re-run with 027
+applied, the shipped arm (`hybrid@0`) scores **87.4%**, and of its 345 short calls
+only **3** drop a gold session — versus the old floor's 937 short / 512 lost. That
+is the honest line between the cutoff trimming noise and the floor losing the
+answer. (See `../FORK.md` §48.)
+
+*Still to measure (SMD-1300, blocking before merge):* the decoy report on the
+Linear corpus (`eval-hybrid.ts`) — whether the relative cutoff admits decoys on
+*short* thoughts the 0.5 floor blocked. The `<1k` column above is reassuring but
+is recall, not decoy precision.
+
 ### Caveats
 
 * One model so far. `qwen3-embedding:4b@1024`, the fork's default, is the row
