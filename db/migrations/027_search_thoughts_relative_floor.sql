@@ -274,12 +274,15 @@ BEGIN
     FROM scored s
   ),
   -- The top candidate's raw cosine, the yardstick the relative cutoff below
-  -- measures against. Taken over ALL candidates, which is the vector arm's top:
-  -- a keyword-only hit (in via a needle, not the vector window) cannot exceed
-  -- it, because any row scoring above the window's minimum is already IN the
-  -- window — so a floor-exempt keyword hit never raises the bar for the vector
-  -- rows. NULL when no scored row has a vector (a pure keyword query), and then
-  -- only keyword hits are admitted.
+  -- measures against — the best similarity available for this query, over all
+  -- candidates. At weight 0 (the tools' default, and the whole SMD-1300 path)
+  -- this equals the vector arm's top: a keyword-only hit cannot exceed it,
+  -- because any row above the vector window's minimum is already IN the window.
+  -- Under a recency weight the window is ranked by the blend, so a needle-
+  -- matched high-cosine row aged out of it can be the top here — deliberately:
+  -- admission is on raw similarity (as 020's absolute floor was under a weight),
+  -- and the best real match is the right bar. NULL when no scored row has a
+  -- vector (a pure keyword query), and then only keyword hits are admitted.
   topsim AS (SELECT max(sim) AS top FROM blended)
   SELECT
     s.cid, s.content, s.metadata, s.created_at,

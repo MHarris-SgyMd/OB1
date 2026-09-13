@@ -286,8 +286,9 @@ async function score(): Promise<void> {
         const strict = [...gold].every((g) => top.has(g));
         const any = [...gold].some((g) => top.has(g));
         if (ids.length < Math.min(k, hay.size)) {
-          shortByArm.set(arm.key, (shortByArm.get(arm.key) ?? 0) + 1);
-          if (!strict) shortLostByArm.set(arm.key, (shortLostByArm.get(arm.key) ?? 0) + 1);
+          const sk = `${arm.key}|${k}`;
+          shortByArm.set(sk, (shortByArm.get(sk) ?? 0) + 1);
+          if (!strict) shortLostByArm.set(sk, (shortLostByArm.get(sk) ?? 0) + 1);
         }
         bump(`${arm.key}|${k}|${q.question_type}`, strict, any);
         bump(`${arm.key}|${k}|ALL`, strict, any);
@@ -300,8 +301,8 @@ async function score(): Promise<void> {
   if (outside) throw new Error(`CONTROL FAILED: ${outside} results came from outside the question's history; the filter did not isolate.`);
   console.log(`\n✓ control: every result was inside its question's history (${use.length} questions × ${arms.length} arms × ${KS.length} k)`);
   console.log(`  ${(queryMs / (use.length * arms.length * KS.length)).toFixed(1)} ms per search call, mean`);
-  console.log(`  short calls (returned < rows asked) — short / of-those-missing-a-gold, per arm, both k:`);
-  for (const a of arms) console.log(`    ${a.key}: ${shortByArm.get(a.key) ?? 0} / ${shortLostByArm.get(a.key) ?? 0}`);
+  console.log(`  short calls (returned < rows asked) — short / of-those-missing-a-gold, per arm per k:`);
+  for (const k of KS) for (const a of arms) console.log(`    k=${k} ${a.key}: ${shortByArm.get(`${a.key}|${k}`) ?? 0} / ${shortLostByArm.get(`${a.key}|${k}`) ?? 0}`);
 
   const types = ["single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update", "ALL"];
   const pct = (a: number, b: number) => (b ? `${((100 * a) / b).toFixed(1)}%` : "—");

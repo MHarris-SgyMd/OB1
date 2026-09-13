@@ -4767,11 +4767,11 @@ so the floor removed the **right answer**, silently: fewer rows, all plausible.
 `qwen3-embedding:0.6b`), a `db/../evals/sweep-floor.ts` swept absolute thresholds
 and a relative cutoff by document length. Strict recall_all@5:
 
-| admission rule | ALL | >3k-token gold docs | mean rows | short (of those, lost a gold) |
+| admission rule | ALL | >3k-token gold docs | mean rows | short@5 (lost a gold) |
 | --- | --- | --- | --- | --- |
-| absolute floor 0.5 (shipped) | 45.3% | 36.1% | 1.1 | 937 (512) |
+| absolute floor 0.5 (shipped) | 45.3% | 36.1% | 1.1 | 467 (256) |
 | no floor (threshold −1) | 87.7% | 84.7% | 5.0 | 0 (0) |
-| **relative cutoff, f = 0.5** | **87.4%** | 84.4% | 4.3 | 345 (**3**) |
+| **relative cutoff, f = 0.5** | **87.4%** | 84.4% | 4.3 | 119 (**1**) |
 
 The floor's damage is entirely on long documents — the `<1k`-token bucket is 100%
 under every rule. An absolute cosine floor **cannot** be right for both a
@@ -4795,9 +4795,9 @@ raw cosine; only *admission* changed. `match_thoughts` is untouched — the tool
 reach it only through the fused function.
 
 The shipped arm lands at **87.4%** — within 0.5 pt of the no-floor ceiling —
-where the old floor sat at 45.3%. Its 345 short calls (returning fewer rows than
-asked) are the relative cutoff **trimming filler**: only **3** of them drop a gold
-session, versus 512 for the floor. That is the honest distinction between the
+where the old floor sat at 45.3%. Its 119 short calls at k=5 (returning fewer rows
+than asked) are the relative cutoff **trimming filler**: only **1** drops a gold
+session, versus 256 for the floor. That is the honest distinction between the
 cutoff working and the bug: the floor lost the answer, the cutoff trims the noise.
 
 Verified by `test-schema` [26] and `test-live` [15] (027 is the last definer, the

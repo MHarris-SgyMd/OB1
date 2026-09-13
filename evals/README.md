@@ -2013,8 +2013,8 @@ So migration 027 replaces the absolute floor with the **relative** cutoff at
 `f = 0.5`: admit the top match and every row within half of its raw cosine
 (keyword hits exempt; a negative `match_threshold` disables it for the raw ranked
 list). The tools send `match_threshold` 0, so the cutoff governs. Re-run with 027
-applied, the shipped arm (`hybrid@0`) scores **87.4%**, and of its 345 short calls
-only **3** drop a gold session — versus the old floor's 937 short / 512 lost. That
+applied, the shipped arm (`hybrid@0`) scores **87.4%**, and of its 119 short calls
+at k=5 only **1** drops a gold session — versus the old floor's 467 short / 256 lost. That
 is the honest line between the cutoff trimming noise and the floor losing the
 answer. (See `../FORK.md` §48.)
 
