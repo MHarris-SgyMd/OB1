@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-four numbered changes on top of the pin. Seven fix defects found in an
+Fifty-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). One (change 53, like change 31) ships no runtime change at
 all: it is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–54 are the numbered `###` sections** further down, which is
+sections. Changes **18–55 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -3769,8 +3769,8 @@ under `reembed:nightly` re-asks every accepted row on a switch. 021's evidence
 backfill is applied and never edited, and trusts a succeeded row whatever its
 caveat: the gate on 021 closes the upgrade path, and a hand re-run of 021's body
 over accepted rows whose thought is unlabelled is the case that remains, said in
-`reembed.ts`'s header (done in change 54: the migrator owns the re-run, and
-migration 029 takes back a label whose only evidence is an acceptance). The
+`reembed.ts`'s header (done in change 55: the migrator owns the re-run, and
+migration 030 takes back a label whose only evidence is an acceptance). The
 extraction worker has no acknowledgement path of its own — its failed rows are
 016's, and preflight does not read them.
 
@@ -5595,12 +5595,12 @@ own 017/020 retrieval. **Unfiled** upstream. Reproduce: a persisted
 `eval-longmemeval.ts` load, then `bun evals/rerank-spike.ts` (see
 `evals/README.md`).
 
-### 54. The migrator owns the re-run — `--reapply` re-runs every recorded migration in one transaction, and migration 029 takes back a label whose only evidence is an acceptance (SMD-1193)
+### 55. The migrator owns the re-run — `--reapply` re-runs every recorded migration in one transaction, and migration 030 takes back a label whose only evidence is an acceptance (SMD-1193)
 
-`db/migrations/029_label_from_claims_excludes_accepted.sql`, `db/migrate.ts`,
+`db/migrations/030_label_from_claims_excludes_accepted.sql`, `db/migrate.ts`,
 `db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts` and
 `server-portable/preflight.ts` (Linear SMD-1193, filed by change 39's first and
-second review passes). One migration, 029: no column, no function, two UPDATEs
+second review passes). One migration, 030: no column, no function, two UPDATEs
 of `thoughts.embedding_model` in one DO block.
 
 **The finding.** Migration 021's evidence backfill labels a thought from its
@@ -5681,7 +5681,7 @@ does; the summary counts re-applied apart from applied; the seeds check runs
 after the commit for every file that seeds, since a brain adopted with
 `--baseline` never had the migrator run 014. No file is named in the loop.
 
-**Migration 029: the corrected rule, applied once to every brain.** 021 cannot
+**Migration 030: the corrected rule, applied once to every brain.** 021 cannot
 change, so its successor does two things in one DO block, 001's `updated_at`
 trigger held as 021 holds it (no row's `updated_at` moves and no audit row is
 written — asserted). First, a label whose *only* evidence is an acceptance goes
@@ -5707,14 +5707,14 @@ earlier pass that did write the vector labels the thought at that pass's model,
 exactly the vector the acceptance kept, and a thought with no such row stays
 NULL. What it leaves: an acceptance under a *suffixed* key is not read against
 the label — a backfill key pools thoughts at the model too, so such a label may
-be the server's own, and the two cannot be told apart; 029 writes no new label
+be the server's own, and the two cannot be told apart; 030 writes no new label
 from one, and because 021's block, re-run as written, *would*, the migrator
 refuses `--reapply` while such a row stands over an unlabelled thought, naming
 the rows and a way back the schema allows: on 021's whole, `reembed.ts --job
 <key> --retry-fallbacks` or `--retire <key>`; on an older schema, where
 `reembed.ts` refuses to run and `--accept-failed` could not have written the
 row, the statement `--retry-fallbacks` would run, per row — otherwise the tool
-loops the operator between two refusals. The claim-key grammar 029 and that
+loops the operator between two refusals. The claim-key grammar 030 and that
 query read is `config.mjs`'s, as two template values and two constants, and
 the latest row is chosen by `finished_at` and then by key, since two rows
 released in one transaction share `now()` and which wins decides whether a
@@ -5722,11 +5722,11 @@ label is taken back. Reached after 021 in the same
 `--reapply` transaction, and pending on every brain at its next plain run, so a
 brain that followed the old paste is corrected too. The rule for any successor that labels from claim rows
 is stated in the file and in `reembed.ts`'s header: an accepted row is not
-evidence; 029 is its spelling.
+evidence; 030 is its spelling.
 
 **The remedies name the command.** `reembed.ts`'s ledgered 021 refusal says
 `cd db && bun migrate.ts --url … --reapply`, what the re-run does with 021 and
-029, and to stop the writers first; `--status`, which reads and answers on any
+030, and to stop the writers first; `--status`, which reads and answers on any
 schema and is what the operator reads first, now prints `a run would refuse: …`
 with it. Preflight's three paste remedies — 023's `backfill_content_fingerprints`
 absent under a ledger that says 023, and 014's body under a ledger that says
@@ -5734,16 +5734,16 @@ absent under a ledger that says 023, and 014's body under a ledger that says
 clause back is a statement, not a paste of a file, and stays.
 
 **Review, second pass (high), triaged — the first stop signal.** Every finding
-was a seam of the first pass's reshape, and most were right: 029's first
+was a seam of the first pass's reshape, and most were right: 030's first
 statement bounded on `finished_at` and would have taken back the label a
 worker itself wrote between the claim and the release (fixed, `claimed_at`,
 and [8] plants that row); the one transaction covered recorded files only, so
 a ledger hole had an earlier-numbered pending file apply *after* the re-run
-over what it restored, and 029 — pending on every existing brain — ran in a
+over what it restored, and 030 — pending on every existing brain — ran in a
 second transaction while the remedy said "the same one" (fixed: every file,
 pending ones recorded inside); 006 and 013 would re-record `ob1_config` from
 the shell with no line saying so (refused); a suffixed-key acceptance over an
-unlabelled thought would be labelled by 021's block and left by 029 (refused,
+unlabelled thought would be labelled by 021's block and left by 030 (refused,
 listing the rows); no `lock_timeout` before 023's, so an idle session's ACCESS
 SHARE froze the re-run and every reader behind 001's ACCESS EXCLUSIVE for ever
 (a 10 s `SET LOCAL` from the first statement — which made the atomicity
@@ -5766,22 +5766,22 @@ pre-check for both, every refusal reported); the pgvector floor's remedy said
 the width was compared against `ob1_config` when the column is the authority
 and 006 judges it (dropped); the hazard list said `50+` at exactly fifty and
 derived its keys from the truncated rows (no limit; fifty shown, the rest
-counted); `DISTINCT ON … ORDER BY finished_at DESC` had no tiebreak, and 029 is
+counted); `DISTINCT ON … ORDER BY finished_at DESC` had no tiebreak, and 030 is
 the first consumer whose outcome depends on *which* row wins (the key); the
-claim-key regexes were spelled inline eight times across 029 and the hazard
+claim-key regexes were spelled inline eight times across 030 and the hazard
 query (two constants in `config.mjs`, two template values); `reembed.ts --status
 --dry-run` printed the refusal twice and `--status` judged only 021 where a run
 judges three (fixed); test [7] stripped `OB1_CHUNK_CONTEXT` from the child's
 shell after applying the schema with the parent's, so a developer with the flag
 on saw the new refusal fire (fixed); the README's FORK pointer list and its
-`test-schema` count were behind (fixed). Not taken: pre-filtering 029's three
+`test-schema` count were behind (fixed). Not taken: pre-filtering 030's three
 scans to candidate thoughts (a few seconds, once; 021's shape); a configurable
 lock timeout to spare CI ten seconds; 028's column comment, which still presents
 021's trust as the standing exception (a comment is hashed with its file, and
-029 adds none).
+030 adds none).
 
 **Not done here.** `db/README.md`'s migrations table stops at 023, and a row
-for 029 alone would mislead; its FORK pointer list names 029. The argument
+for 030 alone would mislead; its FORK pointer list names 030. The argument
 scanner is the migrator's own, a third hand-rolled copy beside `reembed.ts`'s
 and `extract-entities.ts`'s.
 
@@ -5793,7 +5793,7 @@ timestamps; an earlier pass's plain row under its key and the acceptance under
 the new key over the same thought), and asserts `reembed.ts --status` names the
 command and not the paste; `--dry-run` counts every recorded file and writes
 nothing; the run's banner and summary; the labels (`stub-embed`, NULL,
-`earlier-model`, NULL — 021's block labelled the accepted thought and 029 took
+`earlier-model`, NULL — 021's block labelled the accepted thought and 030 took
 it back, in one transaction); no `updated_at` moved, no audit row, the trigger
 enabled after; the recorded ledger rows untouched and the one deleted row (022,
 a ledger hole) recorded, the file applied in its place; the eight-argument
@@ -5806,7 +5806,7 @@ fails at 001 within the lock timeout and rolls back whole), a value beside the
 flag, a flag the runner does not have, `--baseline` beside it, a drifted
 recorded file; and that the re-applied schema has a fresh apply's columns and
 functions; and that `--dry-run` from a differing shell says "would refuse".
-[8] applies 029 onto a populated 028 holding nine labels — a
+[8] applies 030 onto a populated 028 holding nine labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
 a mislabel edited since (stays), a head window the worker wrote between the

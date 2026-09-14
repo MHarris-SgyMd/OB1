@@ -1,5 +1,5 @@
 -- ============================================================================
--- 029 — a label whose only evidence is the operator's acceptance goes back to
+-- 030 — a label whose only evidence is the operator's acceptance goes back to
 --       unknown, and the evidence rule labels with accepted rows excluded
 --       (SMD-1193)
 --

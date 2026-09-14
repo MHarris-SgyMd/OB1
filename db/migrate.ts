@@ -338,8 +338,8 @@ async function reportSeeds(m: Migration): Promise<void> {
 // must not do quietly — re-record ob1_config from a shell configured
 // differently from the brain (006 and 013 write INSERT … ON CONFLICT DO UPDATE
 // again), and let 021's block, run as written, label an unlabelled thought from
-// an acceptance under a SUFFIXED key, which 029 cannot tell from the server's
-// own label (029's header, "What it leaves"). A 10 s lock_timeout from the first
+// an acceptance under a SUFFIXED key, which 030 cannot tell from the server's
+// own label (030's header, "What it leaves"). A 10 s lock_timeout from the first
 // statement, so an idle session holding a lock on thoughts fails the re-run at
 // once rather than freezing every reader behind 001's ACCESS EXCLUSIVE for ever
 // — the banner says to stop the writers first. The seeds check runs after the
@@ -386,11 +386,11 @@ if (reapply) {
     }
   }
   if (has_claims) {
-    // The rows 021's block, run as written, would read as evidence and 029 would
+    // The rows 021's block, run as written, would read as evidence and 030 would
     // leave: the thought's latest succeeded row under a key naming a model is an
     // acceptance under a suffixed key, the thought has a vector, is unlabelled
     // (every thought is, before 021), and 021's bound holds. The grammar is
-    // config.mjs's, as 029 has it.
+    // config.mjs's, as 030 has it.
     const hazards = (await sql.unsafe(
       "SELECT t.id::text AS id, e.work_type FROM thoughts t JOIN (" +
         "SELECT DISTINCT ON (k.thought_id) k.thought_id, k.work_type, k.finished_at, k.accepted, k.own_key FROM (" +
@@ -425,7 +425,7 @@ if (reapply) {
         code: 2,
         text:
           `021's evidence backfill, re-run as written, would label ${hazards.length} unlabelled thought(s) from an\n` +
-          `  acceptance under a suffixed key (${keys.join(", ")}), which migration 029 cannot tell from the server's own label:\n` +
+          `  acceptance under a suffixed key (${keys.join(", ")}), which migration 030 cannot tell from the server's own label:\n` +
           shown.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
           (hazards.length > shown.length ? `\n    … and ${hazards.length - shown.length} more` : "") +
           "\n" + wayBack,

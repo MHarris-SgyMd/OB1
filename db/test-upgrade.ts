@@ -363,7 +363,7 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   await sql.close();
 }
 
-console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one transaction, 029 correcting 021's backfill, and what the re-run refuses (SMD-1193)");
+console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one transaction, 030 correcting 021's backfill, and what the re-run refuses (SMD-1193)");
 {
   await dropSchema(URL_);
   // A brain adopted with --baseline: the schema as far as 020, by hand as it
@@ -400,10 +400,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // The claim rows as the tool leaves them. A plain succeeded row under the
   // model's own key. An ACCEPTED row (SMD-1067): succeeded, the caveat prefix,
   // and the failure's own timestamps — so 021's block, run as written, labels
-  // the thought at a model whose pass never wrote its vector, and 029 must
+  // the thought at a model whose pass never wrote its vector, and 030 must
   // take that back. And a thought with both: an earlier pass's plain row under
   // its key, then the acceptance under the new key — the latest row, which 021
-  // trusts and 029 excludes.
+  // trusts and 030 excludes.
   const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
   await enqueue(EARLIER, [earlierThenAccepted]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${EARLIER}`;
@@ -443,7 +443,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out),
          `…and --dry-run from that shell says it would refuse, the same judgement (exit ${otherDry.code})`);
   // An acceptance under a SUFFIXED key over an unlabelled thought: 021's block,
-  // run as written, would label it, and 029 cannot tell that label from the
+  // run as written, would label it, and 030 cannot tell that label from the
   // server's own. Refused, listing the row; returned to its pool, the run goes.
   const SUFFIXED = `${KEY}:ctx`;
   const suffixedHazard = await plant("unlabelled; a backfill under a suffixed key was refused and accepted");
@@ -488,14 +488,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(run.code === 0, `--reapply exits 0 (${run.code})${run.code === 0 ? "" : `:\n${run.out}`}`);
   assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 1} recorded, 1 pending\\), in order, in one transaction with a 10 s lock timeout`).test(run.out) &&
            /Stop the server and any re-embed or extraction worker first/.test(run.out) &&
-           /021_embedding_model_per_row\.sql\s+re-applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /029_label_from_claims_excludes_accepted\.sql\s+re-applied/.test(run.out) &&
+           /021_embedding_model_per_row\.sql\s+re-applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /030_label_from_claims_excludes_accepted\.sql\s+re-applied/.test(run.out) &&
            new RegExp(`applied 1, re-applied ${MIGRATIONS.length - 1}, skipped 0`).test(run.out) && !/already applied/.test(run.out),
          "…says what it ran: every file in order, the pending one applied in its place, none skipped, and the operator's precondition");
   const models = Object.fromEntries(
     ((await sql`SELECT id, embedding_model AS m FROM thoughts`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m])
   );
   assert(models[vouched] === OPTS.model, `a thought a finished pass vouches for is labelled from its plain succeeded row (${models[vouched]})`);
-  assert(models[accepted] === null, `a thought whose only row is the operator's acceptance ends NULL — 021's block labelled it, 029 took the label back (${models[accepted]})`);
+  assert(models[accepted] === null, `a thought whose only row is the operator's acceptance ends NULL — 021's block labelled it, 030 took the label back (${models[accepted]})`);
   assert(models[earlierThenAccepted] === "earlier-model", `with the acceptance excluded the latest row before it decides: the earlier pass that did write the vector (${models[earlierThenAccepted]})`);
   assert(models[noEvidence] === null, "a thought no pass touched stays NULL");
   assert(models[suffixedHazard] === null, "the thought returned to its pool stays NULL — a pending row is no evidence");
@@ -548,10 +548,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(reapplied.functions === scratch.functions, "…and the same functions");
 }
 
-console.log("\n[8] Migration 029 onto a populated 028 — a label whose only evidence is an acceptance goes back to unknown (SMD-1193)");
+console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evidence is an acceptance goes back to unknown (SMD-1193)");
 {
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "029" });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "030" });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
   const M = OPTS.model;
@@ -561,7 +561,7 @@ console.log("\n[8] Migration 029 onto a populated 028 — a label whose only evi
   const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
   const CAVEAT = ACCEPTED_CAVEAT_PREFIX + "the provider refused the content on every attempt";
   // The corpus a brain has after following the old remedy — 021's body pasted
-  // over accepted rows — beside the labels 029 must leave alone. Every thought
+  // over accepted rows — beside the labels 030 must leave alone. Every thought
   // written two hours ago unless said otherwise.
   const plant = async (content: string, label: string | null, updatedAgo = "2 hours") =>
     (await sql`INSERT INTO thoughts (content, metadata, embedding, embedding_model, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, ${label}, now() - ${updatedAgo}::interval) RETURNING id`)[0].id as string;
@@ -601,10 +601,10 @@ console.log("\n[8] Migration 029 onto a populated 028 — a label whose only evi
   const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   const before = await shape(sql);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("029") });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("030") });
 
   const after = await shape(sql);
-  assert(before.columns === after.columns && before.functions === after.functions, "029 adds no column and no function");
+  assert(before.columns === after.columns && before.functions === after.functions, "030 adds no column and no function");
   const label = async (id: string) => (await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${id}::uuid`)[0].m as string | null;
   assert((await label(mislabelled)) === null, "a label whose only evidence is an acceptance under the model's own key goes back to unknown");
   assert((await label(legitOtherKey)) === M, "a label a real pass wrote stays, though a later pass to another model was accepted");
@@ -624,8 +624,8 @@ console.log("\n[8] Migration 029 onto a populated 028 — a label whose only evi
   assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
 
   const labelsOnce = JSON.stringify(await sql`SELECT id, embedding_model FROM thoughts ORDER BY id`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("029") });
-  assert(JSON.stringify(await sql`SELECT id, embedding_model FROM thoughts ORDER BY id`) === labelsOnce, "re-applying 029 is a no-op: every label as after the first run");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("030") });
+  assert(JSON.stringify(await sql`SELECT id, embedding_model FROM thoughts ORDER BY id`) === labelsOnce, "re-applying 030 is a no-op: every label as after the first run");
   await sql.close();
 }
 

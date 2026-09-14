@@ -66,7 +66,7 @@ row; `--dry-run` prints the `sha256` to use beside each name.
 
 ### 5. Re-applying what the ledger already records
 
-A database adopted with `--baseline` can say 029 in its ledger while its
+A database adopted with `--baseline` can say 030 in its ledger while its
 functions are the guide's: a plain run skips every recorded file, and
 `reembed.ts` and preflight refuse or warn on the body they find and name this:
 
@@ -98,7 +98,7 @@ shell whose `OB1_EMBEDDING_MODEL` or `OB1_CHUNK_CONTEXT` differs from what
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; the width is the column's own and 006 judges it); and an
 accepted claim row under a *suffixed* key (`reembed:<model>@<dim>:ctx`) standing
-over an unlabelled thought, which 021's backfill would label and 029 cannot tell
+over an unlabelled thought, which 021's backfill would label and 030 cannot tell
 from the server's own label — return it with `reembed.ts --job <key>
 --retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
 where `reembed.ts` refuses to run, the refusal prints the statement
@@ -109,7 +109,7 @@ take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written, and 029, reached after it in the same
+evidence backfill runs as written, and 030, reached after it in the same
 transaction, returns a label whose only evidence is an operator's acceptance to
 unknown and labels with accepted rows excluded (SMD-1193).
 
@@ -150,7 +150,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s `FOR UPDATE` wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
-(024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49, 029 change 54).
+(024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49, 030 change 55).
 
 ## What changed relative to the guide
 
@@ -414,7 +414,7 @@ read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
 adopted with `--baseline` — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
-above; 029, reached after 021 in the same run, takes back what 021's backfill
+above; 030, reached after 021 in the same run, takes back what 021's backfill
 read from an accepted row).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
@@ -982,7 +982,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 564 properties (at migration 029), including:
+asserts 564 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

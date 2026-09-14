@@ -672,7 +672,7 @@ export function migrationValues(overrides = {}) {
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
     // 023's one call: NULL is every row waiting; an integer, one batch.
     BACKFILL_LIMIT: String((overrides.backfillLimit === undefined ? resolveBackfillLimit(ENV.OB1_BACKFILL_LIMIT) : overrides.backfillLimit) ?? "NULL"),
-    // 029 reads the caveat prefix an accepted row carries (SMD-1067) and the
+    // 030 reads the caveat prefix an accepted row carries (SMD-1067) and the
     // claim-key grammar; the one spelling of each is the constant below,
     // substituted into the file (SMD-1193).
     ACCEPTED_CAVEAT_PREFIX,
@@ -824,7 +824,7 @@ export function reembedKey(model, dim) {
  * The same grammar for SQL that reads claim rows, as Postgres regexes: the
  * model up to the LAST "@" of `reembed:<model>@<dim>[:suffix]`, and the OWN-key
  * shape (no suffix) that poolModelFor names. 021 spells the first inline and is
- * hashed; 029 takes both as template values ({{REEMBED_KEY_MODEL_RE}},
+ * hashed; 030 takes both as template values ({{REEMBED_KEY_MODEL_RE}},
  * {{REEMBED_OWN_KEY_RE}}) and migrate.ts's --reapply hazard query reads the
  * constants, so a change to the grammar reaches every reader but 021 from here
  * (SMD-1193's third review pass counted eight inline spellings).
