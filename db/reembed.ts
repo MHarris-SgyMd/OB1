@@ -662,7 +662,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every recorded file in one transaction — 021's backfill as written, then 029, which returns a label whose only evidence is\n  an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's model). Stop the server\n  and any worker first:\n    cd db && bun migrate.ts --url … --reapply"
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction — 021's backfill as written, then 029, which returns a label\n  whose only evidence is an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's\n  model). Run it from a shell configured as this brain is, with the server and every worker stopped:\n    cd db && bun migrate.ts --url … --reapply"
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────

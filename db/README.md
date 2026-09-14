@@ -74,30 +74,41 @@ functions are the guide's: a plain run skips every recorded file, and
 bun migrate.ts --url ... --reapply
 ```
 
-`--reapply` re-runs **every recorded migration**, in order, in **one
-transaction**; pending ones then apply as usual, and the ledger is not touched.
-Every recorded file rather than a range from the one a symptom names: a later
-migration may redefine what an earlier one created (022 and 025 redefine 021's
-`upsert_thought`; 020 drops a form 014 recreates), and a file's body may
-reference what only an earlier file installs (025's `upsert_thought` reads a
-column 021 adds, resolved when the function first *runs*, not when it is
-created) — so a start point is safe only when everything before it is really
-present, which nothing can check cheaply. Every file is idempotent, so the run
-restores the latest definition of everything. One transaction, so a failure
-part-way rolls back and the schema is as it was, rather than left with some
-objects at an older definition than before the command. A recorded file that
-changed since it was applied refuses the whole re-run before anything runs;
-`--dry-run` says what would re-run.
+`--reapply` re-runs **every migration** — recorded or pending — in order, in
+**one transaction** with a 10 s lock timeout; recorded rows stay as they are,
+pending ones are recorded in the same transaction. Every file rather than a
+range from the one a symptom names: a later migration may redefine what an
+earlier one created (022 and 025 redefine 021's `upsert_thought`; 020 drops a
+form 014 recreates), and a file's body may reference what only an earlier file
+installs (025's `upsert_thought` reads a column 021 adds, resolved when the
+function first *runs*, not when it is created) — so a start point is safe only
+when everything before it is really present, which nothing can check cheaply.
+Pending files in the same ordered transaction, because a ledger hole (a row
+deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
+*after* the re-run, over the later definitions it had just restored. Every file
+is idempotent, so the run restores the latest definition of everything. One
+transaction, so a failure part-way — a lock not granted within 10 s included —
+rolls back and the schema is as it was. `--dry-run` says what would re-run and
+judges the pgvector floor as the run does.
 
-**Stop the server and any re-embed or extraction worker first.** 023's call
-runs again and takes its lock on `thoughts` (`OB1_BACKFILL_LIMIT` bounds it, as
-on a first apply; it writes nothing when no row is waiting), 025 re-validates
-its constraints over the table, and 023 sets a 10 s `lock_timeout` for the rest
-of the transaction, so a lock held by an idle writer fails the whole re-run —
-which rolls back. 021's evidence backfill runs as written, and 029, reached
-after it in the same transaction, returns a label whose only evidence is an
-operator's acceptance to unknown and labels with accepted rows excluded
-(SMD-1193).
+**Refused before anything runs:** a recorded file that changed since it was
+applied; a shell whose `OB1_EMBEDDING_MODEL`, `OB1_EMBEDDING_DIM` or
+`OB1_CHUNK_CONTEXT` differs from what `ob1_config` records (006 and 013 would
+re-record it — run from a shell configured as the brain is, or change the record
+on purpose with `reembed.ts --switch-model`); and an accepted claim row under a
+*suffixed* key (`reembed:<model>@<dim>:ctx`) standing over an unlabelled thought,
+which 021's backfill would label and 029 cannot tell from the server's own label
+— return it with `reembed.ts --job <key> --retry-fallbacks`, or `--retire` the
+key, first.
+
+**Stop the server and any re-embed or extraction worker first.** 001 and 003
+take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
+`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
+its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
+when no row is waiting); 025 re-validates its constraints over the table. 021's
+evidence backfill runs as written, and 029, reached after it in the same
+transaction, returns a label whose only evidence is an operator's acceptance to
+unknown and labels with accepted rows excluded (SMD-1193).
 
 ## Expected outcome
 

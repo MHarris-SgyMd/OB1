@@ -700,7 +700,7 @@ if (configFailed) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const byHand = "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which re-runs every recorded file in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).";
+              const byHand = "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which re-runs every migration in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).";
               add("fingerprint backfill", "warn",
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")

@@ -5648,28 +5648,35 @@ the old paste wrong for good, as a `startsWith("021_")` branch in a loop the
 tenth review pass of change 21 had scrubbed of filenames. So the shape changed
 in all three places, below.
 
-**`--reapply`: every recorded migration, one transaction.** No start: the
-migrator re-runs every migration the ledger records, in order, in one
-transaction; pending ones then apply as usual, and the ledger is not touched
-(its rows, shas and `applied_at` stand — asserted). Every file is idempotent
-(`test-upgrade` [3] re-applies the whole set over itself), so the run restores
-the latest definition of everything, and a body that reads what an earlier file
-installs finds it there. One transaction, so a failure part-way rolls back and
-the schema is as it was; the output says so and says to run it again. A
-recorded file whose sha differs from the ledger's refuses the whole re-run
-before anything runs (the plain run's drift check reports a drifted file and
-moves on, which for a re-run would skip one file's definitions and restore the
-next one's over whatever the skipped one left); the pgvector floor is judged
-before `BEGIN` too. `--baseline` beside it is refused. Every argument is
-accounted for — a flag the runner does not have, or a value where no flag takes
-one, is refused rather than dropped, since `--reapply=021` or a misspelt flag
-was otherwise a silent plain run that exited 0. The banner says to stop the
-server and the workers first: 023's call runs again and locks `thoughts`
-(`OB1_BACKFILL_LIMIT` bounds it, as on a first apply), 025 re-validates its
-constraints over the table, and 023 sets a 10 s `lock_timeout` for the rest of
-the transaction, so an idle writer's lock fails the whole re-run — which rolls
-back. `--dry-run` says `would re-apply`, and the summary counts re-applied apart
-from applied. No file is named in the loop.
+**`--reapply`: every migration, one transaction.** No start: the migrator
+re-runs every migration — recorded or pending — in order, in one transaction
+with a 10 s `lock_timeout` from its first statement; recorded rows stay as they
+are (rows, shas and `applied_at` — asserted) and pending ones are recorded in
+the same transaction. Every file is idempotent (`test-upgrade` [3] re-applies
+the whole set over itself), so the run restores the latest definition of
+everything, and a body that reads what an earlier file installs finds it there.
+One transaction, so a failure part-way rolls back and the schema is as it was;
+the output says so and says to run it again. Judged before `BEGIN`: a recorded
+file whose sha differs from the ledger's (the plain run's drift check reports a
+drifted file and moves on, which for a re-run would skip one file's definitions
+and restore the next one's over whatever the skipped one left); the pgvector
+floor; a shell configured differently from the brain (006 and 013 write their
+`INSERT … ON CONFLICT DO UPDATE` into `ob1_config` again — a re-run from a shell
+still carrying model A would flip a brain switched to B back to A, silently,
+and every reader of the record with it); and an accepted row under a *suffixed*
+key standing over an unlabelled thought (below). `--baseline` beside it is
+refused. Every argument is accounted for — a flag the runner does not have, a
+value where no flag takes one, or a flag given twice (`--url A --url B` ran
+against A), is refused rather than dropped, since `--reapply=021` or a misspelt
+flag was otherwise a silent plain run that exited 0. The banner says to stop
+the server and the workers first and what a re-run repeats from the current
+shell: 001 and 003 take ACCESS EXCLUSIVE on `thoughts`, 011 builds the trigram
+index when `OB1_TRGM_INDEX` is on and it is absent, 023's call runs again and
+locks `thoughts` (`OB1_BACKFILL_LIMIT` bounds it), 025 re-validates its
+constraints. `--dry-run` says `would re-apply` and judges the floor as the run
+does; the summary counts re-applied apart from applied; the seeds check runs
+after the commit for every file that seeds, since a brain adopted with
+`--baseline` never had the migrator run 014. No file is named in the loop.
 
 **Migration 029: the corrected rule, applied once to every brain.** 021 cannot
 change, so its successor does two things in one DO block, 001's `updated_at`
@@ -5678,12 +5685,16 @@ written — asserted). First, a label whose *only* evidence is an acceptance goe
 back to NULL: the thought's latest succeeded row under a key naming a model is
 an accepted one under the model's **own** key (exactly `reembed:<model>@<dim>`,
 no suffix), the thought is labelled with that key's model, has a vector, and
-nothing has written it since the row finished. Under the own key a thought at
-the model is never pooled, so such a row exists only for a thought that was not
-at the model when the pass read it — and a label saying it is, with nothing
-written since, can only be 021's block having trusted the acceptance. An edit
-or re-capture since is a server's write and its label the server's: left
-alone. Second, 021's rule with accepted rows excluded from the claim rows it
+nothing has written it since the attempt *read* it — `claimed_at`, the bound
+every reader of an acceptance applies since change 39, not 021's `finished_at`:
+the worker writes a head window or bare windows through `update_thought`
+before the row's outcome is chosen, so an accepted row may sit over a thought
+the worker itself labelled at the model between the claim and the release, and
+that label is right. Under the own key a thought at the model is never pooled,
+so such a row exists only for a thought that was not at the model when the
+pass read it — and a label saying it is, with nothing written since the read,
+can only be 021's block having trusted the acceptance. An edit or re-capture
+since is a server's write and its label the server's: left alone. Second, 021's rule with accepted rows excluded from the claim rows it
 reads — `NOT (c.last_error IS NOT NULL AND starts_with(c.last_error,
 '{{ACCEPTED_CAVEAT_PREFIX}}'))`, the prefix substituted from config.mjs's one
 spelling like every other template value, the `IS NOT NULL` because
@@ -5693,10 +5704,13 @@ earlier pass that did write the vector labels the thought at that pass's model,
 exactly the vector the acceptance kept, and a thought with no such row stays
 NULL. What it leaves: an acceptance under a *suffixed* key is not read against
 the label — a backfill key pools thoughts at the model too, so such a label may
-be the server's own, and the two cannot be told apart; no new label is written
-from one either. Reached after 021 in the same `--reapply` transaction, and
-pending on every brain at its next plain run, so a brain that followed the old
-paste is corrected too. The rule for any successor that labels from claim rows
+be the server's own, and the two cannot be told apart; 029 writes no new label
+from one, and because 021's block, re-run as written, *would*, the migrator
+refuses `--reapply` while such a row stands over an unlabelled thought, naming
+the row and the way back (`reembed.ts --job <key> --retry-fallbacks`, which is
+possible on that brain, or `--retire <key>`). Reached after 021 in the same
+`--reapply` transaction, and pending on every brain at its next plain run, so a
+brain that followed the old paste is corrected too. The rule for any successor that labels from claim rows
 is stated in the file and in `reembed.ts`'s header: an accepted row is not
 evidence; 029 is its spelling.
 
@@ -5709,12 +5723,32 @@ absent under a ledger that says 023, and 014's body under a ledger that says
 014, in both branches — name it too; the ALTER FUNCTION that puts 014's SET
 clause back is a statement, not a paste of a file, and stays.
 
-**Not done here.** The runner sets no `lock_timeout` of its own; 023's carries
-from that file on, and the banner says to stop the writers. The atomicity of
-the re-run is stated and reasoned, not tested — inducing a failure part-way
-needs a lock the runner would wait on for ever before 023's timeout applies.
-`db/README.md`'s migrations table stops at 023, and a row for 029 alone would
-mislead; it is not this change's.
+**Review, second pass (high), triaged — the first stop signal.** Every finding
+was a seam of the first pass's reshape, and most were right: 029's first
+statement bounded on `finished_at` and would have taken back the label a
+worker itself wrote between the claim and the release (fixed, `claimed_at`,
+and [8] plants that row); the one transaction covered recorded files only, so
+a ledger hole had an earlier-numbered pending file apply *after* the re-run
+over what it restored, and 029 — pending on every existing brain — ran in a
+second transaction while the remedy said "the same one" (fixed: every file,
+pending ones recorded inside); 006 and 013 would re-record `ob1_config` from
+the shell with no line saying so (refused); a suffixed-key acceptance over an
+unlabelled thought would be labelled by 021's block and left by 029 (refused,
+listing the rows); no `lock_timeout` before 023's, so an idle session's ACCESS
+SHARE froze the re-run and every reader behind 001's ACCESS EXCLUSIVE for ever
+(a 10 s `SET LOCAL` from the first statement — which made the atomicity
+testable: [7] holds a lock and watches the run fail at 001 and roll back);
+`--dry-run` promised a re-apply the run would refuse on the floor (fixed); the
+seeds check skipped re-applied files (fixed); 011 rebuilds the trigram index on
+a re-run when the shell says on and it is absent (said in the banner and both
+comments); `--url` twice ran against the first (refused). Not taken: one
+`scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
+not need, and folding them is a change to that tool.
+
+**Not done here.** `db/README.md`'s migrations table stops at 023, and a row
+for 029 alone would mislead; it is not this change's. The argument scanner is
+the migrator's own, a third hand-rolled copy beside `reembed.ts`'s and
+`extract-entities.ts`'s.
 
 Verified: `test-upgrade` [7] builds the brain the ticket describes — the schema
 applied through 020, then `migrate.ts --baseline` so the ledger says every
@@ -5726,21 +5760,28 @@ command and not the paste; `--dry-run` counts every recorded file and writes
 nothing; the run's banner and summary; the labels (`stub-embed`, NULL,
 `earlier-model`, NULL — 021's block labelled the accepted thought and 029 took
 it back, in one transaction); no `updated_at` moved, no audit row, the trigger
-enabled after; the ledger byte-identical; the eight-argument `update_thought`
-alone and the 3-argument `upsert_thought` carrying 022's sentinel *and* 025's
-provenance; four refusals (a value beside the flag, a flag the runner does not
-have, `--baseline` beside it, a drifted recorded file — before anything ran);
-and that the re-applied schema has a fresh apply's columns and functions. [8]
-applies 029 onto a populated 028 holding eight labels — a paste's mislabel
-(back to NULL), a real pass's label with a later acceptance under another
-model's key (stays), an acceptance under a suffixed key (stays), a mislabel
-edited since (stays), an unlabelled thought with an earlier pass then an
-acceptance (labelled at the earlier pass), a mislabel with an earlier pass
-(taken back and relabelled at it, in the one block), a plain row (labelled), a
-label with no claim row (not read) — no `updated_at` moved, no audit row, the
-trigger enabled, and a second apply a no-op. `test-preflight` pins the 023 and
-014 wordings. `test-upgrade` 84/84, `test-preflight` 164/164, `test-schema`
-564/564, `test-live` 369/369, `tsc` clean, fork checker PASS. Upstream status:
+enabled after; the recorded ledger rows untouched and the one deleted row (022,
+a ledger hole) recorded, the file applied in its place; the eight-argument
+`update_thought` alone and the 3-argument `upsert_thought` carrying 022's
+sentinel *and* 025's provenance; and the refusals, each with nothing written —
+a shell whose model differs from the record, an acceptance under a suffixed key
+over an unlabelled thought (naming the row; returned to its pool, the run goes
+and the thought stays NULL), a session holding a lock on `thoughts` (the run
+fails at 001 within the lock timeout and rolls back whole), a value beside the
+flag, a flag the runner does not have, `--baseline` beside it, a drifted
+recorded file; and that the re-applied schema has a fresh apply's columns and
+functions. [8] applies 029 onto a populated 028 holding nine labels — a
+paste's mislabel (back to NULL), a real pass's label with a later acceptance
+under another model's key (stays), an acceptance under a suffixed key (stays),
+a mislabel edited since (stays), a head window the worker wrote between the
+claim and the failure (stays — the bound is `claimed_at`), an unlabelled
+thought with an earlier pass then an acceptance (labelled at the earlier pass),
+a mislabel with an earlier pass (taken back and relabelled at it, in the one
+block), a plain row (labelled), a label with no claim row (not read) — no
+`updated_at` moved, no audit row, the trigger enabled, and a second apply a
+no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 92/92,
+`test-preflight` 164/164, `test-schema` 564/564, `test-live` 369/369, `tsc`
+clean, fork checker PASS. Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
 

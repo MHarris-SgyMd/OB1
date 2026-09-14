@@ -16,20 +16,27 @@
  * from docs/01-getting-started.md can be adopted: mark the ones already applied
  * with --baseline, or just run them — they will not duplicate anything.
  *
- * --reapply re-runs every migration the ledger records, in order, in ONE
- * transaction; pending ones then apply as usual, and the ledger is not touched.
- * It is the remedy for a database adopted with --baseline whose schema is older
- * than its ledger says — reembed.ts and preflight name the command where they
- * find that. Every recorded file, not a range from the one a symptom names: a
- * later migration may redefine what an earlier one created (022 and 025
- * redefine 021's upsert_thought; 020 drops a form 014 recreates), and a file's
- * body may reference what only an earlier file installs (025's upsert_thought
- * reads a column 021 adds, resolved when the function first RUNS, not when it
- * is created) — so a start point is safe only when everything before it is
- * really present, which nothing can check cheaply. Every file is idempotent, so
- * the run restores the latest definition of everything. One transaction, so a
- * failure part-way leaves the schema as it was rather than with some objects
- * at an older definition than before (SMD-1193).
+ * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
+ * transaction with a 10 s lock timeout; recorded rows stay as they are, pending
+ * ones are recorded in the same transaction. It is the remedy for a database
+ * adopted with --baseline whose schema is older than its ledger says —
+ * reembed.ts and preflight name the command where they find that. Every file,
+ * not a range from the one a symptom names: a later migration may redefine what
+ * an earlier one created (022 and 025 redefine 021's upsert_thought; 020 drops a
+ * form 014 recreates), and a file's body may reference what only an earlier
+ * file installs (025's upsert_thought reads a column 021 adds, resolved when the
+ * function first RUNS, not when it is created) — so a start point is safe only
+ * when everything before it is really present, which nothing can check cheaply;
+ * and pending files in the same ordered transaction, because a ledger hole (a
+ * row deleted or misspelt by hand) would otherwise have an earlier-numbered file
+ * apply AFTER the re-run and put its definitions over the later ones the re-run
+ * had just restored. Every file is idempotent, so the run restores the latest
+ * definition of everything. One transaction, so a failure part-way leaves the
+ * schema as it was rather than with some objects at an older definition than
+ * before. What a re-run repeats from the CURRENT shell, and refuses to change
+ * silently: 006 and 013 re-record ob1_config (refused when the record differs
+ * from the shell), 011 builds the trigram index when OB1_TRGM_INDEX is on and
+ * it is absent, 023 runs its backfill call under OB1_BACKFILL_LIMIT (SMD-1193).
  */
 
 import { SQL } from "bun";
@@ -38,6 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
+  ACCEPTED_CAVEAT_PREFIX,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -63,16 +71,26 @@ const flag = (name: string): string | undefined => {
 const has = (name: string) => args.includes(`--${name}`);
 
 // Every argument accounted for: a flag the runner does not have, a value where
-// no flag takes one, or a flag that takes a value followed by none, is refused
-// rather than dropped — `--reapply=021`, or a misspelt flag, would otherwise be
-// a silent plain run that exits 0 (reembed.ts scans its arguments the same way).
+// no flag takes one, a flag that takes a value followed by none, or a flag
+// given twice (flag() reads the first; `--url A --url B` would run against A),
+// is refused rather than dropped — `--reapply=021`, or a misspelt flag, would
+// otherwise be a silent plain run that exits 0. reembed.ts scans its arguments
+// the same way, with more shapes; the two are not yet one function.
 {
   const TAKES_ONE = new Set(["url"]);
   const TAKES_NONE = new Set(["dry-run", "baseline", "reapply"]);
   const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --reapply";
+  const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const name = a.startsWith("--") ? a.slice(2) : null;
+    if (name !== null && (TAKES_ONE.has(name) || TAKES_NONE.has(name))) {
+      if (seen.has(name)) {
+        console.error(`--${name} given twice.\n${USAGE}`);
+        process.exit(2);
+      }
+      seen.add(name);
+    }
     if (name !== null && TAKES_ONE.has(name)) {
       if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
         console.error(`--${name} takes a value.\n${USAGE}`);
@@ -169,8 +187,9 @@ if (migrations.length === 0) {
 
 console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 // Printed because it is the one setting that changes what the schema CONTAINS
-// rather than how wide a column is, and because it only takes effect the first
-// time 011 applies — see the note in that migration's header.
+// rather than how wide a column is, and because it takes effect only when 011
+// runs — the first apply, and every --reapply — see the note in that
+// migration's header.
 console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
 console.log(`  023 backfill:  ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
 
@@ -207,13 +226,12 @@ if (reapply) {
     await sql.close();
     process.exit(1);
   }
-  const n = migrations.filter(reapplies).length;
+  const recorded = migrations.filter(reapplies).length;
   console.log(
-    n === 0
-      ? "  --reapply: the ledger records nothing to re-run; what follows is a plain run"
-      : `  re-applying every recorded migration (${n}), in order, in one transaction — the ledger is not touched.\n` +
-          "  Stop the server and any re-embed or extraction worker first: 023's backfill call locks thoughts (OB1_BACKFILL_LIMIT\n" +
-          "  bounds it, as on a first apply) and 025 re-validates its constraints over the table."
+    `  re-applying every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a 10 s lock timeout —\n` +
+      "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
+      "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
+      "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
   );
 }
 
@@ -279,47 +297,164 @@ let skipped = 0;
 let drifted = 0;
 let floorBlocked: Migration | null = null;
 
+/**
+ * A migration that seeds database-level settings does so from a DO block that
+ * can only RAISE WARNING when the role does not own the database — and this
+ * client surfaces no warnings. So look at the result rather than trust the
+ * protocol. Called outside the applying transaction: the migration is applied
+ * and recorded by then, and a catalog this role cannot read must not turn that
+ * into "FAILED". Read on a first apply and on a re-run alike — a brain adopted
+ * with --baseline never had the migrator run 014, so the re-run is the first
+ * time it can say the walk bounds are unseeded.
+ */
+async function reportSeeds(m: Migration): Promise<void> {
+  try {
+    // "Set" means set where every role sees it: server configuration or the
+    // database (SHARED_SETTING_SOURCES, as THIS session resolved them at
+    // connect), or the database-level row the migration itself may just have
+    // written — which this session, opened before the ALTER DATABASE, does
+    // not yet see in pg_settings. A role-level value on the migrating role
+    // is neither: it reaches this role alone (tenth review pass). The arrays
+    // go through sql.array: a bare `${array}` is sent as comma-joined text,
+    // and this whole check silently fell into the catch below on every run
+    // until the eleventh review pass ran the migrator and read the output.
+    const [row] = await sql`SELECT current_database() AS db`;
+    const shared = (await sql`
+      SELECT name FROM pg_settings
+      WHERE name = ANY(${sql.array(m.seeds, "TEXT")}) AND source = ANY(${sql.array(SHARED_SETTING_SOURCES, "TEXT")})`) as { name: string }[];
+    const [dbRow] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
+    const dbLevel = parseSetConfig(dbRow?.cfg);
+    const missing = m.seeds.filter((name) => !shared.some((r) => r.name === name) && !(name in dbLevel));
+    if (missing.length) {
+      const statements = missing
+        .map((name) => `       ALTER DATABASE ${quoteIdent(row?.db)} SET ${name} = ${(HNSW_SEEDS as Record<string, number>)[name] ?? "<value>"};`)
+        .join("\n");
+      console.error(
+        `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
+          `     the migrating role does not own the database, or the platform refused ALTER DATABASE. Run as the owner, in one session:\n` +
+          `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
+          `${statements}\n` +
+          `     Until then a broad filter's walk runs with pgvector's defaults, which return short on large tables; preflight warns about it.`
+      );
+    }
+  } catch (e) {
+    console.error(`  ⚠  ${m.name}  applied; could not read pg_settings to confirm the walk bounds (${(e as Error).message}). Preflight checks them at startup.`);
+  }
+}
+
 // ── The re-run, one transaction ─────────────────────────────────────────────
-// Every recorded migration, in order, in ONE transaction: a failure part-way
-// would otherwise leave the files before it at their own definitions while a
-// later file's redefinition of the same objects — 022's and 025's of 021's
-// upsert_thought; 020's drop of the 4-argument match_thoughts that 014 and 019
-// recreate — was not yet restored, with nothing in the catalog to say so. All
-// or nothing, and the output says which. The floor is judged before BEGIN (the
-// drift, above). 023's call sets a 10 s lock_timeout for its transaction, which
-// is this one from then on: a lock not acquired in 10 s fails the whole re-run,
-// which rolls back — the banner says to stop the writers first. The seeds check
-// in the loop is a first apply's; a re-run changes no database-level setting.
+// Every migration — recorded or pending — in order, in ONE transaction: a
+// failure part-way would otherwise leave the files before it at their own
+// definitions while a later file's redefinition of the same objects — 022's and
+// 025's of 021's upsert_thought; 020's drop of the 4-argument match_thoughts
+// that 014 and 019 recreate — was not yet restored, with nothing in the catalog
+// to say so; and a pending file left for the loop would apply AFTER the re-run,
+// over what it restored. All or nothing, and the output says which. Judged
+// before BEGIN: the drift (above), the pgvector floor, the two things a re-run
+// must not do quietly — re-record ob1_config from a shell configured
+// differently from the brain (006 and 013 write INSERT … ON CONFLICT DO UPDATE
+// again), and let 021's block, run as written, label an unlabelled thought from
+// an acceptance under a SUFFIXED key, which 029 cannot tell from the server's
+// own label (029's header, "What it leaves"). A 10 s lock_timeout from the first
+// statement, so an idle session holding a lock on thoughts fails the re-run at
+// once rather than freezing every reader behind 001's ACCESS EXCLUSIVE for ever
+// — the banner says to stop the writers first. The seeds check runs after the
+// commit for every file that seeds, as on a first apply.
 if (reapply && !dryRun && !baseline) {
-  const recorded = migrations.filter(reapplies);
-  const floor = recorded.find((m) => tooOldFor(m));
+  const floor = migrations.find((m) => tooOldFor(m));
   if (floor) {
     console.error(`  ✗  ${floor.name}  refused` + floorMessage(floor));
     await sql.close();
     process.exit(1);
   }
+  const [{ has_config, has_claims, has_label }] = (await sql`
+    SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
+           to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
+           EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model') AS has_label`) as
+    { has_config: boolean; has_claims: boolean; has_label: boolean }[];
+  if (has_config) {
+    const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model', 'embedding_dim', 'chunk_context')`) as { key: string; value: string }[];
+    const record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    const shell: Record<string, string> = { embedding_model: SUBSTITUTIONS.EMBEDDING_MODEL, embedding_dim: SUBSTITUTIONS.EMBEDDING_DIM, chunk_context: SUBSTITUTIONS.CHUNK_CONTEXT };
+    const differ = Object.entries(shell).filter(([k, v]) => k in record && record[k] !== v);
+    if (differ.length) {
+      console.error(
+        `  refusing --reapply: ${differ.map(([k, v]) => `ob1_config records ${k} = ${record[k]} and this shell would re-record it as ${v}`).join("; ")} —\n` +
+          "  006 and 013 write their INSERT … ON CONFLICT DO UPDATE again on a re-run. Run from a shell configured as the brain is\n" +
+          "  (OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_CHUNK_CONTEXT), or change the record on purpose: the embedding model is\n" +
+          "  reembed.ts --switch-model's to record; chunk_context is preflight's to compare. Nothing was written."
+      );
+      await sql.close();
+      process.exit(2);
+    }
+  }
+  if (has_claims) {
+    // The rows 021's block, run as written, would read as evidence and 029 would
+    // leave: the thought's latest succeeded row under a key naming a model is an
+    // acceptance under a suffixed key, the thought has a vector, is unlabelled
+    // (every thought is, before 021), and 021's bound holds.
+    const hazards = (await sql.unsafe(
+      "SELECT t.id::text AS id, e.work_type FROM thoughts t JOIN (" +
+        "SELECT DISTINCT ON (k.thought_id) k.thought_id, k.work_type, k.finished_at, k.accepted, k.own_key FROM (" +
+        "SELECT c.thought_id, c.work_type, c.finished_at, " +
+        "substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model, " +
+        "c.work_type ~ '^reembed:.+@[0-9]+$' AS own_key, " +
+        "(c.last_error IS NOT NULL AND starts_with(c.last_error, $1)) AS accepted " +
+        "FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL" +
+        ") k WHERE k.model IS NOT NULL ORDER BY k.thought_id, k.finished_at DESC" +
+        ") e ON e.thought_id = t.id " +
+        "WHERE e.accepted AND NOT e.own_key AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
+        (has_label ? " AND t.embedding_model IS NULL" : "") +
+        " ORDER BY e.work_type, t.id LIMIT 50",
+      [ACCEPTED_CAVEAT_PREFIX]
+    )) as { id: string; work_type: string }[];
+    if (hazards.length) {
+      const keys = [...new Set(hazards.map((h) => h.work_type))];
+      console.error(
+        `  refusing --reapply: 021's evidence backfill, re-run as written, would label ${hazards.length}${hazards.length === 50 ? "+" : ""} unlabelled thought(s) from an\n` +
+          `  acceptance under a suffixed key (${keys.join(", ")}), which migration 029 cannot tell from the server's own label:\n` +
+          hazards.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
+          "\n  Return them to their pool first — bun reembed.ts --url … --job <key> --retry-fallbacks, which spends the acceptance — or retire\n" +
+          "  the key if it is superseded (--retire <key>), then run --reapply again. Nothing was written."
+      );
+      await sql.close();
+      process.exit(2);
+    }
+  }
   let current: Migration | null = null;
   try {
     await sql.begin(async (tx) => {
-      for (const m of recorded) {
+      await tx.unsafe("SET LOCAL lock_timeout = '10s'");
+      for (const m of migrations) {
         current = m;
         await tx.unsafe(m.sql);
+        if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
   } catch (err) {
+    const sqlstate = (err as { errno?: string }).errno;
     console.error(`  ✗  ${current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
+    if (sqlstate === "55P03") {
+      console.error("  A lock was not granted within 10 s: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.");
+    }
     console.error(
-      "  The re-run is one transaction: it rolled back, nothing was re-applied, and the schema is as it was.\n" +
+      "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
         "  Fix the cause and run --reapply again."
     );
     await sql.close();
     process.exit(1);
   }
-  for (const m of recorded) console.log(`  ✓  ${m.name}  re-applied`);
-  reapplied = recorded.length;
+  for (const m of migrations) {
+    const again = applied.has(m.name);
+    console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
+    if (again) reapplied++;
+    else ran++;
+  }
+  for (const m of migrations) if (m.seeds.length) await reportSeeds(m);
 }
 
-for (const m of migrations) {
+// Under a live --reapply every file ran above; this loop is the plain run's and --dry-run's.
+for (const m of reapply && !dryRun && !baseline ? [] : migrations) {
   const prior = applied.get(m.name);
 
   if (prior && prior !== m.sha) {
@@ -329,20 +464,15 @@ for (const m of migrations) {
     drifted++;
     continue;
   }
-  if (prior && reapplies(m)) {
-    // Re-applied in the one transaction above; --dry-run says what it would be.
-    if (dryRun) {
-      console.log(`  →  ${m.name}  would re-apply (${m.sha})`);
-      reapplied++;
-    }
-    continue;
-  }
-  if (prior) {
+  if (prior && !reapplies(m)) {
     console.log(`  ·  ${m.name}  already applied`);
     skipped++;
     continue;
   }
   if (dryRun) {
+    // A recorded file under --reapply reaches here too, and is judged the same
+    // way: the live re-run refuses the whole transaction on a floor, so the dry
+    // run must not promise a re-apply the run cannot do.
     if (tooOldFor(m)) {
       console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorLibrary} < ${tooOldFor(m)}`);
       floorBlocked ??= m;
@@ -354,8 +484,9 @@ for (const m of migrations) {
       console.log(`  ·  ${m.name}  blocked behind ${floorBlocked.name}`);
       continue;
     }
-    console.log(`  →  ${m.name}  would apply (${m.sha})`);
-    ran++;
+    console.log(`  →  ${m.name}  would ${prior ? "re-apply" : "apply"} (${m.sha})`);
+    if (prior) reapplied++;
+    else ran++;
     continue;
   }
   if (baseline) {
@@ -404,46 +535,7 @@ for (const m of migrations) {
     process.exit(1);
   }
 
-  // A migration that seeds database-level settings does so from a DO block
-  // that can only RAISE WARNING when the role does not own the database — and
-  // this client surfaces no warnings. So look at the result rather than trust
-  // the protocol. Outside the try above: the migration is applied and recorded
-  // by now, and a catalog this role cannot read must not turn that into
-  // "FAILED".
-  if (m.seeds.length) {
-    try {
-      // "Set" means set where every role sees it: server configuration or the
-      // database (SHARED_SETTING_SOURCES, as THIS session resolved them at
-      // connect), or the database-level row the migration itself may just have
-      // written — which this session, opened before the ALTER DATABASE, does
-      // not yet see in pg_settings. A role-level value on the migrating role
-      // is neither: it reaches this role alone (tenth review pass). The arrays
-      // go through sql.array: a bare `${array}` is sent as comma-joined text,
-      // and this whole check silently fell into the catch below on every run
-      // until the eleventh review pass ran the migrator and read the output.
-      const [row] = await sql`SELECT current_database() AS db`;
-      const shared = (await sql`
-        SELECT name FROM pg_settings
-        WHERE name = ANY(${sql.array(m.seeds, "TEXT")}) AND source = ANY(${sql.array(SHARED_SETTING_SOURCES, "TEXT")})`) as { name: string }[];
-      const [dbRow] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
-      const dbLevel = parseSetConfig(dbRow?.cfg);
-      const missing = m.seeds.filter((name) => !shared.some((r) => r.name === name) && !(name in dbLevel));
-      if (missing.length) {
-        const statements = missing
-          .map((name) => `       ALTER DATABASE ${quoteIdent(row?.db)} SET ${name} = ${(HNSW_SEEDS as Record<string, number>)[name] ?? "<value>"};`)
-          .join("\n");
-        console.error(
-          `  ⚠  ${m.name}  applied, but the database-level HNSW walk bounds were not seeded (${missing.join(", ")}) —\n` +
-            `     the migrating role does not own the database, or the platform refused ALTER DATABASE. Run as the owner, in one session:\n` +
-            `       SELECT '[1]'::vector;   -- loads pgvector so a non-superuser may set hnsw.* settings\n` +
-            `${statements}\n` +
-            `     Until then a broad filter's walk runs with pgvector's defaults, which return short on large tables; preflight warns about it.`
-        );
-      }
-    } catch (e) {
-      console.error(`  ⚠  ${m.name}  applied; could not read pg_settings to confirm the walk bounds (${(e as Error).message}). Preflight checks them at startup.`);
-    }
-  }
+  if (m.seeds.length) await reportSeeds(m);
 }
 
 await sql.close();
