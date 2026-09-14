@@ -69,29 +69,40 @@ export function leaseRefusal(ttlS: number, heartbeatS: number, derived = false):
   );
 }
 
-/** What became of a row a beat found no longer this worker's — asked of the row, so the loop names it rightly. */
+/**
+ * What became of a row a beat found no longer this worker's — asked of the
+ * row, so the loop names it rightly. `reaped` is the reaper's own verdict: 015
+ * marks a row failed at its last allowed expiry WITHOUT changing worker_id, so
+ * a failed row still naming this worker was failed by the reaper while this
+ * worker held it (the beats stopped reaching the database for a whole lease on
+ * its third attempt), not finished by anyone else; --retry-failed returns it.
+ */
 export type LostReason =
   | { kind: "deleted" }
   | { kind: "pending" }
   | { kind: "claimed"; worker: string }
-  | { kind: "finished"; status: string };
+  | { kind: "reaped" }
+  | { kind: "finished"; status: string; worker: string };
 
-export async function lostReason(sql: SQL, job: string, id: string): Promise<LostReason> {
+export async function lostReason(sql: SQL, job: string, workerId: string, id: string): Promise<LostReason> {
   const rows = (await sql`SELECT status, worker_id FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job}`) as
     { status: string; worker_id: string | null }[];
   if (rows.length === 0) return { kind: "deleted" };
-  if (rows[0].status === "pending") return { kind: "pending" };
-  if (rows[0].status === "claimed") return { kind: "claimed", worker: rows[0].worker_id ?? "?" };
-  return { kind: "finished", status: rows[0].status };
+  const { status, worker_id } = rows[0];
+  if (status === "pending") return { kind: "pending" };
+  if (status === "claimed") return { kind: "claimed", worker: worker_id ?? "?" };
+  if (status === "failed" && worker_id === workerId) return { kind: "reaped" };
+  return { kind: "finished", status, worker: worker_id ?? "?" };
 }
 
-/** The line a worker prints for a lost row, from what the row said. */
+/** The line a worker prints for a lost row, from what the row said. Every kind but `deleted` is a row the run did not finish. */
 export function describeLoss(why: LostReason | null): string {
   if (why === null) return "no longer this worker's, and the row could not be read; skipping";
   switch (why.kind) {
     case "pending": return "back in the pool — reaped, or requeued by an edit — and the next claim takes it; skipping";
     case "claimed": return `another worker (${why.worker}) holds it now; skipping`;
-    case "finished": return `already ${why.status} under another worker; skipping`;
+    case "reaped": return "marked failed by the reaper while this worker held it — its lease had expired for the last allowed time (last_error says so); --retry-failed returns it; skipping";
+    case "finished": return `already ${why.status} under ${why.worker}; skipping`;
     case "deleted": return "deleted while it was leased";
   }
 }

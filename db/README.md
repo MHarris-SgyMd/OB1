@@ -578,8 +578,9 @@ reports `lost` skipped rather than repeated, and `stop()` in the same
 `finally`; take `--ttl` and `--heartbeat` through `heartbeatFor` and
 `leaseRefusal` so the three workers refuse the same pairs. Give every process a
 globally unique worker id (hostname, pid and a random suffix —
-`release_claims_for_worker` and `renew_claims` match on it alone). `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is
-the third consumer, and the one whose work is per PAIR rather than per thought.
+`release_claims_for_worker` and `renew_claims` match on it alone).
+`extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is the
+third consumer, and the one whose work is per PAIR rather than per thought.
 
 ## Consolidation: proposing which thoughts supersede which
 
@@ -994,9 +995,9 @@ container.
   a 5 s lease beats at 4.5 s, a claim past the original deadline gets none of
   its rows and its release succeeds; it stops beating and a claim after the
   renewed deadline receives its rows on their second attempt. [9] then runs
-  `reembed.ts` with 600 ms embeddings, eight per claim and a 6 s lease renewed
-  every second — a
-  batch that outlasts its lease — and no row reaches a second worker. PGlite
+  `reembed.ts` with 600 ms embeddings, sixteen per claim and a 6 s lease
+  renewed every second — a batch near ten seconds, well past its lease — and no
+  row reaches a second worker. PGlite
   has one connection, so two sequential claims there are disjoint whether or
   not `SKIP LOCKED` does anything.
 - **Two legacy twins fingerprinted at once.** [6b] holds one connection's

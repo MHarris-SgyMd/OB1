@@ -1572,24 +1572,27 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
   // The heartbeat end to end (migration 030): a batch whose work outlasts the
-  // lease, under workers that beat. Every embedding takes 600 ms, eight per
-  // claim, a 6 s lease with a 1 s heartbeat (six seconds, not three: a runner
-  // that pauses the process for two seconds must not be read as a lapse — a
-  // beat is missed only when the process is, and the lease covers five): a
-  // batch runs near five seconds, and until 030 its lease expired mid-way — the rows went to
-  // the other worker on their second attempt, the first's releases returned
-  // false, and three such batches marked rows failed. A fresh backfill key, so
-  // the pool is every thought; the recorded model is the configured one here.
+  // lease, under workers that beat. Every embedding takes 600 ms, sixteen per
+  // claim, a 6 s lease with a 1 s heartbeat: a batch runs near ten seconds,
+  // and until 030 its lease expired mid-way — the rows went to the other
+  // worker on their second attempt, the first's releases returned false, and
+  // three such batches marked rows failed. Six seconds, not three, because a
+  // runner that pauses the process for two seconds must not read as a lapse —
+  // a beat is missed only when the process is, and the lease covers five — and
+  // sixteen, not eight, because eight rows fit inside six seconds and the run
+  // would then pass with renewal a no-op (third review pass). A fresh backfill
+  // key, so the pool is every thought; the recorded model is the configured
+  // one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
-  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "8", "--ttl", "6", "--heartbeat", "1");
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "16", "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
-  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /8 per claim, 6 s leases renewed every 1 s/.test(slow.out),
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /16 per claim, 6 s leases renewed every 1 s/.test(slow.out),
     `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/found no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
-  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fourteen seconds (${slowBeats})`);
+  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fifteen seconds (${slowBeats})`);
   const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);

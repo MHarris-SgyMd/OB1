@@ -54,7 +54,12 @@
 --   (db/test-schema.ts [29] asserts 015 is still the last file to define it,
 --   and db/test-live.ts [8a] and [8b] still hold the concurrent claims
 --   disjoint). release_thought and release_claims_for_worker are untouched;
---   028's comments on last_error and release_thought stand as applied.
+--   028's comments on last_error and release_thought stand as applied. 023's
+--   header, also applied and so not editable (migrate.ts hashes the file),
+--   advises stopping both 015 consumers before its backfill because a worker
+--   parked on its lock would wait out a lease stamped once per batch; since
+--   030 a parked worker keeps beating on its own connection and its leases
+--   hold — the advice survives as throughput advice only.
 --   Upstream (schemas/thought-work-claims) left mid-batch renewal out to keep
 --   the claim a single atomic statement; a separate function keeps that.
 --

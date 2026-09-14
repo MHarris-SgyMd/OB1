@@ -555,7 +555,7 @@ async function worker(n: number): Promise<void> {
   activeWorkers.add(workerId);
   const hb = startHeartbeat({
     sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it`),
+    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it, or at its release if it was the row in hand`),
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
@@ -588,7 +588,7 @@ async function worker(n: number): Promise<void> {
           // (its claim cascaded away), back in the pool (reaped, or requeued by
           // an edit), or another worker's now. Nothing to release either way,
           // and repeating the provider's work would only race the holder.
-          const why = await lostReason(sql, JOB, b.thought_id).catch(() => null);
+          const why = await lostReason(sql, JOB, workerId, b.thought_id).catch(() => null);
           if (why?.kind === "deleted") vanished++;
           else lost++;
           console.error(`  ${b.thought_id}: ${describeLoss(why)}`);
@@ -732,7 +732,7 @@ if (FOLLOW) {
 
 const elapsed = (Date.now() - started) / 1000;
 console.log(
-  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat and left to the pool` : ""}, in ${elapsed.toFixed(1)}s ` +
+  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat (each named above)` : ""}, in ${elapsed.toFixed(1)}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(

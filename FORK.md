@@ -5850,8 +5850,13 @@ of every one of them. And a row a beat finds gone is not assumed reaped — the
 second pass found the message said "reaped while the heartbeat was not reaching
 the database" of a row 016's edit trigger had requeued, and of a deleted one —
 so the loop asks the row (`lostReason`): deleted is counted with the deleted,
-back in the pool is said so, another worker's names the worker. Beats never overlap — a tick that finds one in flight is
-skipped — and the timer is unref'd, so it holds no process open. The three
+back in the pool is said so, another worker's names the worker, and a row the
+reaper marked failed while this worker held it — 015's reaper leaves
+`worker_id` as it was, so the row still names this worker — says so and names
+`--retry-failed`, which the third pass found the second's text had called
+"finished under another worker". Beats never overlap — a tick that finds one
+in flight is skipped — and the timer is unref'd, so it holds no process open.
+The three
 workers wire it identically: started beside the worker id, `claimed()` after
 the claim, each row removed before its release, stopped in the `finally` that
 returns the leases, and the beats summed into the run's summary. A beat that
@@ -5884,9 +5889,10 @@ worker's release succeeds; it beats once more and stops; a claim before the
 renewed deadline gets nothing and one after it receives its three rows on their
 second attempt, every row ending succeeded and none failed. [8a] and [8b] hold
 as they were: the claim is untouched. [9] runs `reembed.ts` end to end with
-every embedding taking 600 ms, eight per claim, a 6 s lease and a 1 s
-heartbeat: two workers re-embed all forty-two thoughts in batches
-near five seconds long, no row reaches a second worker, no release finds its
+every embedding taking 600 ms, sixteen per claim, a 6 s lease and a 1 s
+heartbeat: two workers re-embed all forty-two thoughts in batches near ten
+seconds long — eight per claim fit inside the lease, the third pass noticed,
+and would have passed with renewal a no-op — no row reaches a second worker, no release finds its
 lease gone, none is lost, every claim row succeeded on its first attempt — the
 ticket's first Verify bullet, which no arithmetic could pass; its summary
 counts the beats, and the test holds them at ten or more. [10] and [16] run
