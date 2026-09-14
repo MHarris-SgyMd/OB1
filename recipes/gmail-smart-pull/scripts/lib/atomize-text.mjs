@@ -147,9 +147,6 @@ function parseAtomsFromResponse(raw) {
 // ── Provider: anthropic (direct API) ─────────────────────────────────────────
 
 async function atomizeViaAnthropic(text, { prompt, timeoutMs, anthropicApiKey, anthropicModel }) {
-  if (!anthropicApiKey) {
-    throw new Error("atomizeText: provider='anthropic' requires ANTHROPIC_API_KEY (or opts.anthropicApiKey)");
-  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -186,9 +183,6 @@ async function atomizeViaAnthropic(text, { prompt, timeoutMs, anthropicApiKey, a
 // ── Provider: openrouter (OpenAI-compatible chat API) ────────────────────────
 
 async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey, openrouterModel }) {
-  if (!openrouterApiKey) {
-    throw new Error("atomizeText: provider='openrouter' requires OPENROUTER_API_KEY (or opts.openrouterApiKey)");
-  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {

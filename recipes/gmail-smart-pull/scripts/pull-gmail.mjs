@@ -35,6 +35,11 @@
 //   GMAIL_CALLBACK_PORT          (optional) OAuth callback port (default: 3847)
 //   OPENROUTER_API_KEY           (optional) for --atomize-provider=openrouter
 //   ANTHROPIC_API_KEY            (optional) for --atomize-provider=anthropic
+//   GMAIL_ATOMIZE_PROVIDER       (optional) default for --atomize-provider
+//   CLAUDE_CLI_PATH              (optional) bare path to the claude executable, for --atomize-provider=claude-cli
+//   ATOMIZE_DEBUG                (optional) 1 to include CLI stdout/stderr snippets in atomization errors
+//   GMAIL_STATE_DIR              (optional) where run state lives (default: ../data/gmail-state)
+//   GMAIL_OUTPUT_DIR             (optional) where packs are written (default: ../data/local-export/gmail)
 //   CONTACTS_CACHE_PATH          (optional) JSON file mapping emails → contact names
 //   ENGAGED_THREADS_PATH         (optional) JSON cache of engaged thread IDs
 //
@@ -963,7 +968,7 @@ async function main() {
       assertProviderReady({ provider: args.atomizeProvider });
     } catch (err) {
       console.error(`${err.message}\n  (--atomize-provider / GMAIL_ATOMIZE_PROVIDER is '${args.atomizeProvider}'; pass --no-atomize to skip atomization)`);
-      process.exit(2);
+      process.exit(1);
     }
   }
   const creds = loadOAuthClient();

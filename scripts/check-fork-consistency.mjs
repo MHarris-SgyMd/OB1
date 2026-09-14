@@ -156,7 +156,8 @@ const relOf = (file) => relative(ROOT, file).split(sep).join("/");
 
 function walk(dir, out = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
-    if (name === ".git" || name === "node_modules") continue;
+    // .claude holds this repo's agent worktrees — whole copies of the tree.
+    if (name === ".git" || name === "node_modules" || name === ".claude") continue;
     const p = join(dir, name);
     const s = statSync(p);
     if (s.isDirectory()) walk(p, out, match);

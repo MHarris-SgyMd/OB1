@@ -108,7 +108,7 @@ If the browser doesn't open, copy the URL the script prints and paste it manuall
 node scripts/pull-gmail.mjs --labels=STARRED --window=30d --limit=5 --dry-run
 ```
 
-`--dry-run` fetches and parses but writes nothing — safe for previewing. You'll see the pack stats and a sample record on stdout.
+`--dry-run` fetches and parses but writes nothing — safe for previewing. You'll see the pack stats and a sample record on stdout. It does run the atomizer, so the provider's key (`ANTHROPIC_API_KEY` by default) must be set, or pass `--no-atomize` to preview without it.
 
 ### 5. Real run — emit a pack
 
@@ -158,7 +158,7 @@ The pack file is the handoff. Your ingest pipeline (whatever it is — a `supaba
 | `--override-labels=LABEL1,LABEL2` | `STARRED,IMPORTANT` | Labels that bypass the engagement filter |
 | `--no-atomize` | off | Skip LLM atomization entirely |
 | `--atomize-min-words=N` | `150` | Only atomize messages >= N words |
-| `--atomize-provider=P` | `anthropic`, or `GMAIL_ATOMIZE_PROVIDER` | `anthropic` \| `openrouter` \| `claude-cli` — an unknown value, a missing key for the HTTP providers, or `claude-cli` inside a Claude Code session refuses the run at startup (unless `--no-atomize` or `--list-labels`) |
+| `--atomize-provider=P` | `anthropic`, or `GMAIL_ATOMIZE_PROVIDER` | `anthropic` \| `openrouter` \| `claude-cli` — an unknown value, a missing key for the HTTP providers, or `claude-cli` inside a Claude Code session refuses the run at startup with exit 1 (unless `--no-atomize` or `--list-labels`) |
 | `--skip-contacts-refresh` | off | Silence the "contacts cache missing/stale" warning |
 
 ## Sensitivity routing

@@ -5222,7 +5222,13 @@ every pass named: the duplication between the two recipes' Claude-CLI spawns
 `describeSpawnError`s, each patched four times this ticket) is SMD-1317. The
 gmail copy's error also stops putting stderr and stdout (email text) into the
 run's log by default, behind the same `ATOMIZE_DEBUG=1` switch the atomizer
-uses. Upstream status:
+uses. A boyscout commit took the tidy-ups the passes cut for space: the script's
+env header names every variable it reads (`GMAIL_ATOMIZE_PROVIDER`,
+`CLAUDE_CLI_PATH`, `ATOMIZE_DEBUG`, the two directory overrides), the startup
+refusal exits 1 like the file's other refusals, the per-provider key checks
+that `assertProviderReady` made unreachable are gone, the README says the
+`--dry-run` preview needs the provider's key, and check 5's walk from the
+repo root no longer descends `.claude/worktrees`. Upstream status:
 **contributable in principle** — these are recipe files, not the core server —
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
