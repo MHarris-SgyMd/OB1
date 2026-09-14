@@ -39,12 +39,17 @@
  * the wall clock at the shipped --k and --min-sim, which were chosen there.
  *
  * ── The pool ────────────────────────────────────────────────────────────────
- * Thoughts with at least one extracted entity and no claim row under this key.
- * Built by this run, on every pass — no trigger feeds it, on purpose: a
- * capture has no entities until db/extract-entities.ts reaches it, and a
+ * Thoughts with at least one extracted entity, a vector, and no claim row
+ * under this key. Built by this run, on every pass — no trigger feeds it, on
+ * purpose: a capture has no entities until db/extract-entities.ts reaches it
+ * (and no vector while its embedding failed, until reembed.ts does), and a
  * thought judged before that would have no candidates and a terminal claim
  * row, never to be judged. Extract first, then consolidate; --follow polls in
- * that order. A thought's claim row is terminal once its pairs are judged, so
+ * that order. What the gate cannot see is the OTHER side of a pair: a newer
+ * thought judged while an older neighbour is still unextracted is judged
+ * without it, and since a pair is reached from its newer side only, that pair
+ * is not revisited — run consolidation after extraction has finished, not
+ * beside it. A thought's claim row is terminal once its pairs are judged, so
  * an EDIT does not re-judge it (016's trigger does re-extract it); clear the
  * key's rows to start over, and a pair already proposed is skipped either way.
  *
@@ -132,7 +137,7 @@ if (BATCH * K * TIMEOUT_S > TTL) {
 }
 /** Append every verdict here as JSONL — {newer, older, similarity, shared, verdict, supersedes, confidence, reason, key, proposal} — for evals/eval-consolidate.ts. */
 const DUMP = flag("dump");
-if (DUMP !== undefined && DUMP.startsWith("--")) {
+if (has("dump") && (DUMP === undefined || DUMP.startsWith("--"))) {
   console.error("--dump needs a file path.");
   process.exit(2);
 }
@@ -321,12 +326,13 @@ async function counts(): Promise<Counts> {
   const rows = (await sql`
     SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
-  // The pass's universe is the thoughts with entities (the header's pool rule).
+  // The pass's universe is the thoughts with entities AND a vector (the
+  // header's pool rule): a thought without either has no candidates.
   const [{ unpooled, thoughts }] = await sql`
     SELECT count(*)::int AS thoughts,
            count(*) FILTER (WHERE NOT EXISTS (
              SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}))::int AS unpooled
-    FROM (SELECT DISTINCT thought_id AS id FROM thought_entities) t`;
+    FROM (SELECT DISTINCT e.thought_id AS id FROM thought_entities e JOIN thoughts x ON x.id = e.thought_id WHERE x.embedding IS NOT NULL) t`;
   const [{ proposals }] = await sql`SELECT count(*)::int AS proposals FROM supersession_proposals WHERE status = 'pending'`;
   return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, succeeded: by.succeeded ?? 0, failed: by.failed ?? 0, unpooled: Number(unpooled), thoughts: Number(thoughts), proposals: Number(proposals) };
 }
@@ -430,8 +436,10 @@ async function processRow(row: Row): Promise<Outcome> {
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
+  // No early exit on `stopping` here: a thought is at most --k calls, bounded
+  // by the lease arithmetic above, and a thought released succeeded with pairs
+  // unjudged would be terminal with the pairs never judged (review pass 1).
   for (const c of candidates) {
-    if (stopping) break;
     const older = byId.get(c.older_id);
     if (!older) continue; // deleted between the candidate query and the read
     const t0 = Date.now();
@@ -643,7 +651,9 @@ async function pass(): Promise<Counts> {
   const added = Number((await sql`
     SELECT enqueue_thoughts(${JOB}, ARRAY(
       SELECT DISTINCT e.thought_id FROM thought_entities e
-      WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = e.thought_id AND c.work_type = ${JOB}))) AS added`)[0].added);
+      JOIN thoughts x ON x.id = e.thought_id
+      WHERE x.embedding IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = e.thought_id AND c.work_type = ${JOB}))) AS added`)[0].added);
   const before = await counts();
   if (added > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
   total += before.pending + before.claimed;

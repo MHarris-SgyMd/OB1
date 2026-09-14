@@ -2661,8 +2661,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const EXTRACT = "extract:stub@p1";
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id",
-    `supersession_proposals has the fourteen columns, in order (${cols.join(",")})`);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
+    `supersession_proposals has the fifteen columns, in order (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -2800,6 +2800,23 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const loop = await review(loopPid!, "accept");
   assert(loop.ok === false && loop.error === "WOULD_CYCLE", `a pointer that would close a loop is refused (${loop.error})`);
   assert((await supersedesOf(loopNewer)) === null, "…and nothing was written");
+  // A pointer the acceptance finds already there — set at capture through the
+  // envelope — is not the acceptance's write, and a rejection leaves it
+  // (review pass 1). accept answers written:false and records pointer_written
+  // false; reject clears nothing and says so.
+  const capOld = await seed("capture-set: the earlier note", 5, 9);
+  const capNew = await seed("capture-set: the later note, pointing at the earlier at capture", 5, 0);
+  await mention(capOld, ["capture"]); await mention(capNew, ["capture"]);
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [capNew, capOld]);
+  const capPid = await propose(capOld, capNew, "newer_supersedes_older");
+  const capAcc = await review(capPid!, "accept");
+  assert(capAcc.ok === true && capAcc.written === false, `accepting a proposal whose pointer is already there writes nothing and says so (${JSON.stringify(capAcc)})`);
+  assert((await db.query<{ w: boolean }>(`SELECT pointer_written AS w FROM supersession_proposals WHERE id = $1`, [capPid])).rows[0].w === false, "…and the row records that it wrote nothing");
+  const capRej = await review(capPid!, "reject");
+  assert(capRej.ok === true && capRej.cleared === false && (await supersedesOf(capNew)) === capOld, "rejecting it clears nothing: the capture-time pointer was not this proposal's to clear");
+  const chk = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c'`)).rows[0].c;
+  assert(chk === 9, `the table carries nine CHECK constraints, the state machine's among them (${chk})`);
+
   const missing = await review("00000000-0000-4000-8000-000000000000", "accept");
   assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown proposal id is NOT_FOUND");
   let badDecision = "";
@@ -2812,7 +2829,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const pendingList = await list("pending");
   assert(pendingList.length === 1 && pendingList[0].id === loopPid, `one proposal is pending — the loop one (${pendingList.length})`);
   const all = await list(null);
-  assert(all.length === 3 && Number(all[0].confidence) >= Number(all[1].confidence) && Number(all[1].confidence) >= Number(all[2].confidence),
+  assert(all.length === 4 && Number(all[0].confidence) >= Number(all[1].confidence) && Number(all[2].confidence) >= Number(all[3].confidence),
     `NULL lists every state, most confident first (${all.map((r) => `${r.status}@${r.confidence}`).join(", ")})`);
   const shown = all.find((r) => r.id === pid)!;
   assert(shown.older_id === decision && shown.newer_id === reversal && /bill monthly/.test(String(shown.older_content)) && /annually/.test(String(shown.newer_content)) && shown.status === "rejected",

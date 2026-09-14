@@ -671,6 +671,8 @@ else {
    */
   const CONS = "consolidate:other-judge@p1";
   assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out), "with no consolidation rows and no proposals the check is ok and says so");
+  // The pool's universe is thoughts with entities AND a vector; give three a vector for the count.
+  await claims.unsafe(`UPDATE thoughts SET embedding = ('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector WHERE id IN ('${ids[0]}', '${ids[1]}', '${ids[2]}')`);
   await claims`SELECT record_thought_entities(${ids[0]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
   await claims`SELECT record_thought_entities(${ids[1]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
   await claims`SELECT record_thought_entities(${ids[2]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
@@ -698,6 +700,7 @@ else {
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${CONS}`;
   await claims`DELETE FROM thought_entities`;
   await claims`SELECT prune_orphan_entities()`;
+  await claims.unsafe("UPDATE thoughts SET embedding = NULL");
   await claims.unsafe("DROP TABLE supersession_proposals CASCADE");
   const pre029 = await run(SQL_ENV);
   assert(pre029.code === 0 && /consolidate pass\s+not checked — supersession_proposals does not exist \(migration 029 not applied\)/.test(pre029.out),

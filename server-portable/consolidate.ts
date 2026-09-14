@@ -110,19 +110,20 @@ const dateOf = (d: string | Date): string => {
 };
 
 /**
- * The messages for one pair, older as A and newer as B. Replacer functions
- * throughout, for the reason db/config.mjs gives: `$&` in a thought is text,
- * not a substitution pattern.
+ * The messages for one pair, older as A and newer as B. One pass over the
+ * template's six slots with a replacer function — not six sequential
+ * replaces, which would let a thought whose text contains a later slot's
+ * name (`{content_b}` inside thought A) capture that slot and leave the
+ * template's own slot as a literal (review pass 1); and a function, for the
+ * reason db/config.mjs gives: `$&` in a thought is text, not a pattern.
  */
 export function buildJudgeMessages(older: PairSide, newer: PairSide): { role: "system" | "user"; content: string }[] {
   const src = (s: PairSide) => (s.source ? `, source ${String(s.source).slice(0, 40)}` : "");
-  const content = CONSOLIDATE_PROMPT
-    .replace("{date_a}", () => dateOf(older.createdAt))
-    .replace("{source_a}", () => src(older))
-    .replace("{content_a}", () => wrapSide("thought_a", older.content))
-    .replace("{date_b}", () => dateOf(newer.createdAt))
-    .replace("{source_b}", () => src(newer))
-    .replace("{content_b}", () => wrapSide("thought_b", newer.content));
+  const slots: Record<string, string> = {
+    date_a: dateOf(older.createdAt), source_a: src(older), content_a: wrapSide("thought_a", older.content),
+    date_b: dateOf(newer.createdAt), source_b: src(newer), content_b: wrapSide("thought_b", newer.content),
+  };
+  const content = CONSOLIDATE_PROMPT.replace(/\{(date_a|source_a|content_a|date_b|source_b|content_b)\}/g, (_, k: string) => slots[k]);
   return [{ role: "user", content }];
 }
 

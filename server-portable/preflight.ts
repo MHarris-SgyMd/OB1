@@ -1627,9 +1627,14 @@ if (configFailed) {
           } else if (!proposalsPresent) {
             add("consolidate pass", "skip", "not checked — supersession_proposals does not exist (migration 029 not applied)");
           } else {
+            // The universe is the worker's pool rule — thoughts with entities
+            // AND a vector — and "not yet in the pool" is counted by NOT
+            // EXISTS per key, as the worker's --status counts it, rather than
+            // subtracted: a thought re-extracted to no entities keeps its claim
+            // row, and a subtraction went negative (review pass 1).
             const rows = (await sql`
               SELECT work_type, status, count(*)::int AS c,
-                     (SELECT count(DISTINCT thought_id)::int FROM thought_entities) AS thoughts
+                     (SELECT count(DISTINCT e.thought_id)::int FROM thought_entities e JOIN thoughts x ON x.id = e.thought_id WHERE x.embedding IS NOT NULL) AS thoughts
               FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
               { work_type: string; status: string; c: number; thoughts: number }[];
             const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
@@ -1642,13 +1647,16 @@ if (configFailed) {
               else if (r.status === "failed") c.failed = n;
               else if (r.status === "claimed") c.claimed = n;
               else if (r.status === "pending") c.pending = n;
-              c.unpooled -= n;
               byKey.set(r.work_type, c);
             }
             let unfinished = 0;
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
               if (!passUnfinished(c)) continue;
               unfinished++;
+              const [{ n: unpooled }] = await sql`
+                SELECT count(*)::int AS n FROM (SELECT DISTINCT e.thought_id AS id FROM thought_entities e JOIN thoughts x ON x.id = e.thought_id WHERE x.embedding IS NOT NULL) t
+                WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${key})`;
+              c.unpooled = Number(unpooled);
               // The key names the judge model between the prefix and the
               // prompt version; the command has to run under that model, or
               // consolidate.ts pools under another key.

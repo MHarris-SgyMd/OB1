@@ -744,7 +744,7 @@ function buildServer(principal: Principal): McpServer {
       },
       inputSchema: {
         status: z.enum(["pending", "accepted", "rejected", "all"]).optional().default("pending"),
-        limit: z.number().optional().default(10),
+        limit: z.number().int().min(1).max(200).optional().default(10),
       },
     },
     async ({ status, limit }) => {

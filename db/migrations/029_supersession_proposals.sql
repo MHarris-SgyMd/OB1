@@ -35,7 +35,12 @@
 --       register than two claims about one thing; the judge cost is per pair,
 --       so the pool is narrowed by the cheap signal before the expensive one.
 --       Consequence: a thought with no extracted entities has no candidates,
---       and the worker pools only thoughts that have some (extraction first).
+--       and the worker pools only thoughts that have some, and a vector
+--       (extraction first). The gate cannot see the other side of a pair: a
+--       newer thought judged while an older neighbour is still unextracted
+--       is judged without it, and the pair is not revisited (pairs are
+--       reached from the newer side once) — so the pass follows extraction
+--       rather than running beside it.
 --     * OLDER, by at least a calendar day (UTC). Two directions: the pair
 --       (older, newer) is reached from the NEWER thought only, so a pair is
 --       judged once with no memory of "already judged" needed, and every
@@ -94,9 +99,12 @@
 --   pointer that would close a loop (WOULD_CYCLE, checked by walking the
 --   chain from the superseded thought). An undirected verdict needs the
 --   reviewer to name the direction (DIRECTION_REQUIRED). Rejecting an ACCEPTED
---   proposal undoes its write while it still stands (the pointer is still the
---   one this proposal set) and no further: a later edit that pointed the
---   thought elsewhere is not this proposal's to clear.
+--   proposal undoes its OWN write while it still stands (pointer_written says
+--   the acceptance wrote the column, and it still holds this proposal's
+--   value) and no further: a pointer set at capture that the acceptance merely
+--   found, or a later edit that pointed the thought elsewhere, is not this
+--   proposal's to clear. Acceptances are serialised on one transaction-scoped
+--   advisory lock, so the cycle walk reads committed pointers.
 --
 -- Staleness, the same pass's second output
 --   `stale_entities(older_than)` — per entity, the newest capture among the
@@ -159,12 +167,17 @@ CREATE TABLE IF NOT EXISTS supersession_proposals (
     CHECK (status IN ('pending', 'accepted', 'rejected')),
   reviewed_at        timestamptz,
   review_note        text,
-  -- While accepted: the thought whose supersedes column this proposal set.
+  -- While accepted: the thought whose supersedes column this acceptance
+  -- named, and whether the acceptance WROTE it (false when the column already
+  -- held the value, e.g. set at capture through the envelope): a rejection
+  -- undoes only a write of its own.
   superseding_id     uuid,
+  pointer_written    boolean      NOT NULL DEFAULT false,
   CHECK (older_id <> newer_id),
   CHECK ((status = 'pending') = (reviewed_at IS NULL)),
   CHECK ((status = 'accepted') = (superseding_id IS NOT NULL)),
   CHECK (superseding_id IS NULL OR superseding_id IN (older_id, newer_id)),
+  CHECK (NOT pointer_written OR status = 'accepted'),
   UNIQUE (older_id, newer_id)
 );
 
@@ -175,7 +188,9 @@ COMMENT ON COLUMN supersession_proposals.verdict IS
 COMMENT ON COLUMN supersession_proposals.judge_key IS
   'The pass that judged the pair, consolidate:<model>@p<prompt version>: the judge model rides with the verdict as the embedding model rides with the vector (021).';
 COMMENT ON COLUMN supersession_proposals.superseding_id IS
-  'Set while status is accepted: the thought whose supersedes column this acceptance wrote. Rejecting an accepted proposal clears that column while it still holds this proposal''s value, and this.';
+  'Set while status is accepted: the thought whose supersedes column this acceptance named. Rejecting an accepted proposal clears that column only when pointer_written says the acceptance wrote it and it still holds this proposal''s value; then clears this.';
+COMMENT ON COLUMN supersession_proposals.pointer_written IS
+  'True while an acceptance''s own UPDATE of thoughts.supersedes stands to be undone; false when the column already held the value (set at capture) or after a rejection. Migration 029.';
 
 -- The review queue: pending rows, most confident first.
 CREATE INDEX IF NOT EXISTS supersession_proposals_pending_idx
@@ -335,15 +350,17 @@ BEGIN
 
   IF p_decision = 'reject' THEN
     v_n := 0;
-    IF r.status = 'accepted' THEN
-      -- Undo this proposal's write while it still stands, and no further.
+    IF r.status = 'accepted' AND r.pointer_written THEN
+      -- Undo this proposal's OWN write while it still stands, and no further:
+      -- a pointer the acceptance found already there (set at capture) is not
+      -- this proposal's to clear (review pass 1).
       v_old := CASE WHEN r.superseding_id = r.newer_id THEN r.older_id ELSE r.newer_id END;
       UPDATE thoughts SET supersedes = NULL
        WHERE id = r.superseding_id AND supersedes = v_old;
       GET DIAGNOSTICS v_n = ROW_COUNT;
     END IF;
     UPDATE supersession_proposals
-       SET status = 'rejected', reviewed_at = now(), review_note = p_note, superseding_id = NULL
+       SET status = 'rejected', reviewed_at = now(), review_note = p_note, superseding_id = NULL, pointer_written = false
      WHERE id = p_id;
     RETURN jsonb_build_object('ok', true, 'id', p_id, 'status', 'rejected', 'cleared', v_n > 0);
   END IF;
@@ -362,6 +379,13 @@ BEGIN
   ELSE                    v_sup := r.older_id; v_old := r.newer_id;
   END IF;
 
+  -- Acceptances are serialised on one advisory lock (transaction-scoped, as
+  -- 018's): the cycle walk below reads other rows' pointers, and two accepts
+  -- running at once — A over B in one, B over A in the other — would each
+  -- walk a chain the other has not committed yet and both write, closing the
+  -- loop the check exists to refuse (review pass 1). A reviewer's call is
+  -- human-paced; one lock for all of them costs nothing that shows.
+  PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
   -- The superseding row, locked for the write; its current pointer decides.
   SELECT supersedes INTO v_current FROM thoughts WHERE id = v_sup FOR NO KEY UPDATE;
   IF NOT FOUND THEN
@@ -391,7 +415,8 @@ BEGIN
     UPDATE thoughts SET supersedes = v_old WHERE id = v_sup;
   END IF;
   UPDATE supersession_proposals
-     SET status = 'accepted', reviewed_at = now(), review_note = p_note, superseding_id = v_sup
+     SET status = 'accepted', reviewed_at = now(), review_note = p_note, superseding_id = v_sup,
+         pointer_written = (v_current IS DISTINCT FROM v_old)
    WHERE id = p_id;
   RETURN jsonb_build_object('ok', true, 'id', p_id, 'status', 'accepted',
                             'superseding_id', v_sup, 'superseded_id', v_old,

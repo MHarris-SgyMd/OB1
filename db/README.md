@@ -598,10 +598,13 @@ being compared with itself (and means a same-day contradiction is not found,
 stated rather than hidden). The shared-entity restriction is the cheap signal
 before the expensive one: a conflict is about a subject both name, and the
 judge cost is per pair. It also means a thought with no extracted entities has
-no candidates, which is why the pool is **thoughts with entities and no row
-under the key** — extraction first, then consolidation, made structural rather
-than left to a trigger that would judge a capture before 016's worker reached
-it and leave a terminal claim row behind. k and the floor were chosen by
+no candidates, which is why the pool is **thoughts with entities, a vector,
+and no row under the key** — extraction first, then consolidation, made
+structural rather than left to a trigger that would judge a capture before
+016's worker reached it and leave a terminal claim row behind. The gate cannot
+see the other side of a pair: a newer thought judged while an older neighbour
+is still unextracted is judged without it, and the pair is not revisited, so
+run the pass after extraction has finished rather than beside it. k and the floor were chosen by
 measurement (`evals/eval-consolidate.ts`; `evals/README.md` has the table) and
 are the worker's `--k` and `--min-sim`.
 
