@@ -101,7 +101,8 @@ thought_chunks` shows five columns since 013 added `context`.
 | `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s `FOR UPDATE` wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
-(024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49).
+(024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
+029 change 54).
 
 ## What changed relative to the guide
 
@@ -564,7 +565,137 @@ per row, and `release_claims_for_worker` on shutdown — unconditionally, in a
 `finally`, so a worker that stops for any reason hands its leases back rather
 than leaving them to expire. Give every process a globally unique worker id
 (hostname, pid and a random suffix — `release_claims_for_worker` matches on it
-alone). `extract-entities.ts` is the shape to copy.
+alone). `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is
+the third consumer, and the one whose work is per PAIR rather than per thought.
+
+## Consolidation: proposing which thoughts supersede which
+
+Migration 029 and `consolidate.ts`, its worker (SMD-1294). 025 gave `thoughts`
+a `supersedes` column and `capture_thought` a way to set it, and nothing
+populated it except a caller who already knew the answer at capture time. So a
+decision captured in March and its reversal in June sat side by side, both
+ranking on cosine alone, and `search_thoughts` handed a caller both with no
+signal that one was dead. This is the loop GBrain runs overnight — sample
+nearby pairs, ask a model whether they conflict, surface the result for review
+— built from what the schema already had: 015's leases, 016's shared entities,
+025's column, the metadata model.
+
+**The one rule: the pass proposes, a person confirms.** The worker writes
+`supersession_proposals` and never `thoughts`. `thoughts.supersedes` is written
+only by `review_supersession_proposal(id, 'accept')`, one proposal at a time,
+under the audit trigger with the reviewer as actor — so the audit trail shows
+who confirmed what, and reversing a wrong one is one `--reject`. Nothing is
+applied because a model said so; both GBrain's docs and the review of 025
+arrive at the same rule.
+
+**Which pairs are judged.** `consolidation_candidates(thought)`: the older
+thoughts that share at least one extracted entity with it, captured at least a
+calendar day (UTC) earlier, nearest by exact cosine over that join, at or above
+a floor, at most k — with pairs already proposed (in any state) and thoughts
+already superseded left out. Older-only means a pair is reached from its newer
+side once, with no memory needed; the day rule keeps an import's burst from
+being compared with itself (and means a same-day contradiction is not found,
+stated rather than hidden). The shared-entity restriction is the cheap signal
+before the expensive one: a conflict is about a subject both name, and the
+judge cost is per pair. It also means a thought with no extracted entities has
+no candidates, which is why the pool is **thoughts with entities, a vector,
+that nothing supersedes, and no row under the key** (`consolidation_pool()`,
+one definition read by the worker, its `--status` and preflight) — extraction
+first, then consolidation, made
+structural rather than left to a trigger that would judge a capture before
+016's worker reached it and leave a terminal claim row behind. The gate cannot
+see the other side of a pair: a newer thought judged while an older neighbour
+is still unextracted is judged without it, and the pair is not revisited, so
+run the pass after extraction has finished rather than beside it. k and the floor were chosen by
+measurement (`evals/eval-consolidate.ts`; `evals/README.md` has the table) and
+are the worker's `--k` and `--min-sim`.
+
+**The judge.** One call to the metadata model per pair
+(`server-portable/consolidate.ts` holds the prompt): thought A (older) and B
+(newer), dated, and one question — agree, unrelated, or conflict, and for a
+conflict which is current, decided from what the texts say and not from the
+dates. A conflict whose texts do not say is recorded `conflict_undirected` for
+the reviewer to direct. Only conflicts become rows; the verdict rides with its
+confidence, the judge's one-sentence reason (what a reviewer reads first), the
+cosine, and the pass key `consolidate:<model>@p<prompt version>` — the judge
+model on the row as 021 puts the embedding model beside the vector. The
+worker's agent id rides along as 016's mentions carry theirs.
+
+**Staleness**, the same pass's second output: `stale_entities(window)` names
+the entities nothing has mentioned within the window, quietest first, each
+with its newest capture.
+`--stale` prints it; nobody acts on it.
+
+### `consolidate.ts`
+
+```bash
+bun consolidate.ts --url postgres://…              # the backlog, then exit
+bun consolidate.ts --url … --follow [SECONDS]      # …then keep polling for newly extracted thoughts
+bun consolidate.ts --url … --limit 25              # a trial: this many thoughts, then stop
+bun consolidate.ts --url … --status                # the pass, and the queue
+bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
+bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
+bun consolidate.ts --url … --list [pending|accepted|rejected|all]
+bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
+bun consolidate.ts --url … --reject <id> [--note "…"]
+bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
+#   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
+bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
+```
+
+**The cost, stated up front.** Up to `--k` calls to the metadata model per
+thought with entities, recurring: every thought extracted after a run is judged
+against its older neighbours by the next run or a `--follow` process. Locally
+that is compute; on a hosted provider it is money per pair and BOTH thoughts'
+text goes to the provider. `--dry-run` says how many thoughts a run would
+judge before it judges any. Measured on the fork's 576-issue corpus at the
+shipped `--k 3 --min-sim 0.6` with `qwen2.5:7b`: 517 pairs, one call per thought
+with entities, 21 minutes, about 1,750 prompt tokens a call; 13 proposals, six
+of them real on a hand grading — two per hundred thoughts, half worth accepting
+(`evals/README.md` has the table and what the judge gets wrong).
+
+**Reviewing.** `--list` prints the queue most confident first, each with the
+judge's reason, both thoughts with their capture dates and `ID:` lines, and
+the two commands that decide it; the MCP tool `list_supersession_proposals`
+prints the same queue to a client. `--accept` writes the pointer on the thought
+the verdict names as current (or the one `--direction` names — required for an
+undirected verdict, and an override for a directed one) and refuses what would
+leave the column wrong: the superseding thought already pointing at a third
+thought (the column holds one predecessor; which is the reviewer's call), or a
+pointer that would close a loop. `--reject` marks the row and, if it had been
+accepted, clears the pointer while it still holds this proposal's value. A
+decided pair is never proposed again, whatever happens to the claim table.
+The verdict is about the texts as judged: each proposal records both
+fingerprints when it is written, `--list` and the tool mark a thought edited
+since, and `--accept` refuses such a pair unless `--force` says the reviewer
+has read both texts as they are now. The fingerprints are of the texts the
+judge was sent, taken with the text, so an edit that lands during the judge
+call is visible too. When an acceptance writes the pointer (not when the column
+already held the value) it moves the superseding thought's `updated_at` (001's
+trigger fires on any column), which two readers take as an edit: a client's
+`if_unchanged_since` from before the acceptance is refused, and 021's evidence
+rule stops vouching for that thought's vector, as after any edit.
+
+**Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
+`MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is
+audited under the key's name with the pass key as session. Without it the run
+says so and proceeds unattributed.
+
+**What preflight sees.** `consolidate pass` warns while a pass under any
+`consolidate:` key has rows pending, leased or failed — the counts over the
+thoughts with entities, and the command that finishes it under the key's own
+judge model — and otherwise says `none unfinished`, with the number of
+proposals pending review beside it and the `--list` that shows them: a queue
+is a reviewer's to work, not a defect.
+
+**Verified.** `test-schema.ts` [28] holds the candidate rule's every exclusion,
+the one write, the review path's states and refusals with the audit row, the
+queue and staleness against PGlite; `test-live.ts` [16] runs the worker end to
+end against a stub judge — the audited accept under the key's name, the reject
+that clears, a cleared claim table not re-proposing a decided pair, the pool
+picking up a thought extracted since. `test-store-sql`/`-postgrest` [10] cover
+the tool's read on both stores; `test-preflight` the line.
 
 ## Extensions
 

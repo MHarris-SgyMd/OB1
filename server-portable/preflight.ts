@@ -95,7 +95,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "migration ledger",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger",
 ];
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 /**
@@ -1602,6 +1602,74 @@ if (configFailed) {
         } catch (e) {
           add("re-embed pass", "warn", `could not verify: ${(e as Error).message}`,
               "The check reads thought_work_claims and counts thoughts.");
+        }
+
+        /**
+         * An unfinished consolidation pass, and the review queue (SMD-1294).
+         * db/consolidate.ts is the third consumer of the claim table, under
+         * keys with the consolidate: prefix (one per judge model and prompt
+         * version), and its product is migration 029's proposal table. The
+         * same rule as the re-embed check — a pass is unfinished while any
+         * row under its key is pending, leased or failed — read from the same
+         * counts; "not yet in the pool" is the worker's own pool rule, the
+         * thoughts WITH entities and no row under the key, since a thought
+         * without entities has no candidates and is not pooled. Pending
+         * proposals are not a defect — the pass proposes and a reviewer
+         * decides — so they ride the ok line as a count with the command that
+         * lists them, and appear on the warn line too while a pass is open.
+         */
+        try {
+          const { CONSOLIDATE_KEY_PREFIX, formatPassCounts, passUnfinished } = await import("../db/config.mjs");
+          const [{ claimsPresent, proposalsPresent }] = await sql`
+            SELECT to_regclass('thought_work_claims') IS NOT NULL AS "claimsPresent", to_regclass('supersession_proposals') IS NOT NULL AS "proposalsPresent"`;
+          if (!claimsPresent) {
+            add("consolidate pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
+          } else if (!proposalsPresent) {
+            add("consolidate pass", "skip", "not checked — supersession_proposals does not exist (migration 029 not applied)");
+          } else {
+            // The universe and "not yet in the pool" both come from migration
+            // 029's consolidation_pool — the worker's own rule, one definition
+            // — the second counted per key rather than subtracted: a thought
+            // re-extracted to no entities keeps its claim row, and a
+            // subtraction went negative (review pass 1; the second pass found
+            // three copies of the rule and made it one).
+            const rows = (await sql`
+              SELECT work_type, status, count(*)::int AS c,
+                     (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts
+              FROM thought_work_claims WHERE work_type LIKE ${CONSOLIDATE_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
+              { work_type: string; status: string; c: number; thoughts: number }[];
+            const [{ pending: queued }] = await sql`SELECT count(*)::int AS pending FROM supersession_proposals WHERE status = 'pending'`;
+            const queue = Number(queued) > 0 ? `${queued} proposal(s) pending review — cd db && bun consolidate.ts --url $DATABASE_URL --list` : "";
+            const byKey = new Map<string, PassCounts>();
+            for (const r of rows) {
+              const c = byKey.get(r.work_type) ?? { thoughts: Number(r.thoughts), succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: Number(r.thoughts) };
+              const n = Number(r.c);
+              if (r.status === "succeeded") c.succeeded = n;
+              else if (r.status === "failed") c.failed = n;
+              else if (r.status === "claimed") c.claimed = n;
+              else if (r.status === "pending") c.pending = n;
+              byKey.set(r.work_type, c);
+            }
+            let unfinished = 0;
+            for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
+              if (!passUnfinished(c)) continue;
+              unfinished++;
+              const [{ n: unpooled }] = await sql`SELECT count(*)::int AS n FROM consolidation_pool(${key})`;
+              c.unpooled = Number(unpooled);
+              // The key names the judge model between the prefix and the
+              // prompt version; the command has to run under that model, or
+              // consolidate.ts pools under another key.
+              const model = /^(.+)@p\d+$/.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length))?.[1];
+              const envPrefix = model && model !== metaModel ? `OB1_METADATA_MODEL=${model} ` : "";
+              add("consolidate pass", "warn",
+                  `${key}: ${formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ")} — a consolidation pass under this key stopped before it finished${queue ? `; ${queue}` : ""}`,
+                  `Finish it: cd db && ${envPrefix}bun consolidate.ts --url $DATABASE_URL${c.failed ? ` (--retry-failed for the ${c.failed} failed row(s) once their cause is fixed)` : ""}; ${envPrefix}bun consolidate.ts --url $DATABASE_URL --status shows where it stands.`);
+            }
+            if (unfinished === 0) add("consolidate pass", "ok", `none unfinished${queue ? `; ${queue}` : ""}`);
+          }
+        } catch (e) {
+          add("consolidate pass", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads thought_work_claims, consolidation_pool() and supersession_proposals.");
         }
 
         if (Number(applied[0].c) === 0)

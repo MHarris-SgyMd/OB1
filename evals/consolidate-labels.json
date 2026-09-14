@@ -1,0 +1,568 @@
+{
+  "note": "Hand labels for eval-consolidate.ts (SMD-1294): issue ids from the Linear corpus and a verdict, and NOTHING of the text \u2014 the corpus is internal and stays out of git (evals/README.md), so the reasons behind each label live with the review file the eval writes, not here. `pairs` were drawn from every cross-reference in the corpus whose surrounding sentence carries supersession language (supersede, replace, revert, no longer, obsolete, instead of, duplicate, in favour of, ...), 98 unique pairs, each read and labelled: `older` was captured before `newer`; label conflict|agree|unrelated; for a conflict, `supersedes` is which is current as the TEXTS say it (newer|older|unknown). A parent closed because its children landed, a follow-up, a split-out half, a prerequisite are `agree`; a reference for an analogy or an example is `unrelated`. `proposals` grade what a full pass proposed (true = a real supersession or contradiction), filled from the review file eval-consolidate.ts --full writes; two of the six true ones were borderline.",
+  "pairs": [
+    {
+      "older": "SMD-18",
+      "newer": "SMD-26",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-29",
+      "newer": "SMD-50",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-29",
+      "newer": "SMD-51",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-29",
+      "newer": "SMD-52",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-336",
+      "newer": "SMD-379",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-31",
+      "newer": "SMD-376",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-250",
+      "newer": "SMD-379",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-423",
+      "newer": "SMD-427",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-409",
+      "newer": "SMD-444",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-521",
+      "newer": "SMD-522",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-576",
+      "newer": "SMD-577",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-737",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-740",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-905",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-736",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-745",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-901",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-904",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-737",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-735",
+      "newer": "SMD-738",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-741",
+      "newer": "SMD-956",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-743",
+      "newer": "SMD-1019",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-743",
+      "newer": "SMD-902",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-737",
+      "newer": "SMD-744",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-745",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-737",
+      "newer": "SMD-745",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-745",
+      "newer": "SMD-901",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-745",
+      "newer": "SMD-983",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-761",
+      "newer": "SMD-1138",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-608",
+      "newer": "SMD-761",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-761",
+      "newer": "SMD-933",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-761",
+      "newer": "SMD-934",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-761",
+      "newer": "SMD-982",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-771",
+      "newer": "SMD-905",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-761",
+      "newer": "SMD-775",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-901",
+      "newer": "SMD-961",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-901",
+      "newer": "SMD-972",
+      "label": "conflict",
+      "supersedes": "newer"
+    },
+    {
+      "older": "SMD-856",
+      "newer": "SMD-902",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-902",
+      "newer": "SMD-903",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-902",
+      "newer": "SMD-905",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-744",
+      "newer": "SMD-903",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-903",
+      "newer": "SMD-905",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-672",
+      "newer": "SMD-913",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-708",
+      "newer": "SMD-913",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-608",
+      "newer": "SMD-933",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-745",
+      "newer": "SMD-933",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-933",
+      "newer": "SMD-934",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-934",
+      "newer": "SMD-1138",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-944",
+      "newer": "SMD-951",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-925",
+      "newer": "SMD-945",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-947",
+      "newer": "SMD-948",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-736",
+      "newer": "SMD-955",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-740",
+      "newer": "SMD-955",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-867",
+      "newer": "SMD-956",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-740",
+      "newer": "SMD-957",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-958",
+      "newer": "SMD-1041",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-903",
+      "newer": "SMD-961",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-905",
+      "newer": "SMD-961",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-775",
+      "newer": "SMD-967",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-951",
+      "newer": "SMD-968",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-889",
+      "newer": "SMD-981",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-953",
+      "newer": "SMD-992",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-980",
+      "newer": "SMD-992",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-996",
+      "newer": "SMD-1011",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1012",
+      "newer": "SMD-1202",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-905",
+      "newer": "SMD-1016",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-902",
+      "newer": "SMD-1019",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1020",
+      "newer": "SMD-1062",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-983",
+      "newer": "SMD-1020",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1024",
+      "newer": "SMD-1067",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1024",
+      "newer": "SMD-1068",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-953",
+      "newer": "SMD-1033",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-980",
+      "newer": "SMD-1033",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-992",
+      "newer": "SMD-1033",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-969",
+      "newer": "SMD-1041",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1022",
+      "newer": "SMD-1042",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1057",
+      "newer": "SMD-1058",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-738",
+      "newer": "SMD-1057",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-673",
+      "newer": "SMD-1058",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-1021",
+      "newer": "SMD-1067",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-979",
+      "newer": "SMD-1073",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1091",
+      "newer": "SMD-1215",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-1081",
+      "newer": "SMD-1095",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1104",
+      "newer": "SMD-1105",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1141",
+      "newer": "SMD-1143",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-892",
+      "newer": "SMD-1143",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-637",
+      "newer": "SMD-1166",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-1029",
+      "newer": "SMD-1169",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1068",
+      "newer": "SMD-1175",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-955",
+      "newer": "SMD-1185",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1073",
+      "newer": "SMD-1206",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-907",
+      "newer": "SMD-1206",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-892",
+      "newer": "SMD-1208",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1082",
+      "newer": "SMD-1215",
+      "label": "unrelated"
+    },
+    {
+      "older": "SMD-1166",
+      "newer": "SMD-1215",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1253",
+      "newer": "SMD-1288",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1091",
+      "newer": "SMD-1280",
+      "label": "agree"
+    },
+    {
+      "older": "SMD-1143",
+      "newer": "SMD-1282",
+      "label": "agree"
+    }
+  ],
+  "proposals": [
+    {
+      "older": "SMD-600",
+      "newer": "SMD-627",
+      "true": true
+    },
+    {
+      "older": "SMD-243",
+      "newer": "SMD-734",
+      "true": true
+    },
+    {
+      "older": "SMD-226",
+      "newer": "SMD-734",
+      "true": false
+    },
+    {
+      "older": "SMD-493",
+      "newer": "SMD-742",
+      "true": false
+    },
+    {
+      "older": "SMD-440",
+      "newer": "SMD-523",
+      "true": true
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-957",
+      "true": false
+    },
+    {
+      "older": "SMD-742",
+      "newer": "SMD-867",
+      "true": false
+    },
+    {
+      "older": "SMD-333",
+      "newer": "SMD-363",
+      "true": true
+    },
+    {
+      "older": "SMD-566",
+      "newer": "SMD-570",
+      "true": false
+    },
+    {
+      "older": "SMD-27",
+      "newer": "SMD-103",
+      "true": false
+    },
+    {
+      "older": "SMD-36",
+      "newer": "SMD-103",
+      "true": true
+    },
+    {
+      "older": "SMD-103",
+      "newer": "SMD-470",
+      "true": true
+    },
+    {
+      "older": "SMD-1091",
+      "newer": "SMD-1215",
+      "true": false
+    }
+  ]
+}

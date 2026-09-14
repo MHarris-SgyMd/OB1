@@ -178,6 +178,8 @@ export function reembedKey(model: string, dim: number): string;
 export function parseReembedKey(key: string): { model: string; dim: number } | null;
 /** The model a pass under `key` pools against — its own key's model — or null for a backfill key, which pools every thought (021). */
 export function poolModelFor(key: string): string | null;
+/** How preflight attributes a claim-table key to db/consolidate.ts (029): `consolidate:<model>@p<version>`. */
+export const CONSOLIDATE_KEY_PREFIX: "consolidate:";
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */

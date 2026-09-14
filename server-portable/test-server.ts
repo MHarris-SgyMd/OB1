@@ -160,6 +160,7 @@ console.log("\n[9] tools/list exposes exactly the documented surface");
     "capture_thought",
     "delete_thought",
     "fetch",
+    "list_supersession_proposals",
     "list_thoughts",
     "search",
     "search_thoughts",
@@ -181,7 +182,7 @@ console.log("\n[10] Read tools are annotated read-only, capture is not");
   const b = await mcpBody(r);
   const tools = (b?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] })?.tools ?? [];
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-  for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"]) {
+  for (const t of ["search", "fetch", "search_thoughts", "list_thoughts", "list_supersession_proposals", "thought_stats"]) {
     assert(byName[t]?.annotations?.readOnlyHint === true, `"${t}" is readOnlyHint: true`);
   }
   assert(byName["capture_thought"]?.annotations?.readOnlyHint === false, `"capture_thought" is readOnlyHint: false`);

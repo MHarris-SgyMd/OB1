@@ -27,7 +27,12 @@ One more per-thought cost exists and is **off until you turn it on**: entity
 extraction (`db/extract-entities.ts`, migration 016) sends every thought to the
 metadata model once, and every new capture after that. Locally that is compute;
 on a hosted provider it is money per thought and every thought's text leaves
-your machine. `db/README.md` has the measured cost and quality.
+your machine. `db/README.md` has the measured cost and quality. A second
+optional pass builds on it: consolidation (`db/consolidate.ts`, migration 029)
+asks the same model whether two thoughts that share a subject contradict each
+other, and files the conflicts as proposals for you to accept or reject — up to
+a few calls per thought, both thoughts' text per call, and nothing changes in
+the store until you accept one.
 
 | Model | Width | Note |
 | --- | --- | --- |

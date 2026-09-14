@@ -132,7 +132,7 @@ console.log("[1] The server runs with no Supabase configuration at all");
   });
   const t = await r.text();
   const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
-  assert(b.result?.tools?.length === 9, `all nine tools still registered (${b.result?.tools?.length})`);
+  assert(b.result?.tools?.length === 10, `all ten tools still registered (${b.result?.tools?.length})`);
 }
 
 console.log("\n[2] capture_thought writes through SQL");
@@ -379,6 +379,37 @@ console.log("\n[8] the id a read prints round-trips to update_thought and delete
   await call("delete_thought", { id: lid });
   const gone = await call("list_thoughts", { limit: 20 });
   assert(!/kappa/.test(gone), "the thought reached through list_thoughts is deleted");
+}
+
+console.log("\n[9] list_supersession_proposals renders the queue for a client: both thoughts, the ids, the commands, an edit since judged, and nothing a thought can do to the terminal (migration 029)");
+{
+  // Seeded through SQL: the pass's own write, with a thought whose text
+  // carries an escape sequence and a judge reason that does too.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${new Array(EMBEDDING_DIM).fill(0).map((_, i) => (i === 3 ? 1 : 0)).join(",")}]`;
+  const seed = async (content: string, daysAgo: number) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const older = await seed("queue older: the plan was A \x1b[2A\x1b[2Kforged line", 9);
+  const newer = await seed("queue newer: the plan is B", 0);
+  const [{ id: pid }] = await sql`
+    SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.7, ${"A then B \x1b[31mred"}, 0.9, 'consolidate:stub@p2', NULL) AS id`;
+  const listed = await call("list_supersession_proposals", {});
+  assert(/1 pending supersession proposal/.test(listed) && /conflict, direction not stated/.test(listed), "the tool lists the pending proposal with its verdict phrase");
+  assert(listed.includes(`ID: ${older}`) && listed.includes(`ID: ${newer}`) && listed.includes(`--accept ${pid} --direction <newer|older>`) && listed.includes(`--reject ${pid}`),
+         "…both ids, and the accept command with the direction placeholder the shell cannot parse");
+  assert(!listed.includes("\x1b") && /forged line/.test(listed) && /A then B/.test(listed), "…with the escape sequences stripped from the thought and the reason, the words kept");
+  assert(!/edited since judged/.test(listed), "…and nothing marked edited yet");
+  await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
+  assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
+         "after an edit the tool marks the side, adds --force to the accept command and says why");
+  assert(/No accepted supersession proposals/.test(await call("list_supersession_proposals", { status: "accepted" })), "an empty status says so and names the pass that fills it");
+  await sql`DELETE FROM supersession_proposals`;
+  await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
+  await sql.close();
 }
 
 server.stop();

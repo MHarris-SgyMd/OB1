@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -32,6 +32,7 @@ import type {
   ListFilters,
   MutationResult,
   ProvenanceNode,
+  SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
@@ -327,6 +328,13 @@ export class SqlStore implements ThoughtStore {
       SELECT id, content, type, source_type, derivation_method, created_at
       FROM find_derivatives(${opts.id}::uuid, ${opts.limit ?? null}::int)`;
     return rows.map(normaliseDerivative);
+  }
+
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]> {
+    // Migration 029. NULL status lists every state; the function caps the limit.
+    const rows = await this.sql`
+      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int)`;
+    return rows.map((r: Record<string, unknown>) => normaliseProposal(r));
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

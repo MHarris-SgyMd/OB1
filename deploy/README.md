@@ -118,7 +118,10 @@ there, for that check to pass.
 - **Entity extraction.** `db/extract-entities.ts --follow` is a long-running
   worker with a per-thought model cost; it is not a service here. Run it from a
   checkout, with `OB1_WORKER_KEY` set to a key whose hash is in
-  `MCP_ACCESS_KEYS`, when you have decided to pay that cost.
+  `MCP_ACCESS_KEYS`, when you have decided to pay that cost. The same goes for
+  `db/consolidate.ts`, the pass that proposes supersessions from the entities
+  that worker extracts (a per-pair cost; `db/README.md`), and for reviewing
+  what it proposes.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 
