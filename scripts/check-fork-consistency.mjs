@@ -15,8 +15,10 @@
  *   4. requires_primitives / requires_skills point at directories that exist
  *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
  *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
- *      or skip-permissions flag or mode, no wildcard or bare Bash allow, no
- *      shell spawn — in every text file under the contribution directories
+ *      or skip-permissions flag, alias or mode; no allow rule granting all of
+ *      Bash or a prefix of a network client or interpreter; no spawn through a
+ *      shell in any spelling — in every non-binary file under the contribution
+ *      directories, with counted per-(file, hazard) exceptions
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
@@ -163,33 +165,36 @@ function walk(dir, out = [], match = /\.(sql|md)$/) {
 }
 
 /**
- * Run every rule over every line of every file. A rule is { re, msg } — `re`
- * without the g flag, so test() is stateless — and may carry `skip(rel)`,
- * which exempts a whole file from THAT rule only. Returns the (rel, rule)
- * pairs that matched, so a caller can also ask what did NOT.
+ * Run every rule over every line of every file. A rule is { name, re, msg } —
+ * `re` without the g flag, so test() is stateless — and may carry
+ * `suppress(rel)`: the rule still runs and the hit is still COUNTED, but it
+ * does not fail. Returns hit counts keyed `${rel} ${name}`, so a caller can
+ * hold a suppressed file to an expected count — one read, one definition of
+ * "matches", for both the scan and the exception audit.
  */
 function scanLines(files, rules) {
-  const hits = new Set();
+  const counts = new Map();
   for (const file of files) {
     const rel = relOf(file);
     const lines = readFileSync(file, "utf8").split("\n");
     for (const rule of rules) {
-      if (rule.skip?.(rel)) continue;
+      const quiet = rule.suppress?.(rel) ?? false;
       lines.forEach((line, i) => {
-        if (rule.re.test(line)) {
-          hits.add(`${rel}\u0000${rule.name ?? rule.msg}`);
-          fail(`${rel}:${i + 1}`, rule.msg);
-        }
+        if (!rule.re.test(line)) return;
+        const key = `${rel} ${rule.name ?? rule.msg}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (!quiet) fail(`${rel}:${i + 1}`, rule.msg);
       });
     }
   }
-  return hits;
+  return counts;
 }
 
 // ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
 
 function checkSqlGuards() {
   scanLines(walk(ROOT), [{
+    name: "add-column-guard",
     re: /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/i,
     msg: "ADD COLUMN on thoughts without IF NOT EXISTS",
   }]);
@@ -209,70 +214,127 @@ function checkSqlGuards() {
 // The rule this enforces, written down here because the tree is vendored from
 // upstream wholesale (FORK.md, "Vendored content"): we audit once and hold the
 // delta, and a standing check carries the audit. Content that ships under this
-// repo's name does not run an agent with its sandbox or permissions off, does
-// not recommend a wildcard or bare shell allow, and does not spawn through a
-// shell. The patterns are the spellings Claude Code and Codex actually read,
-// plus the JSON and Python forms of a shell spawn; a probe list below is
-// checked against them on every run so a pattern cannot rot silently.
+// repo's name does not run an agent with its sandbox or approvals off, does not
+// recommend a wildcard, bare or interpreter-prefix shell allow, and does not
+// spawn through a shell. The patterns are MECHANISMS, not the spellings the two
+// fixed files happened to use: Codex's bypass flag and its aliases, Claude
+// Code's skip-permissions flag and mode, every allow-rule shape that grants all
+// of Bash or a prefix of a network client or interpreter, and every spawn shape
+// that involves a shell — the `shell:` option with any non-false value,
+// exec/execSync (always a shell), os.system/os.popen, and an explicit
+// `sh -c` / `cmd /c` argv. A probe list is checked against them on every run so
+// a pattern cannot rot silently.
 //
-// Exceptions are per (file, hazard): a file that must name one flag in order
-// to say it was removed is exempt from THAT hazard only, and is still scanned
-// for every other. An exception that matches nothing is itself a violation, so
-// the list shrinks when the prose it excuses is rewritten.
+// Exceptions are per (file, hazard) and COUNTED: a file that must name one flag
+// in order to say it was removed is exempt from that hazard for exactly the
+// number of lines it has today, and is scanned for every other hazard in full.
+// One more line naming the flag — a rebase re-adding a usage block beside the
+// warning — fails; one fewer — the prose rewritten — fails too, so the list is
+// kept honest in both directions.
 const SHELL_HAZARDS = [
-  { name: "codex-bypass", re: /--dangerously-bypass-approvals-and-sandbox/, what: "Codex's sandbox-bypass flag" },
-  { name: "skip-permissions", re: /--dangerously-skip-permissions|bypassPermissions/, what: "Claude Code's skip-permissions flag or mode" },
-  { name: "wildcard-bash", re: /Bash\(\*(?::\*)?\)|^\s*["']Bash["']\s*,?\s*$/, what: "a wildcard or bare Bash allow" },
-  { name: "shell-spawn", re: /\bshell["']?\s*[:=]\s*[Tt]rue\b/, what: "a shell spawn (spawn an argv array without a shell)" },
+  { name: "codex-bypass",
+    re: /--dangerously-bypass-approvals-and-sandbox|--yolo\b|danger-full-access|--ask-for-approval\s+never\b/,
+    what: "Codex's sandbox-bypass flag or one of its aliases" },
+  { name: "skip-permissions",
+    re: /--dangerously-skip-permissions|bypassPermissions/,
+    what: "Claude Code's skip-permissions flag or mode" },
+  { name: "wildcard-bash",
+    // Bash(*), Bash(:*), Bash(*:*); a quoted bare "Bash" anywhere (a JSON or JS
+    // allow entry); a line that is only `Bash` (a multi-line --allowedTools);
+    // a YAML `allowed-tools:` or a `--allowedTools` carrying the bare token.
+    re: /Bash\(\s*:?\*+\s*(?::\*)?\s*\)|["']Bash["']|^\s*Bash\s*\\?\s*$|allowed-tools:[^\n(]*(?<![\w(])Bash(?![\w(])|--allowedTools\b[^\n]*?(?<![\w(-])Bash(?![\w(])/,
+    what: "an allow rule that grants all of Bash" },
+  { name: "bash-prefix-interpreter",
+    re: /Bash\(\s*(?:curl|wget|sh|bash|zsh|node|python\d?|npx|bunx?|deno|eval|ssh|scp|nc|perl|ruby|php)\b[^)]*:\*\s*\)/,
+    what: "a Bash prefix rule on a network client or interpreter (everything after the prefix is approved)" },
+  { name: "shell-spawn",
+    // The `shell:` option with any value but false/0/null/undefined (`true`,
+    // "/bin/sh", a platform expression); Python's shell=True; exec()/execSync()
+    // outside a regex .exec(); os.system/os.popen; an explicit shell argv.
+    re: /\bshell["']?\s*[:=]\s*(?!false\b|False\b|0\b|null\b|undefined\b)\S|(?<![\w.$])(?:exec|execSync)\s*\(|child_process\.exec(?:Sync)?\s*\(|\bos\.(?:system|popen)\s*\(|["'](?:sh|bash|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']\s*,\s*\[\s*["'](?:-c|\/c|-Command)["']/,
+    what: "a spawn through a shell (spawn an argv array with no shell)" },
 ];
 /** Strings each hazard must catch — the check's own negative tests. */
 const SHELL_HAZARD_PROBES = [
   ["codex-bypass", "codex exec --dangerously-bypass-approvals-and-sandbox -"],
+  ["codex-bypass", "codex exec --yolo -"],
+  ["codex-bypass", "--sandbox danger-full-access"],
+  ["codex-bypass", "codex --ask-for-approval never"],
   ["skip-permissions", "claude --dangerously-skip-permissions"],
   ["skip-permissions", '"defaultMode": "bypassPermissions"'],
   ["skip-permissions", "--permission-mode bypassPermissions"],
   ["wildcard-bash", '      "Bash(*)",'],
   ["wildcard-bash", "'Bash(*:*)'"],
-  ["wildcard-bash", '      "Bash",'],
+  ["wildcard-bash", "Bash(:*)"],
+  ["wildcard-bash", '"allow": ["Bash"]'],
+  ["wildcard-bash", "    Bash \\"],
+  ["wildcard-bash", "allowed-tools: Read, Bash"],
+  ["wildcard-bash", "--allowedTools Bash Edit"],
+  ["bash-prefix-interpreter", '"Bash(curl:*)"'],
+  ["bash-prefix-interpreter", "Bash(curl -s https://api.open-meteo.com/v1/forecast:*)"],
+  ["bash-prefix-interpreter", "Bash(node:*)"],
   ["shell-spawn", "      shell: true,"],
   ["shell-spawn", '"shell": true'],
+  ["shell-spawn", 'shell: "/bin/sh",'],
+  ["shell-spawn", 'shell: process.platform === "win32",'],
   ["shell-spawn", "subprocess.run(cmd, shell=True)"],
+  ["shell-spawn", "execSync(`claude -p ${text}`)"],
+  ["shell-spawn", "exec(cmd, (err, out) => {"],
+  ["shell-spawn", "child_process.exec(cmd)"],
+  ["shell-spawn", "os.system(cmd)"],
+  ["shell-spawn", 'spawn("cmd", ["/c", "start", "", url])'],
+  ["shell-spawn", "spawn('sh', ['-c', cmd])"],
+];
+/** Strings no hazard may catch — ordinary prose and code this repo writes. */
+const SHELL_HAZARD_NON_PROBES = [
+  "a wildcard `Bash` allow",
+  "two `Bash` rules",
+  "no shell (SMD-1251): args is an argv array",
+  "const m = /^x$/.exec(content);",
+  "this spawn uses no shell, so the value",
+  "shell: false,",
+  'Bash(date "+%Y-%m-%d %H:%M:%S %Z")',
+  "WebFetch(domain:api.open-meteo.com)",
 ];
 const SHELL_HAZARD_EXCEPTIONS = new Map([
-  // Prose that names the deleted flag in order to say it was deleted.
-  ["recipes/atomizer/README.md", { "codex-bypass": "the warning that documents the codex provider's removal" }],
-  ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": "the header note that documents the same removal" }],
+  // Prose that names the deleted flag in order to say it was deleted: exactly
+  // this many lines, for exactly this hazard.
+  ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
+  ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": { why: "the header note that documents the same removal", lines: 1 } }],
 ]);
-// Every text file type present under the seven directories, so a rebased
-// settings.json.example or a Python recipe is scanned too; binaries are not.
-const SHELL_HAZARD_FILES = /\.(mjs|cjs|js|ts|tsx|md|json|jsonc|sh|toml|ya?ml|py|txt|html|svelte|xml|example|env|css|sql)$/;
+// Text is scanned by construction: only known binary shapes are skipped, so an
+// extensionless Dockerfile, Procfile or CNAME is read like everything else.
+const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$/i;
 
 function checkShellHazards(dirs) {
   for (const [name, probe] of SHELL_HAZARD_PROBES) {
     const hazard = SHELL_HAZARDS.find((h) => h.name === name);
     if (!hazard?.re.test(probe)) fail("scripts/check-fork-consistency.mjs", `shell-hazard pattern '${name}' no longer catches its probe: ${probe}`);
   }
+  for (const text of SHELL_HAZARD_NON_PROBES) {
+    const hit = SHELL_HAZARDS.find((h) => h.re.test(text));
+    if (hit) fail("scripts/check-fork-consistency.mjs", `shell-hazard pattern '${hit.name}' catches ordinary text it must not: ${text}`);
+  }
   // Only the contribution directories — not their `_template` placeholders,
   // which contributionDirs() already skips — so this never depends on the
   // display filter below to hide a placeholder's hits.
-  const files = dirs.flatMap((d) => walk(d.dir, [], SHELL_HAZARD_FILES));
-  const hits = scanLines(files, SHELL_HAZARDS.map(({ name, re, what }) => ({
+  const files = dirs.flatMap((d) => walk(d.dir, [], /./).filter((f) => !SHELL_HAZARD_BINARY.test(f)));
+  const counts = scanLines(files, SHELL_HAZARDS.map(({ name, re, what }) => ({
     name,
     re,
     msg: `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`,
-    skip: (rel) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
+    suppress: (rel) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
   })));
   for (const [rel, byHazard] of SHELL_HAZARD_EXCEPTIONS) {
-    const file = join(ROOT, rel);
-    const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-    for (const [name, why] of Object.entries(byHazard)) {
-      const hazard = SHELL_HAZARDS.find((h) => h.name === name);
-      if (!hazard || !hazard.re.test(text)) {
-        fail(rel, `listed as a shell-hazard exception for '${name}' (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`);
+    for (const [name, { why, lines }] of Object.entries(byHazard)) {
+      const seen = counts.get(`${rel} ${name}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a shell-hazard exception for '${name}' (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`
+          : `shell-hazard exception for '${name}' (${why}) covers ${lines} line(s) but ${seen} match — a new usage beside the documented one, or the exception's count is stale`);
       }
     }
   }
-  void hits;
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────

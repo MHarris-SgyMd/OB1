@@ -513,7 +513,7 @@ Life Engine runs autonomously via `/loop`. If Claude encounters a tool it doesn'
 | **`--allowedTools` (CLI flag)** | Same scoping, but must be re-typed each launch | Low — scoped |
 | **`--permission-mode auto`** | A middle ground — automatic but with some guardrails | Medium |
 
-Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. That is also why the two `Bash` rules below are **exact-match**, not prefix rules: a prefix rule approves whatever follows the prefix, and for `curl` that is any further URL or `-d @file` — an exfiltration in one command. If a test run needs a tool the list below lacks, add that tool by name.
+Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. That is also why the list below has exactly one `Bash` rule, and it is **exact-match**: the skill runs one shell command, the `date` anchor, and the rule is that command verbatim. The weather check does not use a shell at all — it goes through Claude Code's `WebFetch` tool, whose rule admits one domain. A `curl` prefix rule was considered and rejected: a prefix rule approves whatever follows the prefix, and `curl` takes several URLs and `-d @file` in one command — an exfiltration in one injected message. If a test run needs a tool the list below lacks, add that tool by name.
 
 ### 6.2 Option A: settings.json Allowlist (Recommended)
 
@@ -534,7 +534,7 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
       "mcp__open-brain__capture_thought",
       "mcp__supabase__execute_sql",
       "Bash(date \"+%Y-%m-%d %H:%M:%S %Z\")",
-      "Bash(curl -s \"https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto\")",
+      "WebFetch(domain:api.open-meteo.com)",
       "CronCreate",
       "CronDelete"
     ]
@@ -542,7 +542,7 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
 }
 ```
 
-> **Why two exact-match `Bash` rules, and what breaks.** The skill runs exactly two shell commands — the `date` anchor and one `curl` to Open-Meteo — and each rule above is that command **verbatim**, so Claude Code approves that string and nothing else. Edit the latitude and longitude in the `curl` rule **and** in `life-engine-skill.md` (the Weather section) so the two stay identical; the skill tells the model to run both commands exactly as written. What can break: if the model rephrases a command (single quotes around the URL, `--silent` for `-s`, a `TZ=` prefix on `date`) the string no longer matches and the session pauses on a prompt. Tighten the skill's wording, or add the exact variant you saw as one more rule. Do not answer a prompt with a prefix rule such as `Bash(curl:*)`: `curl` accepts several URLs and `-d @file` in one command, so a prefix rule on it hands every incoming message a way to post your files somewhere. And never a wildcard `Bash` allow — the previous version of this guide recommended one.
+> **Why one exact-match `Bash` rule and one `WebFetch` domain, and what breaks.** The skill runs one shell command, the `date` anchor, and the rule above is that command **verbatim**, so Claude Code approves that string and nothing else. The weather call is not a shell command: the skill fetches Open-Meteo through `WebFetch`, and `WebFetch(domain:api.open-meteo.com)` admits any URL on that host — your latitude and longitude included, so they can live in `life_engine_state` and never touch the allowlist. What can break: if the model rephrases the `date` command (a `TZ=` prefix, `/bin/date`, a different format string) the string no longer matches and the session pauses on a prompt; the skill tells the model to run it exactly as written, so tighten that wording or add the exact variant you saw as one more rule. Do not answer a prompt with a prefix rule on a network client or an interpreter (a `curl` or `node` prefix followed by `:*`): `curl` takes several URLs and `-d @file` in one command, so such a rule hands every incoming message a way to post your files somewhere — and the repo's consistency check refuses those spellings. And never a wildcard `Bash` allow — the previous version of this guide recommended one.
 
 Then launch with just the channel flag:
 
@@ -558,7 +558,7 @@ claude --channels plugin:discord@claude-plugins-official
 
 ### 6.3 Option B: --allowedTools (CLI Flag)
 
-Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. Both `Bash` rules contain double quotes, so each rule is its own single-quoted argument (edit the latitude and longitude here too):
+Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. The `Bash` rule contains double quotes, so each rule is its own single-quoted argument:
 
 ```bash
 claude --channels plugin:telegram@claude-plugins-official \
@@ -574,7 +574,7 @@ claude --channels plugin:telegram@claude-plugins-official \
     mcp__open-brain__capture_thought \
     mcp__supabase__execute_sql \
     'Bash(date "+%Y-%m-%d %H:%M:%S %Z")' \
-    'Bash(curl -s "https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto")' \
+    'WebFetch(domain:api.open-meteo.com)' \
     CronCreate CronDelete
 ```
 

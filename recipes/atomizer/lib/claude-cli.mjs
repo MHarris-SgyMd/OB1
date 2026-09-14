@@ -50,11 +50,14 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
     // name is not found through an npm .cmd shim (ENOENT) and a .cmd/.bat the
     // path names is refused (EINVAL, thrown synchronously by spawn()).
     const describe = (err) => {
-      const bare = "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell";
-      const win = "on Windows, set CLAUDE_CLI_PATH to the real claude executable (the native install), not an npm .cmd shim";
+      const configured = Boolean(process.env.CLAUDE_CLI_PATH);
+      const notFound = configured
+        ? "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell"
+        : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
+      const win = "on Windows that must be the native claude.exe, not an npm .cmd shim (not found without a shell, and refused if named)";
       const hint =
-        process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${win}; ${bare}` :
-        err.code === "ENOENT" ? ` — ${bare}` :
+        process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
+        err.code === "ENOENT" ? ` — ${notFound}` :
         "";
       return new Error(`Claude CLI spawn error: ${err.message}${hint}`);
     };
@@ -77,6 +80,11 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
     child.stderr.on("data", (d) => { stderr += d; });
 
     if (stdinData && child.stdin) {
+      // A spawn that fails (ENOENT) leaves stdin with no handle, and a CLI that
+      // exits before draining a long prompt closes it (EPIPE); either way the
+      // write emits 'error' on stdin, which with no listener is an uncaught
+      // exception. The child's own 'error'/'close' below report the cause.
+      child.stdin.on("error", () => {});
       child.stdin.write(stdinData);
       child.stdin.end();
     }

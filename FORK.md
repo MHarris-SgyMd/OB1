@@ -5049,63 +5049,105 @@ in a table and a shell line, and defended the wildcard with: scoped patterns
 triggers". That defends a shell allowlist with a prompt rule addressed to the
 model being injected — and Life Engine ingests Telegram or Discord messages, a
 weather API response and calendar events on every cycle. The section is
-rewritten: the skill runs exactly two shell commands, so the allowlist carries
-exactly two **exact-match** rules — the `date` anchor and the `curl` line,
-verbatim, with the operator told to edit latitude and longitude in the rule and
-the skill together. Not prefix rules: a first version used
-`Bash(curl -s "https://api.open-meteo.com/v1/forecast:*)`, and the review pass
-pointed out that a prefix rule approves whatever follows the prefix — `curl`
-takes several URLs and `-d @file` in one command, so that rule was an
-exfiltration path one injected message wide, which is also what Claude Code's
-own permissions documentation says about argument-constraining `curl`
-patterns. The skill file now tells the model to run **both** commands exactly
-as written (the first version pinned only `curl`); the callout says **what
-actually breaks** (a rephrased command pauses the loop on a prompt — tighten
-the skill or add the exact variant, never a prefix rule on `curl`, never a
-wildcard); and the skip-permissions option is gone from the table, the shell
-line and the later pointer. The `--allowedTools` form passes each rule as its
-own single-quoted argument.
+rewritten: the skill now runs exactly **one** shell command, the `date` anchor,
+and the allowlist carries that command as one **exact-match** rule plus
+`WebFetch(domain:api.open-meteo.com)` — the weather check goes through Claude
+Code's own fetch tool, not `curl`, so the coordinates can live in
+`life_engine_state` and never touch the allowlist. Two review passes got here.
+The first version used prefix rules, and the first pass pointed out that a
+prefix rule approves whatever follows the prefix — `curl` takes several URLs and
+`-d @file` in one command, so
+`Bash(curl -s "https://api.open-meteo.com/v1/forecast:*)` was an exfiltration
+path one injected message wide (which is also what Claude Code's own
+permissions documentation says about argument-constraining `curl` patterns).
+The second version made both rules exact-match, and the second pass pointed out
+that the skill, three lines below its new "run exactly as written", still told
+the model to substitute the operator's coordinates into the URL — a string an
+exact rule can never approve, so every morning briefing would have paused on a
+prompt, the exact failure Step 6 exists to prevent — and that the three
+byte-identical `curl` strings (two in the README, one in the skill) were
+hand-synchronised with nothing checking them. Taking `curl` out of the picture
+resolves both. The skill tells the model to run the `date` anchor exactly as
+written; the callout says **what actually breaks** (a rephrased `date` pauses
+the loop on a prompt — tighten the skill or add the exact variant; never a
+prefix rule on a network client or interpreter, which the consistency check
+refuses; never a wildcard); and the skip-permissions option is gone from the
+table, the shell line and the later pointer. The `--allowedTools` form passes
+each rule as its own single-quoted argument.
 
 **The general rule, written down.** The community tree is vendored from
 upstream wholesale, so we ship its worst advice with its best. The decision
 this ticket asked for is taken as: **audit once, hold the delta, and let a
 standing check carry the audit** — "Vendored content" above, beside the rebase
 procedure it governs. `scripts/check-fork-consistency.mjs` gains check 6: every
-text file under the seven contribution directories (twenty extensions,
-`.example` and `.py` included, so a rebased `settings.json.example` or a Python
-recipe is scanned too) is checked for Codex's sandbox-bypass flag, Claude Code's
-skip-permissions flag or `bypassPermissions` mode, a wildcard or bare `Bash`
-allow, and a shell spawn in its JavaScript, JSON or Python spelling; a hit fails
-CI with the file, the line and the rule. Exceptions are per **file and
-pattern** — the atomizer's README warning and module header are exempt from the
-bypass-flag pattern alone, because they name it to say it was deleted, and are
-scanned for everything else (the review pass showed a first, file-wide version
-letting the excepted module regain a real shell spawn unnoticed). An exception
-that matches nothing is itself a violation. A probe list — ten strings the four
-patterns must catch — runs against the patterns on every invocation, and caught
-the pass's own regression (`"shell": true` with a quoted key) before it
-shipped. Paths are normalised to `/` so the exception keys match on Windows,
-and the scan walks `contributionDirs()` rather than the category roots, so it
-no longer relies on the display-time `_template` filter (itself anchored to a
-path segment now) to hide a placeholder's hits. Check 5 shares the line
-scanner. Proven three ways: a probe file with the new spellings (five hits, each
-named), a real `shell: true` appended to the excepted module (caught at its
-line), then the tree: 118 contributions, no violations. The new prose in this
-fork names none of the strings literally — "a wildcard `Bash` allow", "the
-sandbox-bypass flag" — so it passes its own check without an exception.
+**non-binary** file under the seven contribution directories — text by
+construction, so an extensionless `Dockerfile` or `Procfile`, a
+`settings.json.example` and a Python recipe are all read — is checked for five
+**mechanisms**, not the spellings the two fixed files happened to use: Codex's
+sandbox-bypass flag and its aliases (`--yolo`, `danger-full-access`,
+`--ask-for-approval never`); Claude Code's skip-permissions flag or
+`bypassPermissions` mode; every allow-rule shape that grants all of `Bash` (the
+wildcard forms, a quoted bare `"Bash"`, a line that is only `Bash`, a YAML
+`allowed-tools:` or `--allowedTools` carrying the bare token); a `Bash` prefix
+rule on a network client or interpreter (`curl`, `wget`, `sh`, `node`,
+`python`… followed by `:*` — everything after the prefix is approved); and a
+spawn through a shell in any spelling (the `shell:` option with a non-false
+value, including the `process.platform === "win32"` workaround the Windows
+prose invites; `exec`/`execSync`, which always use one; `os.system`/`os.popen`;
+an explicit `sh -c`/`cmd /c` argv). A hit fails CI with the file, the line and
+the rule. Exceptions are per **file and pattern and counted**: the atomizer's
+README warning and module header are exempt from the bypass-flag pattern for
+exactly one line each, because they name it to say it was deleted, and are
+scanned for everything else — one more line naming the flag (a rebase re-adding
+a usage block beside the warning) fails, one fewer (the prose rewritten) fails
+too. Two probe lists run against the patterns on every invocation: twenty-eight
+strings the five must catch, and eight ordinary lines of this repo's own prose
+and code they must not (`a wildcard \`Bash\` allow`, a regex `.exec(`,
+`shell: false`). The first pass's version had a file-wide exception (the
+excepted module could regain a real shell spawn unnoticed), four literal
+patterns, an extension allowlist that skipped `.py`, `.example` and every
+extensionless file, `\` separators in the exception keys on Windows, a
+`_template` substring filter that would have hidden a contribution named
+`prompt_template`, and a hand-rolled walk; the second pass's version had a
+whole-file liveness test that an anchored pattern could never satisfy, and
+found the `cmd /c start` browser opener in `pull-gmail.mjs` itself — a cmd.exe
+spawn that read the OAuth URL's `&` as a command separator, now `rundll32`'s URL
+handler with no shell. Paths are normalised to `/`, the scan walks
+`contributionDirs()`, and check 5 shares the line scanner. Proven each time:
+probe files with the new spellings (seven hits on the last, an extensionless
+`Dockerfile` among them), a usage block appended beside the excepted warning
+(caught by count), the warning rewritten (caught as stale), then the tree: 118
+contributions, no violations. The new prose in this fork names none of the
+strings literally — the consistency check caught this change's own callout
+spelling a forbidden prefix rule as an example, and it now describes it
+instead.
 
 Three `metadata.json` files take a patch version and today's date
 (`gmail-smart-pull` 1.0.1, `atomizer` 1.0.1, `life-engine` 1.1.1); authorship
-is unchanged, the content is upstream's with a fork delta. One high-effort
-review pass, ten findings: the prefix rule, the dead `EINVAL` hint, the
-PATHEXT/`ENOENT` shape of the common Windows failure, the file-wide exception,
-the four-literal narrowness, the unpinned `date` anchor, the `_template`
-substring filter, the `\` separator in exception keys, and the duplicated
-walk/scan prologue — all fixed here; the gmail copy's error also stops putting
-stderr and stdout (email text) into the run's log by default, behind the same
-`ATOMIZE_DEBUG=1` switch the atomizer uses. The remaining duplication between
-the two recipes' Claude-CLI spawns (two `buildCleanEnv`, two `STRIP_KEYS`, two
-spawn wrappers, now patched twice) is SMD-1317. Upstream status:
+is unchanged, the content is upstream's with a fork delta. Two high-effort
+review passes, ten findings each. The first: the prefix rule, the dead `EINVAL`
+hint, the PATHEXT/`ENOENT` shape of the common Windows failure, the file-wide
+exception, the four-literal narrowness, the unpinned `date` anchor, the
+`_template` substring filter, the `\` separator in exception keys, and the
+duplicated walk/scan prologue. The second: the skill's coordinate substitution
+that an exact rule could never approve (above), the atomizer copy's missing
+stdin `error` listener (a failed spawn or an early exit with a long prompt was
+an uncaught exception, now the same one-line guard the gmail copy has), the
+liveness test that an anchored pattern could never pass, the narrowness of the
+spawn and allow patterns and the `cmd /c` opener they missed, the whole-file
+exception, `pull-gmail.mjs` storing an unknown `--atomize-provider` (or the
+undocumented `GMAIL_ATOMIZE_PROVIDER`) and degrading per email with exit 0 — it
+now refuses at startup, and the variable is in the README's table — the
+extension allowlist, the 160-character log slice that cut the Windows hint in
+half (400 now; the hint carries no email text), and the not-found hint telling
+a user who never set `CLAUDE_CLI_PATH` that their variable was malformed (it
+now says `claude` is not on PATH). All fixed here, except the one both passes
+named: the duplication between the two recipes' Claude-CLI spawns (two
+`buildCleanEnv`, two `STRIP_KEYS`, two spawn wrappers, and now two
+`describeSpawnError`s, each patched twice this ticket) is SMD-1317. The gmail
+copy's error also stops putting stderr and stdout (email text) into the run's
+log by default, behind the same `ATOMIZE_DEBUG=1` switch the atomizer uses.
+Upstream status:
 **contributable in principle** — these are recipe files, not the core server —
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
@@ -5188,12 +5230,14 @@ that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
 carries the audit so a rebase cannot quietly undo it. Today the audited rule is
 shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
-Codex's sandbox-bypass flag, Claude Code's skip-permissions flag or
-`bypassPermissions` mode, a wildcard or bare `Bash` allow, or a shell spawn in
-its JavaScript, JSON or Python spelling, in every text file under those seven
-directories, with a reviewed exception list — per file *and* per pattern — for
-prose that names a flag in order to say it was removed, and a probe list the
-check runs against its own patterns on every run. A
+Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
+or mode, any allow rule that grants all of `Bash` or a prefix of a network
+client or interpreter, or any spawn through a shell (the `shell:` option with a
+non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
+argv), in every non-binary file under those seven directories, with a reviewed
+exception list — per file *and* per pattern, and *counted* — for prose that
+names a flag in order to say it was removed, and probe lists the check runs
+against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. Three sibling tickets hold the rest of the standard —

@@ -158,7 +158,7 @@ The pack file is the handoff. Your ingest pipeline (whatever it is — a `supaba
 | `--override-labels=LABEL1,LABEL2` | `STARRED,IMPORTANT` | Labels that bypass the engagement filter |
 | `--no-atomize` | off | Skip LLM atomization entirely |
 | `--atomize-min-words=N` | `150` | Only atomize messages >= N words |
-| `--atomize-provider=P` | `anthropic` | `anthropic` \| `openrouter` \| `claude-cli` |
+| `--atomize-provider=P` | `anthropic`, or `GMAIL_ATOMIZE_PROVIDER` | `anthropic` \| `openrouter` \| `claude-cli` — any other value refuses the run at startup |
 | `--skip-contacts-refresh` | off | Silence the "contacts cache missing/stale" warning |
 
 ## Sensitivity routing
@@ -309,7 +309,7 @@ Expected. The engagement filter, auto-generated noise filter, and 10-word minimu
 Usually an LLM budget issue or prompt-mangling. With `--atomize-provider=anthropic`, check `ANTHROPIC_API_KEY` is set and has credit. With `--atomize-provider=claude-cli`, make sure you're running from a standalone terminal, not nested inside a Claude Code session. Set `--no-atomize` to confirm the rest of the pipeline works without the LLM hop.
 
 **`claude-cli spawn error: … ENOENT` (or `… EINVAL` on Windows)**
-The CLI is spawned without a shell. `CLAUDE_CLI_PATH` must be a bare executable path — `~`, `$VAR` and trailing flags are not expanded. On Windows, `claude` in your terminal is usually an npm `.cmd` shim, which this spawn cannot find (`ENOENT`) or run (`EINVAL`): set `CLAUDE_CLI_PATH` to the native `claude.exe`, or use `--atomize-provider=anthropic`. The error message carries the same hint.
+The CLI is spawned without a shell. `CLAUDE_CLI_PATH` must be a bare executable path — `~`, `$VAR` and trailing flags are not expanded. On Windows, `claude` in your terminal is usually an npm `.cmd` shim, which this spawn cannot find (`ENOENT`) or run (`EINVAL`): set `CLAUDE_CLI_PATH` to the native `claude.exe`, or use `--atomize-provider=anthropic`. The error message carries the same hint; when `CLAUDE_CLI_PATH` is not set at all it says instead that `claude` was not found on PATH.
 
 **`Cache stale but --skip-contacts-refresh — using old cache`**
 The contacts cache file is older than 7 days. Regenerate it from whatever source you used in [Relationship tier](#relationship-tier), or accept the stale cache for this run.

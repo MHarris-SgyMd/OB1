@@ -238,11 +238,14 @@ async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey,
 
 /** One shape for every way the spawn can fail, with the hint that fits. */
 function describeSpawnError(err) {
-  const bare = "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell";
-  const win = "on Windows, set CLAUDE_CLI_PATH to the real claude executable (the native install), not an npm .cmd shim";
+  const configured = Boolean(process.env.CLAUDE_CLI_PATH);
+  const notFound = configured
+    ? "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell"
+    : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
+  const win = "on Windows that must be the native claude.exe, not an npm .cmd shim (not found without a shell, and refused if named)";
   const hint =
-    process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${win}; ${bare}` :
-    err.code === "ENOENT" ? ` — ${bare}` :
+    process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
+    err.code === "ENOENT" ? ` — ${notFound}` :
     "";
   return new Error(`claude-cli spawn error: ${err.message}${hint}`);
 }
@@ -307,7 +310,8 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-const KNOWN_PROVIDERS = new Set(["anthropic", "openrouter", "claude-cli"]);
+/** The providers this module knows; pull-gmail.mjs refuses any other value at startup rather than per email. */
+export const KNOWN_PROVIDERS = new Set(["anthropic", "openrouter", "claude-cli"]);
 
 /**
  * Atomize a block of text into a list of atomic strings.

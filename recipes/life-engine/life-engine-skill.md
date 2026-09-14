@@ -196,13 +196,12 @@ Reply YES to apply or NO to skip.
 
 ## Weather
 
-During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key). Run the command exactly as written below, with `-s` and the URL in double quotes — the permission rule in README Step 6 is this exact string (edit your latitude and longitude in both places), and a rephrased command pauses the loop on a permission prompt:
+During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key). Fetch it with the **`WebFetch` tool, not a shell command**: the permission rule in README Step 6 is `WebFetch(domain:api.open-meteo.com)`, which admits any URL on that host and nothing else, so your coordinates can come from `life_engine_state` without touching the rule — and no `curl` ever runs, so no shell rule is needed for weather.
 
-```bash
-curl -s "https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto"
-```
+Read `latitude` and `longitude` from `life_engine_state` if set (defaults: `45.52`, `-122.68` for Portland, OR), then call `WebFetch` with:
 
-Read `latitude` and `longitude` from `life_engine_state` if set (defaults: `45.52`, `-122.68` for Portland, OR).
+- **url:** `https://api.open-meteo.com/v1/forecast?latitude=<latitude>&longitude=<longitude>&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto`
+- **prompt:** `Return the hourly.time array and the hourly.precipitation_probability array from this JSON, verbatim, as JSON. Nothing else.`
 
 **How to interpret the response:**
 - The response contains `hourly.time` (array of ISO timestamps) and `hourly.precipitation_probability` (array of percentages, 0-100)

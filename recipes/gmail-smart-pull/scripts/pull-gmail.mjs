@@ -48,7 +48,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 
-import { atomizeText, DEFAULT_ATOMIZE_PROMPT } from "./lib/atomize-text.mjs";
+import { atomizeText, DEFAULT_ATOMIZE_PROMPT, KNOWN_PROVIDERS } from "./lib/atomize-text.mjs";
 import { parseRfc2822Address, normalizeEmail } from "./lib/entity-resolver.mjs";
 import { detectSensitivity } from "./lib/sensitivity.mjs";
 
@@ -445,8 +445,12 @@ async function refreshAccessToken(creds, token) {
 }
 
 function openBrowser(url) {
-  const cmd = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  // No shell on any platform (SMD-1251). The old Windows form, `cmd /c start "" <url>`,
+  // was a cmd.exe spawn, and cmd.exe read the OAuth URL's `&` as a command
+  // separator — the browser opened a truncated URL. rundll32's URL handler takes
+  // the URL as one argument and needs no shell.
+  const cmd = process.platform === "win32" ? "rundll32" : process.platform === "darwin" ? "open" : "xdg-open";
+  const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
   try {
     spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
   } catch {
@@ -941,6 +945,15 @@ function buildAtomRecord(email, runId, ctx = {}, atom = null) {
 
 async function main() {
   const args = parseArgs(process.argv);
+  // Refuse an unknown provider once, here, rather than once per long email: the
+  // per-message catch below falls back to a whole-email record and continues,
+  // so a stale GMAIL_ATOMIZE_PROVIDER=codex (a provider removed on SMD-1251) would
+  // otherwise ingest the whole corpus un-atomized with exit 0 and a stats field
+  // to show it.
+  if (args.atomize && !KNOWN_PROVIDERS.has(args.atomizeProvider)) {
+    console.error(`--atomize-provider / GMAIL_ATOMIZE_PROVIDER '${args.atomizeProvider}' is not a provider this recipe has (known: ${[...KNOWN_PROVIDERS].join(", ")}). Pass --no-atomize to skip atomization.`);
+    process.exit(2);
+  }
   const creds = loadOAuthClient();
   const accessToken = await authorize(creds, args.loginHint);
 
@@ -1155,7 +1168,9 @@ EMAIL-SPECIFIC GUIDANCE:
     } catch (err) {
       // Fall back to single-thought capture; log and continue. Never lose the email.
       atomizeFailures++;
-      console.warn(`   [atomize] ${email.gmailId} failed, capturing whole-email: ${err.message.slice(0, 160)}`);
+      // 400, not 160: the claude-cli spawn hint is ~250 characters and carries no
+      // email text; provider errors that might are already redacted at source.
+      console.warn(`   [atomize] ${email.gmailId} failed, capturing whole-email: ${err.message.slice(0, 400)}`);
       packMemories.push(buildAtomRecord(email, runId, recordCtx));
     }
   }
