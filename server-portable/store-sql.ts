@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMatchRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestamp, normaliseAgentResolution, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -87,7 +87,7 @@ export class SqlStore implements ThoughtStore {
         ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
         ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
-    return rows.map((r: Record<string, unknown>) => normaliseMatchRow(r));
+    return rows.map(normaliseMatchRow);
   }
 
   async keywordThoughts(opts: {
@@ -107,16 +107,7 @@ export class SqlStore implements ThoughtStore {
         ${opts.offset}::int,
         ${opts.filter}::jsonb
       )`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-      occurrences: Number(r.occurrences),
-      // bigint. Bun hands it back as a string, and Number(undefined) is NaN, so
-      // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
-      totalCount: Number(r.total_count ?? 0),
-    }));
+    return rows.map(normaliseKeywordRow);
   }
 
   async hybridThoughts(opts: {
@@ -154,14 +145,7 @@ export class SqlStore implements ThoughtStore {
       SELECT id, content, metadata, created_at, updated_at
       FROM thoughts WHERE id = ${id}::uuid LIMIT 1`;
     if (rows.length === 0) return null;
-    const r = rows[0];
-    return {
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at).toISOString(),
-      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : null,
-    };
+    return normaliseThoughtRecord(rows[0]);
   }
 
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
@@ -180,12 +164,7 @@ export class SqlStore implements ThoughtStore {
       ORDER BY created_at DESC
       LIMIT ${f.limit}::int`;
 
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return rows.map(normaliseListItem);
   }
 
   async countThoughts(): Promise<number> {
@@ -209,7 +188,7 @@ export class SqlStore implements ThoughtStore {
       people?: Record<string, number>;
     };
     const total = Number(s.total ?? 0);
-    const iso = (t: string | null | undefined) => (t ? new Date(t).toISOString() : null);
+    const iso = (t: string | null | undefined) => (t ? isoTimestamp(t) : null);
     return {
       total,
       oldest: iso(s.first_ts),
@@ -231,10 +210,7 @@ export class SqlStore implements ThoughtStore {
       FROM thoughts
       ORDER BY created_at DESC
       LIMIT ${limit}::int OFFSET ${offset}::int`;
-    return rows.map((r: Record<string, unknown>) => ({
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return rows.map(normaliseThoughtMeta);
   }
 
   async captureThought(opts: {
@@ -356,7 +332,7 @@ export class SqlStore implements ThoughtStore {
       type: r.type == null ? null : String(r.type),
       sourceType: r.source_type == null ? null : String(r.source_type),
       derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
+      created_at: isoTimestamp(r.created_at),
       cycle: r.cycle === true,
     }));
   }
@@ -372,7 +348,7 @@ export class SqlStore implements ThoughtStore {
       type: r.type == null ? null : String(r.type),
       sourceType: r.source_type == null ? null : String(r.source_type),
       derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
+      created_at: isoTimestamp(r.created_at),
     }));
   }
 

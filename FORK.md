@@ -5234,22 +5234,21 @@ repo root no longer descends `.claude/worktrees`. Upstream status:
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
 
-### 52. `PostgrestStore.matchThoughts` maps its rows — `created_at` has one format on the vector path whichever store answers (SMD-1040)
+### 52. The PostgREST store maps every row it returns — one `isoTimestamp`, one normaliser per row shape, shared with the SQL store (SMD-1040)
 
 `server-portable/store-postgrest.ts`'s `matchThoughts` returned
 `(data ?? []) as ThoughtMatch[]`: the client's own row under a type that says
 `created_at: string` in ISO form. The SQL store has always mapped the same row
 through `new Date(...).toISOString()`; so had this store's two younger methods,
-`keywordThoughts` (after a review caught a locale-formatted date on it; the
-comment above that mapper keeps the string it produced) and `hybridThoughts`
-(mapped from the day it arrived, change 32). The
-oldest method was never revisited. The SMD-958 review named it (finding T12)
-and it was ticketed rather than fixed, because by then nothing in the product
-read it: `search` and `search_thoughts` go through `hybridThoughts`, and the
-only remaining caller, `preflight.ts`'s 014 and 020 probes, reads row counts.
-That is also why no test noticed. `test-store-postgrest` [3] asserted count,
-content and similarity on a `matchThoughts` row; the format assertion lived in
-[3b] and [3c], on the two methods that had already been fixed.
+`keywordThoughts` (after a review caught a locale-formatted date on it) and
+`hybridThoughts` (mapped from the day it arrived, change 32). The oldest method
+was never revisited. The SMD-958 review named it (finding T12) and it was
+ticketed rather than fixed, because by then nothing in the product read it:
+`search` and `search_thoughts` go through `hybridThoughts`, and the only
+remaining caller, `preflight.ts`'s 014 and 020 probes, reads row counts. That
+is also why no test noticed: `test-store-postgrest` [3] asserted count, content
+and similarity on a `matchThoughts` row, and the format assertion lived in [3b]
+and [3c], on the two methods already fixed.
 
 Measured before fixing, over `compat/supabase-sql` — the fixture the suite
 uses, which is real SQL through Bun's driver — the row's `created_at` was a
@@ -5261,21 +5260,65 @@ itself the same column is a JSON string in Postgres's own form,
 returns for the same row. Both are the class of difference that survives every
 test asserting presence.
 
-The fix is the shape the ticket asked for: one `normaliseMatchRow` in
-`store.ts`, beside `normaliseHybridRow`, and both stores call it — the SQL
-store's inline map is gone too, so the two cannot drift again on this row.
-`similarity` and `score` go through `Number` there for the reason
-`total_count` does in the keyword mappers. The keyword mappers themselves stay
-as two inline copies: they agree today and both suites assert their format,
-so folding them was left for a pass that has a reason to touch them.
+**The first commit was the ticket's shape** — one `normaliseMatchRow` in
+`store.ts` beside `normaliseHybridRow`, both stores calling it — and left the
+keyword mappers as two inline copies because "they agree today and both suites
+assert their format". **A review pass (high effort, triaged) found that fix
+narrower than its own mechanism, and one input it broke on.** Fixed here:
 
-Verified by `test-store-postgrest` [3], which now asserts what `test-store-sql`
-[3] always has: `typeof created_at === "string"` and the ISO regex, plus
-numbers for `similarity` and `score`. Run against `main`'s store before the
-fix it reports `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central
-Daylight Time)` and fails the suite 59/60; with the fix, 60/60. `test-store-sql`
-83/83 and `test-server` 71/71 unchanged. Upstream status: **not applicable** —
-`server-portable/` and its two stores are the fork's (change 11).
+- `matchThoughts` was not the last bare cast. `getThought`, `listThoughts` and
+  `pageThoughtMeta` on the PostgREST store were casts of the same kind, and
+  `getThought` is the one the `fetch` tool prints verbatim — so the
+  store-dependent wire format the ticket says it closes was still open on the
+  one read path a user sees, while the fix had landed on the method only
+  preflight counts. Now `normaliseThoughtRecord`, `normaliseListItem` and
+  `normaliseThoughtMeta`, in `store.ts`, called by both stores; the SQL store's
+  inline copies of each are gone.
+- The keyword mappers are folded too (`normaliseKeywordRow`). The reviewer's
+  argument was exact: "they agree today and both suites assert their format"
+  is verbatim the state T12 found `matchThoughts` in, and the PR was already
+  editing both files at the method above.
+- `toISOString` throws on an infinite timestamp, which the column allows and
+  migration 020 ranks by design (`test-schema` plants both infinities). The
+  bare cast passed such a row through; the new normaliser would have aborted
+  the whole result array on it, and both preflight probes would have degraded
+  to `skip`. One `isoTimestamp` now formats every timestamp the stores return:
+  a finite one as `toISOString`, an infinite one in Postgres's own spelling on
+  either client (Bun hands back the number `±Infinity`, PostgREST the string),
+  and garbage throws with a message naming the value. `test-store-postgrest`
+  [3d] plants a row dated `infinity` and reads it back through `matchThoughts`,
+  `getThought`, `listThoughts` and `pageThoughtMeta`.
+- The first commit's `typeof score === "number"` assertion could not fail:
+  `typeof NaN` is `"number"`, so a dropped or renamed column under `Number()`
+  passes it. `Number.isFinite` now, there and on the pre-existing [3c] line.
+- No suite can produce PostgREST's `+00:00` string — the fixture hands the store
+  a Date — so [3] feeds `isoTimestamp` that string, the space-separated form,
+  a Date, and both spellings of both infinities, and asserts the output.
+- The ISO regex was spelled three times in one suite while the other asserted
+  `endsWith("Z")`, a weaker rule; the two suites held different contracts on
+  the shared normaliser's output. `db/test-support.ts` exports `ISO_RE`
+  (`toISOString`'s exact shape, three fraction digits) and both use it. The
+  first commit's prose that the PostgREST suite "now asserts what
+  `test-store-sql` [3] always has" was wrong on both counts and is gone.
+- The history above was told four times — a docblock, a call-site comment, a
+  test comment and this section. It is told here; the code says the mechanism
+  (`isoTimestamp`'s docblock names the two clients' shapes and points here).
+
+Ticketed: SMD-1328 — a NULL `created_at` comes out of every mapper as the
+epoch, `1970-01-01T00:00:00.000Z`, the `Date(null)` convention the stores have
+always had and `isoTimestamp` now holds in one place; whether it should be
+`null` under a widened type touches six row types and `index.ts`'s readers,
+its own scope. Declined: a per-method conformance sweep over the whole
+`ThoughtStore` interface — with every read method on a `store.ts` normaliser
+and [3d] reading each back, it would re-assert what [3d] asserts; worth
+revisiting when a method returning a new row shape is added.
+
+Verified: `test-store-postgrest` 73/73 (60 before this ticket; the first
+commit's format assertion, run against `main`'s store, reported
+`got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)` and
+failed the suite 59/60), `test-store-sql` 83/83, `test-server` 71/71, `tsc`
+clean. Upstream status: **not applicable** — `server-portable/` and its two
+stores are the fork's (change 11).
 
 ## Detached from the fork network
 

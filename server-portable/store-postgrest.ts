@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMatchRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestamp, normaliseAgentResolution, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -78,12 +78,9 @@ export class PostgrestStore implements ThoughtStore {
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
-    // Mapped through the shared normaliser, not cast (SMD-1040). This was the
-    // oldest method and the last bare cast: `keywordThoughts` below was fixed
-    // when a review caught the locale-formatted date, `hybridThoughts` arrived
-    // mapped, and this one handed `created_at` back in whatever form the client
-    // gave it — a Date over compat/supabase-sql, a `+00:00` string over
-    // PostgREST — under a type that says ISO.
+    // Every row this store returns goes through store.ts's normalisers, never a
+    // cast: PostgREST hands back the function's own column names and its own
+    // timestamp form (store.ts:isoTimestamp says which). SMD-1040.
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseMatchRow);
   }
 
@@ -100,25 +97,7 @@ export class PostgrestStore implements ThoughtStore {
       p_filter: opts.filter,
     });
     if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Record<string, unknown>[];
-    // Mapped rather than cast. PostgREST returns the function's column names —
-    // `total_count`, snake_case — and the store's contract is `totalCount`; a
-    // cast type-checks and delivers `undefined` to every caller.
-    //
-    // `created_at` goes through Date deliberately, and it is the one line here
-    // that a review caught. `String()` on what the driver hands back produced
-    // "Thu Sep 03 2026 15:51:39 GMT-0500 (Central Daylight Time)" — locale- and
-    // timezone-dependent, and not the ISO string the SQL store returns for the
-    // same row. Two stores disagreeing about a field's FORMAT is the class of
-    // difference that survives every test asserting only presence.
-    return rows.map((r) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-      occurrences: Number(r.occurrences),
-      totalCount: Number(r.total_count ?? 0),
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseKeywordRow);
   }
 
   async hybridThoughts(opts: {
@@ -138,8 +117,6 @@ export class PostgrestStore implements ThoughtStore {
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
-    // Mapped through the shared normaliser, not cast: PostgREST returns the
-    // function's snake_case columns and a JSON null for a NULL similarity.
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseHybridRow);
   }
 
@@ -150,7 +127,7 @@ export class PostgrestStore implements ThoughtStore {
       .eq("id", id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as ThoughtRecord | null) ?? null;
+    return data == null ? null : normaliseThoughtRecord(data as Record<string, unknown>);
   }
 
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
@@ -171,7 +148,7 @@ export class PostgrestStore implements ThoughtStore {
 
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtListItem[];
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseListItem);
   }
 
   async countThoughts(): Promise<number> {
@@ -189,7 +166,7 @@ export class PostgrestStore implements ThoughtStore {
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtMeta[];
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseThoughtMeta);
   }
 
   async statsSummary(): Promise<ThoughtStats> {
@@ -398,7 +375,7 @@ export class PostgrestStore implements ThoughtStore {
       type: r.type == null ? null : String(r.type),
       sourceType: r.source_type == null ? null : String(r.source_type),
       derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
+      created_at: isoTimestamp(r.created_at),
       cycle: r.cycle === true,
     }));
   }
@@ -416,7 +393,7 @@ export class PostgrestStore implements ThoughtStore {
       type: r.type == null ? null : String(r.type),
       sourceType: r.source_type == null ? null : String(r.source_type),
       derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
+      created_at: isoTimestamp(r.created_at),
     }));
   }
 

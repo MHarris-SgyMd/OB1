@@ -104,14 +104,36 @@ export type ThoughtHybridMatch = {
 };
 
 /**
- * A `match_thoughts` row as either backend hands it back — into a ThoughtMatch.
- * Shared so the two stores cannot drift on `created_at`'s FORMAT: the SQL
- * driver returns a Date, PostgREST a `+00:00` string, and a bare cast passes
- * both through under a type that says ISO. Every other row mapper in the
- * stores goes through `new Date(...).toISOString()`; this is the one that did
- * not (SMD-1040). `similarity` and `score` go through Number for the same
- * reason `total_count` does in the keyword mappers — a driver that hands back
- * a string for a float8 would otherwise type-check and break the comparisons.
+ * A timestamptz as either backend hands it back, into the one string form the
+ * store's types promise. The two clients disagree: Bun.sql (the SQL store, and
+ * `compat/supabase-sql` under the PostgREST store's tests) returns a Date, or
+ * the number ±Infinity for an infinite timestamp; PostgREST returns a JSON
+ * string in Postgres's own spelling — `2026-09-14T16:27:09.123456+00:00`, or
+ * `infinity`. Nothing else may format a timestamp: a `String()` on the Date
+ * gave a locale string once, and a bare cast gave each caller its client's
+ * shape (SMD-1040; FORK.md §52 has the history).
+ *
+ * Infinite timestamps are legal in the column (migration 020 ranks them by
+ * design) and `toISOString` throws on them, so they keep Postgres's spelling,
+ * the same on both backends. A NULL column comes out as the epoch — the
+ * Date(null) convention every mapper here has always had; whether that should
+ * be `null` under a widened type is SMD-1328.
+ */
+export function isoTimestamp(v: unknown): string {
+  if (v === Infinity || v === "infinity") return "infinity";
+  if (v === -Infinity || v === "-infinity") return "-infinity";
+  const d = v instanceof Date ? v : new Date(v as string);
+  if (Number.isNaN(d.getTime())) throw new Error(`isoTimestamp: not a timestamp: ${String(v)}`);
+  return d.toISOString();
+}
+
+/**
+ * The row normalisers. One per row shape the store interface returns, shared
+ * by both stores, so a field's format or a column's name cannot drift between
+ * them: PostgREST returns the function's snake_case columns, and a cast
+ * type-checks while delivering `undefined` (`total_count` once) or the
+ * client's own value (`created_at`, above). Numeric columns go through
+ * `Number` because a driver may hand a float8 or bigint back as a string.
  */
 export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
   return {
@@ -119,8 +141,21 @@ export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
     content: String(r.content),
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
     similarity: Number(r.similarity),
-    created_at: new Date(r.created_at as string).toISOString(),
+    created_at: isoTimestamp(r.created_at),
     score: Number(r.score),
+  };
+}
+
+export function normaliseKeywordRow(r: Record<string, unknown>): ThoughtKeywordMatch {
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestamp(r.created_at),
+    occurrences: Number(r.occurrences),
+    // bigint. Bun hands it back as a string, and Number(undefined) is NaN, so
+    // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
+    totalCount: Number(r.total_count ?? 0),
   };
 }
 
@@ -137,7 +172,7 @@ export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMat
     id: String(r.id),
     content: String(r.content),
     metadata: (r.metadata ?? {}) as Record<string, unknown>,
-    created_at: new Date(r.created_at as string).toISOString(),
+    created_at: isoTimestamp(r.created_at),
     similarity: r.similarity == null ? null : Number(r.similarity),
     matchedNeedles: strings(r.matched_needles),
     needles: strings(r.needles),
@@ -172,6 +207,32 @@ export type ThoughtMeta = {
   metadata: Record<string, unknown>;
   created_at: string;
 };
+
+export function normaliseThoughtRecord(r: Record<string, unknown>): ThoughtRecord {
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestamp(r.created_at),
+    updated_at: r.updated_at == null ? null : isoTimestamp(r.updated_at),
+  };
+}
+
+export function normaliseListItem(r: Record<string, unknown>): ThoughtListItem {
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestamp(r.created_at),
+  };
+}
+
+export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
+  return {
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestamp(r.created_at),
+  };
+}
 
 /**
  * What thought_stats renders: the corpus total, its date range, and the counts

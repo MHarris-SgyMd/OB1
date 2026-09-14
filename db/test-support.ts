@@ -287,6 +287,14 @@ export async function restoreVectorToPublic(url: string): Promise<void> {
  * in one process cannot pollute each other's tally — and so `report()` owns the
  * exit code, which every suite was also duplicating.
  */
+/**
+ * The one form `store.ts`'s `isoTimestamp` emits for a finite timestamp —
+ * `Date.prototype.toISOString`, always three fraction digits and `Z`. Both
+ * store suites assert against this, not a hand-copied regex or `endsWith("Z")`,
+ * so the two hold the same contract on the shared normalisers' output.
+ */
+export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 export function createAssert(): {
   assert: (cond: unknown, label: string) => void;
   /**

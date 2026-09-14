@@ -13,7 +13,7 @@
  */
 
 import { SqlStore } from "./store-sql.ts";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { createAssert, ISO_RE, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
@@ -125,7 +125,7 @@ console.log("\n[3] Search ranks and filters exactly as the RPC defines");
   assert(all[0].content === "exact", `closest first (${all[0].content})`);
   assert(all[1].content === "near", `then the blend (${all[1].content})`);
   assert(Math.abs(all[0].similarity - 1) < 1e-6, "similarity is a number, ~1.0 for the exact match");
-  assert(typeof all[0].created_at === "string" && all[0].created_at.endsWith("Z"), "created_at is an ISO string");
+  assert(typeof all[0].created_at === "string" && ISO_RE.test(all[0].created_at), `created_at is an ISO string (got ${all[0].created_at})`);
 
   // The strict comparison. An orthogonal row has similarity exactly 0 and must be
   // excluded at threshold 0 — reimplementing this with >= would silently change
@@ -154,7 +154,7 @@ console.log("\n[3b] keywordThoughts is exact where matchThoughts is approximate"
          `an exact needle returns exactly its row (got ${hits.length}: ${hits.map((h) => h.content).join(" | ")})`);
   assert(hits[0].totalCount === 1, `totalCount is mapped from total_count, not left undefined (${hits[0].totalCount})`);
   assert(hits[0].occurrences === 1, `occurrences is a number (${hits[0].occurrences})`);
-  assert(typeof hits[0].created_at === "string" && hits[0].created_at.endsWith("Z"),
+  assert(typeof hits[0].created_at === "string" && ISO_RE.test(hits[0].created_at),
          "created_at is normalised to an ISO string, as every other store method does");
 
   // The prefix reaches all three, and totalCount says so on every row so a
@@ -218,7 +218,7 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
          `a hit with no vector reports similarity null, not 0 (${JSON.stringify(hits[1]?.similarity)})`);
   assert(hits.every((h) => h.literalOnly === true && h.needles.join() === "SMD-507"), "every row carries the query-level fields");
   assert(typeof hits[0].score === "number" && hits[0].score > hits[2].score, "the score is a number and orders the rows");
-  assert(typeof hits[0].created_at === "string" && hits[0].created_at.endsWith("Z"), "created_at is normalised to an ISO string, as every other store method does");
+  assert(typeof hits[0].created_at === "string" && ISO_RE.test(hits[0].created_at), "created_at is normalised to an ISO string, as every other store method does");
 
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: unit(0), threshold: -1, limit: 10, filter: { kind: "a" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter reaches the keyword arm");
