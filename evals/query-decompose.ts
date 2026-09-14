@@ -15,21 +15,23 @@
  * so each event's session lands mid-pool and no reorder of that one pool recovers
  * the set. Every prior lever operated on one vector's ranking of one pool.
  *
- * The answer this harness records: decomposition is necessary but NOT sufficient,
- * and it corrects the ticket's premise. An LLM cleanly splits the multi-hop
- * questions, and each event's gold rises up its OWN sub-pool (rank-0 share
- * 39%->61%); union coverage reaches the single-vector oracle. Yet strict
- * recall_all@5 barely moves (best +1.7 multi-session, flat temporal; RRF fusion
- * regresses temporal). The reason: in the blended baseline ~85% of golds already
- * sit at rank <=2 individually — the miss was never "each event is mid-pool", it
- * is SET ASSEMBLY (fitting 2-3 mutually-competing golds plus distractors into
- * five). Decomposition removes gold-vs-gold competition but the merge re-introduces
- * gold-vs-distractor competition that no dumb fusion (RRF / round-robin / max-sim)
- * can adjudicate. That last-mile discrimination is a reranker's single-hop
- * strength (any-hit ~99%) — which is why a reranker DESTROYS pre-decomposition
- * sets (SMD-1304) yet belongs AFTER decomposition. Decomposition alone is declined
- * for the default path; decompose-then-rerank is the gated follow-up this measures
- * the headroom for.
+ * The answer this harness records: decomposition is declined, and it corrects the
+ * ticket's premise. Best strict recall_all@5 is +1.7 (multi-session) and flat
+ * temporal; RRF fusion regresses temporal. The premise was that one blended vector
+ * ranks each event mid-pool — but the single blended pool ALREADY covers the whole
+ * set (that IS the oracle, 99.2% / 95.3%), and ~85% of golds already sit at rank
+ * <=2 individually. On the fired questions, decomposition's union covers the SAME
+ * golds as the blended pool (a crude heuristic split even LOSES temporal coverage),
+ * so decomposition adds no coverage; an LLM split cleanly lifts each event's gold
+ * up its OWN sub-pool (rank-0 share 39%->61%), but that does not move strict either.
+ * The miss is SET ASSEMBLY: fitting 2-3 mutually-competing golds plus their
+ * distractors into five slots. Decomposition removes gold-vs-gold competition (each
+ * gold in its own pool) but the merge re-introduces gold-vs-distractor competition
+ * that no dumb fusion (RRF / round-robin / max-sim) can adjudicate. That last-mile
+ * discrimination is a reranker's single-hop strength (any-hit ~99%) — which is why
+ * a reranker DESTROYS pre-decomposition sets (SMD-1304) yet belongs AFTER
+ * decomposition. Decomposition alone is declined for the default path;
+ * decompose-then-rerank is the gated follow-up this measures the headroom for.
  *
  * The mechanism, and what this harness measures: retrieve with SEVERAL
  * vectors. Decompose the question into independent single-fact sub-questions,
@@ -167,36 +169,44 @@ const DECOMP_SYS =
   "(3) Each sub-question must stand alone: resolve pronouns and keep enough context to retrieve the right memory on its own. " +
   "(4) Return ONLY a JSON array of strings and nothing else.";
 
-// LLM split cache: (model → question → sub-questions), persisted so a SUBK/fuse
-// sweep pays the LLM cost once. Keyed by model so a model swap does not read a
-// stale split.
+// LLM split cache: (model+prompt → question → sub-questions), persisted so a
+// SUBK/fuse sweep pays the LLM cost once. Keyed by model AND a fingerprint of the
+// system prompt + temperature, so neither a model swap nor a prompt edit reads a
+// stale split. Only genuine splits are cached: a fetch/parse failure falls back to
+// [question] WITHOUT caching, so one flaky call cannot permanently poison the file.
+const djb2 = (s: string) => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i); return (h >>> 0).toString(36); };
+const CACHE_KEY = `${LLM}@t0#${djb2(DECOMP_SYS)}`;
 const CACHE_PATH = process.env.OB1_DECOMP_CACHE;
 const llmCache: Record<string, Record<string, string[]>> =
   CACHE_PATH && existsSync(CACHE_PATH) ? JSON.parse(readFileSync(CACHE_PATH, "utf8")) : {};
 let cacheDirty = false;
 
 async function llmSplit(question: string): Promise<string[]> {
-  const bucket = (llmCache[LLM] ??= {});
+  const bucket = (llmCache[CACHE_KEY] ??= {});
   if (bucket[question]) return bucket[question];
   const subs = await llmSplitUncached(question);
-  bucket[question] = subs; cacheDirty = true;
-  return subs;
+  if (subs) { bucket[question] = subs; cacheDirty = true; return subs; }
+  return [question]; // failure: fall back, but do not cache the fallback
 }
 
-async function llmSplitUncached(question: string): Promise<string[]> {
-  const r = await fetch(`${EVAL_BASE}/chat/completions`, { method: "POST", headers: EVAL_HEADERS,
-    body: JSON.stringify({ model: LLM, temperature: 0, messages: [
-      { role: "system", content: DECOMP_SYS },
-      { role: "user", content: question }] }) });
-  if (!r.ok) return [question];
+/** Returns the parsed sub-questions, or null on a fetch/parse failure (uncached). */
+async function llmSplitUncached(question: string): Promise<string[] | null> {
+  let r: Response;
+  try {
+    r = await fetch(`${EVAL_BASE}/chat/completions`, { method: "POST", headers: EVAL_HEADERS,
+      body: JSON.stringify({ model: LLM, temperature: 0, messages: [
+        { role: "system", content: DECOMP_SYS },
+        { role: "user", content: question }] }) });
+  } catch { return null; }
+  if (!r.ok) return null;
   const txt = ((await r.json()) as any).choices?.[0]?.message?.content ?? "";
   const m = txt.match(/\[[\s\S]*\]/);
-  if (!m) return [question];
+  if (!m) return null;
   try {
     const arr = JSON.parse(m[0]) as unknown[];
     const subs = [...new Set(arr.filter((x): x is string => typeof x === "string").map((s) => s.trim()).filter(Boolean))];
-    return subs.length ? subs.slice(0, MAX_SUBQ) : [question];
-  } catch { return [question]; }
+    return subs.length ? subs.slice(0, MAX_SUBQ) : [question]; // a valid empty parse = atomic
+  } catch { return null; }
 }
 
 // ── Retrieval + fusion ───────────────────────────────────────────────────────
@@ -259,7 +269,12 @@ if (ARMS.includes("oracle")) {
 // Shared runner for the two decomposition arms.
 async function runDecomp(name: string, decompose: (q: string) => Promise<string[]> | string[]) {
   console.log(`\n  --- ${name} (subk=${SUBK}, fuse=${FUSE}, llm=${name.includes("llm") ? LLM : "—"}) ---`);
-  const strict: Agg = {}; const cover: Agg = {}; // cover = union coverage ceiling (oracle over the union)
+  const strict: Agg = {}; const cover: Agg = {}; // cover = union coverage ceiling (all questions)
+  // Coverage restricted to FIRED questions, where decomposition actually does
+  // something: union vs the one blended pool over the SAME question set. On atomic
+  // questions the union IS the blended pool (basePools), so overall coverage is
+  // definitionally ~oracle; this pair is the non-definitional comparison.
+  const coverFiredU: Agg = {}; const coverFiredB: Agg = {};
   const probe: Record<string, Record<string, number>> = {}; // slice -> best sub-pool gold-rank histogram
   const probeBlend: Record<string, Record<string, number>> = {}; // slice -> blended-pool gold-rank histogram
   const dump: any[] = [];
@@ -292,8 +307,21 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
     cover[q.question_type][1]++;
     const gold = new Set(q.answer_session_ids); const hay = new Set(q.haystack_session_ids); const present = new Set<string>();
     for (const p of pools) for (const c of p) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) present.add(sid);
-    if (gold.size <= 5 && [...gold].every((g) => present.has(g))) cover[q.question_type][0]++;
-    // invariant: an atomic question must match baseline's top-5 sessions exactly.
+    const covered = (set: Set<string>) => gold.size <= 5 && [...gold].every((g) => set.has(g));
+    if (covered(present)) cover[q.question_type][0]++;
+    if (subs.length > 1) { // fired-only: union vs blended over the same questions
+      const blend = new Set<string>();
+      for (const c of basePools[i]) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) blend.add(sid);
+      coverFiredU[q.question_type] ??= [0, 0]; coverFiredB[q.question_type] ??= [0, 0];
+      coverFiredU[q.question_type][1]++; coverFiredB[q.question_type][1]++;
+      if (covered(present)) coverFiredU[q.question_type][0]++;
+      if (covered(blend)) coverFiredB[q.question_type][0]++;
+    }
+    // guard: an atomic question takes the baseline path — it reuses basePools[i]
+    // (the same pool the baseline arm scores) and fuse() returns a single pool
+    // unchanged, so its top-5 equals baseline. This confirms the code routes an
+    // atomic decomposition through that path; it is true by construction, not an
+    // independent replication of production retrieval.
     if (subs.length === 1) { invariantN++;
       const a = sessionsOf(ids, q, 5).join(","); const b = sessionsOf(basePools[i].map((c) => c.id), q, 5).join(",");
       if (a === b) invariantOk++;
@@ -307,7 +335,7 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
         for (const c of pool) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) if (!seen.includes(sid)) seen.push(sid);
         return seen.indexOf(g);
       };
-      const bucket = (r: number) => r === 0 ? "0" : r <= 2 ? "1-2" : r <= 4 ? "3-4" : r <= 9 ? "5-9" : r >= 0 ? "10+" : "absent";
+      const bucket = (r: number) => r < 0 ? "absent" : r === 0 ? "0" : r <= 2 ? "1-2" : r <= 4 ? "3-4" : r <= 9 ? "5-9" : "10+";
       const blank = () => ({ "0": 0, "1-2": 0, "3-4": 0, "5-9": 0, "10+": 0, absent: 0 });
       for (const g of gold) {
         if (!hay.has(g)) continue;
@@ -322,11 +350,13 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
     if (process.env.OB1_DECOMP_DUMP) dump.push({ qid: q.question_id, type: q.question_type, question: q.question, subs });
   }
   report(`${name} strict@5`, strict);
-  report(`${name} union-coverage ceiling`, cover);
+  report(`${name} union-coverage (all q)`, cover);
+  report(`${name} coverage, fired q: union`, coverFiredU);
+  report(`${name} coverage, fired q: blended`, coverFiredB);
   const firePct = pct(fired, questions.length);
   console.log(`  fire ${firePct} (${fired}/${questions.length} decomposed >1); mean sub-qs when fired ${(subqFiredTotal / (fired || 1)).toFixed(2)}; ` +
-    `atomic invariant ${invariantOk}/${invariantN} match baseline`);
-  console.log(`  cost: decompose ${(decompMs / 1000).toFixed(1)}s total, +${embedCalls} embed calls, +${dbCalls} extra match_thoughts`);
+    `atomic path reuses baseline pool ${invariantOk}/${invariantN}`);
+  console.log(`  cost: decompose ${(decompMs / 1000).toFixed(1)}s total, +${embedCalls} sub-query embeddings (batched 32/request), +${dbCalls} extra match_thoughts calls`);
   if (process.env.OB1_DECOMP_PROBE) for (const t of SLICES) if (probe[t]) {
     const line = (b: Record<string, number>) => `rank0 ${b["0"]} | 1-2 ${b["1-2"]} | 3-4 ${b["3-4"]} | 5-9 ${b["5-9"]} | 10+ ${b["10+"]} | absent ${b.absent}`;
     const n = Object.values(probe[t]).reduce((x, y) => x + y, 0);
@@ -339,11 +369,11 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
 if (ARMS.includes("decomp-heur")) await runDecomp("decomp-heur", heuristicSplit);
 if (ARMS.includes("decomp-llm")) await runDecomp("decomp-llm", llmSplit);
 
-console.log(`\nBaseline and the atomic path are the identical single-vector pipeline, so a`);
-console.log(`question the decomposer leaves whole behaves exactly as today (invariant above).`);
-console.log(`Measured finding: decomposition lifts each event's gold up its OWN sub-pool`);
-console.log(`(rank-0 share ~39%->61%), and union coverage reaches the oracle — but strict@5`);
-console.log(`barely moves, because the multi-hop miss is set ASSEMBLY, not per-event retrieval:`);
-console.log(`fusion cannot tell each sub-pool's one gold from its topical distractors. That`);
-console.log(`discrimination is a reranker's single-hop job (any-hit ~99%) — the gated next step.`);
+console.log(`\nAn atomic question reuses the baseline pool by construction (guard above). The`);
+console.log(`blended pool already covers the set (the oracle), and on fired questions the`);
+console.log(`decomposed union covers no more; an LLM split only lifts each event's gold up its`);
+console.log(`OWN sub-pool (rank-0 share ~39%->61%). Strict@5 still barely moves, because the`);
+console.log(`multi-hop miss is set ASSEMBLY, not coverage or per-event rank: fusion cannot tell`);
+console.log(`each sub-pool's one gold from its topical distractors. That discrimination is a`);
+console.log(`reranker's single-hop job (any-hit ~99%) — the gated next step.`);
 await sql.end();

@@ -1004,8 +1004,9 @@ sub-question, union, fuse. This is the standard 2025–26 multi-hop RAG pipeline
 The harness is `evals/query-decompose.ts`; every arm runs the identical pipeline
 (decompose → per-sub-query top-k → fuse → take five distinct sessions), and the
 baseline's decomposer just returns the question whole, so a question left atomic
-behaves exactly as today — an invariant the harness asserts (146/146 for the LLM
-split, 207/207 for the heuristic).
+reuses the baseline pool unchanged — the harness confirms it routes every atomic
+question through that path (146/146 for the LLM split, 207/207 for the heuristic;
+true by construction rather than an independent replication).
 
 An LLM (`qwen2.5:7b`, temperature 0) decomposes cleanly and fires on 41% of the
 248 multi-session + temporal questions (mean 2.25 sub-questions); a cheap
@@ -1018,33 +1019,41 @@ baseline 79.3% / 79.5% and the top-30 oracle 99.2% / 95.3% (`subk` = 20):
 | round-robin (interleave rank-1s) | **81.0%** / 79.5% | 80.2% / 78.7% |
 | max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
 
-**Decomposition does exactly what the ticket predicted at the retrieval layer, and
-it is not enough.** Union coverage — is every gold present *somewhere* in the
-merged sub-pools — reaches **99.2% / 95.3%** at `subk` 20, *equal to* the
-single-vector oracle, and temporal rises to 96.1% at `subk` 30, *above* it:
-decomposition retrieves the whole set, including golds the one blended vector's
-top-30 missed. And it lifts each event's gold up its *own* sub-pool, measured on
-the fired questions (best rank of each gold within any single sub-pool, vs its
-rank in the one blended pool; `subk` 20):
+(The RRF row is byte-identical across the two arms — a real result, re-run to
+confirm, not a duplicated cell. RRF's flat k₀ = 60 weighting makes the merged
+order turn on cross-sub-pool multiplicity, and the questions the LLM decomposes
+beyond the heuristic are the counting ones where that reordering changes no net
+outcome, so both arms land on the same tally.)
 
-| gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ |
-| --- | --- | --- | --- | --- | --- |
-| multi-session, blended pool | 44 | 53 | 6 | 9 | 2 |
-| multi-session, best sub-pool | **70** | 32 | 7 | 3 | 2 |
-| temporal, blended pool | 46 | 54 | 5 | 11 | 5 |
-| temporal, best sub-pool | **74** | 31 | 6 | 8 | 2 |
+**It corrects the ticket's premise, and it is not enough.** The premise was that
+one blended vector ranks each event mid-pool. But the one blended pool *already*
+covers the whole set — that is exactly what the oracle (99.2% / 95.3%) says — and
+in that pool ~85% of golds already sit at rank ≤ 2 individually. Decomposition
+adds no coverage: on the fired questions, its union covers the **same** golds as
+the blended pool (LLM 100% / 96.2% union = 100% / 96.2% blended), and the crude
+heuristic split even *loses* temporal coverage (86.4% union vs 90.9% blended,
+its bare "Y"-fragment sub-queries being worse retrieval queries). What an LLM
+split *does* change is per-event **rank** — each event's gold, given its own
+sub-pool, rises (best rank of each gold within any single sub-pool, vs its rank in
+the one blended pool; fired questions, `subk` 20):
+
+| gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ | absent |
+| --- | --- | --- | --- | --- | --- | --- |
+| multi-session, blended pool | 44 | 53 | 6 | 9 | 2 | 0 |
+| multi-session, best sub-pool | **70** | 32 | 7 | 3 | 2 | 0 |
+| temporal, blended pool | 46 | 53 | 5 | 11 | 5 | 1 |
+| temporal, best sub-pool | **74** | 30 | 6 | 8 | 2 | 1 |
 
 Rank-0 share goes 39% → 61% and the deep tail shrinks — yet strict@5 gains at most
 +1.7 points (multi-session) and is flat-to-negative on temporal; RRF actively
 *regresses* temporal, because it sums shared appearances, so a topical distractor
-in two sub-pools outscores each event's single-pool gold. `subk` 10 → 30 lifts
-coverage (temporal 93.7% → 96.1%) but leaves strict flat, so the bottleneck is not
-scan depth.
+in two sub-pools outscores each event's single-pool gold. `subk` 10 → 30 barely
+moves strict, so the bottleneck is not scan depth either.
 
 The reason strict does not move is that **the multi-hop miss was never "each event
-is mid-pool."** In the blended baseline ~85% of golds already sit at rank ≤ 2
-*individually*; the failure is **set assembly** — fitting 2–3 mutually-competing
-golds plus their distractors into five slots of one ranking. Decomposition removes
+is mid-pool" — it is set assembly.** With coverage already there and each gold
+individually near the top, the failure is fitting 2–3 mutually-competing golds
+plus their distractors into five slots of one ranking. Decomposition removes
 gold-vs-gold competition (each gold in its own pool at rank 0 61% of the time) but
 the merge re-introduces gold-vs-distractor competition, and no dumb fusion (RRF,
 round-robin, max-sim) can tell each sub-pool's one gold from its topical
