@@ -5886,6 +5886,35 @@ comments); `--url` twice ran against the first (refused). Not taken: one
 `scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
 not need, and folding them is a change to that tool.
 
+**Review, fifth pass (high), at the user's call, triaged.** Three of its
+findings were consequences of the fourth's canonical-width change, and they
+were right: the SQL grammar had become narrower than 021's hashed `[0-9]+`, so
+an accepted row under a leading-zero key was evidence to 021 and invisible to
+the gate and to 030 — the gate's invariant broken by the fix meant to keep it;
+and tightening `parseReembedKey` had silenced three refusals (`--job
+reembed:other@01024` ran as a pass to the shell's model, `--retire` no longer
+knew the current key, preflight's advice flipped). Both are 021's grammar
+again, byte for byte; "the model's own key" is the canonical spelling on both
+sides, the SQL recomposing the key from its captures as `poolModelFor`
+compares it. 030's first statement required the acceptance to be the thought's
+*latest* row, so a paste's mislabel refused and accepted again under another
+model's own key kept the wrong label for good — any accepted own-key row for
+the label's model counts now, since a later acceptance under another key
+vouches for nothing about this label and a later real pass moved `updated_at`
+past the bound; [8] plants that row. The width joins the pre-`BEGIN`
+judgements, read from the column (006 refused it inside the transaction, after
+a green dry run). Smaller: the `update_thought` probe is asked only where the
+vector type resolves (PG15 without pgvector raised on parsing the signature);
+the label column is read by relation, not by name across every schema the role
+sees; the printed requeue statement is `requeue()`'s (the attempts reset,
+`claimed_at` kept); `explainFailure` knows which mode it speaks for (the
+pgvector remedy's last sentence and the lock-timeout line differ); two latent
+type errors — a `let` narrowed to `null` across a callback, and the missing
+declarations in `config.d.mts` — are gone; the dead template values with them.
+Left as tidy-ups: the fragment evaluated twice in 030, the unbounded hazard
+query, the duplicated `requeue()`/`wayBack` and argument-scanner spellings, the
+`drifted` shadow, and the plain loop's dry-run floor branch.
+
 **Review, fourth pass (high), at the user's call, triaged.** The loop had
 ended; this pass found four defects worth the name in the third's seams, and
 took them. 030's first statement bounded on the claim, so a correct label the
@@ -5975,18 +6004,22 @@ flag, a flag the runner does not have, `--baseline` beside it, a drifted
 recorded file; and that the re-applied schema has a fresh apply's columns and
 functions; that `--dry-run` from a differing shell says "would refuse"; and
 that a plain run on the baselined brain, 030 pending, fails at 030 naming what
-is missing and `--reapply`. [8] applies 030 onto a populated 029 holding eleven
-labels — a
+is missing and `--reapply`, and that a shell whose width differs from the
+column is refused before `BEGIN`, dry run included. [8] applies 030 onto a
+populated 029 holding twelve labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
 a mislabel edited since (stays), a head window the worker wrote between the
 claim and the failure (stays), a capture the server made between the enqueue
-and the claim (stays — the bound is the enqueue), an unlabelled thought with an
-earlier pass then an acceptance (labelled at the earlier pass),
+and the claim (stays — the bound is the enqueue), a paste's mislabel refused
+and accepted again under another model's own key (back to NULL — the later
+acceptance is the latest row and vouches for nothing about the label), an
+unlabelled thought with an earlier pass then an acceptance (labelled at the
+earlier pass),
 a mislabel with an earlier pass (taken back and relabelled at it, in the one
 block), a plain row (labelled), a label with no claim row (not read) — no
 `updated_at` moved, no audit row, the trigger enabled, and a second apply a
-no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 97/97,
+no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 99/99,
 `test-preflight` 174/174, `test-schema` 640/640, `test-live` 419/419, `tsc`
 clean, fork checker PASS (on the tree with SMD-1304's and SMD-1294's changes
 merged in). Upstream status:

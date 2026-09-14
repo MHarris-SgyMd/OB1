@@ -192,6 +192,11 @@ export function summariseCorpusByModel(
 export const ACCEPTED_CAVEAT_PREFIX: string;
 /** Per embedding_model, the rows with a vector whose thought has a standing accepted row under $1, the model's own key exactly; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
 export const ACCEPTED_BY_MODEL_SQL: string;
+/** 021's claim-key grammar as Postgres regexes: the model up to the last "@", and the width after it. */
+export const REEMBED_KEY_MODEL_SQL_RE: string;
+export const REEMBED_KEY_DIM_SQL_RE: string;
+/** Every succeeded claim row under a key naming a model, with model, own_key, accepted, its timestamps and the thought's latest finished_at — what 030 and migrate.ts --reapply's gate read. Needs 015. */
+export const CLAIM_EVIDENCE_ROWS_SQL: string;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */
 export function versionAtLeast(version: string, major: number, minor?: number, patch?: number): boolean;

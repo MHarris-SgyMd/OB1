@@ -454,6 +454,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const otherDry = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
   assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out),
          `…and --dry-run from that shell says it would refuse, the same judgement (exit ${otherDry.code})`);
+  // The width is the column's, judged before BEGIN in both modes — 006 would
+  // refuse it inside the transaction, after a dry run had said green.
+  const otherWidth = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_DIM: "9" }, cwd: HERE });
+  assert(otherWidth.code === 2 && /would refuse --reapply: thoughts\.embedding is vector\(8\) and this shell says OB1_EMBEDDING_DIM=9/.test(otherWidth.out) && /Set OB1_EMBEDDING_DIM=8/.test(otherWidth.out),
+         `a shell whose width differs from the column is refused before BEGIN, dry run included (exit ${otherWidth.code})`);
   // An acceptance under a SUFFIXED key over an unlabelled thought: 021's block,
   // run as written, would label it, and 030 cannot tell that label from the
   // server's own. Refused, listing the row; returned to its pool, the run goes.
@@ -472,12 +477,13 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
            new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(hazard.out) && new RegExp(`    ${writtenSince}  reembed:stub-embed@8`).test(hazard.out) &&
            // This schema predates 021, so the way back is not a reembed.ts command it would refuse but the statement --retry-fallbacks runs.
            /This schema predates 021, so reembed\.ts refuses to run against it/.test(hazard.out) &&
-           new RegExp(`UPDATE thought_work_claims SET status = 'pending', claimed_at = NULL, finished_at = NULL, ttl_expires_at = NULL, last_error = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id = '${suffixedHazard}';`).test(hazard.out) &&
+           // requeue()'s statement, as reembed.ts spells it: the attempts reset too, claimed_at kept.
+           new RegExp(`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id = '${suffixedHazard}';`).test(hazard.out) &&
            !/--retry-fallbacks, which spends/.test(hazard.out),
          `the two acceptances 021 would label and 030 would leave refuse the re-run, naming the rows and a way back this schema allows (exit ${hazard.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // What --retry-fallbacks does to the rows: back to the pool, the caveat gone.
-  await sql`UPDATE thought_work_claims SET status = 'pending', claimed_at = NULL, finished_at = NULL, last_error = NULL WHERE work_type = ${SUFFIXED} OR thought_id = ${writtenSince}::uuid`;
+  await sql`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = ${SUFFIXED} OR thought_id = ${writtenSince}::uuid`;
   // A session holding a lock on thoughts — an idle transaction, a server left
   // running: 001's DROP TRIGGER wants ACCESS EXCLUSIVE, the 10 s lock_timeout
   // fails it, and the one transaction rolls back with nothing changed.
@@ -487,7 +493,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const locked = await migrate("--reapply");
   await holder.unsafe("ROLLBACK");
   await holder.close();
-  assert(locked.code === 1 && /001_core_schema\.sql\s+FAILED: .*lock timeout/.test(locked.out) && /A lock was not granted within 10 s/.test(locked.out) &&
+  assert(locked.code === 1 && /001_core_schema\.sql\s+FAILED: .*lock timeout/.test(locked.out) && /A lock was not granted within the re-run's 10 s lock_timeout/.test(locked.out) &&
            /it rolled back, nothing was re-applied or applied, and the schema is as it was/.test(locked.out) && !/re-applied\b(?! or)/.test(locked.out.replace(/nothing was re-applied or applied/, "")),
          `a held lock fails the re-run within the lock timeout, at the first file (exit ${locked.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and the one transaction rolled back: no column, the ledger as before");
@@ -622,6 +628,12 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   // the server's, and the bound — the enqueue — says so.
   const capturedBeforeClaim = await plant("captured at M by the server between the row's enqueue and its claim; the attempt failed and was accepted", M, "90 minutes");
   await row(OWN, capturedBeforeClaim, { accepted: true, enqueuedAgo: "2 hours", claimedAgo: "1 hour", ago: "0 seconds" });
+  // A paste's mislabel, then a switch to another model that pooled the thought
+  // (its label is not B), refused, and accepted again: the later acceptance
+  // under B's key is the latest row, and vouches for nothing about M.
+  const twiceAccepted = await plant("labelled at M by a paste over an acceptance under M's own key; later refused and accepted under B's own key", M);
+  await row(OWN, twiceAccepted, { accepted: true, ago: "1 hour" });
+  await row(OTHER_OWN, twiceAccepted, { accepted: true });
 
   const stampsBefore = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
@@ -644,6 +656,7 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   assert((await label(untouched)) === M, "a label with no claim row is not this migration's to read");
   assert((await label(headWindow)) === M, "a thought the worker itself labelled between the claim and the failure keeps its label — written after the enqueue");
   assert((await label(capturedBeforeClaim)) === M, "a thought the server captured at the model between the enqueue and the claim keeps its label — the pool saw it unlabelled, the server wrote it since");
+  assert((await label(twiceAccepted)) === null, "a mislabel accepted again under another model's own key goes back to unknown — the later acceptance is the latest row, and vouches for nothing about the label");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );

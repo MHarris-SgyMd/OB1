@@ -32,12 +32,14 @@
 --
 --   1. A label whose ONLY evidence is an acceptance goes back to NULL. An
 --      accepted row under the model's OWN key (exactly `reembed:<model>@<dim>`,
---      no suffix) stands at the thought's latest finished_at among its
---      succeeded rows under keys naming a model, the thought is labelled with
---      that key's model, it has a vector, and nothing has written it since
---      the row was ENQUEUED (`enqueued_at`; `claimed_at`, then `finished_at`,
---      for a row written by hand without one; a row with none is never
---      standing). The enqueue, not the claim or the release: the pool is
+--      no suffix) exists for the thought — the latest row or not: a later
+--      acceptance under ANOTHER model's key does not vouch for this label,
+--      and a later real pass wrote the vector, moving updated_at past the
+--      bound below — the thought is labelled with that key's model, it has a
+--      vector, and nothing has written it since the row was ENQUEUED
+--      (`enqueued_at`; `claimed_at`, then `finished_at`, for a row written by
+--      hand without one; a row with none is never standing). The enqueue,
+--      not the claim or the release: the pool is
 --      built from the rows not at the model, so a thought the pool took was
 --      not at it THEN — and a label saying it is, with nothing written since,
 --      can only be 021's block having trusted the acceptance. Anything
@@ -47,8 +49,6 @@
 --      accepts a thought already at the target whatever its timestamps); a
 --      head window or bare windows the worker wrote through update_thought
 --      before the row's outcome was chosen; an edit or re-capture since.
---      Every accepted own-key row at the latest time counts, not one of a
---      tie (see the CLAIM_EVIDENCE_ROWS note below).
 --   2. 021's rule, with accepted rows excluded from the claim rows it reads:
 --      the latest succeeded row that is NOT an acceptance decides, so a
 --      thought an earlier pass did write is labelled at that pass's model —
@@ -59,17 +59,16 @@
 --   CLAIM_EVIDENCE_ROWS_SQL, substituted here as {{CLAIM_EVIDENCE_ROWS}} and
 --   read as a constant by `migrate.ts --reapply`'s gate, so what the gate
 --   refuses and what this file corrects are decided by one spelling: every
---   succeeded row under a key naming a model (the grammar is config.mjs's
---   too, with a canonical width — `@08` names no model on either side), its
---   model, whether the key is the model's own, whether the row is an
---   acceptance (`last_error IS NOT NULL AND starts_with(…)`; starts_with(NULL,
---   …) is NULL, and NOT NULL is not true), its timestamps, and the latest
---   finished_at among the thought's rows. Statement 1 takes EVERY accepted
---   own-key row at that latest time: two releases in one transaction share
---   now(), 021's DISTINCT ON picks one of them without a tiebreak, and a
---   reader that picked the other would leave 021's label standing. Statement
---   2 chooses one row, the key breaking the tie, so its choice is the same on
---   every run.
+--   succeeded row under a key naming a model — the grammar is 021's, byte for
+--   byte (`[0-9]+`), since 021 decides what is evidence and a narrower reader
+--   would miss rows it labels from; "the model's own key" is the canonical
+--   spelling, as poolModelFor has it — its model, whether the key is the
+--   model's own, whether the row is an acceptance (`last_error IS NOT NULL
+--   AND starts_with(…)`; starts_with(NULL, …) is NULL, and NOT NULL is not
+--   true), its timestamps, and the latest finished_at among the thought's
+--   rows (the gate's, to match what 021 picks from a tie). Statement 2 chooses
+--   one row, the key breaking a tie on finished_at (two releases in one
+--   transaction share now()), so its choice is the same on every run.
 --
 -- What it leaves
 --   An acceptance under a SUFFIXED key (`reembed:<model>@<dim>:ctx`, a
@@ -130,7 +129,7 @@ BEGIN
   -- gated on the migrator in the compose stack. Under --reapply both are in
   -- place by the time this file runs.
   IF to_regclass('thought_work_claims') IS NULL
-     OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model') THEN
+     OR NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) THEN
     RAISE EXCEPTION USING
       MESSAGE = format('migration 030 needs 015 (thought_work_claims) and 021 (thoughts.embedding_model); this schema lacks %s',
                        CASE WHEN to_regclass('thought_work_claims') IS NULL THEN 'thought_work_claims' ELSE 'thoughts.embedding_model' END),
@@ -148,14 +147,12 @@ BEGIN
   ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at;
 
   -- 1. The label 021's block wrote from an acceptance under the own key: back
-  --    to unknown. EVERY accepted own-key row at the thought's latest time
-  --    counts (021 picks one of a tie and says nothing about which); the bound
-  --    is the row's enqueue, see the header.
+  --    to unknown. Any accepted own-key row for the label's model, the latest
+  --    or not; the bound is the row's enqueue, see the header.
   UPDATE thoughts t
      SET embedding_model = NULL
     FROM ({{CLAIM_EVIDENCE_ROWS}}) e
    WHERE t.id = e.thought_id
-     AND e.finished_at = e.latest
      AND e.accepted AND e.own_key
      AND t.embedding_model = e.model
      AND t.embedding IS NOT NULL

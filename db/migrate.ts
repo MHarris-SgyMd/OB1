@@ -289,22 +289,33 @@ let floorBlocked: Migration | null = null;
  * (insufficient_privilege) on an hnsw.* setting is a non-superuser in a session
  * that has not loaded pgvector — 014 loads it first, so this is reachable only
  * from a hand-run statement, but say what it means. 55P03 (lock_not_available)
- * is the re-run's 10 s lock_timeout. A HINT the statement raised with — 030's
- * names --reapply — is printed as it came.
+ * is a lock_timeout: the re-run's 10 s, or on a plain run the session's — 023's
+ * call sets 10 s for its own transaction, a role or provider default may set
+ * one for every statement. What follows a failure differs by mode: a plain run
+ * has applied and recorded the files before it; a re-run rolled back whole. A
+ * HINT the statement raised with — 030's names --reapply — is printed as it
+ * came.
  */
-function explainFailure(err: unknown, m: Migration | null): string[] {
+function explainFailure(err: unknown, m: Migration | null, reapplying: boolean): string[] {
   const message = (err as Error).message;
   const { errno: sqlstate, hint } = err as { errno?: string; hint?: string };
   const lines: string[] = [];
   if (/hnsw\./.test(message) && sqlstate === "42602") {
-    lines.push(`\n  ${m?.name ?? "the migration"} needs pgvector ${m?.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
+    lines.push(
+      `\n  ${m?.name ?? "the migration"} needs pgvector ${m?.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n` +
+        (reapplying ? pgvectorRemedy("Nothing ran: the re-run is one transaction, and it rolled back.") : PGVECTOR_REMEDY)
+    );
   } else if (/hnsw\./.test(message) && sqlstate === "42501") {
     lines.push(
       `\n  A non-superuser may set hnsw.* settings only after pgvector's library is loaded in the session.\n` +
         `  Run SELECT '[1]'::vector; first in the same session, then the statement that failed.`
     );
   } else if (sqlstate === "55P03") {
-    lines.push("  A lock was not granted within 10 s: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.");
+    lines.push(
+      reapplying
+        ? "  A lock was not granted within the re-run's 10 s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first."
+        : "  A lock was not granted within the session's lock_timeout (023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
+    );
   }
   if (hint) lines.push(`  ${hint}`);
   return lines;
@@ -389,17 +400,32 @@ if (reapply) {
   }
   const floor = migrations.find((m) => tooOldFor(m));
   if (floor) refusals.push({ code: 1, text: `${floor.name} would fail on the pgvector floor.` + floorMessage(floor, true) });
-  const [{ has_config, has_claims, has_label, has_edit }] = (await sql`
+  // The catalog, read by relation (to_regclass) rather than by name in
+  // information_schema, which sees a `thoughts` in any schema the role can
+  // read; and the eight-argument signature names the vector type, which
+  // to_regprocedure cannot parse before pgvector is installed — asked only
+  // where the type resolves.
+  const [{ has_config, has_claims, has_label, has_edit, width }] = (await sql`
     SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
            to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
-           EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model') AS has_label,
-           EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
-                     AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS has_edit`) as
-    { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean }[];
+           EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
+           CASE WHEN to_regtype('vector') IS NULL THEN false
+                ELSE EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
+                               AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') END AS has_edit,
+           (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped) AS width`) as
+    { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null }[];
+  // The column is the width's authority (ob1_config's copy can be edited by
+  // hand); 006 refuses a shell whose width differs from it — inside the
+  // transaction, after a dry run had said green. Judged here, both modes.
+  if (width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
+    refusals.push({
+      code: 2,
+      text:
+        `thoughts.embedding is vector(${width}) and this shell says OB1_EMBEDDING_DIM=${SUBSTITUTIONS.EMBEDDING_DIM} — 006 would refuse the mismatch inside\n` +
+        `  the transaction. Set OB1_EMBEDDING_DIM=${width}; changing the width is a re-embed of every row, not a re-run.`,
+    });
+  }
   if (has_config) {
-    // The width is not compared: the column's own type is its authority, and
-    // 006 refuses a shell whose width differs from it inside the transaction —
-    // a record edited by hand must not send the operator to the wrong width.
     const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model', 'chunk_context')`) as { key: string; value: string }[];
     const record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     const shell: Record<string, string> = { embedding_model: SUBSTITUTIONS.EMBEDDING_MODEL, chunk_context: SUBSTITUTIONS.CHUNK_CONTEXT };
@@ -445,7 +471,9 @@ if (reapply) {
           "  the key if it is superseded (--retire <key>), then run --reapply again."
         : "  This schema predates 021, so reembed.ts refuses to run against it and cannot return them; --accept-failed refuses it too, so\n" +
           "  these rows were written by hand. Return each as --retry-fallbacks would, then run --reapply again:\n" +
-          shown.map((h) => `    UPDATE thought_work_claims SET status = 'pending', claimed_at = NULL, finished_at = NULL, ttl_expires_at = NULL, last_error = NULL WHERE work_type = '${h.work_type}' AND thought_id = '${h.id}';`).join("\n");
+          // requeue()'s statement in reembed.ts, per row: the caveat gone, the
+          // attempts reset, the lease cleared; claimed_at stays, as there.
+          shown.map((h) => `    UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = '${h.work_type}' AND thought_id = '${h.id}';`).join("\n");
       refusals.push({
         code: 2,
         text:
@@ -473,19 +501,21 @@ if (reapply) {
 }
 
 if (reapply && !dryRun) {
-  let current: Migration | null = null;
+  // An object, not a `let`: an assignment inside the callback is invisible to
+  // the type checker's flow analysis, which would narrow a `let` to null.
+  const progress: { current: Migration | null } = { current: null };
   try {
     await sql.begin(async (tx) => {
       await tx.unsafe("SET LOCAL lock_timeout = '10s'");
       for (const m of migrations) {
-        current = m;
+        progress.current = m;
         await tx.unsafe(m.sql);
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
   } catch (err) {
-    console.error(`  ✗  ${current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
-    for (const line of explainFailure(err, current)) console.error(line);
+    console.error(`  ✗  ${progress.current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
+    for (const line of explainFailure(err, progress.current, true)) console.error(line);
     console.error(
       "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
         "  Fix the cause and run --reapply again."
@@ -564,7 +594,7 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);
-    for (const line of explainFailure(err, m)) console.error(line);
+    for (const line of explainFailure(err, m, false)) console.error(line);
     await sql.close();
     process.exit(1);
   }

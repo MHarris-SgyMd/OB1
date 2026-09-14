@@ -93,10 +93,11 @@ judges the pgvector floor as the run does.
 
 **Refused before anything runs, and `--dry-run` says "would refuse" for the
 same:** a recorded file that changed since it was applied; the pgvector floor; a
-shell whose `OB1_EMBEDDING_MODEL` or `OB1_CHUNK_CONTEXT` differs from what
-`ob1_config` records (006 and 013 would re-record it — run from a shell
-configured as the brain is, or change the record on purpose with `reembed.ts
---switch-model`; the width is the column's own and 006 judges it); and an
+shell whose `OB1_EMBEDDING_DIM` differs from the column's width (006 would
+refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` or
+`OB1_CHUNK_CONTEXT` differs from what `ob1_config` records (006 and 013 would
+re-record it — run from a shell configured as the brain is, or change the record
+on purpose with `reembed.ts --switch-model`); and an
 accepted claim row 021's backfill would label an unlabelled thought from and 030
 would not take back — under a *suffixed* key (`reembed:<model>@<dim>:ctx`), or
 over a thought written since the row was enqueued — return it with `reembed.ts
