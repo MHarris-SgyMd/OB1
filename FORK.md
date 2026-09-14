@@ -4803,12 +4803,21 @@ cutoff working and the bug: the floor lost the answer, the cutoff trims the nois
 Verified by `test-schema` [26] and `test-live` [15] (027 is the last definer, the
 `ob1:relative-floor` sentinel is present, a sub-0.5 top row is returned at
 threshold 0 and trimmed at 0.5, the `%` stays the raw cosine), plus the
-LongMemEval arm above; all 19 `ci-parity` suites green. **One Verify item is
-deferred (SMD-1300):** the `eval-hybrid` decoy report on the Linear corpus — does
-the relative cutoff admit decoys on *short* thoughts the 0.5 floor blocked? — is
-blocking before merge and pending that corpus (it holds internal data and was not
-on disk). The short-corpus tail of the sweep (`<1k` at 100%) is reassuring but not
-the decoy measurement itself.
+LongMemEval arm above; all 19 `ci-parity` suites green.
+
+The short-corpus precision cost was measured too, on the 576-issue Linear corpus
+(`eval-hybrid.ts` and `decoy-admission.ts`, `qwen3-embedding:4b`). `eval-hybrid`'s
+control passed on all 749 queries and the four sets' rank-1 is healthy (identifier
+98%, semantic 84%, mixed 92%, decoy 83%) — the floor is not what ranks, so the
+adversarial decoy set (a wrong identifier appended) is unaffected. `threshold 0.5`
+on the 027 function reproduces the old absolute floor exactly (`sim > 0.5` implies
+`sim ≥ 0.5·top`), so it is the honest before; `threshold 0` is the shipped
+relative cutoff. Between them, **rank-1 is unchanged (84.3%)** — the cutoff never
+displaces the top answer — and the cost is **~0.7 more non-target rows per
+ten-result query** (mean non-target 8.30 → 9.02), because at a dominant top of
+~0.8 it keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the
+answer, in exchange for the 45→87% recall on long captures; a bounded,
+non-adversarial cost, not the decoy admission the floor was feared to unmask.
 
 Upstream status: **not applicable** — a fork-internal correction to the fork's own
 017/020 fusion. Downstream follow-ups filed from the remaining LongMemEval gaps:

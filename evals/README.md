@@ -2043,10 +2043,18 @@ at k=5 only **1** drops a gold session — versus the old floor's 467 short / 25
 is the honest line between the cutoff trimming noise and the floor losing the
 answer. (See `../FORK.md` §48.)
 
-*Still to measure (SMD-1300, blocking before merge):* the decoy report on the
-Linear corpus (`eval-hybrid.ts`) — whether the relative cutoff admits decoys on
-*short* thoughts the 0.5 floor blocked. The `<1k` column above is reassuring but
-is recall, not decoy precision.
+*The short-corpus precision cost, measured (SMD-1300).* On the 576-issue Linear
+corpus (`qwen3-embedding:4b`), `threshold 0.5` on the 027 function is the old
+absolute floor exactly (`sim > 0.5` ⇒ `sim ≥ 0.5·top`), so it is the honest
+before; `threshold 0` is the shipped relative cutoff. `eval-hybrid.ts`: the
+control passed on all 749 queries and the four sets' rank-1 is healthy
+(identifier 98%, semantic 84%, mixed 92%, decoy 83%) — the floor is not what
+ranks, so the adversarial decoy set is unaffected. `decoy-admission.ts` over 576
+title→body queries: **rank-1 is unchanged (84.3%)** between 0.5 and 0 — the cutoff
+never displaces the answer — and the cost is **+0.7 non-target rows per
+ten-result query** (mean non-target 8.30 → 9.02), because a dominant top of ~0.8
+keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the answer for
+the 45→87% long-capture recall: bounded and non-adversarial.
 
 ### Caveats
 
