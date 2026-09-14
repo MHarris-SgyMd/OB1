@@ -4878,7 +4878,7 @@ shape finds exactly the caveat row. Green at both widths; `test-upgrade` green
 (the shape comparison of columns and signatures is unaffected by a comment).
 The first review pass found all of the above — the pinned number, the overbroad
 reach, the quoted prefix, the dashes, and a wrong ticket named as the successor —
-and each was fixed rather than filed.
+and each was fixed rather than filed. The second pass found nothing.
 
 Upstream status: **not applicable** — the claim table is the fork's (015).
 
