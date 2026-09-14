@@ -45,16 +45,44 @@
  *
  *   OB1_EVAL_LME=/path/longmemeval_s.json DATABASE_URL=postgres://... bun eval-longmemeval.ts
  *   OB1_EVAL_EMBED=qwen3-embedding:0.6b@1024   embedding spec (default: the fork's default model)
- *   OB1_EVAL_PHASE=load|score|both           default both; load is resumable
+ *   OB1_EVAL_PHASE=load|score|both|windows   default both; load and windows are resumable
  *   OB1_EVAL_BATCH=32                        inputs per embedding request
  *   OB1_EVAL_MAX_QUESTIONS=20                score a prefix only (smoke test)
  *   OB1_EVAL_LME_MAP=/path/map.json          where the session→thought map is kept
+ *   OB1_EVAL_LME_ARMS=windows                score the windows question (SMD-1305) instead of the floor
+ *   OB1_EVAL_LME_CHUNKS=lme_chunks_4096      a side table of windows to score instead of thought_chunks
+ *
+ * WINDOWS (SMD-1305). A session over chunk.ts's limit is stored as its whole
+ * vector plus overlapping windows, and match_thoughts scores it by the best of
+ * them. The `windows` arm set asks what the windows buy: `vector@-1` is
+ * match_thoughts as shipped; `both@-1` is the same best-of computed directly
+ * over the whole vector and the windows table named by OB1_EVAL_LME_CHUNKS
+ * (thought_chunks unless set, when it must agree with `vector@-1` to the row —
+ * the control); `whole@-1` reads the whole vector alone, which is the store a
+ * load at OB1_CHUNK_TOKENS past every session would have written (the whole
+ * vector is the same text under the same model either way, so no reload is
+ * needed to know it); `windows@-1` reads the windows alone where a thought has
+ * them, its whole vector where it does not; `over<N>@-1` is the rule
+ * db/config.mjs's resolveChunkTokens derives for the model — the whole vector
+ * alone for a session at or under N estimated tokens, best-of above it — exact
+ * when the windows table holds windows of the size the rule names. The direct
+ * arms rank one exact scan of the filtered rows, so what differs between arms
+ * is the vectors, not the plan. A second table slices every arm by the longest gold session's
+ * estimated length, which is where a whole vector would wash out if it does.
+ *
+ * The `windows` PHASE writes the side table: for every loaded session whose
+ * estimate exceeds OB1_CHUNK_TOKENS (which it requires), chunk.ts's windows at
+ * that limit are embedded and stored under the thought's id in
+ * OB1_EVAL_LME_CHUNKS — the store's whole vectors untouched — so windows at
+ * another limit can be scored beside the shipped 1200 without a 14-hour
+ * reload. Resumable by thought.
  */
 import { SQL } from "bun";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { loadEnv } from "./env.ts";
 import { EVAL_BASE, EVAL_HEADERS, applyPrompt, parseSpec } from "./lib.ts";
-import { chunkContent } from "../server-portable/chunk.ts";
+import { chunkContent, DEFAULT_MAX_TOKENS, estimateTokens } from "../server-portable/chunk.ts";
+import { resolveChunkTokens } from "../db/config.mjs";
 
 loadEnv();
 
@@ -69,6 +97,12 @@ const PHASE = process.env.OB1_EVAL_PHASE ?? "both";
 const BATCH = Number(process.env.OB1_EVAL_BATCH ?? 32);
 const MAXQ = Number(process.env.OB1_EVAL_MAX_QUESTIONS ?? 0);
 const MAP_PATH = process.env.OB1_EVAL_LME_MAP ?? `/tmp/lme-map-${EMBED_MODEL.replace(/[^A-Za-z0-9.-]+/g, "_")}.json`;
+const ARMS = process.env.OB1_EVAL_LME_ARMS ?? "shipped";
+if (ARMS !== "shipped" && ARMS !== "windows") { console.error(`OB1_EVAL_LME_ARMS must be shipped or windows, not ${ARMS}.`); process.exit(2); }
+if (!["load", "score", "both", "windows"].includes(PHASE)) { console.error(`OB1_EVAL_PHASE must be load, score, both or windows, not ${PHASE}.`); process.exit(2); }
+/** The windows table the direct arms read and the windows phase writes; an identifier, interpolated, so it is checked. */
+const CHUNKS = process.env.OB1_EVAL_LME_CHUNKS ?? "thought_chunks";
+if (!/^[a-z_][a-z0-9_]{0,62}$/.test(CHUNKS)) { console.error(`OB1_EVAL_LME_CHUNKS must be a plain lower-case identifier, not ${CHUNKS}.`); process.exit(2); }
 
 type Turn = { role: string; content: string };
 type Question = {
@@ -197,6 +231,56 @@ async function load(): Promise<void> {
   writeMap(map);
 }
 
+/**
+ * Windows at another limit, beside the store's (SMD-1305). Needs the load
+ * phase's map, OB1_CHUNK_TOKENS for the limit, and OB1_EVAL_LME_CHUNKS naming a
+ * table other than thought_chunks, which is the store's own and is not written.
+ */
+async function loadWindows(): Promise<void> {
+  const limit = Number(process.env.OB1_CHUNK_TOKENS);
+  if (!Number.isFinite(limit) || limit <= 0) throw new Error("the windows phase needs OB1_CHUNK_TOKENS, the limit to window at.");
+  if (CHUNKS === "thought_chunks") throw new Error("the windows phase writes a side table: set OB1_EVAL_LME_CHUNKS to a name other than thought_chunks.");
+  const map = readMap();
+  const missing = [...sessions.keys()].filter((sid) => !map[sid]);
+  if (missing.length) throw new Error(`${missing.length} sessions are not loaded; run the load phase first.`);
+  await sql.unsafe(`CREATE TABLE IF NOT EXISTS ${CHUNKS} (
+    thought_id uuid NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
+    chunk_index int NOT NULL,
+    embedding vector(${DIM}) NOT NULL,
+    PRIMARY KEY (thought_id, chunk_index))`);
+  const done = new Set<string>((await sql.unsafe(`SELECT DISTINCT thought_id FROM ${CHUNKS}`)).map((r: { thought_id: string }) => r.thought_id));
+  // By thought, not session: a fingerprint twin is one row, windowed once.
+  const todo = new Map<string, Session>();
+  for (const s of sessions.values()) {
+    const id = map[s.sid];
+    if (done.has(id) || todo.has(id) || estimateTokens(s.text) <= limit) continue;
+    todo.set(id, s);
+  }
+  console.log(`▸ windows at ${limit} tokens into ${CHUNKS}: ${todo.size} sessions over the limit to window, ${done.size} already done — ${EMBED_MODEL}, batch ${BATCH}`);
+  const items = [...todo.entries()];
+  const t0 = Date.now();
+  let doneNow = 0, rows = 0, tokens = 0;
+  const PER_ROUND = Math.max(1, Math.floor(BATCH / 4));
+  for (let i = 0; i < items.length; i += PER_ROUND) {
+    const round = items.slice(i, i + PER_ROUND).map(([id, s]) => ({ id, windows: chunkContent(s.text, { maxTokens: limit }).map((c) => c.content) }));
+    const vectors = await embedMany(round.flatMap((r) => r.windows), false);
+    let k = 0;
+    for (const r of round) {
+      for (let j = 0; j < r.windows.length; j++) {
+        await sql.unsafe(`INSERT INTO ${CHUNKS} (thought_id, chunk_index, embedding) VALUES ($1, $2, $3::vector) ON CONFLICT DO NOTHING`, [r.id, j, toVector(vectors[k++])]);
+        tokens += estimateTokens(r.windows[j]);
+      }
+      rows += r.windows.length;
+    }
+    doneNow += round.length;
+    if (doneNow % (PER_ROUND * 10) === 0 || doneNow === items.length) {
+      const el = (Date.now() - t0) / 1000;
+      console.log(`  ${doneNow}/${items.length} sessions  ${rows} windows  ${el.toFixed(0)}s  ${(doneNow / el).toFixed(2)}/s  ~${Math.round(tokens / el)} window tok/s  eta ${((items.length - doneNow) / (doneNow / el) / 60).toFixed(0)} min`);
+    }
+  }
+  console.log(`✓ ${rows} windows at ${limit} tokens (${tokens.toLocaleString()} estimated tokens) over ${items.length} sessions in ${CHUNKS}`);
+}
+
 type Arm = { key: string; label: string; run: (qv: string, q: Question, k: number) => Promise<string[]> };
 
 async function score(): Promise<void> {
@@ -213,28 +297,91 @@ async function score(): Promise<void> {
   // An object, not a JSON string: Bun stringifies a ::jsonb parameter itself,
   // and a string would arrive as a jsonb scalar that nothing contains.
   const filterFor = (q: Question) => ({ lme_q: [q.question_id] });
-  const arms: Arm[] = [
+  const ids = (rows: { id: string }[]) => rows.map((r) => r.id);
+  const shipped: Arm[] = [
     {
       key: "hybrid@0.5", label: "hybrid, threshold 0.5 (what search_thoughts sent before SMD-1300)",
-      run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.5, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
+      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.5, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
       // SMD-1300 / migration 027: the tools now send a threshold of 0, and the
       // function admits relative to the top match. This is the SHIPPED arm once
       // 027 is applied; against a pre-027 database it is the plain no-floor call.
       key: "hybrid@0 (027)", label: "hybrid, threshold 0 — the relative cutoff governs (search_thoughts today)",
-      run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
+      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
       key: "hybrid@-1", label: "hybrid, threshold -1 — no floor of any kind (027 treats a negative threshold as the raw ranked list)",
-      run: async (qv, q, k) => (await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
+      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
-      key: "vector@-1", label: "vector only (match_thoughts)",
-      run: async (qv, q, k) => (await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb)`).map((r: { id: string }) => r.id),
+      key: "vector@-1", label: "vector only (match_thoughts: best of the whole vector and the windows)",
+      run: async (qv, q, k) => ids(await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
   ];
+  // The windows question (SMD-1305; the header explains the arms). One query
+  // per question fetches every filtered thought with its whole-vector
+  // similarity and its best window's — an exact scan, OFFSET 0 the planner
+  // fence so it cannot become an HNSW walk that returns short under a
+  // filter — and each direct arm is a rule over those two numbers, ranked
+  // here. These arms measure vectors, and must not measure plans.
+  type Scored = { id: string; whole: number | null; win: number | null; est: number };
+  const scoredCache = new Map<string, Scored[]>();
+  const scoredFor = async (qv: string, q: Question): Promise<Scored[]> => {
+    const hit = scoredCache.get(q.question_id);
+    if (hit) return hit;
+    const rows = (await sql.unsafe(
+      `SELECT t.id, 1 - (t.embedding <=> $1::vector) AS whole,
+              (SELECT max(1 - (c.embedding <=> $1::vector)) FROM ${CHUNKS} c WHERE c.thought_id = t.id) AS win
+       FROM thoughts t WHERE t.metadata @> $2::jsonb OFFSET 0`,
+      // The object, as above: Bun stringifies a ::jsonb parameter itself.
+      [qv, filterFor(q)])) as { id: string; whole: number | null; win: number | null }[];
+    // The thought's estimated length, from the loader's own text; a twin's
+    // sessions share it.
+    const scored = rows.map((r) => ({ ...r, est: estimateTokens(sessions.get(idToSids.get(r.id)![0])!.text) }));
+    scoredCache.set(q.question_id, scored);
+    return scored;
+  };
+  const rank = (score: (s: Scored) => number | null) => async (qv: string, q: Question, k: number) =>
+    (await scoredFor(qv, q))
+      .map((s) => ({ id: s.id, sim: score(s) }))
+      .filter((s): s is { id: string; sim: number } => s.sim !== null)
+      .sort((a, b) => b.sim - a.sim || (a.id < b.id ? -1 : 1))
+      .slice(0, k)
+      .map((s) => s.id);
+  const best = (s: Scored) => (s.whole === null ? s.win : s.win === null ? s.whole : Math.max(s.whole, s.win));
+  // The rule the server derives for this model (db/config.mjs), unpinned.
+  const derived = resolveChunkTokens(undefined, spec.name, DEFAULT_MAX_TOKENS);
+  const windows: Arm[] = [
+    shipped.find((a) => a.key === "vector@-1")!,
+    { key: "both@-1", label: `best of the whole vector and the windows in ${CHUNKS}`, run: rank(best) },
+    { key: "whole@-1", label: "the whole-content vector alone (what a load with no windows stores)", run: rank((s) => s.whole) },
+    { key: "windows@-1", label: `the windows in ${CHUNKS} alone where a thought has them, its whole vector where it does not`, run: rank((s) => s.win ?? s.whole) },
+    {
+      key: `over${derived.threshold}@-1`,
+      label: `the whole vector alone for a session at or under ${derived.threshold} estimated tokens, best of it and the windows in ${CHUNKS} above — the rule resolveChunkTokens derives for ${spec.name} (${derived.tokens}-token windows)`,
+      run: rank((s) => (s.est <= derived.threshold ? s.whole : best(s))),
+    },
+  ];
+  const arms = ARMS === "windows" ? windows : shipped;
+  /** The arm whose misses are listed: the one each set exists to examine. */
+  const missArm = ARMS === "windows" ? "whole@-1" : "hybrid@0.5";
   const KS = [5, 10];
+
+  // The length slice: a question sits in the bucket of its LONGEST gold
+  // session, since that is the vector with the most to wash out. Estimated
+  // tokens, as chunk.ts estimates them, so the first bucket is exactly the
+  // sessions that were never windowed.
+  const BUCKETS: [string, (t: number) => boolean][] = [
+    [`≤${DEFAULT_MAX_TOKENS} (no windows)`, (t) => t <= DEFAULT_MAX_TOKENS],
+    [`${DEFAULT_MAX_TOKENS + 1}–2048`, (t) => t > DEFAULT_MAX_TOKENS && t <= 2048],
+    ["2049–4096", (t) => t > 2048 && t <= 4096],
+    [">4096", (t) => t > 4096],
+  ];
+  const bucketOf = (q: Question): string => {
+    const longest = Math.max(...q.answer_session_ids.map((sid) => estimateTokens(sessions.get(sid)!.text)));
+    return BUCKETS.find(([, fits]) => fits(longest))![0];
+  };
 
   type Cell = { strict: number; any: number; n: number };
   const cell = (): Cell => ({ strict: 0, any: 0, n: 0 });
@@ -292,7 +439,8 @@ async function score(): Promise<void> {
         }
         bump(`${arm.key}|${k}|${q.question_type}`, strict, any);
         bump(`${arm.key}|${k}|ALL`, strict, any);
-        if (arm.key === "hybrid@0.5" && k === 5 && !strict) misses.push(`${q.question_type}  ${q.question_id}  ${q.question.slice(0, 80)}`);
+        bump(`${arm.key}|${k}|len:${bucketOf(q)}`, strict, any);
+        if (arm.key === missArm && k === 5 && !strict) misses.push(`${q.question_type}  ${q.question_id}  ${q.question.slice(0, 80)}`);
       }
     }
     if ((i + 1) % 50 === 0) console.log(`  ${i + 1}/${use.length}  ${((Date.now() - t0) / 1000).toFixed(0)}s`);
@@ -306,22 +454,54 @@ async function score(): Promise<void> {
 
   const types = ["single-session-user", "single-session-assistant", "single-session-preference", "multi-session", "temporal-reasoning", "knowledge-update", "ALL"];
   const pct = (a: number, b: number) => (b ? `${((100 * a) / b).toFixed(1)}%` : "—");
-  for (const k of KS) {
-    console.log(`\n## strict recall_all@${k} (any-hit@${k} in parentheses)\n`);
-    console.log(`| question type | n | ${arms.map((a) => a.key).join(" | ")} |`);
+  const printTable = (k: number, head: string, rows: string[]) => {
+    console.log(`\n| ${head} | n | ${arms.map((a) => a.key).join(" | ")} |`);
     console.log(`| --- | --- | ${arms.map(() => "---").join(" | ")} |`);
-    for (const t of types) {
+    for (const t of rows) {
       const n = table.get(`${arms[0].key}|${k}|${t}`)?.n ?? 0;
       if (!n) continue;
       const cells = arms.map((a) => { const c = table.get(`${a.key}|${k}|${t}`) ?? cell(); return `${pct(c.strict, c.n)} (${pct(c.any, c.n)})`; });
-      console.log(`| ${t} | ${n} | ${cells.join(" | ")} |`);
+      console.log(`| ${t.replace(/^len:/, "")} | ${n} | ${cells.join(" | ")} |`);
     }
+  };
+  for (const k of KS) {
+    console.log(`\n## strict recall_all@${k} (any-hit@${k} in parentheses)`);
+    printTable(k, "question type", types);
+    printTable(k, "longest gold session, est. tokens", BUCKETS.map(([name]) => `len:${name}`));
   }
   console.log(`\narms: ${arms.map((a) => `${a.key} = ${a.label}`).join("; ")}`);
-  console.log(`\n${misses.length} misses on hybrid@0.5 at k=5 (first 25):`);
+  if (ARMS === "windows") {
+    // The write cost of two rules over the sessions this run scored, in the
+    // loader's own estimate: windows at OB1_CHUNK_TOKENS (the shipped 1200
+    // unless the run names another), and the rule derived for this model —
+    // what a load under each embeds beyond the whole vectors.
+    const cost = (threshold: number, size: number) => {
+      let whole = 0, win = 0, rows = 0, chunked = 0;
+      for (const s of sessions.values()) {
+        whole += estimateTokens(s.text);
+        const w = chunkContent(s.text, { maxTokens: size, threshold });
+        if (w.length) chunked++;
+        rows += w.length;
+        for (const c of w) win += estimateTokens(c.content);
+      }
+      return { whole, win, rows, chunked };
+    };
+    const limit = Number(process.env.OB1_CHUNK_TOKENS) || DEFAULT_MAX_TOKENS;
+    const rules: [string, number, number][] = [
+      [`${limit}-token windows above ${limit}${limit === DEFAULT_MAX_TOKENS ? " (shipped)" : ""}`, limit, limit],
+      [`${derived.tokens}-token windows above ${derived.threshold} (derived for ${spec.name})`, derived.threshold, derived.tokens],
+    ];
+    console.log(`\ntokens embedded, estimated as chunk.ts estimates them, over ${sessions.size.toLocaleString()} sessions:`);
+    for (const [name, threshold, size] of rules) {
+      const c = cost(threshold, size);
+      console.log(`  ${name}: whole ${c.whole.toLocaleString()} + windows ${c.win.toLocaleString()} over ${c.rows.toLocaleString()} rows from ${c.chunked.toLocaleString()} sessions = ${((c.whole + c.win) / c.whole).toFixed(2)}× a load with no windows`);
+    }
+  }
+  console.log(`\n${misses.length} misses on ${missArm} at k=5 (first 25):`);
   for (const m of misses.slice(0, 25)) console.log(`  ${m}`);
 }
 
 if (PHASE === "load" || PHASE === "both") await load();
+if (PHASE === "windows") await loadWindows();
 if (PHASE === "score" || PHASE === "both") await score();
 await sql.end();
