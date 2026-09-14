@@ -5502,9 +5502,17 @@ reviewer reads first), the cosine, and the pass key
 the embedding model beside the vector (SMD-1254). Acceptance refuses what would
 leave the column wrong: a pointer at a third thought (`ALREADY_SUPERSEDES` — the
 column holds one predecessor, and which is the reviewer's call) or one that
-would close a loop (`WOULD_CYCLE`); an undirected verdict needs `--direction`.
-Rejecting an accepted proposal undoes its write while it still stands. A
-decided pair is never proposed again, whatever happens to the claim table.
+would close a loop (`WOULD_CYCLE`); an undirected verdict needs `--direction`;
+and the verdict is about the texts as judged — each proposal records both
+fingerprints as it is written, the queue marks a thought edited since, and
+accepting such a pair is refused (`EDITED_SINCE`) unless the reviewer, reading
+both texts as they are now, passes `--force`. Accepting moves the superseding
+thought's `updated_at`, which a client's `if_unchanged_since` and 021's evidence
+rule read as an edit. Rejecting an accepted proposal undoes its own write while
+it still stands. A decided pair is never proposed again, whatever happens to the
+claim table. Nothing a capture controls reaches the judge outside the two
+delimited blocks, and nothing a thought contains reaches a reviewer's terminal
+or client with its control characters intact.
 `stale_entities` is the pass's second output — subjects nothing has mentioned
 within a window — printed by `--stale` and acted on by nobody.
 
@@ -5560,7 +5568,10 @@ audited accept under the key's name, the reject that clears, a cleared claim
 table not re-proposing a decided pair, the pool picking up a thought extracted
 since), `test-store-sql`/`-postgrest` [10], `test-preflight`'s `consolidate
 pass` line, and the four suites that count the tool surface (ten now, seven
-read-only). All suites green.
+read-only). Three review passes, triaged in full: the second's top finding was
+the first's fix (the stop signal); the third, with the operator's and the
+adversary's lenses, found the prompt's header line, the missing staleness guard
+and the unstripped control characters above. All suites green.
 
 Upstream status: **not applicable** — upstream has no proposal table, no worker
 and no `supersedes` writer beyond capture; the shape is GBrain's, the parts are
