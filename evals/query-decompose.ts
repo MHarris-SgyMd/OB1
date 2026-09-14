@@ -39,8 +39,8 @@
  * vectors. Decompose the question into independent single-fact sub-questions,
  * retrieve top-k per sub-question, union, and fuse — so each event gets its own
  * vector ranking its own session near the top. This is the standard 2025–26
- * multi-hop RAG pipeline (decompose → retrieve per hop → union → fuse; ACL 2025
- * SRW, arXiv:2606.08577). A reranker, if it earns its place, belongs AFTER this
+ * multi-hop RAG pipeline (decompose → retrieve per hop → union → fuse). A
+ * reranker, if it earns its place, belongs AFTER this
  * step (on single-hop sub-pools where its any-hit strength applies) — gated on
  * this pass showing lift, per SMD-1318.
  *

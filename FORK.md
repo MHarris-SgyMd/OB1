@@ -71,8 +71,8 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 Fifty-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Three (changes 53 and 55, like change 31) ship no runtime
-change at all: each is a measurement that decided against building something.
+data layer (Phase 2). Three (changes 31, 53, and 55) ship no runtime change at
+all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
 sections. Changes **18–55 are the numbered `###` sections** further down, which is
