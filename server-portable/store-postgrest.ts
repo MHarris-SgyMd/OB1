@@ -12,7 +12,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -21,6 +21,7 @@ import type {
   ListFilters,
   MutationResult,
   ProvenanceNode,
+  SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   ThoughtListItem,
@@ -384,6 +385,17 @@ export class PostgrestStore implements ThoughtStore {
     });
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseDerivative);
+  }
+
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]> {
+    // Migration 029's function is plain, so PostgREST reaches it over rpc like
+    // the provenance pair above. NULL args take its defaults.
+    const { data, error } = await this.client.rpc("list_supersession_proposals", {
+      p_status: opts.status === undefined ? "pending" : opts.status,
+      p_limit: opts.limit ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseProposal);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

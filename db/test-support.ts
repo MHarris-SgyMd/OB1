@@ -30,6 +30,7 @@ const TABLES = [
   "thought_audit",
   "thought_chunks",
   "thought_work_claims",
+  "supersession_proposals",
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
@@ -83,6 +84,12 @@ const FUNCTIONS = [
   "thoughts_enqueue_entity_extraction()",
   SEARCH_THOUGHTS_HYBRID_SIGNATURE,
   "extract_search_needles(text)",
+  // 029 (SMD-1294)
+  "consolidation_candidates(uuid, int, float)",
+  "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid)",
+  "review_supersession_proposal(uuid, text, text, text, jsonb)",
+  "list_supersession_proposals(text, int)",
+  "stale_entities(interval, int)",
 ];
 
 export type SchemaOptions = {

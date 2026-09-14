@@ -732,6 +732,61 @@ function buildServer(principal: Principal): McpServer {
     }
   );
 
+  // Tool 2b: the supersession review queue (migration 029, SMD-1294)
+  server.registerTool(
+    "list_supersession_proposals",
+    {
+      title: "List Supersession Proposals",
+      description:
+        "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged to CONFLICT — a decision and its reversal, a value and its update — with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted or rejected ones, or all.",
+      annotations: {
+        readOnlyHint: true,
+      },
+      inputSchema: {
+        status: z.enum(["pending", "accepted", "rejected", "all"]).optional().default("pending"),
+        limit: z.number().optional().default(10),
+      },
+    },
+    async ({ status, limit }) => {
+      try {
+        const data = await (await db()).listSupersessionProposals({ status: status === "all" ? null : status, limit });
+        if (!data.length) {
+          return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
+        }
+        const day = (d: string) => new Date(d).toLocaleDateString();
+        const snip = (c: string) => { const t = c.replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
+        const phrase = (v: string) =>
+          v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
+          : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
+          : "conflict, direction not stated — accepting needs --direction newer|older";
+        const results = data.map((p, i) => {
+          const review = p.status === "pending"
+            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}   reject: … --reject ${p.id}`
+            : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${p.reviewNote}` : ""}`;
+          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.reason ? `\n   ${p.reason}` : ""}` +
+            `\n   newer [${day(p.newer.created_at)}]: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
+            `\n   older [${day(p.older.created_at)}]: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
+            `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
+        });
+        return {
+          content: [{
+            type: "text" as const,
+            text: `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s), most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.\n\n${results.join("\n\n")}`,
+          }],
+        };
+      } catch (err: unknown) {
+        const msg = (err as Error).message;
+        const hint = /list_supersession_proposals|supersession_proposals/.test(msg)
+          ? " — migration 029 (db/migrations/029_supersession_proposals.sql) is not applied, or PostgREST has not reloaded its schema cache"
+          : "";
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // Tool 3: Stats
   server.registerTool(
     "thought_stats",

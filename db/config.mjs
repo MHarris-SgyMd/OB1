@@ -842,6 +842,16 @@ export function poolModelFor(key) {
 }
 
 /**
+ * The shape of a consolidation pass key (migration 029, SMD-1294):
+ * `consolidate:<model>@p<prompt version>`, built by
+ * server-portable/consolidate.ts's consolidateKey() and read back by its
+ * parseConsolidateKey(). The prefix lives here so preflight can attribute a
+ * claim-table key to db/consolidate.ts the way REEMBED_KEY_PREFIX attributes
+ * one to reembed.ts, without importing the prompt module.
+ */
+export const CONSOLIDATE_KEY_PREFIX = "consolidate:";
+
+/**
  * The corpus by the model its vectors carry (migration 021): one row per
  * label, NULL for unknown, vectorless rows left out — what preflight's
  * `vector models` check and reembed.ts's corpus line both read. Plain SQL with

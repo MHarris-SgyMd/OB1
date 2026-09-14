@@ -659,6 +659,53 @@ else {
   await claims`INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${EMBEDDING_MODEL})`;
 
   /**
+   * An unfinished consolidation pass, and the review queue (SMD-1294).
+   * db/consolidate.ts pools the thoughts WITH entities under
+   * consolidate:<model>@p<version>, and its product is migration 029's
+   * proposal table. The states are written as the tool would leave them: a
+   * pass stopped mid-way warns with the counts (the universe being the thoughts
+   * with entities, not every thought) and the command that finishes it under
+   * the key's own model; pending proposals ride the line as a count with the
+   * command that lists them, and alone they are ok, not a warning — the pass
+   * proposes, a reviewer decides. Before 015 or 029 there is nothing to read.
+   */
+  const CONS = "consolidate:other-judge@p1";
+  assert(/consolidate pass\s+none unfinished\s*$/m.test(noRecord.out), "with no consolidation rows and no proposals the check is ok and says so");
+  await claims`SELECT record_thought_entities(${ids[0]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+  await claims`SELECT record_thought_entities(${ids[1]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+  await claims`SELECT record_thought_entities(${ids[2]}::uuid, 'extract:stub@p1', ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${CONS}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${CONS} AND thought_id = ${ids[0]}::uuid`;
+  await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
+  const consMid = await run(SQL_ENV);
+  assert(consMid.code === 0 && new RegExp(`consolidate pass\\s+${rx(CONS)}: 3 thoughts with entities — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a consolidation pass under this key stopped before it finished; 1 proposal\\(s\\) pending review — cd db && bun consolidate\\.ts --url \\$DATABASE_URL --list`).test(consMid.out),
+         `a consolidation pass stopped mid-way warns with its counts over the thoughts with entities, and the queue (${consMid.out.split("\n").find((l) => /consolidate pass/.test(l))?.trim()})`);
+  assert(/Finish it: cd db && OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
+         "…and the remedy runs the worker under the key's own judge model, since another shell would pool under another key");
+  const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
+  assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
+  await claims`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'stub: not JSON' WHERE work_type = ${CONS} AND thought_id = ${ids[1]}::uuid`;
+  const consFailed = await run(SQL_ENV);
+  assert(/consolidate pass\s+[^\n]* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool/.test(consFailed.out) && /\(--retry-failed for the 1 failed row\(s\) once their cause is fixed\)/.test(consFailed.out),
+         "…with a failed row, --retry-failed in the remedy");
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${CONS}`;
+  const consDone = await run(SQL_ENV);
+  assert(/consolidate pass\s+none unfinished; 1 proposal\(s\) pending review — cd db && bun consolidate\.ts --url \$DATABASE_URL --list\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out),
+         "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect — and the thought never pooled is not a signal");
+  const consOk = JSON.parse((await run(SQL_ENV, "--json")).out) as { checks: { name: string; status: string }[] };
+  assert(consOk.checks.some((c) => c.name === "consolidate pass" && c.status === "ok"), "…and --json says ok for it");
+  await claims`DELETE FROM supersession_proposals`;
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${CONS}`;
+  await claims`DELETE FROM thought_entities`;
+  await claims`SELECT prune_orphan_entities()`;
+  await claims.unsafe("DROP TABLE supersession_proposals CASCADE");
+  const pre029 = await run(SQL_ENV);
+  assert(pre029.code === 0 && /consolidate pass\s+not checked — supersession_proposals does not exist \(migration 029 not applied\)/.test(pre029.out),
+         "before migration 029 there is no queue to read, and the check says so rather than warning");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("029") });
+  assert(/consolidate pass\s+none unfinished\s*$/m.test((await run(SQL_ENV)).out), "…and 029 applied it is ok again");
+
+  /**
    * The rows say which model they are at (migration 021, SMD-1068). The claim
    * table is a record of passes and vanishes when an operator clears it; the
    * column is a fact about each vector. Every fixture below has an EMPTY claim
@@ -798,6 +845,8 @@ else {
   const pre015 = await run(SQL_ENV);
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "before migration 015 there is nothing to read, and the check says so rather than warning");
+  assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
+         "…and the consolidate pass check, which reads the same table, says so too");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
 
   // The chunk writers run as the calling role. A role that can read

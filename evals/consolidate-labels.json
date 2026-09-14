@@ -1,0 +1,5 @@
+{
+  "note": "Hand labels for eval-consolidate.ts (SMD-1294): issue ids from the Linear corpus and a verdict, no text. `pairs` are judged directly (older captured before newer; label conflict|agree|unrelated; supersedes newer|older|unknown for a conflict). `proposals` grade what a full pass proposed (true = a real supersession or contradiction).",
+  "pairs": [],
+  "proposals": []
+}

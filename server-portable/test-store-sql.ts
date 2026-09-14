@@ -428,6 +428,33 @@ console.log("\n[9] Provenance: capture writes it, the read methods walk it, and 
   assert(walk.some((n) => n.cycle === true), "traceProvenance surfaces the cycle flag through the store mapper");
 }
 
+console.log("\n[10] listSupersessionProposals reads migration 029's queue through the one row mapper (SMD-1294)");
+{
+  // The worker writes the row (its call, made directly here); the store reads
+  // it back in the shape the tool prints, both thoughts inline.
+  const older = await store.captureThought({ content: "queue: we bill monthly", payload: { metadata: {} }, embedding: unit(5) });
+  const newer = await store.captureThought({ content: "queue: we bill annually now", payload: { metadata: {} }, embedding: unit(5) });
+  const admin5 = new SQL({ url: URL_, max: 1 });
+  await admin5`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${older.id}`;
+  const [{ id: pid }] = await admin5`
+    SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.85, 'monthly versus annual', 0.97, 'consolidate:stub@p1', NULL) AS id`;
+  const pending = await store.listSupersessionProposals({});
+  assert(pending.length === 1 && pending[0].id === pid, `the default lists the pending proposal (${pending.length})`);
+  const row = pending[0];
+  assert(row.status === "pending" && row.verdict === "newer_supersedes_older" && row.confidence === 0.85 && row.reason === "monthly versus annual" && Math.abs((row.similarity ?? 0) - 0.97) < 1e-5 && row.judgeKey === "consolidate:stub@p1",
+         `…mapped: status, verdict, a numeric confidence, the reason, the cosine and the judge key (${JSON.stringify({ ...row, older: undefined, newer: undefined })})`);
+  assert(row.older.id === older.id && /monthly/.test(row.older.content) && row.newer.id === newer.id && /annually/.test(row.newer.content) && row.older.created_at < row.newer.created_at,
+         "…with both thoughts inline, the older captured first");
+  assert(row.reviewedAt === null && row.reviewNote === null && row.supersedingId === null, "…and the review fields null while pending");
+  assert((await store.listSupersessionProposals({ status: "accepted" })).length === 0, "a status filter applies");
+  await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
+  assert((await store.listSupersessionProposals({})).length === 0, "an accepted proposal leaves the pending list");
+  const all = await store.listSupersessionProposals({ status: null });
+  assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
+         "null lists every state, and the accepted row names the thought it wrote");
+  await admin5.close();
+}
+
 await store.close();
 
 report();

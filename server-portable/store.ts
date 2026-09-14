@@ -370,6 +370,49 @@ export type CaptureResult = {
 };
 
 /**
+ * One row of migration 029's review queue, with both thoughts (SMD-1294): a
+ * pair the consolidation pass judged to conflict, the judge's verdict on which
+ * is current, and where the review stands. `list_supersession_proposals`'s
+ * shape, in one place for both stores.
+ */
+export type SupersessionProposal = {
+  id: string;
+  status: "pending" | "accepted" | "rejected";
+  verdict: "newer_supersedes_older" | "older_supersedes_newer" | "conflict_undirected";
+  confidence: number;
+  reason: string | null;
+  similarity: number | null;
+  judgeKey: string;
+  judgedAt: string;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  /** While accepted: the thought whose supersedes column the acceptance wrote. */
+  supersedingId: string | null;
+  older: { id: string; content: string; created_at: string };
+  newer: { id: string; content: string; created_at: string };
+};
+
+/** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
+export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
+  const iso = (v: unknown) => new Date(v as string).toISOString();
+  return {
+    id: String(r.id),
+    status: String(r.status) as SupersessionProposal["status"],
+    verdict: String(r.verdict) as SupersessionProposal["verdict"],
+    confidence: Number(r.confidence),
+    reason: r.reason == null ? null : String(r.reason),
+    similarity: r.similarity == null ? null : Number(r.similarity),
+    judgeKey: String(r.judge_key),
+    judgedAt: iso(r.judged_at),
+    reviewedAt: r.reviewed_at == null ? null : iso(r.reviewed_at),
+    reviewNote: r.review_note == null ? null : String(r.review_note),
+    supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
+    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at) },
+    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at) },
+  };
+}
+
+/**
  * Every database operation the MCP tools perform. Errors are thrown, not returned
  * — each implementation normalises its own error shape so callers do not have to
  * know whether they are talking to PostgREST or to Postgres.
@@ -701,6 +744,16 @@ export interface ThoughtStore {
    * rather than breaking search — preflight's `provenance` check names the fix.
    */
   supersededAmong(ids: string[]): Promise<Record<string, string>>;
+
+  /**
+   * Migration 029's review queue (SMD-1294): the pairs db/consolidate.ts
+   * judged to conflict, in one status (null for every status), most confident
+   * first, each with both thoughts. Read-only — accepting or rejecting is the
+   * worker's --accept / --reject, through review_supersession_proposal, so the
+   * write to thoughts.supersedes has one path. Throws on a schema before 029;
+   * the tool names the migration.
+   */
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
 
   close(): Promise<void>;
 }
