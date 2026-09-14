@@ -797,8 +797,9 @@ export function summariseCorpusByModel(rows, atModel, acceptedRows = []) {
  * not do. Both readers recognise an accepted row by this prefix: reembed.ts's
  * data rule leaves it in place, and preflight's `vector models` counts its
  * vector as detail rather than as a warning — each only while nothing has
- * written the thought since (`updated_at <= finished_at`, 021's own evidence
- * rule): an edit is a new question. `--retry-fallbacks` returns it like any
+ * written the thought since (`updated_at <= claimed_at` — the moment the
+ * attempt read the content; finished_at for a row never claimed — the shape
+ * of 021's own evidence rule): an edit is a new question. `--retry-fallbacks` returns it like any
  * caveat, which spends the acceptance.
  */
 export const ACCEPTED_CAVEAT_PREFIX = "kept the vector it had; accepted by the operator: ";
