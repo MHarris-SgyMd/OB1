@@ -1,10 +1,11 @@
 /**
  * store-postgrest.ts — the existing behaviour, behind the store interface.
  *
- * This is `supabase-js` talking to PostgREST over HTTP. It is unchanged in
- * substance from the original inline calls; only the error handling moved, from
- * returning `{ data, error }` tuples to throwing, so both stores present one shape
- * to the tools.
+ * This is `supabase-js` talking to PostgREST over HTTP. Two things changed from
+ * the original inline calls: errors throw instead of returning `{ data, error }`
+ * tuples, and every row goes through `store.ts`'s normalisers instead of a
+ * cast, so both stores present one shape — and one timestamp format — to the
+ * tools (SMD-1040).
  *
  * Works anywhere fetch works, including Cloudflare Workers — which is why it stays
  * the default and why it is still worth keeping after the SQL store exists.
@@ -163,7 +164,11 @@ export class PostgrestStore implements ThoughtStore {
     const { data, error } = await this.client
       .from("thoughts")
       .select("metadata, created_at")
+      // `id` breaks ties: created_at is transaction-fixed, so a multi-row
+      // INSERT gives thousands of equal values, and a walk of separate range()
+      // requests over an unstable order can count a tied row twice or never.
       .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) throw new Error(error.message);
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseThoughtMeta);
@@ -178,12 +183,11 @@ export class PostgrestStore implements ThoughtStore {
     // silently. `total` and this walk are separate reads (as the tool's were
     // before SMD-1249), so the note is best-effort under concurrent writes over
     // the walk's window, not transactional. (This is the pre-SMD-1249 tool logic,
-    // moved into the store that still needs it, with one addition: a JSON null
-    // inside a topics/people array is skipped, so for well-formed metadata this
-    // store and migration 024's function — which drops it with WHERE ... IS NOT
-    // NULL — render the same top-10 breakdowns. Without the guard the walk would
-    // coerce null to a literal "null" key. Degenerate non-string metadata is not
-    // guaranteed to match the SQL path; see store.ts:ThoughtStats.)
+    // moved into the store that still needs it, mirroring migration 024's rules
+    // where the walk meets them — each is stated inline below. Degenerate
+    // non-string metadata is not guaranteed to match the SQL path; see
+    // store.ts:ThoughtStats. SMD-1336 asks whether this store should simply
+    // call the function.)
     const total = await this.countThoughts();
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};
@@ -198,7 +202,7 @@ export class PostgrestStore implements ThoughtStore {
       if (page.length === 0) break;
 
       for (const r of page) {
-        const m = (r.metadata || {}) as Record<string, unknown>;
+        const m = r.metadata;
         if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
         if (Array.isArray(m.topics))
           for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;

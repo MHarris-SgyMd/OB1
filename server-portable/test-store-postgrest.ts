@@ -259,8 +259,8 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
     assert(got?.created_at === "infinity", "getThought: the same");
   } finally {
     // Gone before [8]'s date-range assertions, which expect a finite span —
-    // and gone even if a store call above threw, so the row cannot leak into
-    // the next run's shared database.
+    // and gone even if a store call above threw, so a later section of THIS
+    // run is not misled (the next run starts from resetSchema regardless).
     await sql`DELETE FROM thoughts WHERE id = ${plantedId}::uuid`;
     await sql.close();
   }
@@ -402,16 +402,23 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   // the SQL store's min/max ignore it. The range must match what SQL says.
   const sql = new SQL({ url: URL_, max: 1 });
   const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
-  const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
-  const s = await store.statsSummary();
-  // The store's own formatter as the oracle, not a second one: on the edges this
-  // PR added (an infinity, an empty range) `new Date(x).toISOString()` throws or
-  // fabricates where the store returns "infinity" or null.
-  assert(s.newest === isoTimestampOrNull(range.newest) && s.oldest === isoTimestampOrNull(range.oldest),
-         `the date range ignores the undated row, as 024's min/max do (${s.oldest} → ${s.newest})`);
-  assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
-  await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
-  await sql.close();
+  const s = await (async () => {
+    try {
+      const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
+      const s = await store.statsSummary();
+      // The store's own formatter as the oracle, not a second one: on the edges
+      // this PR added (an infinity, an empty range) `new Date(x).toISOString()`
+      // throws or fabricates where the store returns "infinity" or null.
+      assert(s.newest === isoTimestampOrNull(range.newest) && s.oldest === isoTimestampOrNull(range.oldest),
+             `the date range ignores the undated row, as 024's min/max do (${s.oldest} → ${s.newest})`);
+      assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+      return s;
+    } finally {
+      // The same cleanup contract as [3d]: gone before [9], thrown or not.
+      await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+      await sql.close();
+    }
+  })();
   assert(s.aggregated === s.total, "a corpus under the cap is fully covered — the tool prints no truncation note");
   assert(s.types["statmark"] === 2, `the unique type is tallied across both rows (${JSON.stringify(s.types)})`);
   assert(s.topics["stattopic"] === 2, "the unique topic unnests from both arrays");

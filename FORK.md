@@ -5410,6 +5410,33 @@ false. Declined: pinning "Invalid Date" in `test-server` as expected output
 (pinning a bug), and widening `ThoughtListItem.created_at` here (SMD-1328's
 decision, five reader sites).
 
+**A fourth pass, at the user's call.** Its top three findings were the three
+already ticketed (SMD-1328 twice, SMD-1336) — the loop had ended — and the
+rest were tidy-ups worth taking in files the PR was already in:
+
+- The stats page walk ordered by `created_at DESC` alone across up to 100
+  separate `range()` requests. `created_at` is transaction-fixed, so a
+  multi-row INSERT gives thousands of equal values, and a walk over an
+  unstable order can count a tied row twice or never. Both stores' page
+  queries break ties on `id` (pre-existing; the PR had rewritten the block
+  around it).
+- `isoTimestampOpt` for the keys an envelope may omit (`updated_at` before
+  018, `revoked_at` when not revoked) — the one place `== null` is the right
+  test, spelled once instead of three times. The SQL store's `statsSummary`
+  had optional keys and an empty-object fallback that `isoTimestampOrNull`
+  would now throw on; 024 guarantees every key, so the tolerance is gone
+  rather than left to mislead.
+- `db/reembed.ts` kept its own copy of the uuid regex for `--accept-failed`;
+  it imports the stores' `UUID_RE` now, so the CLI refuses exactly the ids
+  the stores answer null for. The PostgREST file header still said the store
+  was "unchanged in substance"; it names the mapping layer. [3d]'s `finally`
+  comment claimed to protect the next run, which `resetSchema` already does;
+  it protects later sections of this run, and [8] has the same contract.
+
+Ticketed: SMD-1338 — the malformed-id rule is enforced per store read method
+while `update_thought` and `delete_thought` take a bare `z.string()` and hand
+it to Postgres; validate once at the tool boundary.
+
 Verified: `test-store-postgrest` 77/77 (60 before this ticket; the first
 commit's format assertion, run against `main`'s store, reported
 `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)` and

@@ -171,23 +171,26 @@ export class SqlStore implements ThoughtStore {
     // and the tool never prints a truncation note on this path. (The PostgREST
     // store still walks and can truncate; that is the divergence the interface
     // documents.) jsonb comes back from Bun.sql already parsed into JS values.
+    // One row, one jsonb, every key present — 024 builds the object with all
+    // six, so no optional keys and no empty-object fallback: a missing key
+    // would be a changed function, and isoTimestampOrNull throws on it.
     const rows = await this.sql`SELECT thought_stats_summary() AS s`;
-    const s = (rows[0]?.s ?? {}) as {
-      total?: number;
-      first_ts?: string | null;
-      last_ts?: string | null;
-      types?: Record<string, number>;
-      topics?: Record<string, number>;
-      people?: Record<string, number>;
+    const s = rows[0].s as {
+      total: number;
+      first_ts: string | null;
+      last_ts: string | null;
+      types: Record<string, number>;
+      topics: Record<string, number>;
+      people: Record<string, number>;
     };
-    const total = Number(s.total ?? 0);
+    const total = Number(s.total);
     return {
       total,
       oldest: isoTimestampOrNull(s.first_ts),
       newest: isoTimestampOrNull(s.last_ts),
-      types: s.types ?? {},
-      topics: s.topics ?? {},
-      people: s.people ?? {},
+      types: s.types,
+      topics: s.topics,
+      people: s.people,
       aggregated: total,
     };
   }
@@ -200,7 +203,7 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT metadata, created_at
       FROM thoughts
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT ${limit}::int OFFSET ${offset}::int`;
     return rows.map(normaliseThoughtMeta);
   }

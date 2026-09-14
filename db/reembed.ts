@@ -383,6 +383,7 @@ import {
   validateEmbeddingConfig,
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
+import { UUID_RE } from "../server-portable/store.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -1138,8 +1139,8 @@ if (ACCEPT_FAILED) {
         failedRows.slice(0, 20).map(describe).join("\n")
     );
   }
-  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const bad = ACCEPT_IDS.filter((id) => !UUID.test(id));
+  // The stores' rule (store.ts), so the CLI refuses exactly the ids they answer null for.
+  const bad = ACCEPT_IDS.filter((id) => !UUID_RE.test(id));
   if (bad.length) await refuse(`not a thought id: ${bad.join(", ")}.`);
   const failedIds = new Set(failedRows.map((r) => r.id));
   const asked = [...new Set(ACCEPT_IDS.map((id) => id.toLowerCase()))];

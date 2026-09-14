@@ -147,6 +147,16 @@ export function isoTimestampOrNull(v: unknown): string | null {
 }
 
 /**
+ * `isoTimestamp` for a key an envelope may omit — `update_thought`'s jsonb
+ * before 018 had no `updated_at`; `resolve_agent`'s has `revoked_at` only when
+ * revoked. Absence is legitimate there, so `undefined` is `undefined`, not the
+ * throw above. The one place `== null` is the right test.
+ */
+export function isoTimestampOpt(v: unknown): string | undefined {
+  return v == null ? undefined : isoTimestamp(v);
+}
+
+/**
  * The row normalisers. One per row shape the store interface returns, shared
  * by both stores, so a field's format or a column's name cannot drift between
  * them: PostgREST returns the function's snake_case columns, and a cast
@@ -397,9 +407,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
       // same column through normaliseThoughtRecord. Passing the ISO value back
       // as if_unchanged_since is safe — 021 compares both sides at millisecond
       // precision.
-      // `== null`, not isoTimestampOrNull: a pre-018 envelope has no
-      // updated_at key at all, and that absence is legitimate here.
-      updatedAt: r.updated_at == null ? undefined : isoTimestamp(r.updated_at),
+      updatedAt: isoTimestampOpt(r.updated_at),
       duplicateOf: r.duplicate_of ? String(r.duplicate_of) : undefined,
       // Another row holds this text's key under different text — a stale
       // fingerprint — so this row could not take the fingerprint it should have.
@@ -409,7 +417,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
   return {
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
-    currentUpdatedAt: r.current_updated_at == null ? undefined : isoTimestamp(r.current_updated_at),
+    currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
   };
 }
 
@@ -520,7 +528,7 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
       ok: false,
       error: "REVOKED",
       agentId: r.agent_id,
-      revokedAt: r.revoked_at == null ? "" : isoTimestamp(r.revoked_at),
+      revokedAt: isoTimestampOpt(r.revoked_at) ?? "",
       reason: typeof r.reason === "string" ? r.reason : null,
     };
   }
