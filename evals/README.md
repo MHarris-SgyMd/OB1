@@ -912,6 +912,84 @@ keep by catching that.
   content the model can act on. So a second tier cannot stream a first draft — it
   can only be adaptive and invisible, or an explicit parameter on the tool.
 
+### Re-measured on LongMemEval: the reranker re-declined (SMD-1304), and two neighbouring levers with it
+
+Everything above was measured on the **tracker** corpus, which tier 1 saturates —
+a reranker there has almost nothing to reorder. LongMemEval-S (the second corpus,
+the one built precisely because the tracker was too easy) is the fair re-test:
+after SMD-1300 removed the cosine floor, its weakest slices are **multi-session
+(79.3%)** and **temporal (79.5%)** strict recall_all@5 on `qwen3-embedding:0.6b`,
+and the golds are *in the pool* — a perfect reorder of the top-30 would reach
+99.2% / 95.3% (the oracle). That is real headroom, and a public number to beat:
+GBrain reports 93.40% → 95.53% all-types with a hosted Voyage reranker on.
+
+`evals/rerank-spike.ts` runs the fan-in / date / bi-encoder / LLM-listwise arms
+off a persisted `eval-longmemeval.ts` load. The cross-encoders need a torch env
+(Ollama serves no reranker — itself part of the finding): `rerank-crossencoder.py`
+for the sentence-transformers cross-encoder (bge-reranker-v2-m3), and
+`rerank-llm-reranker.py` for the causal-LM yes/no rerankers (Qwen3-Reranker,
+MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool.
+
+| reranker of the top-30 pool | MS strict | MS any-hit | temporal strict | temporal any-hit |
+| --- | --- | --- | --- | --- |
+| baseline (no rerank — the vector pool) | 79.3% | 96.7% | 79.5% | 92.9% |
+| bge-m3, bi-encoder cosine | 81.8% | — | 75.6% | — |
+| qwen2.5:7b, general-LLM listwise | 27.3% | 87.6% | 40.9% | 85.8% |
+| bge-reranker-v2-m3, cross-encoder | 66.9% | 94.2% | 71.7% | 92.1% |
+| Qwen3-Reranker-4B, cross-encoder | 66.1% | 99.2% | 70.1% | 96.1% |
+| **MemReranker-4B**, reasoning-calibrated | **89.3%** | 99.2% | **81.9%** | 96.9% |
+| *oracle (perfect rerank of top-30)* | *99.2%* | — | *95.3%* | — |
+
+**Read the two metrics against each other.** Every cross-encoder posts a *higher*
+any-hit than the baseline while posting a *lower* strict — and the stronger the
+model, the wider the gap. That is the mechanism: a cross-encoder is elite at
+surfacing *one* relevant session, so it packs the top-5 with the dominant gold and
+its most-on-topic neighbours and squeezes the *second* gold out. The misses are
+multi-hop **counting/comparison** questions ("how many days between X and Y") where
+every session is equally relevant, so a sharper relevance judge collapses
+set-coverage. Reranking optimises depth; `strict recall_all@k` needs breadth.
+
+**The same architecture, retrained, reverses it.** MemReranker-4B is
+Qwen3-Reranker-4B after reasoning/calibration distillation — same lineage, same
+yes/no scoring — and it lifts multi-session **66.1% → 89.3%** (+10 over baseline)
+while keeping any-hit at 99.2%. The failure was the training objective, not the
+architecture: trained *not* to concentrate, a reranker keeps "find a gold" and
+recovers the set.
+
+**But held-out, the gain does not travel — so treat it as benchmark-specific.**
+MemReranker used LongMemEval as an evaluation benchmark. On a genuinely
+off-distribution corpus — the 601-issue Linear tracker with the hand-labelled
+`graphrag-questions.json` multi-hop set, which it never saw — the result does not
+reproduce:
+
+| held-out Linear corpus | multi-hop @5 | aggregation @5 |
+| --- | --- | --- |
+| baseline (vector) | 100% (17/17) | 29% (2/7) |
+| Qwen3-Reranker-4B | 100% (17/17) | 29% (2/7) |
+| MemReranker-4B | 94% (16/17) | 43% (3/7) |
+
+MemReranker is about neutral here (+1 aggregation, −1 multi-hop), and the generic
+Qwen3-Reranker is *perfectly* neutral, not harmful — because these multi-hop
+questions are easy (baseline 100%), their golds robustly top-ranked, so there is no
+marginal second gold to drop. So the catastrophic LongMemEval harm is a
+**difficulty** effect (marginal golds at rank 3–4), not a law about cross-encoders;
+and MemReranker's +10 is largely benchmark-specific. A *hard* held-out multi-hop
+corpus would be needed to confirm it, and the tracker corpus (too easy) is not one.
+
+Two neighbouring levers were on the same load and fell the same way. **The
+candidate window (SMD-1301)** is a no-op: calling the shipped fused function at
+`match_count` = 5, 10, 20, 50, 100 and taking the first 5 gives byte-identical
+recall — at `recency_weight` 0 the vector arm is ranked by similarity, so a wider
+scan admits more rows below the five but never reorders the five (the keyword arm
+perturbs at most one question, a constant offset that does not move with the
+window). **An event-date
+signal (SMD-1302)** is noise-to-harmful: only 4% of temporal questions name a date
+to match, the gold is no closer to `question_date` than a distractor, and a
+proximity blend gains at most +2 of 248 questions while hurting at any real weight (the
+recency-shaped signal SMD-945 already declined). The decline stands on the corpus
+that could have overturned it; the only untested lever is a *hosted* reranker
+(Voyage `rerank-2.5`), off the local-by-default path.
+
 ### Verifying Matryoshka support against the model cards
 
 Widths were measured, which beats any card. **MRL membership was not** — I inferred
