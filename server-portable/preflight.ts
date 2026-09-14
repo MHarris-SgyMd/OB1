@@ -26,6 +26,7 @@
 import { createStore, type StoreEnv } from "./store.ts";
 import { createClient } from "@supabase/supabase-js";
 import { parseKeyRecords } from "./auth.ts";
+import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import type { PassCounts } from "../db/config.mjs";
 
 type Status = "ok" | "fail" | "warn" | "skip";
@@ -137,6 +138,33 @@ add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credent
   }
   for (const w of embeddingConfigWarnings(embDim, embModel, truncate)) {
     add("embedding config", "warn", w, "Benchmark it on your own corpus — see evals/README.md.");
+  }
+}
+{
+  // The window a capture is split at, and where the number came from
+  // (SMD-1305). The rule is db/config.mjs's — the call embed.ts makes — so this
+  // prints what the server will do, not a second opinion of it. An explicit
+  // limit over the model's window is the one configuration that defeats the
+  // windows: a window that long is cut silently, which is what they exist to
+  // prevent.
+  const { resolveChunkTokens, MAX_WHOLE_TOKENS, DEFAULT_MODEL_WINDOW } = await import("../db/config.mjs");
+  const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, embModel, DEFAULT_MAX_TOKENS);
+  const windowText = chunk.window !== undefined
+    ? `${embModel}'s ${chunk.window}-token window`
+    : `${embModel}'s window, which db/config.mjs's KNOWN_MODEL_WINDOW does not list`;
+  const rule = `captures over ${chunk.threshold} tokens are windowed at ${chunk.tokens}`;
+  if (chunk.from === "OB1_CHUNK_TOKENS" && chunk.window !== undefined && chunk.tokens > chunk.window) {
+    add("chunk window", "warn",
+        `OB1_CHUNK_TOKENS=${chunk.tokens} is over ${windowText} — a window that long is cut at ${chunk.window} tokens silently, which is the failure the windows exist to prevent`,
+        `Unset OB1_CHUNK_TOKENS to derive the rule from the window, or set it under ${chunk.window}.`);
+  } else if (chunk.from === "OB1_CHUNK_TOKENS") {
+    add("chunk window", "ok", `${rule}, from OB1_CHUNK_TOKENS (${windowText})`);
+  } else if (chunk.from === "window") {
+    add("chunk window", "ok",
+        `${rule}, derived from ${windowText}${chunk.capped ? ` — the threshold capped at ${MAX_WHOLE_TOKENS}, past which the whole vector alone was measured to lose recall, the window at the shipped size, which larger windows were measured not to beat (evals/README.md, SMD-1305)` : ""}`);
+  } else {
+    add("chunk window", "ok",
+        `${rule}, the default for ${windowText} — set OB1_CHUNK_TOKENS if the provider embeds fewer than ${DEFAULT_MODEL_WINDOW} tokens in one request`);
   }
 }
 add("metadata model", "ok", metaModel);

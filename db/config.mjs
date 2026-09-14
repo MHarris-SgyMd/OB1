@@ -170,6 +170,94 @@ export const KNOWN_MODEL_DIMS = {
 };
 
 /**
+ * Tokens a provider embeds in one request before cutting the rest silently —
+ * the window the chunk limit is derived from (SMD-1305).
+ *
+ * Measured, not read off a card, because the card is wrong in both directions
+ * (evals/README.md, "Ollama caps embeddings at 2048 tokens by default"):
+ * Ollama's default batch cuts `bge-m3` at 2048 although it advertises 8192, and
+ * `qwen3-embedding` embeds 18,919 tokens whole — the longest LongMemEval
+ * session, `prompt_eval_count` checked — although its manifest sets no batch at
+ * all. Each local entry is what `/api/embed` reported as `prompt_eval_count`
+ * for a document longer than it, or the served context where a document that
+ * long went through whole. A model rebuilt past its default with a Modelfile
+ * (`PARAMETER num_batch 8192`) has another name and is not here: set
+ * OB1_CHUNK_TOKENS for it, or add the entry once it is measured. Hosted entries
+ * are the provider's documented maximum input, not verified here: no key. A
+ * WRONG entry here truncates windows silently, which is the failure the windows
+ * exist to prevent, so a model that is not measured is not listed.
+ */
+export const KNOWN_MODEL_WINDOW = {
+  // ── Hosted, from provider documentation. ────────────────────────────────────
+  "openai/text-embedding-3-small": 8191,
+  "openai/text-embedding-3-large": 8191,
+  "openai/text-embedding-ada-002": 8191,
+  "mistralai/mistral-embed-2312": 8192,
+  "qwen/qwen3-embedding-4b": 32768,
+  "qwen/qwen3-embedding-8b": 32768,
+  "baai/bge-m3": 8192,
+
+  // ── Local via Ollama, at each model's default parameters. ───────────────────
+  embeddinggemma: 2048,                    // prompt_eval_count 2048 on a 4K and on an 8K document
+  "nomic-embed-text": 2048,                // card says 8192; served at 2048, at chance on a 4K document
+  "bge-m3": 2048,                          // card says 8192; the default batch cuts at 2048
+  "snowflake-arctic-embed2": 2048,         // likewise
+  "granite-embedding": 512,                // prompt_eval_count 512 — a 1200-token window was cut here
+  "qwen3-embedding:0.6b": 32768,           // served context; 18,919 tokens embedded whole
+  "qwen3-embedding:4b": 40960,             // served context; 18,919 tokens embedded whole
+};
+
+/**
+ * Ollama's default batch: the window the shipped chunk limit was set under.
+ * The limit-to-window ratio it fixes (1200 of 2048) is the headroom the
+ * tokenless estimate in server-portable/chunk.ts needs, and a known model's
+ * threshold — and, for a smaller window, its window size — is derived at the
+ * same ratio of its own window.
+ */
+export const DEFAULT_MODEL_WINDOW = 2048;
+
+/**
+ * The longest capture a whole vector alone was measured to hold, in chunk.ts's
+ * estimated tokens: the length a derived rule windows above, whatever the
+ * window. Measured on LongMemEval-S under both qwen3-embedding models
+ * (evals/README.md, SMD-1305): with the whole vector alone, strict recall held
+ * within half a point of best-of-whole-and-windows for every question whose
+ * longest gold session was under 4096 estimated tokens, and fell 1.8 (4b) and
+ * 3.6 (0.6b) points above it. So a model with a 40,960-token window embeds a
+ * 3,000-token capture whole and still windows a 5,000-token one — at 1200 a
+ * window, the shipped size, because 4096-token windows over those same
+ * sessions were measured to buy nothing (88.7% strict recall@5 with them or
+ * without) where 1200-token ones bought 0.9 points.
+ */
+export const MAX_WHOLE_TOKENS = 4096;
+
+/**
+ * How a model's captures are windowed: `threshold`, the estimated length a
+ * capture is windowed above, and `tokens`, the size of each window. Both are
+ * OB1_CHUNK_TOKENS when it is set to a positive number, as before SMD-1305.
+ * Otherwise a model in KNOWN_MODEL_WINDOW derives them from its window at the
+ * shipped ratio (1200 of 2048): the window size never above `fallback`, the
+ * threshold never above MAX_WHOLE_TOKENS — so a 2048-token model gets 1200 and
+ * 1200 as it always did, a 512-token model gets 300 and 300 where 1200 cut its
+ * windows, and the default model windows above 4096 at 1200. A model the table
+ * does not know gets `fallback` for both (server-portable/chunk.ts's
+ * DEFAULT_MAX_TOKENS, passed in because this file cannot import it under
+ * Node). One rule for the server, reembed.ts and preflight, which names the
+ * source it reports; `capped` says the threshold stopped at MAX_WHOLE_TOKENS.
+ *
+ * Empty, non-numeric and non-positive mean unset, as every numeric variable
+ * server-portable/embed.ts reads (deploy/compose.yaml forwards `${VAR:-}`).
+ */
+export function resolveChunkTokens(raw, model, fallback) {
+  const n = raw ? Number(raw) : NaN;
+  const window = KNOWN_MODEL_WINDOW[model];
+  if (Number.isFinite(n) && n > 0) return { tokens: n, threshold: n, from: "OB1_CHUNK_TOKENS", window, capped: false };
+  if (window === undefined) return { tokens: fallback, threshold: fallback, from: "default", window, capped: false };
+  const atRatio = Math.floor((window * fallback) / DEFAULT_MODEL_WINDOW);
+  return { tokens: Math.min(atRatio, fallback), threshold: Math.min(atRatio, MAX_WHOLE_TOKENS), from: "window", window, capped: atRatio > MAX_WHOLE_TOKENS };
+}
+
+/**
  * Models trained with Matryoshka Representation Learning, which concentrates
  * meaning in the leading dimensions so a prefix of the vector is still a good
  * vector. Truncating one of these is a supported operation; truncating anything

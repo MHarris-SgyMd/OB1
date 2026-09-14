@@ -51,7 +51,11 @@ durable part and the tags are re-derivable.
 `preflight.ts --deep` exercises both against the live endpoint, checks the
 embedding width matches the schema, and checks the metadata model actually honours
 JSON mode — a provider that ignores `response_format` degrades every capture to
-`uncategorized` without ever failing. With or without `--deep`, over a direct
+`uncategorized` without ever failing. `chunk window` prints the length a capture
+is windowed above, the window size, and where the numbers came from — `OB1_CHUNK_TOKENS`, the model's
+measured window (`db/config.mjs`, `KNOWN_MODEL_WINDOW`), or the default for a
+model the table does not know — and warns when an explicit limit is over the
+window, since a window that long is cut silently (SMD-1305). With or without `--deep`, over a direct
 connection it also reads the claim table: a re-embed pass that has not finished —
 rows pending, leased or failed under a `reembed:` key — is a warning with the
 counts and the command that finishes it, because `ob1_config` records the new

@@ -85,6 +85,30 @@ console.log("\n[3] Credentials are not echoed");
   assert(/db\.example/.test(r.out), "…while the host stays visible for debugging");
 }
 
+console.log("\n[3b] The chunk window is derived from the model, and named");
+{
+  // Configuration checks print whether or not the database answers, so a
+  // refused port is enough; the model is set explicitly because the suite
+  // exports the default one to every run.
+  const base = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x", OB1_CHUNK_TOKENS: undefined };
+  const qwen = await run({ ...base, OB1_EMBEDDING_MODEL: "qwen3-embedding:4b", OB1_EMBEDDING_DIM: "1024" });
+  assert(/chunk window\s+captures over 4096 tokens are windowed at 1200, derived from qwen3-embedding:4b's 40960-token window — the threshold capped at 4096/.test(qwen.out),
+         "the default model windows above 4096 at the shipped 1200: the threshold from its window, capped, and the line says so");
+  const gemma = await run({ ...base, OB1_EMBEDDING_MODEL: "embeddinggemma", OB1_EMBEDDING_DIM: "768" });
+  assert(/chunk window\s+captures over 1200 tokens are windowed at 1200, derived from embeddinggemma's 2048-token window\s*$/m.test(gemma.out),
+         "a 2048-token model derives the shipped 1200 for both, uncapped");
+  const unknown = await run({ ...base, OB1_EMBEDDING_MODEL: "some-model", OB1_EMBEDDING_DIM: "1024" });
+  assert(/chunk window\s+captures over 1200 tokens are windowed at 1200, the default for some-model's window, which db\/config\.mjs's KNOWN_MODEL_WINDOW does not list/.test(unknown.out),
+         "an unknown model keeps 1200 and is told where the table is");
+  const pinned = await run({ ...base, OB1_EMBEDDING_MODEL: "qwen3-embedding:4b", OB1_EMBEDDING_DIM: "1024", OB1_CHUNK_TOKENS: "1200" });
+  assert(/chunk window\s+captures over 1200 tokens are windowed at 1200, from OB1_CHUNK_TOKENS \(qwen3-embedding:4b's 40960-token window\)/.test(pinned.out),
+         "OB1_CHUNK_TOKENS sets both, as it always did, and the window is shown beside it");
+  const over = await run({ ...base, OB1_EMBEDDING_MODEL: "embeddinggemma", OB1_EMBEDDING_DIM: "768", OB1_CHUNK_TOKENS: "3000" });
+  assert(/chunk window\s+OB1_CHUNK_TOKENS=3000 is over embeddinggemma's 2048-token window — a window that long is cut at 2048 tokens silently/.test(over.out)
+         && /Unset OB1_CHUNK_TOKENS to derive the rule from the window, or set it under 2048/.test(over.out),
+         "a limit over the model's window is a warning naming the cut and the two ways out");
+}
+
 console.log("\n[4] Unreachable database fails rather than hanging");
 {
   const r = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql",

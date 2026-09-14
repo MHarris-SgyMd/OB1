@@ -40,8 +40,23 @@ export type ChunkOptions = {
    * overshoots is truncated silently, which is the bug, not a degradation.
    * Retrieval was also measured perfect at 2000 tokens and at chance by 4000, so
    * there is nothing to gain from crowding the ceiling.
+   *
+   * The server passes what db/config.mjs's `resolveChunkTokens` derives for the
+   * configured model (SMD-1305): this size, never above the default below —
+   * 4096-token windows were measured to buy nothing where 1200-token ones
+   * bought recall — and a `threshold` that may be higher. The default is what
+   * a model the table does not know gets, and what a 2048-token model derives.
    */
   maxTokens?: number;
+  /**
+   * Estimated tokens a capture is windowed above. Defaults to maxTokens, the
+   * shipped rule: anything that does not fit one window is windowed. A model
+   * measured to embed more than a window whole is given a higher one
+   * (SMD-1305): the default model's captures are windowed above 4096 estimated
+   * tokens, at 1200 a window, so a 3,000-token capture is one vector and a
+   * 5,000-token one is a vector and its windows.
+   */
+  threshold?: number;
   /**
    * Overlap between consecutive chunks. A sentence that straddles a boundary
    * otherwise appears in neither chunk with its context intact, and the
@@ -51,6 +66,7 @@ export type ChunkOptions = {
   overlapTokens?: number;
 };
 
+/** 1200 of Ollama's 2048-token batch; a model with a smaller known window derives its own at this ratio, a larger one keeps this size and raises the threshold. */
 export const DEFAULT_MAX_TOKENS = 1200;
 export const DEFAULT_OVERLAP_TOKENS = 150;
 
@@ -59,23 +75,30 @@ export const DEFAULT_OVERLAP_TOKENS = 150;
  * sentences, then whitespace. Splitting mid-sentence produces windows that embed
  * to something meaning neither half, so it is the last resort rather than the
  * default.
+ *
+ * The boundary is the caller's limit, not the default. Until SMD-1305 this read
+ * DEFAULT_MAX_TOKENS whatever `maxTokens` was, which was invisible at 1200 and
+ * wrong either side of it: under a smaller limit a paragraph between the two
+ * passed here whole and was cut at words by the post-condition below, where
+ * sentences would have done; under a larger one every paragraph over 1200 was
+ * cut into sentences the assembly then had to re-join.
  */
-function segments(text: string): string[] {
+function segments(text: string, maxTokens: number): string[] {
   const paras = text.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
   const out: string[] = [];
   for (const para of paras) {
-    if (estimateTokens(para) <= DEFAULT_MAX_TOKENS) { out.push(para.trim()); continue; }
+    if (estimateTokens(para) <= maxTokens) { out.push(para.trim()); continue; }
     // Keep the terminator with the sentence it ends.
     const sentences = para.match(/[^.!?]+[.!?]+[\s"')\]]*|[^.!?]+$/g) ?? [para];
     for (const s of sentences) {
-      if (estimateTokens(s) <= DEFAULT_MAX_TOKENS) { out.push(s.trim()); continue; }
+      if (estimateTokens(s) <= maxTokens) { out.push(s.trim()); continue; }
       // A single sentence over the limit — unpunctuated prose, a pasted table, a
       // minified blob. Fall back to words so it is still bounded.
       const words = s.split(/\s+/);
       let buf: string[] = [];
       for (const w of words) {
         buf.push(w);
-        if (estimateTokens(buf.join(" ")) >= DEFAULT_MAX_TOKENS) { out.push(buf.join(" ")); buf = []; }
+        if (estimateTokens(buf.join(" ")) >= maxTokens) { out.push(buf.join(" ")); buf = []; }
       }
       if (buf.length) out.push(buf.join(" "));
     }
@@ -86,16 +109,17 @@ function segments(text: string): string[] {
 export type Chunk = { index: number; content: string };
 
 /**
- * Returns [] when the content fits in one window — the caller then stores a single
- * whole-content embedding exactly as before, and no chunk rows are written.
+ * Returns [] when the content is at or under the threshold — one window, unless
+ * the caller raised it — and the caller then stores a single whole-content
+ * embedding exactly as before, with no chunk rows written.
  */
 export function chunkContent(content: string, opts: ChunkOptions = {}): Chunk[] {
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   const overlapTokens = Math.min(opts.overlapTokens ?? DEFAULT_OVERLAP_TOKENS, Math.floor(maxTokens / 2));
 
-  if (estimateTokens(content) <= maxTokens) return [];
+  if (estimateTokens(content) <= (opts.threshold ?? maxTokens)) return [];
 
-  const segs = segments(content);
+  const segs = segments(content, maxTokens);
   const chunks: string[] = [];
   let buf: string[] = [];
 

@@ -123,6 +123,8 @@ services:
       # Read per capture. Preflight refuses to start if this is on against a
       # database without migration 013, so a stale value here fails loudly.
       OB1_CHUNK_CONTEXT: ${OB1_CHUNK_CONTEXT:-}
+      # Unset, derived from the embedding model's measured window; preflight
+      # prints the value, and warns when an explicit one is over the window.
       OB1_CHUNK_TOKENS: ${OB1_CHUNK_TOKENS:-}
       OB1_CHUNK_OVERLAP: ${OB1_CHUNK_OVERLAP:-}
       OB1_EMBEDDING_DIMENSIONS: ${OB1_EMBEDDING_DIMENSIONS:-}
