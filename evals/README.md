@@ -2244,7 +2244,8 @@ other limits real.
 * Two local models on one corpus. The 4096 cap is one number from two models
   on sessions whose median is 2,600 tokens and whose 99th percentile is 5,200;
   above 8,192 there are three. A corpus of 20,000-token documents has not been
-  measured, and on it the whole vector may hold worse or the cap may be low.
+  measured, and on it the whole vector may hold worse or the cap may be low
+  (SMD-1315).
 * The shipped 1200 was not tuned either way here: 600- or 2,000-token windows
   were not measured, only that 4096-token ones lose to it.
 * Hosted models have no entry and keep 1200 for both numbers, exactly what
