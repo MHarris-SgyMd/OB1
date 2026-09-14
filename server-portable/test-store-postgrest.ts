@@ -135,6 +135,16 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
          "…retrieved by its final window, not its opening");
   assert(Math.abs((hits[0]?.similarity ?? 0) - 1) < 1e-6,
          `scored by the matching chunk (${hits[0]?.similarity?.toFixed(4)})`);
+  // The format assertion test-store-sql [3] has had all along. This store
+  // returned the client's own value — a Date here, a `+00:00` string over
+  // PostgREST — under a type that says ISO string, and nothing noticed because
+  // [3b] and [3c] asserted the format on the two younger methods only
+  // (SMD-1040). `typeof` first: a Date coerced for the regex would fail it,
+  // but the message should say which it was.
+  assert(typeof hits[0]?.created_at === "string" && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(hits[0].created_at),
+         `created_at is an ISO string, as the SQL store returns (got ${typeof hits[0]?.created_at} ${String(hits[0]?.created_at)})`);
+  assert(typeof hits[0]?.score === "number" && typeof hits[0]?.similarity === "number",
+         "similarity and score arrive as numbers, not the client's own representation");
 }
 
 console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");

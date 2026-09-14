@@ -104,6 +104,27 @@ export type ThoughtHybridMatch = {
 };
 
 /**
+ * A `match_thoughts` row as either backend hands it back — into a ThoughtMatch.
+ * Shared so the two stores cannot drift on `created_at`'s FORMAT: the SQL
+ * driver returns a Date, PostgREST a `+00:00` string, and a bare cast passes
+ * both through under a type that says ISO. Every other row mapper in the
+ * stores goes through `new Date(...).toISOString()`; this is the one that did
+ * not (SMD-1040). `similarity` and `score` go through Number for the same
+ * reason `total_count` does in the keyword mappers — a driver that hands back
+ * a string for a float8 would otherwise type-check and break the comparisons.
+ */
+export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    similarity: Number(r.similarity),
+    created_at: new Date(r.created_at as string).toISOString(),
+    score: Number(r.score),
+  };
+}
+
+/**
  * A `search_thoughts_hybrid` row as either backend hands it back — snake_case
  * column names, `similarity` possibly NULL, text[] as arrays — into the store's
  * shape. Shared so the two stores cannot drift on the nullable field:

@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMatchRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -78,7 +78,13 @@ export class PostgrestStore implements ThoughtStore {
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtMatch[];
+    // Mapped through the shared normaliser, not cast (SMD-1040). This was the
+    // oldest method and the last bare cast: `keywordThoughts` below was fixed
+    // when a review caught the locale-formatted date, `hybridThoughts` arrived
+    // mapped, and this one handed `created_at` back in whatever form the client
+    // gave it — a Date over compat/supabase-sql, a `+00:00` string over
+    // PostgREST — under a type that says ISO.
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseMatchRow);
   }
 
   async keywordThoughts(opts: {

@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-one numbered changes on top of the pin. Seven fix defects found in an
+Fifty-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–51 are the numbered `###` sections** further down, which is
+sections. Changes **18–52 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -2226,7 +2226,8 @@ test (rows fetched = `total_count`) rather than the constant 100; the eval's
 decoy builder guards an empty identifier set; the vector-cache override is a
 prefix so two text rules cannot share one file; and the stride sampler has one
 definition. Tickets: SMD-1040 (`PostgrestStore.matchThoughts` is still a bare
-cast, so `created_at` differs in format between stores on the vector path) and
+cast, so `created_at` differs in format between stores on the vector path;
+done in change 52) and
 SMD-1041 (declare `ROWS` on `match_thoughts` and `search_thoughts_keyword` in
 their own migrations — a hint set from 017 would be reset by the next
 re-apply of 014; done in change 36). Declined: rewriting the CTEs as a FULL OUTER JOIN, moving
@@ -5232,6 +5233,49 @@ repo root no longer descends `.claude/worktrees`. Upstream status:
 **contributable in principle** — these are recipe files, not the core server —
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
+
+### 52. `PostgrestStore.matchThoughts` maps its rows — `created_at` has one format on the vector path whichever store answers (SMD-1040)
+
+`server-portable/store-postgrest.ts`'s `matchThoughts` returned
+`(data ?? []) as ThoughtMatch[]`: the client's own row under a type that says
+`created_at: string` in ISO form. The SQL store has always mapped the same row
+through `new Date(...).toISOString()`; so had this store's two younger methods,
+`keywordThoughts` (after a review caught a locale-formatted date on it; the
+comment above that mapper keeps the string it produced) and `hybridThoughts`
+(mapped from the day it arrived, change 32). The
+oldest method was never revisited. The SMD-958 review named it (finding T12)
+and it was ticketed rather than fixed, because by then nothing in the product
+read it: `search` and `search_thoughts` go through `hybridThoughts`, and the
+only remaining caller, `preflight.ts`'s 014 and 020 probes, reads row counts.
+That is also why no test noticed. `test-store-postgrest` [3] asserted count,
+content and similarity on a `matchThoughts` row; the format assertion lived in
+[3b] and [3c], on the two methods that had already been fixed.
+
+Measured before fixing, over `compat/supabase-sql` — the fixture the suite
+uses, which is real SQL through Bun's driver — the row's `created_at` was a
+`Date` object, not a string at all; `JSON.stringify` hid it (a Date serialises
+to ISO), and a template string showed
+`Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)`. Over PostgREST
+itself the same column is a JSON string in Postgres's own form,
+`2026-09-14T16:27:09.123456+00:00` — a string, but not the one the SQL store
+returns for the same row. Both are the class of difference that survives every
+test asserting presence.
+
+The fix is the shape the ticket asked for: one `normaliseMatchRow` in
+`store.ts`, beside `normaliseHybridRow`, and both stores call it — the SQL
+store's inline map is gone too, so the two cannot drift again on this row.
+`similarity` and `score` go through `Number` there for the reason
+`total_count` does in the keyword mappers. The keyword mappers themselves stay
+as two inline copies: they agree today and both suites assert their format,
+so folding them was left for a pass that has a reason to touch them.
+
+Verified by `test-store-postgrest` [3], which now asserts what `test-store-sql`
+[3] always has: `typeof created_at === "string"` and the ISO regex, plus
+numbers for `similarity` and `score`. Run against `main`'s store before the
+fix it reports `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central
+Daylight Time)` and fails the suite 59/60; with the fix, 60/60. `test-store-sql`
+83/83 and `test-server` 71/71 unchanged. Upstream status: **not applicable** —
+`server-portable/` and its two stores are the fork's (change 11).
 
 ## Detached from the fork network
 

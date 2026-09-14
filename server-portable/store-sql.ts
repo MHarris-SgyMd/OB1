@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMatchRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -87,14 +87,7 @@ export class SqlStore implements ThoughtStore {
         ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
         ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      similarity: Number(r.similarity),
-      created_at: new Date(r.created_at as string).toISOString(),
-      score: Number(r.score),
-    }));
+    return rows.map((r: Record<string, unknown>) => normaliseMatchRow(r));
   }
 
   async keywordThoughts(opts: {
