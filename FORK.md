@@ -5284,10 +5284,9 @@ narrower than its own mechanism, and one input it broke on.** Fixed here:
   the whole result array on it, and both preflight probes would have degraded
   to `skip`. One `isoTimestamp` now formats every timestamp the stores return:
   a finite one as `toISOString`, an infinite one in Postgres's own spelling on
-  either client (Bun hands back the number `±Infinity`, PostgREST the string),
-  and garbage throws with a message naming the value. `test-store-postgrest`
-  [3d] plants a row dated `infinity` and reads it back through `matchThoughts`,
-  `getThought`, `listThoughts` and `pageThoughtMeta`.
+  either client (Bun hands back the number `±Infinity`, PostgREST the string).
+  `test-store-postgrest` [3d] plants a row dated `infinity` and reads it back
+  through `matchThoughts`, `getThought`, `listThoughts` and `pageThoughtMeta`.
 - The first commit's `typeof score === "number"` assertion could not fail:
   `typeof NaN` is `"number"`, so a dropped or renamed column under `Number()`
   passes it. `Number.isFinite` now, there and on the pre-existing [3c] line.
@@ -5304,21 +5303,72 @@ narrower than its own mechanism, and one input it broke on.** Fixed here:
   test comment and this section. It is told here; the code says the mechanism
   (`isoTimestamp`'s docblock names the two clients' shapes and points here).
 
-Ticketed: SMD-1328 — a NULL `created_at` comes out of every mapper as the
-epoch, `1970-01-01T00:00:00.000Z`, the `Date(null)` convention the stores have
-always had and `isoTimestamp` now holds in one place; whether it should be
-`null` under a widened type touches six row types and `index.ts`'s readers,
-its own scope. Declined: a per-method conformance sweep over the whole
-`ThoughtStore` interface — with every read method on a `store.ts` normaliser
-and [3d] reading each back, it would re-assert what [3d] asserts; worth
-revisiting when a method returning a new row shape is added.
+**A second pass (high effort, triaged) found the first pass's rules meeting
+each other, and two more casts.** Fixed:
 
-Verified: `test-store-postgrest` 73/73 (60 before this ticket; the first
+- The pass-1 normaliser made a NEW divergence on the field this ticket
+  unifies. A NULL `created_at` is legal (001 has no `NOT NULL`; 020 and 023
+  name the state), sorts first under `ORDER BY created_at DESC`, and the
+  PostgREST store's stats walk takes the first row of the first page as the
+  newest thought — so `isoTimestamp(null)`'s epoch was reported as the
+  corpus's newest date, `<real> → 1/1/1970`, where before the bare cast
+  passed JSON null through and the tool omitted the range, and where the SQL
+  store's 024 `min`/`max` ignore NULLs. `ThoughtMeta.created_at` is
+  `string | null` — the one place in the interface, since only the walk reads
+  it — and the walk skips undated rows when picking the range.
+  `test-store-postgrest` [8] plants one and checks the range against SQL's
+  `min`/`max`.
+- `isoTimestamp` threw on anything Date could not parse, from inside `.map()`
+  over every row of four read methods that used to be casts — so one row with
+  a BC date or a year past ±275760 (Postgres accepts to 294276) would have
+  failed `list_thoughts`, `fetch`, the stats walk and both preflight probes
+  outright. The rule is now the one the infinities already had: a value with
+  no ISO form keeps Postgres's own text, one odd row stays one odd row.
+  `undefined` still throws — the column is missing from the row, a SELECT
+  bug. [3] feeds it a BC date and `undefined`.
+- `normaliseMutation` still formatted `updated_at` and `current_updated_at`
+  with `String()`, two hundred lines under a docblock saying nothing else may
+  format a timestamp — so `update_thought` printed `+00:00` where `fetch` now
+  prints ISO for the same column. Both take `isoTimestampOrNull`; passing the
+  ISO value back as `if_unchanged_since` is safe because 021 compares at
+  millisecond precision on both sides. `revokedAt` too.
+- The PostgREST `getThought` had no `UUID_RE` guard: a malformed id was a raw
+  Postgres cast error on one store and `null` on the other, through `fetch`.
+  `UUID_RE` moves to `store.ts` (both stores had their own copy) and the guard
+  mirrors the SQL store's.
+- `traceProvenance` and `findDerivatives` were byte-identical inline mappers
+  in both stores, one row shape short of the mechanism — pass 1 edited their
+  `created_at` line in all four copies without noticing. `normaliseDerivative`
+  and `normaliseProvenanceNode` join the others.
+- The normalisers re-spelled the id/content/metadata/created_at quartet five
+  times; they compose `normaliseListItem` now, so SMD-1328's decision is one
+  edit. The nullable rule was spelled twice with two different null tests
+  (`t ?` and `== null`); `isoTimestampOrNull` is the one spelling.
+- The one `typeof score === "number"` pass 1 missed (the recency-weighted
+  line of [3c]) is `Number.isFinite`; [3d] plants its row through
+  `test-support`'s `plantLegacyRow` rather than a third copy of the INSERT
+  (the helper's `createdAt` accepts `null` for [8]); the `ISO_RE` block had
+  landed between `createAssert`'s JSDoc and `createAssert`.
+
+Ticketed, folded into SMD-1328: what the tools PRINT for a timestamp with no
+ISO form. `isoTimestamp`'s sentinels are text a Date cannot parse, and five
+readers (`Captured:` twice, the list prefix, the fetch/search title, the
+stats range) do `new Date(x).toLocaleDateString()`, which prints
+"Invalid Date" — on the SQL store that replaces a hard error with silently
+wrong text on a row only raw SQL can create. NULL → epoch and sentinel →
+"Invalid Date" are one decision, null under a widened type or a display
+helper at five sites, and it is that ticket's. Declined in pass 1 and still: a
+per-method conformance sweep over the whole `ThoughtStore` interface — with
+every read method on a `store.ts` normaliser and [3d] reading each back, it
+would re-assert what [3d] asserts.
+
+Verified: `test-store-postgrest` 77/77 (60 before this ticket; the first
 commit's format assertion, run against `main`'s store, reported
 `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)` and
-failed the suite 59/60), `test-store-sql` 83/83, `test-server` 71/71, `tsc`
-clean. Upstream status: **not applicable** — `server-portable/` and its two
-stores are the fork's (change 11).
+failed the suite 59/60), `test-store-sql` 83/83, `test-update-delete` and
+`test-agents` unchanged, `test-server` 71/71, `tsc` clean. Upstream status:
+**not applicable** — `server-portable/` and its two stores are the fork's
+(change 11).
 
 ## Detached from the fork network
 

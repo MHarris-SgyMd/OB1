@@ -264,9 +264,9 @@ console.log("\n[5] Stats counting and paging");
   assert(p1.length === 2 && p2.length === 2, "pages fill to the requested size");
   assert(p3.length === 0, "a page past the end is empty, which ends the loop");
 
-  const seen = new Set([...p1, ...p2].map((r) => r.created_at + JSON.stringify(r.metadata)));
+  const seen = new Set([...p1, ...p2].map((r) => String(r.created_at) + JSON.stringify(r.metadata)));
   assert(seen.size === 4, "pages do not overlap");
-  assert(p1[0].created_at >= p2[p2.length - 1].created_at, "ordering is stable across pages");
+  assert(String(p1[0].created_at) >= String(p2[p2.length - 1].created_at), "ordering is stable across pages");
 }
 
 console.log("\n[5b] statsSummary aggregates the whole corpus in one SQL call (migration 024)");

@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestamp, normaliseAgentResolution, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -55,7 +55,6 @@ function toVector(embedding: number[]): string {
  * column/argument, not a not-found; the read methods treat it as no-match so a
  * bad id from an MCP client gets a clean answer, not a Postgres error string.
  */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
@@ -188,11 +187,10 @@ export class SqlStore implements ThoughtStore {
       people?: Record<string, number>;
     };
     const total = Number(s.total ?? 0);
-    const iso = (t: string | null | undefined) => (t ? isoTimestamp(t) : null);
     return {
       total,
-      oldest: iso(s.first_ts),
-      newest: iso(s.last_ts),
+      oldest: isoTimestampOrNull(s.first_ts),
+      newest: isoTimestampOrNull(s.last_ts),
       types: s.types ?? {},
       topics: s.topics ?? {},
       people: s.people ?? {},
@@ -324,17 +322,7 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT thought_id, depth, parent_id, content, type, source_type, derivation_method, created_at, cycle
       FROM trace_provenance(${opts.id}::uuid, ${opts.maxDepth ?? null}::int, ${opts.nodeCap ?? null}::int)`;
-    return rows.map((r: Record<string, unknown>) => ({
-      thoughtId: String(r.thought_id),
-      depth: Number(r.depth),
-      parentId: r.parent_id ? String(r.parent_id) : null,
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: isoTimestamp(r.created_at),
-      cycle: r.cycle === true,
-    }));
+    return rows.map(normaliseProvenanceNode);
   }
 
   async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
@@ -342,14 +330,7 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT id, content, type, source_type, derivation_method, created_at
       FROM find_derivatives(${opts.id}::uuid, ${opts.limit ?? null}::int)`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: isoTimestamp(r.created_at),
-    }));
+    return rows.map(normaliseDerivative);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

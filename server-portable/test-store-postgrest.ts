@@ -22,7 +22,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, ISO_RE, resetSchema } from "../db/test-support.ts";
+import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "../compat/supabase-sql/index.ts";
@@ -154,7 +154,8 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
   assert(isoTimestamp(new Date("2026-09-14T16:27:09.123Z")) === "2026-09-14T16:27:09.123Z", "a Date passes through unchanged");
   assert(isoTimestamp(Infinity) === "infinity" && isoTimestamp("infinity") === "infinity", "an infinite timestamp keeps Postgres's spelling on either client");
   assert(isoTimestamp(-Infinity) === "-infinity" && isoTimestamp("-infinity") === "-infinity", "…and so does -infinity");
-  assert((() => { try { isoTimestamp("not a date"); return false; } catch { return true; } })(), "garbage throws rather than becoming a fabricated date");
+  assert(isoTimestamp("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC", "a value with no ISO form keeps Postgres's text — one odd row, not a failed result");
+  assert((() => { try { isoTimestamp(undefined); return false; } catch { return true; } })(), "a column missing from the row throws — a SELECT bug, not data");
 }
 
 console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
@@ -218,7 +219,7 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   // this suite exists to hold.
   assert(vector.every((r) => Number.isFinite(r.score) && r.score === r.similarity), "match_thoughts' score column comes back through the RPC, equal to similarity at weight 0");
   const weighted = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {}, recencyWeight: 0.5, halfLifeDays: 30 });
-  assert(weighted.length === plain.length && weighted.every((r) => typeof r.score === "number"), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
+  assert(weighted.length === plain.length && weighted.every((r) => Number.isFinite(r.score)), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
 }
@@ -228,9 +229,11 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
   // getThought, listThoughts and pageThoughtMeta were bare casts too, and
   // getThought is the one the `fetch` tool prints verbatim (SMD-1040 review).
   const kw = await store.keywordThoughts({ query: "PGRST202", limit: 1, offset: 0, filter: {} });
-  const rec = await store.getThought(String(kw[0]?.id));
+  assert(kw.length === 1, `[3b]'s keyword thought is still there to read back (${kw.length})`);
+  const rec = await store.getThought(kw[0].id);
   assert(rec !== null && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
   assert(rec !== null && (rec.updated_at == null || ISO_RE.test(rec.updated_at)), `getThought's updated_at is null or ISO (got ${String(rec?.updated_at)})`);
+  assert((await store.getThought("not-a-uuid")) === null, "a malformed id is null on this store too, not a uuid cast error");
 
   // Migration 020 ranks an infinite created_at by design and test-schema plants
   // one; Date.toISOString throws on it, which would abort the whole result
@@ -238,22 +241,20 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
   // number Infinity, PostgREST as the string "infinity"; both come out as
   // Postgres's spelling. vec(6) is an axis no section before this one has used.
   const sql = new SQL({ url: URL_, max: 1 });
-  const [planted] = await sql`
-    INSERT INTO thoughts (content, content_fingerprint, embedding, created_at)
-    VALUES ('a row dated infinity', NULL, ${"[" + vec(6).join(",") + "]"}::vector, 'infinity')
-    RETURNING id`;
+  const plantedId = await plantLegacyRow(sql, "a row dated infinity", "[" + vec(6).join(",") + "]", "infinity");
   const far = await store.matchThoughts({ embedding: vec(6), threshold: 0.5, limit: 5, filter: {} });
-  assert(far.some((r) => r.id === planted.id), `the infinite row is returned, not thrown on (${far.length} rows)`);
-  assert(far.find((r) => r.id === planted.id)?.created_at === "infinity", `…with created_at spelled as Postgres does (got ${far.find((r) => r.id === planted.id)?.created_at})`);
+  const hit = far.find((r) => r.id === plantedId);
+  assert(hit !== undefined, `the infinite row is returned, not thrown on (${far.length} rows)`);
+  assert(hit?.created_at === "infinity", `…with created_at spelled as Postgres does (got ${hit?.created_at})`);
   const list = await store.listThoughts({ limit: 50 });
   assert(list[0]?.created_at === "infinity" && list.slice(1).every((r) => ISO_RE.test(r.created_at)),
          `listThoughts: infinity sorts first, every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
   const page = await store.pageThoughtMeta(0, 50);
-  assert(page[0]?.created_at === "infinity" && page.slice(1).every((r) => ISO_RE.test(r.created_at)), "pageThoughtMeta: the same on the stats walk's rows");
-  const got = await store.getThought(planted.id);
+  assert(page[0]?.created_at === "infinity" && page.slice(1).every((r) => ISO_RE.test(String(r.created_at))), "pageThoughtMeta: the same on the stats walk's rows");
+  const got = await store.getThought(plantedId);
   assert(got?.created_at === "infinity", "getThought: the same");
   // Gone before [8]'s date-range assertions, which expect a finite span.
-  await sql`DELETE FROM thoughts WHERE id = ${planted.id}::uuid`;
+  await sql`DELETE FROM thoughts WHERE id = ${plantedId}::uuid`;
   await sql.close();
 }
 
@@ -387,8 +388,19 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
     payload: { metadata: { type: "statmark", topics: ["stattopic", null] } },
     embedding: vec(7),
   });
+  // A row with no created_at (the column is nullable; 020 and 023 name the
+  // state). It sorts FIRST under ORDER BY created_at DESC, so before the walk
+  // skipped it the epoch was reported as the corpus's newest thought — while
+  // the SQL store's min/max ignore it. The range must match what SQL says.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
+  const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
   const s = await store.statsSummary();
+  assert(s.newest === new Date(range.newest).toISOString() && s.oldest === new Date(range.oldest).toISOString(),
+         `the date range ignores the undated row, as 024's min/max do (${s.oldest} → ${s.newest})`);
   assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+  await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+  await sql.close();
   assert(s.aggregated === s.total, "a corpus under the cap is fully covered — the tool prints no truncation note");
   assert(s.types["statmark"] === 2, `the unique type is tallied across both rows (${JSON.stringify(s.types)})`);
   assert(s.topics["stattopic"] === 2, "the unique topic unnests from both arrays");

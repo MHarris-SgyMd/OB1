@@ -11,7 +11,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, isoTimestamp, normaliseAgentResolution, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -45,7 +45,6 @@ const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
 
 /** Canonical hyphenated uuid; a malformed id is treated as no-match by the 025 read methods. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
@@ -121,6 +120,9 @@ export class PostgrestStore implements ThoughtStore {
   }
 
   async getThought(id: string): Promise<ThoughtRecord | null> {
+    // As the SQL store: a malformed id is "not found", not a uuid cast error
+    // surfaced through `fetch` on one store and null on the other.
+    if (!UUID_RE.test(id)) return null;
     const { data, error } = await this.client
       .from("thoughts")
       .select("id, content, metadata, created_at, updated_at")
@@ -206,10 +208,15 @@ export class PostgrestStore implements ThoughtStore {
           for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
       }
 
-      // Ordered newest-first, so the first row of the first page is the newest
-      // overall and the last row of the final page is the oldest.
-      if (newest === null) newest = page[0].created_at;
-      oldest = page[page.length - 1].created_at;
+      // Ordered newest-first, so the first dated row of the first page is the
+      // newest overall and the last dated row of the final page is the oldest.
+      // A NULL created_at sorts first under DESC and is skipped, as 024's
+      // min/max skip it on the SQL store (see store.ts:ThoughtMeta).
+      for (const r of page) {
+        if (r.created_at === null) continue;
+        if (newest === null) newest = r.created_at;
+        oldest = r.created_at;
+      }
       aggregated += page.length;
 
       if (page.length < STATS_PAGE_SIZE) break; // short page — corpus exhausted
@@ -367,17 +374,7 @@ export class PostgrestStore implements ThoughtStore {
       p_node_cap: opts.nodeCap ?? null,
     });
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
-      thoughtId: String(r.thought_id),
-      depth: Number(r.depth),
-      parentId: r.parent_id ? String(r.parent_id) : null,
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: isoTimestamp(r.created_at),
-      cycle: r.cycle === true,
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseProvenanceNode);
   }
 
   async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
@@ -387,14 +384,7 @@ export class PostgrestStore implements ThoughtStore {
       p_limit: opts.limit ?? null,
     });
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
-      id: String(r.id),
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: isoTimestamp(r.created_at),
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseDerivative);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {
