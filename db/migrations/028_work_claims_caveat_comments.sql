@@ -14,10 +14,11 @@
 --   it, and its claim is succeeded because that vector is the provider's final
 --   answer — with the refusal written on the row. The second is the operator's
 --   (SMD-1067): `--accept-failed` marks a row the provider refuses permanently
---   succeeded with `kept the vector it had; accepted by the operator: <the
---   failure>`. `db/reembed.ts` applies the rule through ONE predicate
---   (`withCaveat()`: status = 'succeeded' AND last_error IS NOT NULL) for the
---   count, the list and `--retry-fallbacks`, and states it in its header;
+--   succeeded with a caveat that begins with ACCEPTED_CAVEAT_PREFIX (config.mjs
+--   spells it, once). `db/reembed.ts` reads the rule as one shape — status =
+--   'succeeded' AND last_error IS NOT NULL — spelled in `withCaveat()` for the
+--   list, `--retry-fallbacks` and the end-of-run count, and again as a FILTER
+--   in `--status`'s counts(); it states the rule in its header, and
 --   `db/README.md` states it too.
 --
 --   The schema said nothing. 015's COMMENTs cover `work_type`, `worker_id` and
@@ -27,24 +28,32 @@
 --   consumer of the claim table — had no way to learn that a note on a
 --   succeeded row IS the caveat, and that `--retry-fallbacks` will return every
 --   such row to the pool. `db/extract-entities.ts`, the sibling over the same
---   table, releases success with NULL and so does not collide; a consumer that
---   put any other note there would be swept in silently.
+--   table, releases success with NULL — which is the only reason it does not
+--   collide: reembed.ts's readers are scoped to the key it is RUN with, and
+--   `--job` accepts any key (a warning when it lacks the reembed: prefix), so a
+--   consumer that noted success under its own key would be swept the day
+--   someone pointed `--job` at that key (SMD-1311 would refuse that). Only
+--   preflight's re-embed pass check and `--retire` are prefix-scoped.
 --
 --   015 is applied and cannot be edited (migrate.ts hashes the file). The
 --   ticket hoped to ride a migration that touched this area anyway (SMD-1042's
---   backfill, 023, or a later redefinition); 023 landed without it and no
---   redefinition of release_thought is on the roadmap, so the two comments
---   travel alone. A docs-only migration is heavy for two statements, but the
---   alternative is the rule staying where a reader of the schema cannot see it.
+--   backfill, 023, or a later redefinition); 023 landed without it and nothing
+--   filed today redefines release_thought (SMD-1023's lease renewal is the
+--   nearest, and it is about the claim), so the two comments travel alone. A
+--   docs-only migration is heavy for two statements, but the alternative is
+--   the rule staying where a reader of the schema cannot see it.
 --
 -- WHAT
 --   * COMMENT ON COLUMN thought_work_claims.last_error — both meanings, by
---     status, and the consequence under a reembed: key: every succeeded row
---     with a non-NULL last_error is read as a caveat — by reembed.ts (status,
---     the end-of-run counts, the retry-fallbacks flag) and by preflight's
---     re-embed pass check, each scoped to reembed keys. A consumer under its
---     own work_type key (extract-entities.ts) is never swept; the rule states
---     what the column MEANS everywhere and what is READ under those keys.
+--     status; the rule as the COLUMN's, not one tool's (a consumer stores
+--     nothing else here on success), with the readers named honestly: reembed.ts
+--     under whichever key it is run with, preflight across every reembed: key;
+--     the bound every reader puts on an acceptance (nothing has written the
+--     thought since the attempt read it) and the fact that an edited caveat row
+--     returns to the pool on the next run, flag or not; and the one consumer of
+--     succeeded rows that does NOT read this column — 021's evidence backfill,
+--     which trusts a succeeded row whatever its caveat (reembed.ts's header
+--     says when that matters: a hand re-run of 021's body).
 --   * COMMENT ON FUNCTION release_thought — re-issued with 015's sentence kept
 --     and one added: p_error is stored whatever p_status is, and what it means
 --     on success.
@@ -59,7 +68,11 @@
 --   The flags are named without their leading dashes ("the retry-fallbacks
 --   flag", not "--retry-fallbacks"): test [10] strips `--` to end of line
 --   before scanning the migrations for Supabase-specific text, and its header
---   holds that no migration puts that sequence inside a string literal.
+--   holds that no migration puts that sequence inside a string literal. [27]
+--   asserts it of the LIVE comment text, so a successor's re-issue is held to
+--   it too. Code identifiers are kept to the two file names and one exported
+--   constant; the flags are described, not spelled, so a rename does not
+--   strand the applied text.
 --
 -- SAFETY
 --   COMMENT ON is idempotent (it replaces the description). No DDL on data,
@@ -70,7 +83,7 @@
 -- =============================================================================
 
 COMMENT ON COLUMN thought_work_claims.last_error IS
-  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted with reembed.ts''s accept-failed flag, whose text begins with the prefix config.mjs spells as ACCEPTED_CAVEAT_PREFIX). NULL on a succeeded row is a clean success. Under a reembed: work_type key every reader of the pass — reembed.ts''s status output, its end-of-run counts and its retry-fallbacks flag, and preflight''s re-embed pass check — treats a succeeded row with a non-NULL last_error as a caveat, and the retry-fallbacks flag returns it to the pool; so a pass under such a key must not store any other note here on success. Rule: SMD-1021; stated here: SMD-1052.';
+  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted, whose text begins with the prefix config.mjs exports as ACCEPTED_CAVEAT_PREFIX). NULL on a succeeded row is a clean success. The rule is the column''s, not one tool''s: reembed.ts, under whichever key it is run with, counts and lists every succeeded row with a non-NULL last_error as a caveat and its retry-fallbacks flag returns each to the pool; preflight''s re-embed pass check reads the same across every reembed: key. So a consumer stores nothing else here on success. An acceptance is honoured only while nothing has written the thought since the attempt read it (updated_at no later than claimed_at); a caveat row whose thought was written since returns to the pool on reembed.ts''s next run under its key, flag or not. Not a reader of this column: 021''s evidence backfill, which trusts a succeeded row whatever its caveat (reembed.ts''s header says when that matters). Rule: SMD-1021 and SMD-1067; stated here: SMD-1052.';
 
 COMMENT ON FUNCTION release_thought(uuid, text, text, text, text) IS
-  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment; under a reembed: key the retry-fallbacks flag returns every such row to the pool). Pass NULL for a clean success.';
+  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment: the readers of the key return every such row to the pool when asked). Pass NULL for a clean success.';

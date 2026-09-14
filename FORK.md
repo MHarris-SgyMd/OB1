@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Forty-eight numbered changes on top of the pin. Seven fix defects found in an
+Forty-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–48 are the numbered `###` sections** further down, which is
+sections. Changes **18–49 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -2457,7 +2457,8 @@ long — which is the provider's final answer and was recorded as an unqualified
 success.
 
 **The decision: a caveat on a succeeded row, not a new status.** `release_thought`
-already stores `p_error` whatever the status, so the rule costs no migration:
+already stores `p_error` whatever the status, so the rule cost no migration then
+(change 49 later spent one to state it on the column):
 **a succeeded row's `last_error`, when set, is what the worker could not do** —
 the write stands, and this is what it fell short of. A refused row is released
 `succeeded` with the provider's status and message on it and the flag that
@@ -2534,9 +2535,10 @@ through the server before [1]'s 400 can latch. And the default's rationale now
 says the budget is per request but the queue is shared, so against a provider
 that serves one request at a time the last window is timed against the whole
 queue. The caveat rule lived in the tool and this file and not on the column
-(015 cannot be edited, and a comment-only migration is a second mechanism):
-SMD-1052, meant to ride a migration touching this area anyway; it landed alone
-as migration 028 (change 49). Declined: dropping the server's
+(015 cannot be edited, and a comment-only migration was judged a second
+mechanism): SMD-1052, meant to ride a migration touching this area anyway. That
+judgement was reversed when nothing came to ride — it landed alone as migration
+028 (change 49). Declined: dropping the server's
 latch or latching on the shortest refused length — change 27 measured and
 decided that latch and its test still holds. The reason first recorded here,
 that a length latch "infers one row's answer from another's", was wrong and the
@@ -4833,52 +4835,72 @@ Change 34 gave `thought_work_claims.last_error` a second meaning: on a
 what the worker could not do (a long thought stored with its head window's vector
 because the provider refused the whole content; since change 39, a failure the
 operator accepted with `--accept-failed`). `db/reembed.ts` reads every such row
-through one predicate (`withCaveat()`) for the count, the list and
-`--retry-fallbacks`, and its header and `db/README.md` state the rule. The
+as one shape — `withCaveat()` for the list, `--retry-fallbacks` and the
+end-of-run count, a `FILTER` of the same shape in `--status`'s `counts()` —
+and its header and `db/README.md` state the rule. The
 **schema said nothing**: 015 commented `work_type`, `worker_id` and
 `attempt_count` and not this column, and `release_thought`'s comment said only
 "Mark one claim succeeded or failed" — nothing about `p_error`, which it stores
 whatever the status. A reader of the table (`\d+`, a future consumer of the claim
 table) had no way to learn that any note on a succeeded row is read as the
-caveat and returned to the pool by `--retry-fallbacks`. The rule's *reach* is
-narrower than the ticket said: every reader — `reembed.ts`'s `--status`, its
-end-of-run counts and `--retry-fallbacks`, and preflight's re-embed pass check
-— is scoped to a `reembed:` work_type key, so `extract-entities.ts` under its
-own key is never swept, and the comment says so rather than forbidding every
-consumer a note.
+caveat and returned to the pool by `--retry-fallbacks`. `extract-entities.ts`
+under its own key is not swept today — but only because it releases success
+with NULL: `reembed.ts`'s readers are scoped to the key it is *run* with, and
+`--job` accepts any key with a warning, so the day someone pointed `--job` at
+another tool's key its noted rows would go back to the pool. Only preflight's
+re-embed pass check and `--retire` are prefix-scoped. The comment therefore
+states the rule as the **column's** — a consumer stores nothing else there on
+success — and names the readers with their real scope (SMD-1311 would make
+`--retry-fallbacks` refuse a key without the prefix).
 
 **Migration 028** is the two statements, and nothing else: an idempotent
 `COMMENT ON COLUMN thought_work_claims.last_error` giving both meanings by status
 — failed: why it failed; succeeded, when set: a caveat, the write stands, NULL is
-a clean success — and the consequence under a `reembed:` key (a pass there must
-not store any other note on success); and `release_thought`'s `COMMENT ON
-FUNCTION` re-issued with 015's holder sentence kept and one added: `p_error` is
-stored in `last_error` whatever `p_status` is, and what it means on success. No
-DDL on data, no body change, no ACL change, no placeholder. The ticket hoped to
-ride 023's backfill or a later redefinition; 023 landed without it and nothing
-on the roadmap redefines `release_thought`, so the comments travel alone — a
-docs-only migration is heavy for two statements, and the alternative was the rule
-staying where a reader of the schema cannot see it. Two spellings the comment
+a clean success — the rule as the column's, the readers with their scope, the
+bound every reader puts on an acceptance (honoured only while nothing has
+written the thought since the attempt read it) and that an edited caveat row
+returns to the pool on the next run flag or not, and the one consumer of
+succeeded rows that does *not* read the column (021's evidence backfill, which
+trusts a succeeded row whatever its caveat — the reason `reembed.ts`'s baseline
+remedy says to `--retry-fallbacks` or `--retire` first); and `release_thought`'s
+`COMMENT ON FUNCTION` re-issued with 015's text kept whole and one sentence
+added: `p_error` is stored in `last_error` whatever `p_status` is, and what it
+means on success. No DDL on data, no body change, no ACL change, no placeholder.
+The ticket hoped to ride 023's backfill or a later redefinition; 023 landed
+without it and nothing filed today redefines `release_thought` (SMD-1023's lease
+renewal is the nearest, and it is about the claim), so the comments travel alone
+— a docs-only migration is heavy for two statements, and the alternative was the
+rule staying where a reader of the schema cannot see it. Spellings the comment
 deliberately avoids: the acceptance prefix is named by its constant
 (`ACCEPTED_CAVEAT_PREFIX`) rather than quoted, since an applied comment cannot
-follow a rewording; and the flags are named without their dashes, since
-`test-schema` [10] strips `--` to end of line before scanning the migrations and
-holds that no file puts that sequence inside a string literal.
+follow a rewording; the flags are described, not spelled, since `test-schema`
+[10] strips `--` to end of line before scanning the migrations and holds that no
+file puts that sequence inside a string literal; and code identifiers stop at
+two file names and that constant.
 
 The trap a successor must not fall into: `CREATE OR REPLACE FUNCTION` keeps a
 function's comment, but any migration that redefines `release_thought` and
 re-issues 015's one-sentence `COMMENT` would silently drop the `p_error` sentence.
 So `test-schema` [27] asserts the **live** text of both comments
-(`col_description`, `obj_description`) after every file has applied — no
-migration number pinned, so a compliant successor passes and a lossy one fails
-whichever file it is — plus the two avoided spellings above, and the fact the
-comments state: a succeeded release with `p_error` stores it, one with NULL
-leaves the column NULL, a failed release stores the error, and `withCaveat()`'s
-shape finds exactly the caveat row. Green at both widths; `test-upgrade` green
-(the shape comparison of columns and signatures is unaffected by a comment).
-The first review pass found all of the above — the pinned number, the overbroad
-reach, the quoted prefix, the dashes, and a wrong ticket named as the successor —
-and each was fixed rather than filed. The second pass found nothing.
+(`col_description`, `obj_description`) after every file has applied — anchored
+on the rule's words rather than clause order, no migration number pinned, so a
+compliant successor passes and a lossy one fails whichever file it is; 015's
+text is checked whole, not its middle clause; the no-`--` rule is asserted of
+the live text — and the fact the comments state: a succeeded release with
+`p_error` stores it, one with NULL leaves the column NULL, a failed release
+stores the error, and the caveat shape selects exactly the caveat row. Green at
+both widths; `test-upgrade` green (the shape comparison of columns and
+signatures is unaffected by a comment). Three review passes. The first found a
+pinned migration number, a quoted prefix, dashes in a literal and a wrong ticket
+named as the successor, each fixed. The second found nothing. A third at higher
+effort found that the first pass's own fix had introduced a false reason
+("never swept under its own key"), that "one predicate" overstated
+`counts()`, that the acceptance bound and 021's backfill were missing from a
+comment addressed to a `\d+` reader, and that the 015 check was partial — all
+fixed here — and three mechanism changes it proposed became tickets: SMD-1311
+(refuse `--retry-fallbacks` under a non-`reembed:` key), SMD-1312 (one exported
+spelling of the caveat predicate), SMD-1313 (a generic last-issued-COMMENT
+test).
 
 Upstream status: **not applicable** — the claim table is the fork's (015).
 

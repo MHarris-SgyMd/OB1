@@ -426,7 +426,7 @@ table finds it: `COMMENT ON COLUMN thought_work_claims.last_error` gives both
 meanings by status, and `release_thought`'s comment says `p_error` is stored
 whatever the status and what it means on success; `test-schema` [27] asserts
 the live text of both, so a later redefinition that re-issues 015's shorter
-comment fails the suite. The server still remembers a refusal for the life of its process;
+comment fails the suite (SMD-1313 is the generic form). The server still remembers a refusal for the life of its process;
 shaping that latch is SMD-1054.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
