@@ -22,11 +22,13 @@
  * or more has a heartbeat that fits and only a one-second lease is refused.
  *
  * What a beat learns. `renew_claims` returns the ids still held. A row the
- * worker thought it held that is not among them was reaped — the beats stopped
- * for a whole lease, which under a live process means the database was
- * unreachable for that long — and is another worker's now: it goes into
- * `lost`, the loop skips it rather than repeating the provider's work, and the
- * run's summary counts it. Two things keep that reading honest. A row the loop
+ * worker thought it held that is not among them is no longer this worker's:
+ * reaped (the beats stopped reaching the database for a whole lease), requeued
+ * by 016's edit trigger while it waited its turn, or deleted with its claim
+ * row. It goes into `lost`, the loop skips it rather than repeating the
+ * provider's work, and asks the row which of the three it was (`lostReason`)
+ * before naming and counting it — a deleted row is counted with the deleted,
+ * not the lost. Two things keep the verdict itself honest. A row the loop
  * has finished is removed from `held` BEFORE its release is sent, so a beat in
  * flight across a release does not read the release as a loss: a loss is an id
  * that was held when the beat was sent AND is still held when it returns AND
@@ -52,14 +54,46 @@ export function heartbeatFor(ttlS: number): number {
   return Math.max(1, Math.min(DEFAULT_HEARTBEAT_S, Math.floor(ttlS / 3)));
 }
 
-/** Why a lease and heartbeat pair is refused, or null: the lease must cover two beats, so one missed beat cannot lapse it. */
-export function leaseRefusal(ttlS: number, heartbeatS: number): string | null {
+/**
+ * Why a lease and heartbeat pair is refused, or null: the lease must cover two
+ * beats, so one missed beat cannot lapse it. `derived` says the heartbeat was
+ * not given but taken from the lease, so the text does not quote a flag the
+ * operator never passed.
+ */
+export function leaseRefusal(ttlS: number, heartbeatS: number, derived = false): string | null {
   if (ttlS >= 2 * heartbeatS) return null;
   return (
-    `--ttl ${ttlS} s cannot cover two heartbeats of --heartbeat ${heartbeatS} s: one delayed beat would let the lease expire, and another worker\n` +
+    `--ttl ${ttlS} s cannot cover two ${derived ? `beats of the ${heartbeatS} s heartbeat derived from it` : `heartbeats of --heartbeat ${heartbeatS} s`}: one delayed beat would let the lease expire, and another worker\n` +
     `  would repeat rows this one is still working on. The lease is how long a dead worker's rows stay out of the pool, and nothing else\n` +
     `  since migration 030; it need not cover the batch. ${heartbeatS <= 1 ? "Raise --ttl." : "Raise --ttl or lower --heartbeat."}`
   );
+}
+
+/** What became of a row a beat found no longer this worker's — asked of the row, so the loop names it rightly. */
+export type LostReason =
+  | { kind: "deleted" }
+  | { kind: "pending" }
+  | { kind: "claimed"; worker: string }
+  | { kind: "finished"; status: string };
+
+export async function lostReason(sql: SQL, job: string, id: string): Promise<LostReason> {
+  const rows = (await sql`SELECT status, worker_id FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job}`) as
+    { status: string; worker_id: string | null }[];
+  if (rows.length === 0) return { kind: "deleted" };
+  if (rows[0].status === "pending") return { kind: "pending" };
+  if (rows[0].status === "claimed") return { kind: "claimed", worker: rows[0].worker_id ?? "?" };
+  return { kind: "finished", status: rows[0].status };
+}
+
+/** The line a worker prints for a lost row, from what the row said. */
+export function describeLoss(why: LostReason | null): string {
+  if (why === null) return "no longer this worker's, and the row could not be read; skipping";
+  switch (why.kind) {
+    case "pending": return "back in the pool — reaped, or requeued by an edit — and the next claim takes it; skipping";
+    case "claimed": return `another worker (${why.worker}) holds it now; skipping`;
+    case "finished": return `already ${why.status} under another worker; skipping`;
+    case "deleted": return "deleted while it was leased";
+  }
 }
 
 export type Heartbeat = {

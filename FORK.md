@@ -5846,7 +5846,11 @@ again (016's edit trigger requeues a row mid-extraction and a near-empty pool
 hands it straight back), and an id lost for ever would have been skipped while
 held, returned by the `finally` and reported pending. `stop()` voids a beat
 still in flight, so the `finally`'s return of the leases is not read as a loss
-of every one of them. Beats never overlap — a tick that finds one in flight is
+of every one of them. And a row a beat finds gone is not assumed reaped — the
+second pass found the message said "reaped while the heartbeat was not reaching
+the database" of a row 016's edit trigger had requeued, and of a deleted one —
+so the loop asks the row (`lostReason`): deleted is counted with the deleted,
+back in the pool is said so, another worker's names the worker. Beats never overlap — a tick that finds one in flight is
 skipped — and the timer is unref'd, so it holds no process open. The three
 workers wire it identically: started beside the worker id, `claimed()` after
 the claim, each row removed before its release, stopped in the `finally` that
@@ -5862,7 +5866,9 @@ refused before anything is claimed — exit 2, the arithmetic shown;
 `reembed.ts --status` answers regardless, as before — and a lease given without
 a heartbeat derives one of a third of itself, at most 60 s and at least 1 s,
 so any lease of two seconds or more fits and only a one-second lease has no
-pair (its refusal names the lease alone). `--ttl` now means one thing: how long a dead
+pair (its refusal names the lease alone, and says the heartbeat was derived
+rather than quoting a flag the operator never passed). `--dry-run` in all three
+workers prints the lease and heartbeat a run would use. `--ttl` now means one thing: how long a dead
 worker's rows stay out of the pool. Nothing about the batch, the timeout or the
 calls a thought costs sizes it, and the three refusals that did —
 `reembed.ts`'s derived floor with its long-lease warning,
@@ -5872,19 +5878,20 @@ under a heartbeating worker a lease lapses only when the beats stop reaching
 the database for a whole lease, so a row expired three times is one whose
 worker died three times on it, not one that was slow.
 
-**Proof.** `test-live` [8e]: a worker on a 5 s lease beats at 2.5 s; a claim
+**Proof.** `test-live` [8e]: a worker on a 5 s lease beats at 4.5 s; a claim
 at 5.5 s — past the original deadline — gets only the unclaimed rows and the
 worker's release succeeds; it beats once more and stops; a claim before the
 renewed deadline gets nothing and one after it receives its three rows on their
 second attempt, every row ending succeeded and none failed. [8a] and [8b] hold
 as they were: the claim is untouched. [9] runs `reembed.ts` end to end with
-every embedding taking 600 ms, eight per claim, a 3 s lease and the 1 s
-heartbeat it derives: two workers re-embed all forty-two thoughts in batches
+every embedding taking 600 ms, eight per claim, a 6 s lease and a 1 s
+heartbeat: two workers re-embed all forty-two thoughts in batches
 near five seconds long, no row reaches a second worker, no release finds its
 lease gone, none is lost, every claim row succeeded on its first attempt — the
 ticket's first Verify bullet, which no arithmetic could pass; its summary
 counts the beats, and the test holds them at ten or more. [10] and [16] run
-their first pass under a 3 s lease with answers slowed to 400 and 700 ms so the
+their first pass under a 6 s lease beating every second, with answers slowed
+to 400 and 700 ms, so the
 beats fire in the other two workers — the count in each summary says they did —
 and assert the old refusals are gone (a batch of four at a 300 s timeout is a
 `--dry-run` that exits 0) and the new one holds. `test-schema` [29] owns the

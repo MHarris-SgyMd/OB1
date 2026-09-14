@@ -83,7 +83,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, heartbeatFor, leaseRefusal, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -135,7 +135,7 @@ const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
 const HEARTBEAT = has("heartbeat") ? numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1) : heartbeatFor(TTL);
 const TIMEOUT_S = numberFlag("timeout", 300, 1);
 {
-  const refusal = leaseRefusal(TTL, HEARTBEAT);
+  const refusal = leaseRefusal(TTL, HEARTBEAT, !has("heartbeat"));
   if (refusal) {
     console.error(refusal);
     process.exit(2);
@@ -301,7 +301,7 @@ if (STATUS_ONLY || DRY_RUN) {
       `\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config so new captures enqueue; `}` +
         `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; send ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} ` +
-        `with ${WORKERS} worker(s). Nothing was written.`
+        `with ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
   }
   await sql.close();
@@ -462,7 +462,7 @@ async function worker(n: number): Promise<void> {
   activeWorkers.add(workerId);
   const hb = startHeartbeat({
     sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) reaped while the heartbeat was not reaching the database for ${TTL} s — another worker has them; skipping`),
+    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it`),
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
@@ -491,10 +491,14 @@ async function worker(n: number): Promise<void> {
       for (const b of batch) {
         if (stopping) return;
         if (hb.lost.has(b.thought_id)) {
-          // A beat found this row no longer ours: reaped and re-leased while
-          // the beats were not reaching the database. Another worker has it;
-          // repeating the provider's work here would only race its write.
-          lost++;
+          // A beat found this row no longer ours. The row says why: deleted
+          // (its claim cascaded away), back in the pool (reaped, or requeued by
+          // an edit), or another worker's now. Nothing to release either way,
+          // and repeating the provider's work would only race the holder.
+          const why = await lostReason(sql, JOB, b.thought_id).catch(() => null);
+          if (why?.kind === "deleted") vanished++;
+          else lost++;
+          console.error(`  ${b.thought_id}: ${describeLoss(why)}`);
           continue;
         }
         const row = byId.get(b.thought_id);
@@ -655,7 +659,7 @@ if (FOLLOW) {
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
-  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed}s ` +
+  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat and left to the pool` : ""}, in ${elapsed}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(

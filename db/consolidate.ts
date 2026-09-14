@@ -90,7 +90,7 @@ import {
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, heartbeatFor, leaseRefusal, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -141,7 +141,7 @@ const K = numberFlag("k", DEFAULT_CANDIDATES, 1, { max: 50 });
 const MIN_SIM = numberFlag("min-sim", DEFAULT_MIN_SIMILARITY, -1, { integer: false, max: 1 });
 const MIN_CONFIDENCE = numberFlag("min-confidence", DEFAULT_MIN_CONFIDENCE, 0, { integer: false, max: 1 });
 {
-  const refusal = leaseRefusal(TTL, HEARTBEAT);
+  const refusal = leaseRefusal(TTL, HEARTBEAT, !has("heartbeat"));
   if (refusal) {
     console.error(refusal);
     process.exit(2);
@@ -403,7 +403,7 @@ if (STATUS_ONLY || DRY_RUN) {
     console.log(
       `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
         `add ${c.unpooled} thoughts to the pool; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.metadataModel} ` +
-        `and ${WORKERS} worker(s). Nothing was written.`
+        `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
     );
   }
   await sql.close();
@@ -555,7 +555,7 @@ async function worker(n: number): Promise<void> {
   activeWorkers.add(workerId);
   const hb = startHeartbeat({
     sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) reaped while the heartbeat was not reaching the database for ${TTL} s — another worker has them; skipping`),
+    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it`),
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
@@ -584,10 +584,14 @@ async function worker(n: number): Promise<void> {
       for (const b of batch) {
         if (stopping) return;
         if (hb.lost.has(b.thought_id)) {
-          // A beat found this row no longer ours: reaped and re-leased while
-          // the beats were not reaching the database. Another worker has it;
-          // repeating the provider's work here would only race its write.
-          lost++;
+          // A beat found this row no longer ours. The row says why: deleted
+          // (its claim cascaded away), back in the pool (reaped, or requeued by
+          // an edit), or another worker's now. Nothing to release either way,
+          // and repeating the provider's work would only race the holder.
+          const why = await lostReason(sql, JOB, b.thought_id).catch(() => null);
+          if (why?.kind === "deleted") vanished++;
+          else lost++;
+          console.error(`  ${b.thought_id}: ${describeLoss(why)}`);
           continue;
         }
         const row = byId.get(b.thought_id);
@@ -728,7 +732,7 @@ if (FOLLOW) {
 
 const elapsed = (Date.now() - started) / 1000;
 console.log(
-  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed.toFixed(1)}s ` +
+  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat and left to the pool` : ""}, in ${elapsed.toFixed(1)}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(

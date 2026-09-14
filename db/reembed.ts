@@ -388,7 +388,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { UUID_RE } from "../server-portable/store.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, heartbeatFor, leaseRefusal, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -533,7 +533,7 @@ const HEARTBEAT = flag("heartbeat") === undefined ? heartbeatFor(TTL) : numberFl
 // Read-only modes never claim, so they answer whatever the lease; --dry-run
 // reports the refusal a run would make, alongside the 018 check below.
 const refusalTtl: string | null = (() => {
-  const r = leaseRefusal(TTL, HEARTBEAT);
+  const r = leaseRefusal(TTL, HEARTBEAT, flag("heartbeat") === undefined);
   return r === null ? null : ` ${r}`;
 })();
 
@@ -1222,7 +1222,7 @@ if (STATUS_ONLY || DRY_RUN) {
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
       FROM thought_work_claims WHERE work_type = ${JOB} AND status = 'claimed' GROUP BY worker_id`) as
       { worker_id: string; c: number; first_expiry: string }[];
-    for (const l of leases) console.log(`    held by ${l.worker_id}: ${l.c} rows, earliest lease expiry ${l.first_expiry}`);
+    for (const l of leases) console.log(`    held by ${l.worker_id}: ${l.c} rows, earliest lease deadline ${l.first_expiry} (renewed on each heartbeat while the holder lives)`);
   }
   if (c.failed > 0) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
@@ -1522,7 +1522,7 @@ async function worker(n: number): Promise<void> {
   activeWorkers.add(workerId);
   const hb = startHeartbeat({
     sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
-    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) reaped while the heartbeat was not reaching the database for ${TTL} s — another worker has them; skipping`),
+    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) no longer this worker's at the last beat — reaped, requeued by an edit, or deleted; each is named as the loop reaches it`),
     onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
   });
   try {
@@ -1547,10 +1547,14 @@ async function worker(n: number): Promise<void> {
       for (const b of batch) {
         if (stopping) return;
         if (hb.lost.has(b.thought_id)) {
-          // A beat found this row no longer ours: reaped and re-leased while
-          // the beats were not reaching the database. Another worker has it;
-          // repeating the provider's work here would only race its write.
-          lost++;
+          // A beat found this row no longer ours. The row says why: deleted
+          // (its claim cascaded away), back in the pool (reaped, or requeued by
+          // an edit), or another worker's now. Nothing to release either way,
+          // and repeating the provider's work would only race the holder.
+          const why = await lostReason(sql, JOB, b.thought_id).catch(() => null);
+          if (why?.kind === "deleted") vanished++;
+          else lost++;
+          console.error(`  ${b.thought_id}: ${describeLoss(why)}`);
           continue;
         }
         const row = byId.get(b.thought_id);
@@ -1660,7 +1664,7 @@ progress(true);
 
 const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat and left to the pool` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
 printCounts(after, "after");
 await printDuplicateGroups();
 if (after.fellBack > 0) await printFallbacks(after.fellBack);

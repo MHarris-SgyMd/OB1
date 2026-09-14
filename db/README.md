@@ -991,10 +991,11 @@ container.
   asserts on ids: none claimed twice, the union exactly the pool. A worker
   "dies" on a 2 s lease and a second worker receives its rows after expiry,
   on their second attempt. [8e] is the heartbeat (migration 030): a worker on
-  a 5 s lease beats at 2.5 s, a claim past the original deadline gets none of
+  a 5 s lease beats at 4.5 s, a claim past the original deadline gets none of
   its rows and its release succeeds; it stops beating and a claim after the
   renewed deadline receives its rows on their second attempt. [9] then runs
-  `reembed.ts` with 600 ms embeddings, eight per claim and a 3 s lease — a
+  `reembed.ts` with 600 ms embeddings, eight per claim and a 6 s lease renewed
+  every second — a
   batch that outlasts its lease — and no row reaches a second worker. PGlite
   has one connection, so two sequential claims there are disjoint whether or
   not `SKIP LOCKED` does anything.
@@ -1036,7 +1037,7 @@ container.
   the chunk rows, one audit row rather than thirty-seven, both twins succeeded
   with exactly one fingerprinted and the pair named in the run and under
   `--status`, the refused thought listed under `--status` and the timed-out one
-  failed with the setting named, a `--ttl` the batch could outlive refused with
+  failed with the setting named, a `--ttl` under two heartbeats refused with
   exit 2 before the pool exists, `ob1_config`, a re-run that processes only a
   later capture, the poisoned row accepted with `--accept-failed` (refused
   first without ids, for an id whose row is not failed, and beside a run flag;

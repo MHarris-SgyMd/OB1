@@ -771,20 +771,21 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // that completes them. Five-second leases. Every wait is a lower bound from
   // Bun.sleep, so a slow runner only makes the "after" claims later; the one
   // step with an upper bound — the claim at 5.5 s must land before the renewed
-  // deadline at 7.5 s — has two seconds, and the beat at 2.5 s has the same
-  // before the original deadline.
+  // deadline at 9.5 s — has four seconds. The beat at 4.5 s has no upper
+  // bound: a lease past its deadline that no claim has reaped is still the
+  // holder's, and the beat renews it ([29] asserts that).
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
   const t0 = Date.now();
   const alive = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
   assert(alive.length === 4, `a worker takes four rows on a 5 s lease (got ${alive.length})`);
-  await Bun.sleep(2500);
+  await Bun.sleep(4500);
   const b0 = performance.now();
   const beat1 = (await sql`SELECT thought_id FROM renew_claims(${JOB4}, 'alive', 5)`).map((r: { thought_id: string }) => r.thought_id);
   const beatMs = performance.now() - b0;
-  assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 2.5 s renews all four (${beat1.length})`);
-  await Bun.sleep(3000); // 5.5 s: past the original deadline, 2 s before the renewed one
+  assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 4.5 s renews all four (${beat1.length})`);
+  await Bun.sleep(1000); // 5.5 s: past the original deadline, 4 s before the renewed one
   const afterOriginal = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
   assert(afterOriginal.length === 2 && afterOriginal.every((id) => !alive.includes(id)),
     `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length}, at ${Date.now() - t0} ms)`);
@@ -818,8 +819,8 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   assert(heartbeatFor(900) === 60 && heartbeatFor(10) === 3 && heartbeatFor(2) === 1 && heartbeatFor(1) === 1, "heartbeatFor: 60 s, or a third of the lease, at least one second");
   assert(leaseRefusal(900, 60) === null && leaseRefusal(4, 2) === null && leaseRefusal(2, 1) === null && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(leaseRefusal(3, 2) ?? "") && /Raise --ttl or lower --heartbeat\.$/.test(leaseRefusal(3, 2) ?? ""),
     "leaseRefusal: a lease of two heartbeats passes — two seconds at the one-second floor included — and one under is refused with the arithmetic");
-  assert(/--ttl 1 s cannot cover two heartbeats of --heartbeat 1 s/.test(leaseRefusal(1, 1) ?? "") && /Raise --ttl\.$/.test(leaseRefusal(1, 1) ?? ""),
-    "…and at the heartbeat's floor the remedy is the lease alone");
+  assert(/--ttl 1 s cannot cover two beats of the 1 s heartbeat derived from it/.test(leaseRefusal(1, 1, true) ?? "") && /Raise --ttl\.$/.test(leaseRefusal(1, 1, true) ?? ""),
+    "…and at the heartbeat's floor, derived, the text quotes no flag the operator did not pass and the remedy is the lease alone");
 
   await sql`DELETE FROM thoughts`;
 }
@@ -1572,18 +1573,20 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 
   // The heartbeat end to end (migration 030): a batch whose work outlasts the
   // lease, under workers that beat. Every embedding takes 600 ms, eight per
-  // claim, a 3 s lease with the 1 s heartbeat it derives: a batch runs near
-  // five seconds, and until 030 its lease expired mid-way — the rows went to
+  // claim, a 6 s lease with a 1 s heartbeat (six seconds, not three: a runner
+  // that pauses the process for two seconds must not be read as a lapse — a
+  // beat is missed only when the process is, and the lease covers five): a
+  // batch runs near five seconds, and until 030 its lease expired mid-way — the rows went to
   // the other worker on their second attempt, the first's releases returned
   // false, and three such batches marked rows failed. A fresh backfill key, so
   // the pool is every thought; the recorded model is the configured one here.
   slowMs = 600;
   const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
-  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "8", "--ttl", "3");
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "8", "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
-  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /8 per claim, 3 s leases renewed every 1 s/.test(slow.out),
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /8 per claim, 6 s leases renewed every 1 s/.test(slow.out),
     `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
-  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/lost to an expired lease/.test(slow.out) && !/heartbeat failed/.test(slow.out),
+  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/found no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
   assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fourteen seconds (${slowBeats})`);
@@ -1714,14 +1717,14 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const shortLease = await extract("--ttl", "3", "--heartbeat", "2");
   assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
   const bigBatch = await extract("--dry-run", "--batch", "4", "--timeout", "300");
-  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out),
-    `…while a batch of four at a 300 s timeout, refused until 030 as able to outlive the lease, is not: the heartbeat sizes the lease now (exit ${bigBatch.code})`);
+  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out) && /900 s leases renewed every 60 s\. Nothing was written/.test(bigBatch.out),
+    `…while a batch of four at a 300 s timeout, refused until 030 as able to outlive the lease, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
 
-  // A 3 s lease with the 1 s heartbeat it derives, and 400 ms answers — ten
-  // thoughts across two workers, some two seconds each — so the beats fire
-  // during the run, and the summary counts them.
+  // A 6 s lease with a 1 s heartbeat, and 400 ms answers — ten thoughts across
+  // two workers, some two seconds each — so the beats fire during the run, and
+  // the summary counts them.
   slowMs = 400;
-  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "3");
+  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
   const firstBeats = Number(/, (\d+) heartbeat\(s\)/.exec(first.out)?.[1] ?? 0);
   assert(firstBeats >= 1 && !/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out),
@@ -2246,16 +2249,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const shortLease = await consolidate("--ttl", "3", "--heartbeat", "2");
   assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
   const bigBatch = await consolidate("--dry-run", "--batch", "4", "--k", "5", "--timeout", "120");
-  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out), `…while a batch whose k calls exceed the lease, refused until 030, is not: the heartbeat sizes the lease now (exit ${bigBatch.code})`);
+  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out) && /900 s leases renewed every 60 s\. Nothing was written/.test(bigBatch.out),
+    `…while a batch whose k calls exceed the lease, refused until 030, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
-  // A 3 s lease with the 1 s heartbeat it derives, and 700 ms verdicts — five
-  // pairs across two workers, some three and a half seconds of model time — so
-  // the beats fire during the run, and the summary counts them.
+  // A 6 s lease with a 1 s heartbeat, and 700 ms verdicts — five pairs across
+  // two workers, some three and a half seconds of model time — so the beats
+  // fire during the run, and the summary counts them.
   slowMs = 700;
-  const first = await consolidate("--workers", "2", "--dump", dump, "--ttl", "3");
+  const first = await consolidate("--workers", "2", "--dump", dump, "--ttl", "6", "--heartbeat", "1");
   slowMs = 0;
   const firstBeats = Number(/, (\d+) heartbeat\(s\)/.exec(first.out)?.[1] ?? 0);
   assert(firstBeats >= 1 && !/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out),

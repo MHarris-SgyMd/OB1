@@ -76,10 +76,12 @@
 --     the future) or pending and unrenewed (the renewal saw a status that was
 --     not claimed), never both.
 --   * The ids returned are the rows still held. A row of the worker's batch
---     that is NOT among them was reaped and, in all likelihood, re-leased to
---     another worker: the consumer skips it rather than repeating the
---     provider's work, and its release, had it been attempted, would have
---     returned false as 015 says.
+--     that is NOT among them is no longer this worker's: reaped and, in all
+--     likelihood, re-leased to another worker; or requeued by 016's edit
+--     trigger while it waited its turn; or deleted, its claim row cascading
+--     away. The consumer skips it rather than repeating the provider's work,
+--     asks the row which of the three it was before naming it, and its
+--     release, had it been attempted, would have returned false as 015 says.
 --   * An empty worker id and a non-positive lease are refused as claim_thoughts
 --     refuses them: a lease of zero would stamp the rows already expired.
 --
