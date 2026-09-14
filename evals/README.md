@@ -928,7 +928,9 @@ off a persisted `eval-longmemeval.ts` load. The cross-encoders need a torch env
 (Ollama serves no reranker — itself part of the finding): `rerank-crossencoder.py`
 for the sentence-transformers cross-encoder (bge-reranker-v2-m3), and
 `rerank-llm-reranker.py` for the causal-LM yes/no rerankers (Qwen3-Reranker,
-MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool.
+MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool, and
+`query-decompose.ts` measures the decomposition lever (the subsection after this
+one) off the same load.
 
 | reranker of the top-30 pool | MS strict | MS any-hit | temporal strict | temporal any-hit |
 | --- | --- | --- | --- | --- |
@@ -989,6 +991,72 @@ proximity blend gains at most +2 of 248 questions while hurting at any real weig
 recency-shaped signal SMD-945 already declined). The decline stands on the corpus
 that could have overturned it; the only untested lever is a *hosted* reranker
 (Voyage `rerank-2.5`), off the local-by-default path.
+
+### Query decomposition: it fixes what the nulls blamed, and strict@5 still barely moves (SMD-1318)
+
+The SMD-1301/1302/1304 nulls all pointed one way: a multi-hop counting/comparison
+question ("how many days between X and Y", "which came first") needs 2–3 distinct
+gold sessions in the top five, but **one blended query vector is the average of
+several events**, so each event's session lands mid-pool and no reorder of that
+one pool recovers the set. The untested fix: retrieve with **several** vectors —
+decompose the question into single-fact sub-questions, retrieve top-k per
+sub-question, union, fuse. This is the standard 2025–26 multi-hop RAG pipeline.
+The harness is `evals/query-decompose.ts`; every arm runs the identical pipeline
+(decompose → per-sub-query top-k → fuse → take five distinct sessions), and the
+baseline's decomposer just returns the question whole, so a question left atomic
+behaves exactly as today — an invariant the harness asserts (146/146 for the LLM
+split, 207/207 for the heuristic).
+
+An LLM (`qwen2.5:7b`, temperature 0) decomposes cleanly and fires on 41% of the
+248 multi-session + temporal questions (mean 2.25 sub-questions); a cheap
+conjunction/comparison heuristic fires on 16.5%. Strict recall_all@5, versus the
+baseline 79.3% / 79.5% and the top-30 oracle 99.2% / 95.3% (`subk` = 20):
+
+| fusion of the sub-query pools | heuristic MS / temporal | LLM MS / temporal |
+| --- | --- | --- |
+| RRF (k₀ = 60) | 79.3% / 76.4% | 79.3% / 76.4% |
+| round-robin (interleave rank-1s) | **81.0%** / 79.5% | 80.2% / 78.7% |
+| max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
+
+**Decomposition does exactly what the ticket predicted at the retrieval layer, and
+it is not enough.** Union coverage — is every gold present *somewhere* in the
+merged sub-pools — reaches **99.2% / 95.3%** at `subk` 20, *equal to* the
+single-vector oracle, and temporal rises to 96.1% at `subk` 30, *above* it:
+decomposition retrieves the whole set, including golds the one blended vector's
+top-30 missed. And it lifts each event's gold up its *own* sub-pool, measured on
+the fired questions (best rank of each gold within any single sub-pool, vs its
+rank in the one blended pool; `subk` 20):
+
+| gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ |
+| --- | --- | --- | --- | --- | --- |
+| multi-session, blended pool | 44 | 53 | 6 | 9 | 2 |
+| multi-session, best sub-pool | **70** | 32 | 7 | 3 | 2 |
+| temporal, blended pool | 46 | 54 | 5 | 11 | 5 |
+| temporal, best sub-pool | **74** | 31 | 6 | 8 | 2 |
+
+Rank-0 share goes 39% → 61% and the deep tail shrinks — yet strict@5 gains at most
++1.7 points (multi-session) and is flat-to-negative on temporal; RRF actively
+*regresses* temporal, because it sums shared appearances, so a topical distractor
+in two sub-pools outscores each event's single-pool gold. `subk` 10 → 30 lifts
+coverage (temporal 93.7% → 96.1%) but leaves strict flat, so the bottleneck is not
+scan depth.
+
+The reason strict does not move is that **the multi-hop miss was never "each event
+is mid-pool."** In the blended baseline ~85% of golds already sit at rank ≤ 2
+*individually*; the failure is **set assembly** — fitting 2–3 mutually-competing
+golds plus their distractors into five slots of one ranking. Decomposition removes
+gold-vs-gold competition (each gold in its own pool at rank 0 61% of the time) but
+the merge re-introduces gold-vs-distractor competition, and no dumb fusion (RRF,
+round-robin, max-sim) can tell each sub-pool's one gold from its topical
+neighbours. That discrimination is precisely a reranker's single-hop strength
+(any-hit ~99% on one gold; the SMD-1304 finding) — which is why a reranker
+*destroys* a pre-decomposition multi-hop set yet belongs **after** decomposition,
+on the single-hop sub-pools. **Decision:** decomposition alone is declined for the
+default path (marginal strict gain at the cost of an LLM call plus N retrievals per
+query, on a local-by-default fork); the measured, motivated follow-up is
+**decompose-then-rerank** — lift each sub-pool's gold to rank 0, then interleave —
+whose headroom is the 39% of golds not yet at rank 0. Like the reranker itself
+(SMD-1304), that belongs on a *hard* held-out corpus, not only LongMemEval.
 
 ### Verifying Matryoshka support against the model cards
 

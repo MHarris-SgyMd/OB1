@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-four numbered changes on top of the pin. Seven fix defects found in an
+Fifty-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). One (change 53, like change 31) ships no runtime change at
-all: it is a measurement that decided against building something.
+data layer (Phase 2). Three (changes 53 and 55, like change 31) ship no runtime
+change at all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–54 are the numbered `###` sections** further down, which is
+sections. Changes **18–55 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -5720,6 +5720,69 @@ rendering and the CLI's `--force` path. All suites green.
 Upstream status: **not applicable** — upstream has no proposal table, no worker
 and no `supersedes` writer beyond capture; the shape is GBrain's, the parts are
 the fork's. **Unfiled** upstream.
+
+### 55. Query decomposition, measured — it fixes what the SMD-1301/1302/1304 nulls blamed, and strict@5 still barely moves (SMD-1318)
+
+Change 53 declined three levers and named the fourth — query decomposition — "the
+more fundamental lever". This change measures it, and like change 53 it ships **no
+runtime change**: the fundamental lever is declined for the default path too,
+because the measurement corrects the premise every prior null shared. The harness
+is `evals/query-decompose.ts`, off the same persisted `eval-longmemeval.ts` load.
+
+The shared premise was: a multi-hop counting/comparison question ("how many days
+between X and Y", "which came first, X or Y") needs 2–3 distinct gold sessions in
+the top five, but **one blended query vector is the average of several events**,
+so each event's session lands mid-pool and no reorder of that one pool recovers
+the set. The fix follows directly and is the standard 2025–26 multi-hop RAG
+pipeline: retrieve with **several** vectors — decompose the question into
+single-fact sub-questions, retrieve top-k per sub-question, union, fuse. Every arm
+runs the identical pipeline (decompose → per-sub-query top-k → fuse → take five
+distinct sessions); the baseline's decomposer returns the question whole, so a
+question left atomic is byte-identical to today — an invariant the harness asserts
+(146/146 for the LLM split, 207/207 for the heuristic). An LLM (`qwen2.5:7b`,
+temperature 0) splits cleanly and fires on 41% of the 248 multi-session + temporal
+questions (mean 2.25 sub-questions).
+
+Strict recall_all@5, versus baseline 79.3% / 79.5% and the top-30 oracle 99.2% /
+95.3% (`subk` = 20, MS / temporal):
+
+| fusion of the sub-query pools | heuristic | LLM |
+| --- | --- | --- |
+| RRF (k₀ = 60) | 79.3% / 76.4% | 79.3% / 76.4% |
+| round-robin | **81.0%** / 79.5% | 80.2% / 78.7% |
+| max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
+
+**Decomposition does exactly what the ticket predicted at the retrieval layer, and
+it is not enough.** Union coverage — every gold present *somewhere* in the merged
+sub-pools — reaches **99.2% / 95.3%** (top-k 20 per sub-query), equal to the
+single-vector oracle, and temporal rises to 96.1% at top-k 30, above it: it
+retrieves the whole set. And it lifts each event's gold up its *own* sub-pool —
+on the fired questions, the share of golds at rank 0 of their best sub-pool rises
+from **39% to 61%** (multi-session) and **38% to 61%** (temporal), with the deep
+tail shrinking. Yet strict@5 gains at most +1.7 points and is flat-to-negative on
+temporal; RRF *regresses* temporal, because it sums shared appearances, so a
+topical distractor in two sub-pools outscores each event's single-pool gold.
+`subk` 10 → 30 lifts coverage but not strict — the bottleneck is not scan depth.
+
+The reason is that **the miss was never "each event is mid-pool."** In the blended
+baseline ~85% of golds already sit at rank ≤ 2 *individually*; the failure is
+**set assembly** — fitting 2–3 mutually-competing golds plus distractors into five
+slots of one ranking. Decomposition removes gold-vs-gold competition (each gold in
+its own pool) but the merge re-introduces gold-vs-distractor competition, and no
+dumb fusion can tell each sub-pool's one gold from its topical neighbours. That
+discrimination is exactly a reranker's single-hop strength (any-hit ~99%, change
+53) — which is why a reranker *destroys* a pre-decomposition multi-hop set yet
+belongs **after** decomposition, on the single-hop sub-pools. So decomposition
+alone is declined for the default path (a marginal strict gain at the cost of an
+LLM call plus N retrievals per query, on a local-by-default fork), and the
+measured, motivated follow-up is **decompose-then-rerank** — lift each sub-pool's
+gold to rank 0, then interleave — whose headroom is the 39% of golds not yet
+there. Like the reranker (change 53), that belongs on a *hard* held-out corpus,
+not only LongMemEval.
+
+Upstream status: **not applicable** — a fork-internal measurement of the fork's
+own retrieval. **Unfiled** upstream. Reproduce: a persisted `eval-longmemeval.ts`
+load, then `bun evals/query-decompose.ts` (see `evals/README.md`).
 
 ## Detached from the fork network
 
