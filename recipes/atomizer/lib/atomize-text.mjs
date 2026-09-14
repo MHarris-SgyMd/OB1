@@ -127,8 +127,9 @@ function parseAtomsFromResponse(raw) {
 
 async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
   // Pipe the prompt via stdin instead of the -p command-line arg. Multi-line
-  // prompts with quotes and newlines get mangled under Windows shell:true.
-  // Stdin avoids all shell escaping.
+  // prompts with quotes and newlines were mangled when this ran through a
+  // Windows shell; stdin avoids every escaping question, and the spawn now uses
+  // no shell at all (SMD-1251).
   const fullPrompt = `${prompt}\n\n${wrapInput(text)}\n\nOUTPUT (JSON array of atomic thoughts):`;
   const { stdout } = await spawnClaudeCli(
     [process.env.CLAUDE_CLI_PATH || "claude", "-p"],

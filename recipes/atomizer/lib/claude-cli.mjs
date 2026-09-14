@@ -45,12 +45,29 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
   return new Promise((resolve, reject) => {
     // No shell (SMD-1251): args is an argv array and the prompt travels on
     // stdin, so nothing here is interpreted. A shell would read metacharacters
-    // in CLAUDE_CLI_PATH. On Windows the path must be the real executable —
-    // Node refuses to spawn an npm `.cmd` shim without a shell (EINVAL).
-    const child = spawn(args[0], args.slice(1), {
-      stdio: [stdinData ? "pipe" : "ignore", "pipe", "pipe"],
-      env,
-    });
+    // in CLAUDE_CLI_PATH. The cost: args[0] must be a bare executable path (no
+    // ~, no $VAR, no flags), and on Windows the native claude.exe — the bare
+    // name is not found through an npm .cmd shim (ENOENT) and a .cmd/.bat the
+    // path names is refused (EINVAL, thrown synchronously by spawn()).
+    const describe = (err) => {
+      const bare = "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell";
+      const win = "on Windows, set CLAUDE_CLI_PATH to the real claude executable (the native install), not an npm .cmd shim";
+      const hint =
+        process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${win}; ${bare}` :
+        err.code === "ENOENT" ? ` — ${bare}` :
+        "";
+      return new Error(`Claude CLI spawn error: ${err.message}${hint}`);
+    };
+    let child;
+    try {
+      child = spawn(args[0], args.slice(1), {
+        stdio: [stdinData ? "pipe" : "ignore", "pipe", "pipe"],
+        env,
+      });
+    } catch (err) {
+      reject(describe(err));
+      return;
+    }
 
     let stdout = "";
     let stderr = "";
@@ -72,7 +89,7 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(new Error(`Claude CLI spawn error: ${err.message}`));
+      reject(describe(err));
     });
 
     child.on("close", (code) => {

@@ -26,7 +26,7 @@ This recipe ships two workflows:
 - An LLM provider — one of:
   - OpenRouter API key (same one from your Open Brain setup) **recommended, default**
   - Anthropic API key (direct)
-  - Local `claude` CLI on PATH (must be run from a standalone terminal, not inside a Claude Code session; spawned without a shell — on Windows, `CLAUDE_CLI_PATH` must name the real executable, not an npm `.cmd` shim)
+  - Local `claude` CLI on PATH (must be run from a standalone terminal, not inside a Claude Code session; spawned without a shell, so `CLAUDE_CLI_PATH` must be a bare executable path — on Windows the native `claude.exe`, not an npm `.cmd` shim)
 
 > [!WARNING]
 > The atomizer used to include a `codex` provider that ran `codex exec --dangerously-bypass-approvals-and-sandbox`. That path was **removed** before this PR. The atomizer feeds arbitrary user-controlled memory/email text into the LLM — running a sandbox-bypass agent on untrusted input is a prompt-injection → local-code-execution primitive. Use one of the three providers above; they only generate text. If you have an older checkout that still references `--provider=codex`, upgrade.

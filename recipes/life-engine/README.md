@@ -513,7 +513,7 @@ Life Engine runs autonomously via `/loop`. If Claude encounters a tool it doesn'
 | **`--allowedTools` (CLI flag)** | Same scoping, but must be re-typed each launch | Low — scoped |
 | **`--permission-mode auto`** | A middle ground — automatic but with some guardrails | Medium |
 
-Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. If a test run needs a tool the list below lacks, add that tool by name.
+Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. That is also why the two `Bash` rules below are **exact-match**, not prefix rules: a prefix rule approves whatever follows the prefix, and for `curl` that is any further URL or `-d @file` — an exfiltration in one command. If a test run needs a tool the list below lacks, add that tool by name.
 
 ### 6.2 Option A: settings.json Allowlist (Recommended)
 
@@ -533,8 +533,8 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
       "mcp__open-brain__thought_stats",
       "mcp__open-brain__capture_thought",
       "mcp__supabase__execute_sql",
-      "Bash(date:*)",
-      "Bash(curl -s \"https://api.open-meteo.com/v1/forecast:*)",
+      "Bash(date \"+%Y-%m-%d %H:%M:%S %Z\")",
+      "Bash(curl -s \"https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto\")",
       "CronCreate",
       "CronDelete"
     ]
@@ -542,7 +542,7 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
 }
 ```
 
-> **Why two scoped `Bash` rules, and what breaks.** The skill runs exactly two shell commands: `date "+%Y-%m-%d %H:%M:%S %Z"` for the date anchor and one `curl -s "https://api.open-meteo.com/v1/forecast?…"` for the rain forecast. A `Bash(prefix:*)` rule matches any command that begins with the prefix, so these two rules cover both — including your own latitude and longitude, which come after the prefix. What can break: if the model rephrases a command (single quotes around the URL, `--silent` for `-s`, a different flag order) the prefix no longer matches and the session pauses on a prompt. The skill file pins both commands word for word and tells the model to run them exactly as written; if you still see a prompt, add the exact variant you saw as one more rule. Do not widen to a wildcard `Bash` allow: that hands every incoming message a shell, and the previous version of this guide did exactly that.
+> **Why two exact-match `Bash` rules, and what breaks.** The skill runs exactly two shell commands — the `date` anchor and one `curl` to Open-Meteo — and each rule above is that command **verbatim**, so Claude Code approves that string and nothing else. Edit the latitude and longitude in the `curl` rule **and** in `life-engine-skill.md` (the Weather section) so the two stay identical; the skill tells the model to run both commands exactly as written. What can break: if the model rephrases a command (single quotes around the URL, `--silent` for `-s`, a `TZ=` prefix on `date`) the string no longer matches and the session pauses on a prompt. Tighten the skill's wording, or add the exact variant you saw as one more rule. Do not answer a prompt with a prefix rule such as `Bash(curl:*)`: `curl` accepts several URLs and `-d @file` in one command, so a prefix rule on it hands every incoming message a way to post your files somewhere. And never a wildcard `Bash` allow — the previous version of this guide recommended one.
 
 Then launch with just the channel flag:
 
@@ -558,7 +558,7 @@ claude --channels plugin:discord@claude-plugins-official
 
 ### 6.3 Option B: --allowedTools (CLI Flag)
 
-Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. The `curl` rule contains double quotes, so each rule is its own argument:
+Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. Both `Bash` rules contain double quotes, so each rule is its own single-quoted argument (edit the latitude and longitude here too):
 
 ```bash
 claude --channels plugin:telegram@claude-plugins-official \
@@ -573,8 +573,8 @@ claude --channels plugin:telegram@claude-plugins-official \
     mcp__open-brain__thought_stats \
     mcp__open-brain__capture_thought \
     mcp__supabase__execute_sql \
-    'Bash(date:*)' \
-    'Bash(curl -s "https://api.open-meteo.com/v1/forecast:*)' \
+    'Bash(date "+%Y-%m-%d %H:%M:%S %Z")' \
+    'Bash(curl -s "https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto")' \
     CronCreate CronDelete
 ```
 

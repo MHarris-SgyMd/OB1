@@ -29,9 +29,11 @@
  * here too; every provider below only generates text. The remaining CLI spawn
  * uses an argv array with no shell, so no part of the command line is
  * interpreted — the prompt travels on stdin and the binary path from
- * CLAUDE_CLI_PATH is executed as given. On Windows that path must be the
- * real executable (the native `claude.exe`), not an npm `.cmd` shim: Node
- * refuses to run `.cmd`/`.bat` files without a shell.
+ * CLAUDE_CLI_PATH is executed as given — so it must be a bare executable
+ * path (no `~`, no `$VAR`, no flags). On Windows it must be the native
+ * `claude.exe`: the bare name resolves only to `.com`/`.exe` without a shell,
+ * so the npm `claude.cmd` shim is not found (ENOENT), and a `.cmd`/`.bat` the
+ * variable names is refused (EINVAL). The spawn error says which.
  *
  * API:
  *   atomizeText(text, {
@@ -225,22 +227,49 @@ async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey,
 // email body never touches a command line. The spawn is an argv array with no
 // shell (SMD-1251): a shell would interpret metacharacters in CLAUDE_CLI_PATH,
 // and it was the shell that mangled multi-line prompts on Windows in the first
-// place. On Windows, CLAUDE_CLI_PATH must name the real executable — Node
-// refuses to spawn an npm `.cmd` shim without a shell (EINVAL).
+// place. Two costs, both said to the operator when they bite:
+//   - CLAUDE_CLI_PATH must be a BARE executable path. No `~`, no `$VAR`, no
+//     trailing flags — nothing expands them now. Otherwise: ENOENT.
+//   - On Windows the bare name `claude` is found only as `.com`/`.exe` (libuv
+//     ignores PATHEXT), so the npm `claude.cmd` shim is ENOENT; and a `.cmd`
+//     or `.bat` the variable points at is refused outright (EINVAL — thrown
+//     synchronously by spawn(), not emitted). Point the variable at the
+//     native `claude.exe`, or use the anthropic/openrouter provider.
+
+/** One shape for every way the spawn can fail, with the hint that fits. */
+function describeSpawnError(err) {
+  const bare = "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell";
+  const win = "on Windows, set CLAUDE_CLI_PATH to the real claude executable (the native install), not an npm .cmd shim";
+  const hint =
+    process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${win}; ${bare}` :
+    err.code === "ENOENT" ? ` — ${bare}` :
+    "";
+  return new Error(`claude-cli spawn error: ${err.message}${hint}`);
+}
 
 async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
   const fullPrompt = `${prompt}\n\nINPUT THOUGHT:\n${text}\n\nOUTPUT (JSON array of atomic thoughts):`;
   return await new Promise((resolve, reject) => {
     const cliPath = process.env.CLAUDE_CLI_PATH || "claude";
-    const child = spawn(cliPath, ["-p"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: buildCleanEnv(),
-    });
+    let child;
+    try {
+      // Node reports most spawn failures (ENOENT, EACCES…) on the 'error'
+      // event, but throws EINVAL synchronously — a .cmd/.bat without a shell —
+      // so both roads lead to describeSpawnError.
+      child = spawn(cliPath, ["-p"], {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: buildCleanEnv(),
+      });
+    } catch (err) {
+      reject(describeSpawnError(err));
+      return;
+    }
     let stdout = "";
     let stderr = "";
     let killed = false;
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
+    child.stdin.on("error", () => { /* a spawn failure closes stdin first; the 'error' below reports it */ });
     child.stdin.write(fullPrompt);
     child.stdin.end();
     const timer = setTimeout(() => {
@@ -250,18 +279,21 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
     }, timeoutMs);
     child.on("error", (err) => {
       clearTimeout(timer);
-      const hint = err.code === "EINVAL" && process.platform === "win32"
-        ? " (on Windows, set CLAUDE_CLI_PATH to the real claude executable, not an npm .cmd shim — this spawn uses no shell)"
-        : "";
-      reject(new Error(`claude-cli spawn error: ${err.message}${hint}`));
+      reject(describeSpawnError(err));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
       if (killed) return;
       if (code !== 0) {
-        reject(new Error(
-          `claude-cli exited with code ${code}.\nStderr: ${stderr.slice(0, 500)}\nStdout: ${stdout.slice(0, 300)}`,
-        ));
+        // Don't put stdout/stderr in the error by default: the CLI often echoes
+        // the prompt, which here is email text, and this message reaches the
+        // run's log. ATOMIZE_DEBUG=1 includes the raw snippets — the same
+        // switch recipes/atomizer uses.
+        const debug = process.env.ATOMIZE_DEBUG === "1";
+        const detail = debug
+          ? `\nStderr: ${stderr.slice(0, 500)}\nStdout: ${stdout.slice(0, 300)}`
+          : ` (stderr ${stderr.length}B, stdout ${stdout.length}B — set ATOMIZE_DEBUG=1 to see)`;
+        reject(new Error(`claude-cli exited with code ${code}.${detail}`));
         return;
       }
       try {

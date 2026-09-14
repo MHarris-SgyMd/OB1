@@ -250,7 +250,7 @@ Writing the upsert job itself is out of scope for this recipe — the shape of a
 
 Long emails often bundle several distinct ideas (decisions, questions, commitments, context). Storing the whole message as one embedding-addressable thought hurts retrieval. The recipe's atomizer runs an LLM over any message >= `--atomize-min-words` (default 150) and splits it into a JSON array of atomic thoughts. Each atom becomes its own pack record with `memoryId = gmail:<id>#atom:<index>`. Short emails skip atomization and remain one record.
 
-**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. The `claude-cli` provider is for a machine that already has the Claude CLI signed in and no API key to spare — opt-in, standalone terminal only. It pipes the prompt via **stdin** rather than the `-p` argument, so the email body never touches a command line, and it spawns the CLI as an argv array with **no shell**. On Windows, point `CLAUDE_CLI_PATH` at the real `claude` executable (the native install), not an npm `.cmd` shim — Node refuses to run those without a shell.
+**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. The `claude-cli` provider is for a machine that already has the Claude CLI signed in and no API key to spare — opt-in, standalone terminal only. It pipes the prompt via **stdin** rather than the `-p` argument, so the email body never touches a command line, and it spawns the CLI as an argv array with **no shell**. `CLAUDE_CLI_PATH`, when set, must be a bare executable path — no `~`, no `$VAR`, no flags, since nothing expands them now. On Windows it must name the native `claude.exe`: without a shell the bare name `claude` is not found through an npm `.cmd` shim, and a `.cmd` the variable points at is refused.
 
 > [!WARNING]
 > This recipe used to ship a fourth provider, `codex`, that ran `codex exec` over the email body, and one environment variable turned that run into a sandbox-bypass one. Email bodies are attacker-supplied text; an agent with tools, fed untrusted input, with its sandbox off, is a prompt-injection → local-code-execution primitive. Upstream deleted the identical branch from [`recipes/atomizer`](../atomizer/) for that reason and missed this copy; it is deleted here too (SMD-1251). The three providers above only generate text.
@@ -308,8 +308,8 @@ Expected. The engagement filter, auto-generated noise filter, and 10-word minimu
 **Atomization always fails with `no JSON array found`**
 Usually an LLM budget issue or prompt-mangling. With `--atomize-provider=anthropic`, check `ANTHROPIC_API_KEY` is set and has credit. With `--atomize-provider=claude-cli`, make sure you're running from a standalone terminal, not nested inside a Claude Code session. Set `--no-atomize` to confirm the rest of the pipeline works without the LLM hop.
 
-**`claude-cli spawn error: spawn EINVAL` on Windows**
-The CLI is spawned without a shell, and Node refuses to run an npm `.cmd` shim that way. Set `CLAUDE_CLI_PATH` to the real `claude` executable (the native Windows install), or use `--atomize-provider=anthropic`.
+**`claude-cli spawn error: … ENOENT` (or `… EINVAL` on Windows)**
+The CLI is spawned without a shell. `CLAUDE_CLI_PATH` must be a bare executable path — `~`, `$VAR` and trailing flags are not expanded. On Windows, `claude` in your terminal is usually an npm `.cmd` shim, which this spawn cannot find (`ENOENT`) or run (`EINVAL`): set `CLAUDE_CLI_PATH` to the native `claude.exe`, or use `--atomize-provider=anthropic`. The error message carries the same hint.
 
 **`Cache stale but --skip-contacts-refresh — using old cache`**
 The contacts cache file is older than 7 days. Regenerate it from whatever source you used in [Relationship tier](#relationship-tier), or accept the stale cache for this run.

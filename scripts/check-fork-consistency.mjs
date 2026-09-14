@@ -15,14 +15,15 @@
  *   4. requires_primitives / requires_skills point at directories that exist
  *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
  *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
- *      or skip-permissions flag, no wildcard Bash allow, no shell spawn
+ *      or skip-permissions flag or mode, no wildcard or bare Bash allow, no
+ *      shell spawn — in every text file under the contribution directories
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -145,7 +146,10 @@ function checkDeps(meta, { rel }) {
   }
 }
 
-// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+// ── Line scanning, shared by checks 5 and 6 ──────────────────────────────────
+
+/** Repo-relative path with `/` separators on every OS, so it can be a key. */
+const relOf = (file) => relative(ROOT, file).split(sep).join("/");
 
 function walk(dir, out = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
@@ -158,18 +162,37 @@ function walk(dir, out = [], match = /\.(sql|md)$/) {
   return out;
 }
 
-function checkSqlGuards() {
-  const re = /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/gi;
-  for (const file of walk(ROOT)) {
-    const text = readFileSync(file, "utf8");
-    const lines = text.split("\n");
-    lines.forEach((line, i) => {
-      re.lastIndex = 0;
-      if (re.test(line)) {
-        fail(`${file.slice(ROOT.length + 1)}:${i + 1}`, "ADD COLUMN on thoughts without IF NOT EXISTS");
-      }
-    });
+/**
+ * Run every rule over every line of every file. A rule is { re, msg } — `re`
+ * without the g flag, so test() is stateless — and may carry `skip(rel)`,
+ * which exempts a whole file from THAT rule only. Returns the (rel, rule)
+ * pairs that matched, so a caller can also ask what did NOT.
+ */
+function scanLines(files, rules) {
+  const hits = new Set();
+  for (const file of files) {
+    const rel = relOf(file);
+    const lines = readFileSync(file, "utf8").split("\n");
+    for (const rule of rules) {
+      if (rule.skip?.(rel)) continue;
+      lines.forEach((line, i) => {
+        if (rule.re.test(line)) {
+          hits.add(`${rel}\u0000${rule.name ?? rule.msg}`);
+          fail(`${rel}:${i + 1}`, rule.msg);
+        }
+      });
+    }
   }
+  return hits;
+}
+
+// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+
+function checkSqlGuards() {
+  scanLines(walk(ROOT), [{
+    re: /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/i,
+    msg: "ADD COLUMN on thoughts without IF NOT EXISTS",
+  }]);
 }
 
 // ── 6: shipped content never hands untrusted input a shell ───────────────────
@@ -186,47 +209,70 @@ function checkSqlGuards() {
 // The rule this enforces, written down here because the tree is vendored from
 // upstream wholesale (FORK.md, "Vendored content"): we audit once and hold the
 // delta, and a standing check carries the audit. Content that ships under this
-// repo's name does not run an agent with its sandbox off, does not recommend a
-// wildcard shell allow, and does not spawn a CLI through a shell. A file that
-// must name one of these strings in order to say it was removed is listed as
-// an exception, with the reason, so the exception is reviewed rather than
-// silent.
+// repo's name does not run an agent with its sandbox or permissions off, does
+// not recommend a wildcard or bare shell allow, and does not spawn through a
+// shell. The patterns are the spellings Claude Code and Codex actually read,
+// plus the JSON and Python forms of a shell spawn; a probe list below is
+// checked against them on every run so a pattern cannot rot silently.
+//
+// Exceptions are per (file, hazard): a file that must name one flag in order
+// to say it was removed is exempt from THAT hazard only, and is still scanned
+// for every other. An exception that matches nothing is itself a violation, so
+// the list shrinks when the prose it excuses is rewritten.
 const SHELL_HAZARDS = [
-  { re: /--dangerously-bypass-approvals-and-sandbox/, what: "Codex's sandbox-bypass flag" },
-  { re: /--dangerously-skip-permissions/, what: "Claude Code's skip-permissions flag" },
-  { re: /Bash\(\*\)/, what: "a wildcard Bash allow" },
-  { re: /\bshell:\s*true\b/, what: "a shell spawn (spawn an argv array without a shell)" },
+  { name: "codex-bypass", re: /--dangerously-bypass-approvals-and-sandbox/, what: "Codex's sandbox-bypass flag" },
+  { name: "skip-permissions", re: /--dangerously-skip-permissions|bypassPermissions/, what: "Claude Code's skip-permissions flag or mode" },
+  { name: "wildcard-bash", re: /Bash\(\*(?::\*)?\)|^\s*["']Bash["']\s*,?\s*$/, what: "a wildcard or bare Bash allow" },
+  { name: "shell-spawn", re: /\bshell["']?\s*[:=]\s*[Tt]rue\b/, what: "a shell spawn (spawn an argv array without a shell)" },
+];
+/** Strings each hazard must catch — the check's own negative tests. */
+const SHELL_HAZARD_PROBES = [
+  ["codex-bypass", "codex exec --dangerously-bypass-approvals-and-sandbox -"],
+  ["skip-permissions", "claude --dangerously-skip-permissions"],
+  ["skip-permissions", '"defaultMode": "bypassPermissions"'],
+  ["skip-permissions", "--permission-mode bypassPermissions"],
+  ["wildcard-bash", '      "Bash(*)",'],
+  ["wildcard-bash", "'Bash(*:*)'"],
+  ["wildcard-bash", '      "Bash",'],
+  ["shell-spawn", "      shell: true,"],
+  ["shell-spawn", '"shell": true'],
+  ["shell-spawn", "subprocess.run(cmd, shell=True)"],
 ];
 const SHELL_HAZARD_EXCEPTIONS = new Map([
   // Prose that names the deleted flag in order to say it was deleted.
-  ["recipes/atomizer/README.md", "the warning that documents the codex provider's removal"],
-  ["recipes/atomizer/lib/atomize-text.mjs", "the header note that documents the same removal"],
+  ["recipes/atomizer/README.md", { "codex-bypass": "the warning that documents the codex provider's removal" }],
+  ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": "the header note that documents the same removal" }],
 ]);
-const SHELL_HAZARD_FILES = /\.(mjs|cjs|js|ts|tsx|md|json|sh|toml|ya?ml)$/;
+// Every text file type present under the seven directories, so a rebased
+// settings.json.example or a Python recipe is scanned too; binaries are not.
+const SHELL_HAZARD_FILES = /\.(mjs|cjs|js|ts|tsx|md|json|jsonc|sh|toml|ya?ml|py|txt|html|svelte|xml|example|env|css|sql)$/;
 
-function checkShellHazards() {
-  for (const cat of CATEGORIES) {
-    const base = join(ROOT, cat);
-    if (!existsSync(base)) continue;
-    for (const file of walk(base, [], SHELL_HAZARD_FILES)) {
-      const rel = file.slice(ROOT.length + 1);
-      if (SHELL_HAZARD_EXCEPTIONS.has(rel)) continue;
-      readFileSync(file, "utf8").split("\n").forEach((line, i) => {
-        for (const { re, what } of SHELL_HAZARDS) {
-          if (re.test(line)) {
-            fail(`${rel}:${i + 1}`, `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`);
-          }
-        }
-      });
+function checkShellHazards(dirs) {
+  for (const [name, probe] of SHELL_HAZARD_PROBES) {
+    const hazard = SHELL_HAZARDS.find((h) => h.name === name);
+    if (!hazard?.re.test(probe)) fail("scripts/check-fork-consistency.mjs", `shell-hazard pattern '${name}' no longer catches its probe: ${probe}`);
+  }
+  // Only the contribution directories — not their `_template` placeholders,
+  // which contributionDirs() already skips — so this never depends on the
+  // display filter below to hide a placeholder's hits.
+  const files = dirs.flatMap((d) => walk(d.dir, [], SHELL_HAZARD_FILES));
+  const hits = scanLines(files, SHELL_HAZARDS.map(({ name, re, what }) => ({
+    name,
+    re,
+    msg: `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`,
+    skip: (rel) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
+  })));
+  for (const [rel, byHazard] of SHELL_HAZARD_EXCEPTIONS) {
+    const file = join(ROOT, rel);
+    const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+    for (const [name, why] of Object.entries(byHazard)) {
+      const hazard = SHELL_HAZARDS.find((h) => h.name === name);
+      if (!hazard || !hazard.re.test(text)) {
+        fail(rel, `listed as a shell-hazard exception for '${name}' (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`);
+      }
     }
   }
-  // An exception that no longer matches anything is a stale exception: say so,
-  // so the list shrinks when the prose it excuses is rewritten.
-  for (const [rel, why] of SHELL_HAZARD_EXCEPTIONS) {
-    const file = join(ROOT, rel);
-    const hit = existsSync(file) && SHELL_HAZARDS.some(({ re }) => re.test(readFileSync(file, "utf8")));
-    if (!hit) fail(rel, `listed as a shell-hazard exception (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`);
-  }
+  void hits;
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────
@@ -238,7 +284,7 @@ for (const d of dirs) {
   checkDeps(meta, d);
 }
 checkSqlGuards();
-checkShellHazards();
+checkShellHazards(dirs);
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
@@ -351,8 +397,10 @@ function checkComposeForwardsDocumentedEnv() {
 }
 checkComposeForwardsDocumentedEnv();
 
-// The upstream _template placeholder link is intentional.
-const filtered = violations.filter((v) => !v.where.includes("_template"));
+// The upstream _template placeholder link is intentional. Anchored to a path
+// segment, so a contribution whose name merely contains "_template" is not
+// silently excused.
+const filtered = violations.filter((v) => !/(^|\/)_template(\/|:|$)/.test(v.where));
 
 console.log(`Checked ${dirs.length} contributions across ${CATEGORIES.length} categories.`);
 
