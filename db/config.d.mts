@@ -37,6 +37,31 @@ export const MAX_HNSW_DIM: number;
  */
 export const KNOWN_MODEL_DIMS: Record<string, number>;
 
+/**
+ * Tokens a provider embeds in one request before cutting the rest silently.
+ * Measured (`prompt_eval_count`) local models only; a hosted model is absent
+ * until measured, and keeps the fallback.
+ */
+export const KNOWN_MODEL_WINDOW: Record<string, number>;
+/** Ollama's default batch, 2048: the window the shipped chunk limit was set under. */
+export const DEFAULT_MODEL_WINDOW: number;
+/** The longest capture a whole vector alone was measured to hold, 4096 estimated tokens: a derived rule windows above it. */
+export const MAX_WHOLE_TOKENS: number;
+/** Where a chunk limit came from: the variable, the model's window, or the fallback. */
+export type ChunkTokensFrom = "OB1_CHUNK_TOKENS" | "window" | "default";
+/**
+ * How a model's captures are windowed: `threshold` (estimated tokens a capture is
+ * windowed above) and `tokens` (the window size). Both OB1_CHUNK_TOKENS when a positive
+ * number; else derived from KNOWN_MODEL_WINDOW at the shipped ratio, the size never
+ * above `fallback` and the threshold never above MAX_WHOLE_TOKENS; else `fallback` for
+ * both. `window` is the model's entry when it has one, whichever branch decided.
+ */
+export function resolveChunkTokens(
+  raw: string | undefined,
+  model: string,
+  fallback: number
+): { tokens: number; threshold: number; from: ChunkTokensFrom; window: number | undefined; capped: boolean };
+
 /** Models whose cards claim Matryoshka training, so truncation is supported. */
 export const MRL_MODELS: Set<string>;
 

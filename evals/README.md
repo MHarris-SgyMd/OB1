@@ -1898,7 +1898,7 @@ thought per session, windows from `server-portable/chunk.ts`'s `chunkContent`,
 the document prompt from `db/config.mjs`, the 4-argument `upsert_thought` with
 the 021 envelope. 19,829 distinct session ids (25,112 memberships — a session
 sits in several histories), 19,825 rows after 003's fingerprint folded four
-twins, 56,267 chunk rows; median session 2,589 tokens, p90 4,253, and 15,737 of
+twins, 56,267 chunk rows; median session 2,589 tokens, p90 4,253, and 15,743 of
 them long enough to chunk. The session's date leads its text, as a pasted
 transcript's would.
 
@@ -1912,8 +1912,8 @@ that fails either prints no table. It passed on all 2,820 calls.
 Load, embedding requests batched 32 inputs: **50,103 s (13.9 h)** for 19,829
 sessions at `qwen3-embedding:4b@1024`, the default (0.40 sessions/s, ~1,000
 content tokens/s); 11,303 s for 19,564 at `qwen3-embedding:0.6b@1024` (1.73/s,
-~4,400 content tokens/s). The windows are half of that — 15,737 sessions
-chunked — and SMD-1305 asks what they buy under the 4b. Scoring: 10 s for
+~4,400 content tokens/s). The windows are half of that — 15,743 sessions
+chunked — and what they buy is measured in the next section. Scoring: 10 s for
 470 questions × 3 arms × 2 k; **1.3–1.5 ms per search call**, mean, over
 19,825 rows with a filter that admits ~50.
 
@@ -2073,6 +2073,202 @@ the 45→87% long-capture recall: bounded and non-adversarial.
   for that.
 * Three-arm, two-k design; per-question rank data is not kept. A follow-up
   that wants MRR or the rank of the missed gold session extends `score()`.
+
+## What the windows buy under a model that embeds the capture whole — and the rule that replaced the constant
+
+`eval-longmemeval.ts` with `OB1_EVAL_LME_ARMS=windows`, and `eval-longctx.ts`
+with `OB1_EVAL_WINDOWS=1200` (SMD-1305). `server-portable/chunk.ts` splits a
+capture into overlapping windows once its estimate passes a limit, and the
+limit was one constant for every model: 1200, chosen so a window clears
+Ollama's 2048-token batch with headroom for the tokenless estimate. The
+default model does not have that batch. `qwen3-embedding:4b` embedded the
+longest LongMemEval session — 78,174 characters, 19,544 estimated tokens —
+whole, `prompt_eval_count` 18,919, and so did the 0.6b. So under the default
+the constant windowed 15,743 of 19,829 sessions that the model would have
+embedded in one piece, wrote 56,267 chunk rows, embedded 2.12× the tokens, and
+made the 13.9-hour load about seven hours longer than it had to be. Whether
+those windows bought recall had never been measured.
+
+### How it was measured
+
+No reload. A load with no windows writes the same whole vector — the same
+text under the same model and prompt — so the whole vectors already in the
+LongMemEval store *are* that load, and the question is answered by reading
+the store three ways. That premise was checked rather than assumed: 40 random
+rows per model, re-embedded through the same endpoint singly and in batches of
+eight other sessions, sit at cosine 1.000000 to the stored vector to six
+decimals, and every stored text equals the corpus render (batch composition
+does not move these models' vectors). One exact scan per question fetches every
+thought in the history with its whole-vector similarity and its best window's —
+nothing in it is ordered by distance or limited, so no HNSW walk can return
+short under the filter and the arms compare vectors, not plans — and each arm
+is a rule over those two numbers:
+
+| arm | rule |
+| --- | --- |
+| `vector@-1` | `match_thoughts` as shipped: best of the whole vector and the windows |
+| `both@-1` | the same best-of, computed directly — the control; it matched `vector@-1` to the row on every slice, both models |
+| `whole@-1` | the whole vector alone: a load with no windows |
+| `windows@-1` | the windows alone where a thought has them, the whole vector where it does not |
+| `over4096@-1` | the whole vector alone for a session at or under 4096 estimated tokens, best-of above: the rule the server now derives |
+
+A second table slices every arm by the longest gold session's estimated
+length, since that is the vector with the most to wash out. And a third
+window size was loaded rather than inferred: the `windows` phase embeds
+`chunk.ts`'s windows at another limit for every session over it into a side
+table (`OB1_EVAL_LME_CHUNKS`), leaving the store's vectors alone — 4096-token
+windows for the 2,615 sessions over 4096, 5,182 rows, 6,334 s under the 4b and
+1,694 s under the 0.6b — and the arms read that table instead.
+
+### Results, 2026-09-13
+
+Strict recall_all@5 over 470 questions, any-hit in the LongMemEval section's
+tables above; k=10 in the last row. Sessions per question type as before.
+
+**`qwen3-embedding:4b@1024`, the default:**
+
+| | no windows | 1200-token windows above 1200 (shipped) | 1200-token windows above 4096 (derived) | 4096-token windows above 4096 | 1200 windows alone |
+| --- | --- | --- | --- | --- | --- |
+| single-session-user (64) | 95.3% | 96.9% | 95.3% | 95.3% | 95.3% |
+| single-session-assistant (56) | 100.0% | 100.0% | 100.0% | 100.0% | 100.0% |
+| single-session-preference (30) | 93.3% | 93.3% | 93.3% | 93.3% | 90.0% |
+| multi-session (121) | 86.8% | 87.6% | 86.0% | 86.0% | 77.7% |
+| temporal-reasoning (127) | 77.2% | 78.0% | 78.7% | 78.0% | 74.8% |
+| knowledge-update (72) | 95.8% | 97.2% | 95.8% | 95.8% | 95.8% |
+| **ALL, strict@5** | **88.7%** | **89.6%** | **88.9%** | **88.7%** | 85.5% |
+| ALL, strict@10 | 94.3% | 94.9% | 94.9% | 94.5% | 93.6% |
+
+| longest gold session | n | no windows | shipped | derived | 4096 windows |
+| --- | --- | --- | --- | --- | --- |
+| ≤1200 (never windowed) | 24 | 100.0% | 100.0% | 100.0% | 100.0% |
+| 1201–2048 | 26 | 100.0% | 100.0% | 100.0% | 100.0% |
+| 2049–4096 | 253 | 91.7% | 92.1% | 91.3% | 91.3% |
+| >4096 | 167 | 80.8% | 82.6% | 82.0% | 81.4% |
+
+**`qwen3-embedding:0.6b@1024`:**
+
+| | no windows | shipped | derived | 4096 windows | 1200 windows alone |
+| --- | --- | --- | --- | --- | --- |
+| **ALL, strict@5** | **86.6%** | **87.9%** | **87.4%** | **86.8%** | 86.2% |
+| ALL, strict@10 | 93.4% | 94.9% | 94.0% | 93.8% | 92.3% |
+| 2049–4096 (253) | 88.9% | 88.9% | 88.5% | 88.5% | 87.4% |
+| >4096 (167) | 79.0% | 82.6% | 82.0% | 80.2% | 80.2% |
+
+**The write cost of each rule**, in `chunk.ts`'s estimate over the 19,829
+sessions, and the load it implies at the 4b's measured rate:
+
+| rule | sessions windowed | chunk rows | tokens embedded | ÷ no windows | load under the 4b |
+| --- | --- | --- | --- | --- | --- |
+| no windows | 0 | 0 | 50.2M | 1.00× | ~6.6 h, projected |
+| 4096-token windows above 4096 | 2,615 | 5,182 | 62.6M | 1.25× | ~8.2 h, projected (the windows alone measured: 6,334 s) |
+| **1200-token windows above 4096 (derived)** | 2,615 | 13,921 | 64.5M | **1.29×** | **~8.5 h, projected** |
+| 1200-token windows above 1200 (shipped) | 15,743 | 56,267 | 106.6M | 2.12× | **13.9 h, measured** |
+
+**The tail test, one document at a time.** `eval-longctx.ts`'s four documents
+per bucket, identical but for the final sentence, scored by the whole vector,
+by the best 1200-token window, and by the best of both:
+
+| model | served ctx | 1K | 2K | 4K | 8K |
+| --- | --- | --- | --- | --- | --- |
+| qwen3-embedding:4b, whole vector | 40960 | 4/4 | 4/4 | 4/4 | 4/4 |
+| qwen3-embedding:4b, windows@1200 | | 4/4 (0 win) | 4/4 (2) | 4/4 (5) | 4/4 (9) |
+| qwen3-embedding:0.6b, whole vector | 32768 | 4/4 | 4/4 | 4/4 | 4/4 |
+| qwen3-embedding:0.6b, windows@1200 | | 4/4 | 4/4 | 4/4 | 4/4 |
+| embeddinggemma, whole vector | 2048 | 4/4 | 4/4 | **1/4** | **1/4** |
+| embeddinggemma, windows@1200 | | 4/4 | 4/4 | **4/4** | **4/4** |
+
+### What it says
+
+**The whole vector is the signal; the windows are a small complement to it.**
+Under the 4b the whole vector alone scores 88.7% and the shipped windows
+alone 85.5%; together 89.6%. The windows add 0.9 points — four questions in
+470 — for 2.12× the tokens embedded, and every one of those four questions has
+a gold session over 2048 estimated tokens, three of them over 4096, where the
+>4096 slice alone gains 1.8 points (82.6% against 80.8% on its 167). Under the
+0.6b the same shape: +1.3 for the windows, six questions, all with a gold
+session over 4096, where that slice gains 3.6; nothing at all in 2049–4096.
+
+**Window size matters more than coverage.** 4096-token windows over the same
+2,615 long sessions bought nothing under the 4b — 88.7% with them, 88.7%
+without — and 0.2 under the 0.6b, while 1200-token windows over those
+sessions bought 0.2 and 0.8. A 4096-token window is as diluted as the whole
+vector it stands beside; a 1200-token one is not. So a rule that raises the
+window size with the model's window would spend 25% more embedding for
+nothing, and the shipped size stays.
+
+**The tail test cannot see any of this.** Both qwen models are 4/4 at every
+bucket with or without windows, and so is `embeddinggemma` once windowed —
+the harness works, and the synthetic documents are too easy: four candidates,
+one distinguishing sentence. The 1.8- and 3.6-point losses above 4096 on
+LongMemEval are the dilution the README's `bge-m3` finding predicted, at a
+length the tail test called fine. Real corpora, not synthetic ones, are where
+the ceiling shows.
+
+**The rule shipped.** `db/config.mjs` now carries `KNOWN_MODEL_WINDOW` beside
+`KNOWN_MODEL_DIMS` — the tokens each model embeds in one request, measured by
+`prompt_eval_count` for the local entries (the qwen models at their served
+context, verified on the 18,919-token session; `embeddinggemma`, `bge-m3`,
+`snowflake-arctic-embed2` and `nomic-embed-text` at Ollama's 2048 batch;
+`granite-embedding` at 512); hosted models are absent until measured — and
+`resolveChunkTokens` derives two numbers from it at the shipped ratio (1200 of
+2048): the length a capture is windowed above, capped at 4096 where the whole
+vector was measured to stop holding, and the window size, never above 1200.
+A 2048-token model gets 1200 and 1200, exactly what it had. `granite-embedding`
+gets 300 and 300 with a 37-token overlap, where the constant cut its
+1200-token windows to 512 in silence (and, the review pass found, a 150-token
+overlap against a 300-token window carried nothing at all: the overlap now
+scales with a window that derived smaller). The qwen models window a capture
+only past 4096 estimated tokens,
+still at 1200 a window: under the 4b that is 88.9% against the shipped 89.6%
+(three questions), 94.9% against 94.9% at k=10, for 61% of the tokens embedded
+and a quarter of the chunk rows; under the 0.6b 87.4% against 87.9%. A model
+the table does not know keeps 1200 for both, and preflight's `chunk window`
+line prints the rule, its source, and a warning when an explicit
+`OB1_CHUNK_TOKENS` is over the model's window. Setting `OB1_CHUNK_TOKENS=1200`
+restores the shipped behaviour for both numbers, as it always set both.
+
+The price of the default is two or three questions in 470 on a corpus of
+2,600-token sessions, and what it buys is about five hours of a fourteen-hour
+import and three-quarters of the chunk table. Those are the operator's numbers
+to weigh, and the variable is there to weigh them the other way.
+
+**One defect found in passing.** `chunkContent`'s segmenter read the default
+limit, not the caller's: under a smaller limit a paragraph between the two
+passed whole and was cut at words by the post-condition, where sentences would
+have done; under a larger one every paragraph over 1200 was cut into sentences
+the assembly then re-joined. Invisible at 1200, fixed with the rule that made
+other limits real.
+
+### Caveats
+
+* Two local models on one corpus. The 4096 cap is one number from two models
+  on sessions whose median is 2,600 tokens and whose 99th percentile is 5,200;
+  above 8,192 there are three. A corpus of 20,000-token documents has not been
+  measured, and on it the whole vector may hold worse or the cap may be low
+  (SMD-1315).
+* The shipped 1200 was not tuned either way here: 600- or 2,000-token windows
+  were not measured, only that 4096-token ones lose to it.
+* Hosted models have no entry and keep 1200 for both numbers, exactly what
+  they had: a provider's document states the model's maximum, not what the
+  serving provider behind an OpenRouter route admits, and a wrong entry
+  truncates silently. A model rebuilt with a Modelfile past its default batch
+  has another name and no entry either — `OB1_CHUNK_TOKENS` is the path for
+  both until they are measured.
+* The projected load times scale the measured 13.9 hours by tokens embedded;
+  the one side load measured (4096-token windows, 6,334 s for 12.5M tokens)
+  ran at 1,969 tokens/s, about the full load's overall rate, so the scaling
+  holds to first order. No configuration but the shipped one has been loaded
+  end to end.
+* Strict recall counts sessions; a reader model was not run, so whether the
+  two or three sessions the shipped windows recover would have changed an
+  answer is not known.
+* The 4096 cap is in `chunk.ts`'s estimated tokens, and the estimate is
+  pessimistic only for text with spaces: `words × 1.3` collapses on a script
+  without them and `chars / 4` under-counts CJK by three to five times, so a
+  14,000-character Japanese note estimates at ~3,500 tokens and is now embedded
+  whole under a qwen model at ~12,000 real tokens — no truncation (the window is
+  40,960), dilution only, and unmeasured here (SMD-1314). Before this change it
+  was windowed at 1200 estimated tokens, which under-counted the same way.
 
 ## Related
 

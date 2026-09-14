@@ -41,8 +41,11 @@ type Env = {
   OB1_EMBEDDING_DIMENSIONS?: string;
   /**
    * Chunking for captures too long to embed in one provider call. Tokens per
-   * window and overlap between windows; see chunk.ts. Defaults suit Ollama's
-   * 2048-token batch.
+   * window and overlap between windows; see chunk.ts. Unset, the length a
+   * capture is windowed above and the window size are derived from the
+   * embedding model's measured window (db/config.mjs, KNOWN_MODEL_WINDOW; 1200
+   * and 1200 for a model it does not know) and preflight prints the rule and
+   * where it came from.
    */
   OB1_CHUNK_TOKENS?: string;
   OB1_CHUNK_OVERLAP?: string;

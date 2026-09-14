@@ -90,6 +90,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORPUS = process.env.OB1_EVAL_CORPUS ?? "/tmp/linear-corpus-full.json";
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? `${DEFAULT_EMBEDDING_MODEL}@1024`;
 const CTX_MODEL = process.env.OB1_EVAL_CTX_MODEL ?? DEFAULT_METADATA_MODEL;
+// The constant, not the rule the server derives for the model (SMD-1305): this
+// harness compares contextualised windows to bare ones, and it needs windows to
+// compare, so it windows above the constant as the server did before the rule.
 const CHUNK_TOKENS = Number(process.env.OB1_CHUNK_TOKENS) || DEFAULT_MAX_TOKENS;
 
 /**

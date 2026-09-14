@@ -25,9 +25,16 @@
  *   itself carries no signal.
  *
  *   bun eval-longctx.ts embeddinggemma bge-m3 'qwen3-embedding:4b!instruct@1024'
+ *   OB1_EVAL_WINDOWS=1200 bun eval-longctx.ts ...   also score each document by
+ *       its chunk.ts windows at that limit (SMD-1305): three rows per model —
+ *       the whole vector alone, the windows alone, and the best of both, which
+ *       is how match_thoughts scores a stored thought.
  */
 
-import { embed, cosine, EVAL_BASE } from "./lib.ts";
+import { embed, cosine } from "./lib.ts";
+import { chunkContent } from "../server-portable/chunk.ts";
+
+const WINDOWS = Number(process.env.OB1_EVAL_WINDOWS) || 0;
 
 
 /** Roughly 1.35 tokens per word for this kind of prose, checked against Ollama. */
@@ -94,25 +101,44 @@ async function servedContext(model: string): Promise<string> {
 const models = process.argv.slice(2);
 const table: Record<string, Record<number, string>> = {};
 const ctxs: Record<string, string> = {};
+/** The rows printed: the model alone, or with its two window rows under OB1_EVAL_WINDOWS. */
+const rows: string[] = [];
 
 for (const model of models) {
   process.stderr.write(`  … ${model}\n`);
   ctxs[model] = await servedContext(model);
-  table[model] = {};
+  const variants = WINDOWS ? [model, `${model} windows@${WINDOWS}`, `${model} best of both`] : [model];
+  for (const v of variants) { table[v] = {}; ctxs[v] = ctxs[model]; rows.push(v); }
   for (const target of BUCKETS) {
     const docs = TAILS.map((t) => ({ key: t.key, text: build(target, t.text) }));
-    const vecs: Record<string, number[]> = {};
+    const whole: Record<string, number[]> = {};
+    const windows: Record<string, number[][]> = {};
     try {
-      for (const d of docs) vecs[d.key] = await embed(model, d.text);
-      let hit = 0;
+      for (const d of docs) {
+        whole[d.key] = await embed(model, d.text);
+        // chunkContent returns [] under the limit; a document with no windows
+        // is scored by its whole vector in the windows row, as the store does.
+        windows[d.key] = WINDOWS ? await Promise.all(chunkContent(d.text, { maxTokens: WINDOWS }).map((c) => embed(model, c.content))) : [];
+      }
+      const hits = variants.map(() => 0);
+      let chunkRows = 0;
+      for (const d of docs) chunkRows += windows[d.key].length;
       for (const t of TAILS) {
         const qv = await embed(model, t.q, true);
-        const ranked = docs.map((d) => ({ k: d.key, s: cosine(qv, vecs[d.key]) })).sort((a, b) => b.s - a.s);
-        if (ranked[0].k === t.key) hit++;
+        const scored = docs.map((d) => {
+          const w = cosine(qv, whole[d.key]);
+          const c = windows[d.key].length ? Math.max(...windows[d.key].map((v) => cosine(qv, v))) : w;
+          return { k: d.key, s: [w, c, Math.max(w, c)] };
+        });
+        variants.forEach((_, i) => {
+          const ranked = [...scored].sort((a, b) => b.s[i] - a.s[i]);
+          if (ranked[0].k === t.key) hits[i]++;
+        });
       }
-      table[model][target] = `${hit}/${TAILS.length}`;
+      variants.forEach((v, i) => { table[v][target] = `${hits[i]}/${TAILS.length}`; });
+      if (WINDOWS) table[variants[1]][target] += ` (${chunkRows / docs.length} win)`;
     } catch (e) {
-      table[model][target] = "ERR";
+      for (const v of variants) table[v][target] = "ERR";
       process.stderr.write(`    ${target}: ${(e as Error).message.slice(0, 70)}\n`);
     }
   }
@@ -121,11 +147,13 @@ for (const model of models) {
 const approxWords = (t: number) => Math.round(t / TOK_PER_WORD);
 console.log(`\n  ${TAILS.length} documents per bucket, identical except the final sentence.`);
 console.log(`  The query asks for the final sentence, so a truncated document is unfindable.\n`);
-console.log("  model                              served ctx  " + BUCKETS.map((b) => `${b / 1000}K`.padStart(8)).join(""));
-console.log("  " + "─".repeat(76));
-for (const m of models) {
-  const cells = BUCKETS.map((b) => (table[m][b] ?? "-").padStart(8)).join("");
-  console.log(`  ${m.padEnd(34)} ${ctxs[m].padStart(9)}  ${cells}`);
+const cellW = WINDOWS ? 14 : 8;
+console.log("  model                                        served ctx  " + BUCKETS.map((b) => `${b / 1000}K`.padStart(cellW)).join(""));
+console.log("  " + "─".repeat(58 + cellW * BUCKETS.length));
+for (const m of rows) {
+  const cells = BUCKETS.map((b) => (table[m][b] ?? "-").padStart(cellW)).join("");
+  console.log(`  ${m.padEnd(44)} ${ctxs[m].padStart(9)}  ${cells}`);
 }
 console.log(`\n  bucket sizes: ${BUCKETS.map((b) => `${b} tok ≈ ${approxWords(b)} words`).join(", ")}`);
 console.log("  4/4 = every document found by its conclusion. 1/4 = chance.");
+if (WINDOWS) console.log(`  windows@${WINDOWS}: the document scored by its best chunk.ts window at that limit (mean windows per document in parentheses); best of both is match_thoughts' rule.`);

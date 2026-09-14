@@ -34,7 +34,9 @@ import {
   composeChunkForEmbedding,
   usableChunkContext,
   resolveChunkContext,
+  resolveChunkTokens,
   resolveEmbeddingDimensions,
+  type ChunkTokensFrom,
 } from "../db/config.mjs";
 
 /** The environment keys this module reads. A subset of index.ts's Env. */
@@ -194,7 +196,18 @@ export type EmbedConfig = {
   embeddingDim: number;
   /** Whether to send the OpenAI `dimensions` parameter. */
   dimensionsRequested: boolean;
+  /** Tokens per window; see chunkTokensFrom for how it was decided. */
   chunkTokens: number;
+  /** Estimated tokens a capture is windowed above: chunkTokens, unless the model's window raised it (SMD-1305). */
+  chunkThreshold: number;
+  /**
+   * Where chunkTokens came from: OB1_CHUNK_TOKENS, the configured model's
+   * window in db/config.mjs's KNOWN_MODEL_WINDOW, or chunk.ts's default for a
+   * model the table does not know. Preflight prints it (SMD-1305).
+   */
+  chunkTokensFrom: ChunkTokensFrom;
+  /** The configured model's window in KNOWN_MODEL_WINDOW, when it has one. */
+  modelWindow: number | undefined;
   chunkOverlap: number;
   /** Whether to generate a situating blurb per window before embedding it. */
   chunkContext: boolean;
@@ -221,6 +234,16 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
   // `Authorization: Bearer undefined` to Ollama is harmless but confusing in
   // logs, so the header is omitted entirely when there is no key.
   const key = env.OB1_LLM_API_KEY || env.OPENROUTER_API_KEY;
+  // The window a capture is split at. Until SMD-1305 this was chunk.ts's
+  // constant for every model — 1200, chosen for Ollama's 2048-token batch —
+  // while the default model embeds 18,919 tokens whole and a 512-token model
+  // had its windows cut. The rule is db/config.mjs's, so the server,
+  // reembed.ts and preflight cannot disagree about it: an explicit
+  // OB1_CHUNK_TOKENS wins for both the size and the threshold, a model the
+  // window table knows derives a threshold from its window at the shipped
+  // ratio (capped where the whole vector was measured to stop holding) and a
+  // size at or under the constant, and an unknown model keeps the constant.
+  const chunk = resolveChunkTokens(env.OB1_CHUNK_TOKENS, model, DEFAULT_MAX_TOKENS);
   return {
     llmBase: (env.OB1_LLM_BASE_URL || DEFAULT_LLM_BASE_URL).replace(/\/+$/, ""),
     headers: key
@@ -239,12 +262,22 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
      * db/config.mjs's, shared with preflight and the migrator.
      */
     dimensionsRequested: resolveEmbeddingDimensions(env.OB1_EMBEDDING_DIMENSIONS, dim, model),
-    // The default is deliberately well under Ollama's 2048-token batch rather
-    // than close to it: the token count is an estimate, and a chunk that
-    // overshoots is silently truncated, which is the failure being fixed rather
-    // than a degradation of it.
-    chunkTokens: numberOr(env.OB1_CHUNK_TOKENS, DEFAULT_MAX_TOKENS, "positive"),
-    chunkOverlap: numberOr(env.OB1_CHUNK_OVERLAP, DEFAULT_OVERLAP_TOKENS, "non-negative"),
+    chunkTokens: chunk.tokens,
+    chunkThreshold: chunk.threshold,
+    chunkTokensFrom: chunk.from,
+    modelWindow: chunk.window,
+    // The overlap follows a window that DERIVED smaller than the constant
+    // (first review pass): at 300 tokens chunk.ts clamps the default 150 to
+    // half the window, and its carry rule — never carry the whole buffer —
+    // then carries nothing out of a two-segment window, so a granite-embedding
+    // capture had no overlap at all. Scaled at the ratio the constant fixes
+    // (150 of 1200 → 37 of 300). Gated on the SOURCE, not the size (second
+    // pass): an explicit OB1_CHUNK_TOKENS keeps the 150 it always had, so a
+    // pinned store does not change shape on upgrade; OB1_CHUNK_OVERLAP wins
+    // over both.
+    chunkOverlap: numberOr(env.OB1_CHUNK_OVERLAP,
+      chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
+      "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
     metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,
     // Deterministic by default; overridable for anyone who wants variety.
@@ -545,7 +578,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
    */
   async function embedCapture(content: string): Promise<EmbeddedCapture> {
     const cfg = config();
-    const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, overlapTokens: cfg.chunkOverlap });
+    const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, threshold: cfg.chunkThreshold, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
       return { embedding: await getEmbedding(content), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
     }

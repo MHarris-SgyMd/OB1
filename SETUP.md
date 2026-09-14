@@ -154,11 +154,18 @@ The short version:
   ollama create bge-m3-long -f Modelfile     # then set OB1_EMBEDDING_MODEL=bge-m3-long
   ```
 
-  **The server now handles this for you**: a capture above `OB1_CHUNK_TOKENS`
-  (1200 by default) is split into overlapping windows, each embedded separately, so
-  the whole note stays searchable regardless of the provider's batch. Short thoughts
-  are untouched. Raising `num_batch` is therefore optional — it lets each window be
-  larger, nothing more.
+  **The server now handles this for you**: a capture above `OB1_CHUNK_TOKENS` is
+  split into overlapping windows, each embedded separately, so the whole note stays
+  searchable regardless of the provider's batch. Unset, the rule follows the
+  model's measured window: a 2048-token model windows everything over 1200 tokens
+  at 1200, as before; `qwen3-embedding:4b`, which embeds far more than that whole,
+  windows only captures over 4096 tokens — still at 1200 a window, because the
+  whole vector was measured to hold to about that length and larger windows were
+  measured to buy nothing (`evals/README.md`, SMD-1305). `preflight.ts` prints the
+  rule and where it came from. Windows already written stay until an edit or a
+  backfill re-embed pass (`FORK.md` §50). Short thoughts are untouched. Raising `num_batch`
+  is therefore optional — it lets each window be larger, nothing more; a model
+  rebuilt that way has a new name, so set `OB1_CHUNK_TOKENS` for it.
 
   It also sidesteps the harder problem. Even with the batch raised, a single 8K-token
   embedding cannot surface its own final sentence: the model embeds all of it and the
