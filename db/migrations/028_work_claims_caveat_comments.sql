@@ -57,7 +57,7 @@
 --     at reembed.ts's header and db/README.md for them rather than restating
 --     them: three review passes each mis-stated a detail of reader behaviour
 --     in this literal before the fourth chose this shape.
---   * COMMENT ON FUNCTION release_thought — re-issued with 015's sentence kept
+--   * COMMENT ON FUNCTION release_thought — re-issued with 015's text kept whole
 --     and one added: p_error is stored whatever p_status is, and what it means
 --     on success.
 --
