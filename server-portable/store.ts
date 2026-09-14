@@ -104,6 +104,85 @@ export type ThoughtHybridMatch = {
 };
 
 /**
+ * A timestamptz as either backend hands it back, into the one string form the
+ * store's types promise. The two clients disagree: Bun.sql (the SQL store, and
+ * `compat/supabase-sql` under the PostgREST store's tests) returns a Date, or
+ * the number ±Infinity for an infinite timestamp; PostgREST returns a JSON
+ * string in Postgres's own spelling — `2026-09-14T16:27:09.123456+00:00`, or
+ * `infinity`. Nothing else may format a timestamp: a `String()` on the Date
+ * gave a locale string once, and a bare cast gave each caller its client's
+ * shape (SMD-1040; FORK.md §52 has the history).
+ *
+ * The rule. A finite timestamp is `toISOString`. One with no ISO form keeps
+ * the text it arrived as rather than failing the caller's whole result — one
+ * odd row stays one odd row. The column allows `infinity`, which migration
+ * 020 ranks by design; both clients' spellings of it come out as Postgres's.
+ * A BC date or a year past ±275760 is the case the two clients do NOT agree
+ * on: PostgREST's text survives (`0044-03-15T00:00:00+00:00 BC`), but Bun's
+ * driver has already turned it into `Date(NaN)` — or, on a parameterised
+ * query, a Date whose `toISOString` is the extended-year form — before the
+ * store sees it, so the SQL store hands back JS's "Invalid Date". Recovering
+ * the text there means selecting `created_at::text` beside the column; that,
+ * and whether NULL (the epoch, the Date(null) convention every mapper here
+ * has always had) and the no-ISO-form rows should be `null` under a widened
+ * type, and what the tools print for them (today "Invalid Date"), is
+ * SMD-1328. `undefined` throws: the column is missing from the row, a bug in
+ * the SELECT, not data.
+ */
+export function isoTimestamp(v: unknown): string {
+  if (v === undefined) throw new Error("isoTimestamp: the row has no such column");
+  if (v === Infinity || v === "infinity") return "infinity";
+  if (v === -Infinity || v === "-infinity") return "-infinity";
+  const d = v instanceof Date ? v : new Date(v as string);
+  return Number.isNaN(d.getTime()) ? String(v) : d.toISOString();
+}
+
+/**
+ * `isoTimestamp` for a column whose type says null — `updated_at`, a stats
+ * range, `ThoughtMeta.created_at`. Only SQL NULL becomes null; a missing
+ * column (`undefined`) still throws, as above.
+ */
+export function isoTimestampOrNull(v: unknown): string | null {
+  return v === null ? null : isoTimestamp(v);
+}
+
+/**
+ * `isoTimestamp` for a key an envelope may omit — `update_thought`'s jsonb
+ * before 018 had no `updated_at`; `resolve_agent`'s has `revoked_at` only when
+ * revoked. Absence is legitimate there, so `undefined` is `undefined`, not the
+ * throw above. The one place `== null` is the right test.
+ */
+export function isoTimestampOpt(v: unknown): string | undefined {
+  return v == null ? undefined : isoTimestamp(v);
+}
+
+/**
+ * The row normalisers. One per row shape the store interface returns, shared
+ * by both stores, so a field's format or a column's name cannot drift between
+ * them: PostgREST returns the function's snake_case columns, and a cast
+ * type-checks while delivering `undefined` (`total_count` once) or the
+ * client's own value (`created_at`, above). Numeric columns go through
+ * `Number` because a driver may hand a float8 or bigint back as a string.
+ */
+export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
+  return {
+    ...normaliseListItem(r),
+    similarity: Number(r.similarity),
+    score: Number(r.score),
+  };
+}
+
+export function normaliseKeywordRow(r: Record<string, unknown>): ThoughtKeywordMatch {
+  return {
+    ...normaliseListItem(r),
+    occurrences: Number(r.occurrences),
+    // bigint. Bun hands it back as a string, and Number(undefined) is NaN, so
+    // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
+    totalCount: Number(r.total_count ?? 0),
+  };
+}
+
+/**
  * A `search_thoughts_hybrid` row as either backend hands it back — snake_case
  * column names, `similarity` possibly NULL, text[] as arrays — into the store's
  * shape. Shared so the two stores cannot drift on the nullable field:
@@ -113,10 +192,7 @@ export type ThoughtHybridMatch = {
 export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMatch {
   const strings = (x: unknown) => (Array.isArray(x) ? x.map(String) : []);
   return {
-    id: String(r.id),
-    content: String(r.content),
-    metadata: (r.metadata ?? {}) as Record<string, unknown>,
-    created_at: new Date(r.created_at as string).toISOString(),
+    ...normaliseListItem(r),
     similarity: r.similarity == null ? null : Number(r.similarity),
     matchedNeedles: strings(r.matched_needles),
     needles: strings(r.needles),
@@ -147,10 +223,48 @@ export type ThoughtListItem = {
   created_at: string;
 };
 
+/**
+ * The stats walk's row. `created_at` is nullable here and nowhere else in the
+ * interface (SMD-1328 decides the rest): the column allows NULL, NULLs sort
+ * first under `ORDER BY created_at DESC`, and a fabricated epoch in the first
+ * row would be reported as the corpus's NEWEST thought — where the SQL store's
+ * `min`/`max` (migration 024) ignore NULLs.
+ */
 export type ThoughtMeta = {
   metadata: Record<string, unknown>;
-  created_at: string;
+  created_at: string | null;
 };
+
+export function normaliseThoughtRecord(r: Record<string, unknown>): ThoughtRecord {
+  return {
+    ...normaliseListItem(r),
+    updated_at: isoTimestampOrNull(r.updated_at),
+  };
+}
+
+export function normaliseListItem(r: Record<string, unknown>): ThoughtListItem {
+  return {
+    id: String(r.id),
+    content: String(r.content),
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestamp(r.created_at),
+  };
+}
+
+export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
+  return {
+    metadata: (r.metadata ?? {}) as Record<string, unknown>,
+    created_at: isoTimestampOrNull(r.created_at),
+  };
+}
+
+/**
+ * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
+ * column or argument, not a not-found; both stores' read methods treat it as
+ * no-match so a bad id from an MCP client gets a clean answer, not a Postgres
+ * error string — the same answer whichever store is configured.
+ */
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * What thought_stats renders: the corpus total, its date range, and the counts
@@ -224,6 +338,31 @@ export type Derivative = {
   created_at: string;
 };
 
+/** The five columns 025's two functions share; spread FIRST, so an explicit field can never be overwritten by it. */
+function derivationFields(r: Record<string, unknown>) {
+  return {
+    content: String(r.content),
+    type: r.type == null ? null : String(r.type),
+    sourceType: r.source_type == null ? null : String(r.source_type),
+    derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
+    created_at: isoTimestamp(r.created_at),
+  };
+}
+
+export function normaliseDerivative(r: Record<string, unknown>): Derivative {
+  return { ...derivationFields(r), id: String(r.id) };
+}
+
+export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceNode {
+  return {
+    ...derivationFields(r),
+    thoughtId: String(r.thought_id),
+    depth: Number(r.depth),
+    parentId: r.parent_id ? String(r.parent_id) : null,
+    cycle: r.cycle === true,
+  };
+}
+
 export type CaptureResult = {
   id: string;
   /** Set when the row was written but its embedding could not be attached. */
@@ -263,7 +402,12 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
     return {
       ok: true,
       id: String(r.id),
-      updatedAt: r.updated_at ? String(r.updated_at) : undefined,
+      // isoTimestamp, not String: the function returns jsonb, so this arrives
+      // as Postgres's `+00:00` spelling on both clients, and `fetch` prints the
+      // same column through normaliseThoughtRecord. Passing the ISO value back
+      // as if_unchanged_since is safe — 021 compares both sides at millisecond
+      // precision.
+      updatedAt: isoTimestampOpt(r.updated_at),
       duplicateOf: r.duplicate_of ? String(r.duplicate_of) : undefined,
       // Another row holds this text's key under different text — a stale
       // fingerprint — so this row could not take the fingerprint it should have.
@@ -273,7 +417,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
   return {
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
-    currentUpdatedAt: r.current_updated_at ? String(r.current_updated_at) : undefined,
+    currentUpdatedAt: isoTimestampOpt(r.current_updated_at),
   };
 }
 
@@ -384,7 +528,7 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
       ok: false,
       error: "REVOKED",
       agentId: r.agent_id,
-      revokedAt: String(r.revoked_at ?? ""),
+      revokedAt: isoTimestampOpt(r.revoked_at) ?? "",
       reason: typeof r.reason === "string" ? r.reason : null,
     };
   }

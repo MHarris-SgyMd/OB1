@@ -1,24 +1,24 @@
 /**
  * store-postgrest.ts — the existing behaviour, behind the store interface.
  *
- * This is `supabase-js` talking to PostgREST over HTTP. It is unchanged in
- * substance from the original inline calls; only the error handling moved, from
- * returning `{ data, error }` tuples to throwing, so both stores present one shape
- * to the tools.
+ * This is `supabase-js` talking to PostgREST over HTTP. Two things changed from
+ * the original inline calls: errors throw instead of returning `{ data, error }`
+ * tuples, and every row goes through `store.ts`'s normalisers instead of a
+ * cast, so both stores present one shape — and one timestamp format — to the
+ * tools (SMD-1040).
  *
  * Works anywhere fetch works, including Cloudflare Workers — which is why it stays
  * the default and why it is still worth keeping after the SQL store exists.
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
   CaptureResult,
   Derivative,
   ListFilters,
-  MutationError,
   MutationResult,
   ProvenanceNode,
   ThoughtHybridMatch,
@@ -43,9 +43,6 @@ import type {
 // tool in SMD-1249, so the cap lives with the only path that still needs it.
 const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
-
-/** Canonical hyphenated uuid; a malformed id is treated as no-match by the 025 read methods. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
@@ -78,7 +75,10 @@ export class PostgrestStore implements ThoughtStore {
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtMatch[];
+    // Every row this store returns goes through store.ts's normalisers, never a
+    // cast: PostgREST hands back the function's own column names and its own
+    // timestamp form (store.ts:isoTimestamp says which). SMD-1040.
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseMatchRow);
   }
 
   async keywordThoughts(opts: {
@@ -94,25 +94,7 @@ export class PostgrestStore implements ThoughtStore {
       p_filter: opts.filter,
     });
     if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Record<string, unknown>[];
-    // Mapped rather than cast. PostgREST returns the function's column names —
-    // `total_count`, snake_case — and the store's contract is `totalCount`; a
-    // cast type-checks and delivers `undefined` to every caller.
-    //
-    // `created_at` goes through Date deliberately, and it is the one line here
-    // that a review caught. `String()` on what the driver hands back produced
-    // "Thu Sep 03 2026 15:51:39 GMT-0500 (Central Daylight Time)" — locale- and
-    // timezone-dependent, and not the ISO string the SQL store returns for the
-    // same row. Two stores disagreeing about a field's FORMAT is the class of
-    // difference that survives every test asserting only presence.
-    return rows.map((r) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-      occurrences: Number(r.occurrences),
-      totalCount: Number(r.total_count ?? 0),
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseKeywordRow);
   }
 
   async hybridThoughts(opts: {
@@ -132,19 +114,20 @@ export class PostgrestStore implements ThoughtStore {
       half_life_days: opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays,
     });
     if (error) throw new Error(error.message);
-    // Mapped through the shared normaliser, not cast: PostgREST returns the
-    // function's snake_case columns and a JSON null for a NULL similarity.
     return ((data ?? []) as Record<string, unknown>[]).map(normaliseHybridRow);
   }
 
   async getThought(id: string): Promise<ThoughtRecord | null> {
+    // As the SQL store: a malformed id is "not found", not a uuid cast error
+    // surfaced through `fetch` on one store and null on the other.
+    if (!UUID_RE.test(id)) return null;
     const { data, error } = await this.client
       .from("thoughts")
       .select("id, content, metadata, created_at, updated_at")
       .eq("id", id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as ThoughtRecord | null) ?? null;
+    return data == null ? null : normaliseThoughtRecord(data as Record<string, unknown>);
   }
 
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
@@ -165,7 +148,7 @@ export class PostgrestStore implements ThoughtStore {
 
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtListItem[];
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseListItem);
   }
 
   async countThoughts(): Promise<number> {
@@ -180,10 +163,14 @@ export class PostgrestStore implements ThoughtStore {
     const { data, error } = await this.client
       .from("thoughts")
       .select("metadata, created_at")
+      // `id` breaks ties: created_at is transaction-fixed, so a multi-row
+      // INSERT gives thousands of equal values, and a walk of separate range()
+      // requests over an unstable order can count a tied row twice or never.
       .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
       .range(offset, offset + limit - 1);
     if (error) throw new Error(error.message);
-    return (data ?? []) as ThoughtMeta[];
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseThoughtMeta);
   }
 
   async statsSummary(): Promise<ThoughtStats> {
@@ -195,12 +182,11 @@ export class PostgrestStore implements ThoughtStore {
     // silently. `total` and this walk are separate reads (as the tool's were
     // before SMD-1249), so the note is best-effort under concurrent writes over
     // the walk's window, not transactional. (This is the pre-SMD-1249 tool logic,
-    // moved into the store that still needs it, with one addition: a JSON null
-    // inside a topics/people array is skipped, so for well-formed metadata this
-    // store and migration 024's function — which drops it with WHERE ... IS NOT
-    // NULL — render the same top-10 breakdowns. Without the guard the walk would
-    // coerce null to a literal "null" key. Degenerate non-string metadata is not
-    // guaranteed to match the SQL path; see store.ts:ThoughtStats.)
+    // moved into the store that still needs it, mirroring migration 024's rules
+    // where the walk meets them — each is stated inline below. Degenerate
+    // non-string metadata is not guaranteed to match the SQL path; see
+    // store.ts:ThoughtStats. SMD-1336 asks whether this store should simply
+    // call the function.)
     const total = await this.countThoughts();
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};
@@ -215,18 +201,21 @@ export class PostgrestStore implements ThoughtStore {
       if (page.length === 0) break;
 
       for (const r of page) {
-        const m = (r.metadata || {}) as Record<string, unknown>;
+        const m = r.metadata;
         if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
         if (Array.isArray(m.topics))
           for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
         if (Array.isArray(m.people))
           for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
+        // Ordered newest-first, so the first dated row of the first page is the
+        // newest overall and the last dated row of the final page is the
+        // oldest. A NULL created_at sorts first under DESC and is skipped, as
+        // 024's min/max skip it on the SQL store (see store.ts:ThoughtMeta).
+        if (r.created_at !== null) {
+          if (newest === null) newest = r.created_at;
+          oldest = r.created_at;
+        }
       }
-
-      // Ordered newest-first, so the first row of the first page is the newest
-      // overall and the last row of the final page is the oldest.
-      if (newest === null) newest = page[0].created_at;
-      oldest = page[page.length - 1].created_at;
       aggregated += page.length;
 
       if (page.length < STATS_PAGE_SIZE) break; // short page — corpus exhausted
@@ -384,17 +373,7 @@ export class PostgrestStore implements ThoughtStore {
       p_node_cap: opts.nodeCap ?? null,
     });
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
-      thoughtId: String(r.thought_id),
-      depth: Number(r.depth),
-      parentId: r.parent_id ? String(r.parent_id) : null,
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
-      cycle: r.cycle === true,
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseProvenanceNode);
   }
 
   async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
@@ -404,14 +383,7 @@ export class PostgrestStore implements ThoughtStore {
       p_limit: opts.limit ?? null,
     });
     if (error) throw new Error(error.message);
-    return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
-      id: String(r.id),
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return ((data ?? []) as Record<string, unknown>[]).map(normaliseDerivative);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

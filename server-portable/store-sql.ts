@@ -23,14 +23,13 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseHybridRow, normaliseMutation, RECENCY_DEFAULTS } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
   CaptureResult,
   Derivative,
   ListFilters,
-  MutationError,
   MutationResult,
   ProvenanceNode,
   ThoughtHybridMatch,
@@ -49,13 +48,6 @@ import type {
 function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
-
-/**
- * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
- * column/argument, not a not-found; the read methods treat it as no-match so a
- * bad id from an MCP client gets a clean answer, not a Postgres error string.
- */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
@@ -87,14 +79,7 @@ export class SqlStore implements ThoughtStore {
         ${opts.recencyWeight ?? RECENCY_DEFAULTS.weight}::float,
         ${opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays}::float
       )`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      similarity: Number(r.similarity),
-      created_at: new Date(r.created_at as string).toISOString(),
-      score: Number(r.score),
-    }));
+    return rows.map(normaliseMatchRow);
   }
 
   async keywordThoughts(opts: {
@@ -114,16 +99,7 @@ export class SqlStore implements ThoughtStore {
         ${opts.offset}::int,
         ${opts.filter}::jsonb
       )`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-      occurrences: Number(r.occurrences),
-      // bigint. Bun hands it back as a string, and Number(undefined) is NaN, so
-      // the fallback is 0 rather than a quiet NaN in the caller's "N of M".
-      totalCount: Number(r.total_count ?? 0),
-    }));
+    return rows.map(normaliseKeywordRow);
   }
 
   async hybridThoughts(opts: {
@@ -161,14 +137,7 @@ export class SqlStore implements ThoughtStore {
       SELECT id, content, metadata, created_at, updated_at
       FROM thoughts WHERE id = ${id}::uuid LIMIT 1`;
     if (rows.length === 0) return null;
-    const r = rows[0];
-    return {
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at).toISOString(),
-      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : null,
-    };
+    return normaliseThoughtRecord(rows[0]);
   }
 
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
@@ -187,12 +156,7 @@ export class SqlStore implements ThoughtStore {
       ORDER BY created_at DESC
       LIMIT ${f.limit}::int`;
 
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return rows.map(normaliseListItem);
   }
 
   async countThoughts(): Promise<number> {
@@ -206,24 +170,26 @@ export class SqlStore implements ThoughtStore {
     // and the tool never prints a truncation note on this path. (The PostgREST
     // store still walks and can truncate; that is the divergence the interface
     // documents.) jsonb comes back from Bun.sql already parsed into JS values.
+    // One row, one jsonb, every key present — 024 builds the object with all
+    // six, so no optional keys and no empty-object fallback: a missing key
+    // would be a changed function, and isoTimestampOrNull throws on it.
     const rows = await this.sql`SELECT thought_stats_summary() AS s`;
-    const s = (rows[0]?.s ?? {}) as {
-      total?: number;
-      first_ts?: string | null;
-      last_ts?: string | null;
-      types?: Record<string, number>;
-      topics?: Record<string, number>;
-      people?: Record<string, number>;
+    const s = rows[0].s as {
+      total: number;
+      first_ts: string | null;
+      last_ts: string | null;
+      types: Record<string, number>;
+      topics: Record<string, number>;
+      people: Record<string, number>;
     };
-    const total = Number(s.total ?? 0);
-    const iso = (t: string | null | undefined) => (t ? new Date(t).toISOString() : null);
+    const total = Number(s.total);
     return {
       total,
-      oldest: iso(s.first_ts),
-      newest: iso(s.last_ts),
-      types: s.types ?? {},
-      topics: s.topics ?? {},
-      people: s.people ?? {},
+      oldest: isoTimestampOrNull(s.first_ts),
+      newest: isoTimestampOrNull(s.last_ts),
+      types: s.types,
+      topics: s.topics,
+      people: s.people,
       aggregated: total,
     };
   }
@@ -236,12 +202,9 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT metadata, created_at
       FROM thoughts
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
       LIMIT ${limit}::int OFFSET ${offset}::int`;
-    return rows.map((r: Record<string, unknown>) => ({
-      metadata: (r.metadata ?? {}) as Record<string, unknown>,
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return rows.map(normaliseThoughtMeta);
   }
 
   async captureThought(opts: {
@@ -355,17 +318,7 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT thought_id, depth, parent_id, content, type, source_type, derivation_method, created_at, cycle
       FROM trace_provenance(${opts.id}::uuid, ${opts.maxDepth ?? null}::int, ${opts.nodeCap ?? null}::int)`;
-    return rows.map((r: Record<string, unknown>) => ({
-      thoughtId: String(r.thought_id),
-      depth: Number(r.depth),
-      parentId: r.parent_id ? String(r.parent_id) : null,
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
-      cycle: r.cycle === true,
-    }));
+    return rows.map(normaliseProvenanceNode);
   }
 
   async findDerivatives(opts: { id: string; limit?: number }): Promise<Derivative[]> {
@@ -373,14 +326,7 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT id, content, type, source_type, derivation_method, created_at
       FROM find_derivatives(${opts.id}::uuid, ${opts.limit ?? null}::int)`;
-    return rows.map((r: Record<string, unknown>) => ({
-      id: String(r.id),
-      content: String(r.content),
-      type: r.type == null ? null : String(r.type),
-      sourceType: r.source_type == null ? null : String(r.source_type),
-      derivationMethod: r.derivation_method == null ? null : String(r.derivation_method),
-      created_at: new Date(r.created_at as string).toISOString(),
-    }));
+    return rows.map(normaliseDerivative);
   }
 
   async supersededAmong(ids: string[]): Promise<Record<string, string>> {

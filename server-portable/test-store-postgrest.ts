@@ -22,11 +22,10 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
+import { isoTimestamp, isoTimestampOrNull } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -135,6 +134,26 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
          "…retrieved by its final window, not its opening");
   assert(Math.abs((hits[0]?.similarity ?? 0) - 1) < 1e-6,
          `scored by the matching chunk (${hits[0]?.similarity?.toFixed(4)})`);
+  // This method returned the client's own value under `created_at: string`
+  // until SMD-1040 — a Date over this fixture. `typeof` first so the message
+  // names what arrived rather than a coerced Date failing the regex.
+  assert(typeof hits[0]?.created_at === "string" && ISO_RE.test(hits[0].created_at),
+         `created_at is an ISO string, as the SQL store returns (got ${typeof hits[0]?.created_at} ${String(hits[0]?.created_at)})`);
+  // isFinite, not typeof: `typeof NaN` is "number", so a dropped or renamed
+  // column would pass a typeof check under Number().
+  assert(Number.isFinite(hits[0]?.score) && Number.isFinite(hits[0]?.similarity),
+         "similarity and score arrive as finite numbers, not NaN from a missing column");
+
+  // The fixture hands the store a Date; real PostgREST hands it Postgres's own
+  // JSON spelling, which no suite here can produce. Feed the helper both, plus
+  // the spellings of an infinite timestamp on each client (see [3d]).
+  assert(isoTimestamp("2026-09-14T16:27:09.123456+00:00") === "2026-09-14T16:27:09.123Z", "PostgREST's +00:00 string normalises to the SQL store's form");
+  assert(isoTimestamp("2026-09-14 16:27:09+00") === "2026-09-14T16:27:09.000Z", "a space-separated timestamptz text form normalises too");
+  assert(isoTimestamp(new Date("2026-09-14T16:27:09.123Z")) === "2026-09-14T16:27:09.123Z", "a Date passes through unchanged");
+  assert(isoTimestamp(Infinity) === "infinity" && isoTimestamp("infinity") === "infinity", "an infinite timestamp keeps Postgres's spelling on either client");
+  assert(isoTimestamp(-Infinity) === "-infinity" && isoTimestamp("-infinity") === "-infinity", "…and so does -infinity");
+  assert(isoTimestamp("0044-03-15T00:00:00+00:00 BC") === "0044-03-15T00:00:00+00:00 BC", "a value with no ISO form keeps Postgres's text — one odd row, not a failed result");
+  assert((() => { try { isoTimestamp(undefined); return false; } catch { return true; } })(), "a column missing from the row throws — a SELECT bug, not data");
 }
 
 console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
@@ -159,7 +178,7 @@ console.log("\n[3b] keywordThoughts over PostgREST returns the same shape");
   // The two stores must agree on the SHAPE of a field, not merely have one. This
   // path returned a locale- and timezone-formatted date where the SQL store
   // returns ISO, and every assertion that only checked presence passed.
-  assert(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(hits[0].created_at),
+  assert(ISO_RE.test(hits[0].created_at),
          `created_at is an ISO string, as the SQL store returns (got ${hits[0].created_at})`);
 
   // The p_filter argument, which is the jsonb one and therefore the one that
@@ -188,7 +207,7 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   assert(rows[0].needleCounts.length === 1 && rows[0].needleCounts[0] === 1, `needle_counts is mapped to numbers (${JSON.stringify(rows[0].needleCounts)})`);
   assert(rows[0].literalOnly === true && rows[0].commonNeedles.length === 0, "literal_only and common_needles are mapped, not left undefined");
   assert(typeof rows[0].similarity === "number" && Math.abs(rows[0].similarity) < 1e-6, `a keyword hit orthogonal to the query reports similarity 0, not null (${rows[0].similarity})`);
-  assert(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
+  assert(ISO_RE.test(rows[0].created_at), `created_at is an ISO string (got ${rows[0].created_at})`);
 
   const plain = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
   const vector = await store.matchThoughts({ embedding: vec(3), threshold: 0.5, limit: 5, filter: {} });
@@ -196,11 +215,53 @@ console.log("\n[3c] hybridThoughts over PostgREST — the path every search take
   // Migration 020's two named arguments reach the function by name over this
   // client too, and the new column comes back — the RPC argument shape is what
   // this suite exists to hold.
-  assert(vector.every((r) => typeof r.score === "number" && r.score === r.similarity), "match_thoughts' score column comes back through the RPC, equal to similarity at weight 0");
+  assert(vector.every((r) => Number.isFinite(r.score) && r.score === r.similarity), "match_thoughts' score column comes back through the RPC, equal to similarity at weight 0");
   const weighted = await store.hybridThoughts({ query: "windows", embedding: vec(3), threshold: 0.5, limit: 5, filter: {}, recencyWeight: 0.5, halfLifeDays: 30 });
-  assert(weighted.length === plain.length && weighted.every((r) => typeof r.score === "number"), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
+  assert(weighted.length === plain.length && weighted.every((r) => Number.isFinite(r.score)), `recency_weight and half_life_days are accepted as named RPC arguments (${weighted.length} rows)`);
   const filtered = await store.hybridThoughts({ query: "SMD-507", embedding: vec(3), threshold: 0.5, limit: 5, filter: { kind: "nope" } });
   assert(filtered.every((r) => r.matchedNeedles.length === 0), "the jsonb filter is passed as an object and reaches the keyword arm");
+}
+
+console.log("\n[3d] Every read method returns the SQL store's timestamp form — and a row dated infinity does not throw");
+{
+  // getThought, listThoughts and pageThoughtMeta were bare casts too, and
+  // getThought is the one the `fetch` tool prints verbatim (SMD-1040 review).
+  const kw = await store.keywordThoughts({ query: "PGRST202", limit: 1, offset: 0, filter: {} });
+  assert(kw.length === 1, `[3b]'s keyword thought is still there to read back (${kw.length})`);
+  const rec = await store.getThought(kw[0].id);
+  assert(rec !== null && ISO_RE.test(rec.created_at), `getThought's created_at is ISO (got ${String(rec?.created_at)})`);
+  assert(rec !== null && (rec.updated_at == null || ISO_RE.test(rec.updated_at)), `getThought's updated_at is null or ISO (got ${String(rec?.updated_at)})`);
+  assert((await store.getThought("not-a-uuid")) === null, "a malformed id is null on this store too, not a uuid cast error");
+
+  // Migration 020 ranks an infinite created_at by design and test-schema plants
+  // one; Date.toISOString throws on it, which would abort the whole result
+  // array and turn preflight's probes into "skip". Bun hands it back as the
+  // number Infinity, PostgREST as the string "infinity"; both come out as
+  // Postgres's spelling. vec(6) is an axis no section before this one has used.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const plantedId = await plantLegacyRow(sql, "a row dated infinity", "[" + vec(6).join(",") + "]", "infinity");
+  try {
+    const far = await store.matchThoughts({ embedding: vec(6), threshold: 0.5, limit: 5, filter: {} });
+    const hit = far.find((r) => r.id === plantedId);
+    assert(hit !== undefined, `the infinite row is returned, not thrown on (${far.length} rows)`);
+    assert(hit?.created_at === "infinity", `…with created_at spelled as Postgres does (got ${hit?.created_at})`);
+    // By id, not position: a NULL created_at sorts above +infinity under DESC,
+    // so a later undated fixture must not turn this into a misleading failure.
+    const list = await store.listThoughts({ limit: 50 });
+    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => ISO_RE.test(r.created_at)),
+           `listThoughts: the planted row is "infinity", every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
+    const page = await store.pageThoughtMeta(0, 50);
+    assert(page.some((r) => r.created_at === "infinity") && page.filter((r) => r.created_at !== "infinity").every((r) => r.created_at !== null && ISO_RE.test(r.created_at)),
+           "pageThoughtMeta: the same on the stats walk's rows");
+    const got = await store.getThought(plantedId);
+    assert(got?.created_at === "infinity", "getThought: the same");
+  } finally {
+    // Gone before [8]'s date-range assertions, which expect a finite span —
+    // and gone even if a store call above threw, so a later section of THIS
+    // run is not misled (the next run starts from resetSchema regardless).
+    await sql`DELETE FROM thoughts WHERE id = ${plantedId}::uuid`;
+    await sql.close();
+  }
 }
 
 console.log("\n[4] A thought is deduplicated across its own chunks");
@@ -333,8 +394,29 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
     payload: { metadata: { type: "statmark", topics: ["stattopic", null] } },
     embedding: vec(7),
   });
-  const s = await store.statsSummary();
-  assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+  // A row with no created_at (the column is nullable; 020 and 023 name the
+  // state). It sorts FIRST under ORDER BY created_at DESC, so before the walk
+  // skipped it the epoch was reported as the corpus's newest thought — while
+  // the SQL store's min/max ignore it. The range must match what SQL says.
+  const sql = new SQL({ url: URL_, max: 1 });
+  const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
+  const s = await (async () => {
+    try {
+      const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
+      const s = await store.statsSummary();
+      // The store's own formatter as the oracle, not a second one: on the edges
+      // this PR added (an infinity, an empty range) `new Date(x).toISOString()`
+      // throws or fabricates where the store returns "infinity" or null.
+      assert(s.newest === isoTimestampOrNull(range.newest) && s.oldest === isoTimestampOrNull(range.oldest),
+             `the date range ignores the undated row, as 024's min/max do (${s.oldest} → ${s.newest})`);
+      assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
+      return s;
+    } finally {
+      // The same cleanup contract as [3d]: gone before [9], thrown or not.
+      await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;
+      await sql.close();
+    }
+  })();
   assert(s.aggregated === s.total, "a corpus under the cap is fully covered — the tool prints no truncation note");
   assert(s.types["statmark"] === 2, `the unique type is tallied across both rows (${JSON.stringify(s.types)})`);
   assert(s.topics["stattopic"] === 2, "the unique topic unnests from both arrays");
