@@ -1019,29 +1019,30 @@ baseline 79.3% / 79.5% and the top-30 oracle 99.2% / 95.3% (`subk` = 20):
 | round-robin (interleave rank-1s) | **81.0%** / 79.5% | 80.2% / 78.7% |
 | max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
 
-(The RRF row is byte-identical across the two arms — a real result, re-run to
-confirm, not a duplicated cell. RRF's flat k₀ = 60 weighting makes the merged
-order turn on cross-sub-pool multiplicity, and the questions the LLM decomposes
-beyond the heuristic are the counting ones where that reordering changes no net
-outcome, so both arms land on the same tally.)
+(The RRF row is identical for the two arms — verified by re-running each, not a
+duplicated cell. The two arms diverge under round-robin and max-sim, so the
+harness does distinguish them; RRF's flat k₀ = 60 weighting simply makes it a poor
+fusion here, and both arms land on the same tally under it.)
 
 **It corrects the ticket's premise, and it is not enough.** The premise was that
-one blended vector ranks each event mid-pool. But the one blended pool *already*
-covers the whole set — that is exactly what the oracle (99.2% / 95.3%) says — and
-in that pool ~85% of golds already sit at rank ≤ 2 individually. Decomposition
-adds no coverage: on the fired questions, its union covers the **same** golds as
-the blended pool (LLM 100% / 96.2% union = 100% / 96.2% blended), and the crude
-heuristic split even *loses* temporal coverage (86.4% union vs 90.9% blended,
-its bare "Y"-fragment sub-queries being worse retrieval queries). What an LLM
-split *does* change is per-event **rank** — each event's gold, given its own
-sub-pool, rises (best rank of each gold within any single sub-pool, vs its rank in
-the one blended pool; fired questions, `subk` 20):
+one blended vector ranks each event mid-pool. But **coverage is not the
+bottleneck**: a single blended query at the baseline depth (30) already covers the
+whole set — that is the oracle (99.2% / 95.3%) — and decomposition only reaches
+the same, its union covering 100% / 96.2% of the fired questions' golds. At *equal*
+per-query depth (`subk` 20) the multi-query union does edge out one query (blended
+98.0% / 92.3% on the same fired questions), so several vectors retrieve marginally
+more than one for the same budget — but no more than one *deeper* query already
+gets, and the crude heuristic's bare "Y"-fragment sub-queries do worse than that
+(86.4% union). What an LLM split *does* change is per-event **rank** — each event's
+gold, given its own sub-pool, rises (best rank of each gold within any single
+sub-pool vs its rank in the blended pool, both truncated to `subk` 20 for a
+same-depth comparison; fired questions):
 
 | gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ | absent |
 | --- | --- | --- | --- | --- | --- | --- |
-| multi-session, blended pool | 44 | 53 | 6 | 9 | 2 | 0 |
+| multi-session, blended pool | 44 | 53 | 6 | 9 | 1 | 1 |
 | multi-session, best sub-pool | **70** | 32 | 7 | 3 | 2 | 0 |
-| temporal, blended pool | 46 | 53 | 5 | 11 | 5 | 1 |
+| temporal, blended pool | 46 | 53 | 5 | 11 | 2 | 4 |
 | temporal, best sub-pool | **74** | 30 | 6 | 8 | 2 | 1 |
 
 Rank-0 share goes 39% → 61% and the deep tail shrinks — yet strict@5 gains at most

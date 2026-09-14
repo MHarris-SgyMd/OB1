@@ -5753,22 +5753,25 @@ Strict recall_all@5, versus baseline 79.3% / 79.5% and the top-30 oracle 99.2% /
 | round-robin | **81.0%** / 79.5% | 80.2% / 78.7% |
 | max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
 
-(The RRF row is byte-identical across the two arms — a real, re-run result, not a
-duplicated cell: RRF's flat k₀ = 60 weighting turns the merged order on
-cross-sub-pool multiplicity, and the extra questions the LLM decomposes are the
-counting ones where that reordering changes no net outcome.)
+(The RRF row is identical for the two arms — verified by re-running each, not a
+duplicated cell: the two arms diverge under round-robin and max-sim, so the
+harness does distinguish them; RRF's flat k₀ = 60 weighting simply makes it a poor
+fusion here.)
 
 **It corrects the ticket's premise, and it is not enough.** The premise was that
-one blended vector ranks each event mid-pool — but the single blended pool
-*already* covers the whole set (that is exactly the oracle, 99.2% / 95.3%), and in
-it ~85% of golds already sit at rank ≤ 2 individually. Decomposition adds no
-coverage: on the fired questions its union covers the **same** golds as the blended
-pool (LLM 100% / 96.2%, both), and the crude heuristic split even *loses* temporal
-coverage. What an LLM split changes is per-event **rank** — the share of golds at
-rank 0 of their best sub-pool rises from **39% to 61%** (multi-session) and 38% to
-61% (temporal), with the deep tail shrinking. Yet strict@5 gains at most +1.7
-points and is flat-to-negative on temporal; RRF *regresses* temporal, because it
-sums shared appearances, so a topical distractor in two sub-pools outscores each
+one blended vector ranks each event mid-pool — but **coverage is not the
+bottleneck**: a single blended query at the baseline depth (30) already covers the
+whole set (that is exactly the oracle, 99.2% / 95.3%), and decomposition only
+reaches the same, its union covering 100% / 96.2% of the fired questions' golds. At
+*equal* per-query depth (`subk` 20) the multi-query union does edge out one query
+(blended 98.0% / 92.3% on the same questions) — several vectors retrieve marginally
+more than one for the same budget, but no more than one *deeper* query already
+gets. And ~83% of the fired questions' golds already sit at rank ≤ 2 in the blended
+pool individually. What an LLM split changes is per-event **rank** — the share of
+golds at rank 0 of their best sub-pool rises from **39% to 61%** (multi-session)
+and 38% to 61% (temporal), with the deep tail shrinking. Yet strict@5 gains at most
++1.7 points and is flat-to-negative on temporal; RRF *regresses* temporal, because
+it sums shared appearances, so a topical distractor in two sub-pools outscores each
 event's single-pool gold. `subk` 10 → 30 barely moves strict — the bottleneck is
 not scan depth.
 

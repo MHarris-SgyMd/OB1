@@ -200,7 +200,10 @@ async function llmSplitUncached(question: string): Promise<string[] | null> {
   } catch { return null; }
   if (!r.ok) return null;
   const txt = ((await r.json()) as any).choices?.[0]?.message?.content ?? "";
-  const m = txt.match(/\[[\s\S]*\]/);
+  // Prefer an array that starts with a quoted string, so a stray bracket in prose
+  // ("Here [are] the items: [\"a\",\"b\"]") does not get greedily swallowed into an
+  // unparseable span; fall back to the loose match for other well-formed shapes.
+  const m = txt.match(/\[\s*"[\s\S]*"\s*\]/) ?? txt.match(/\[[\s\S]*\]/);
   if (!m) return null;
   try {
     const arr = JSON.parse(m[0]) as unknown[];
@@ -296,7 +299,12 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
     const q = questions[i]; const subs = subsByQ[i];
     strict[q.question_type] ??= [0, 0]; cover[q.question_type] ??= [0, 0];
     if (subs.length > 1) { fired++; subqFiredTotal += subs.length; }
-    // Retrieve per sub-query; an atomic query reuses the baseline pool depth-for-depth.
+    // Retrieve per sub-query. A one-sub-question result is treated as atomic and
+    // routed through the baseline pool (basePools[i], the ORIGINAL question's
+    // vector) — deliberately, even when the model reworded that one question:
+    // this isolates the effect of DECOMPOSITION (several vectors) from single-query
+    // rewriting, which is a separate lever, not this ticket. So a lone reword is
+    // not embedded, and the arm's only difference from baseline is the >1-hop split.
     let pools: Ranked[];
     if (subs.length === 1) { pools = [basePools[i]]; }
     else { pools = []; for (const s of subs) { pools.push(await poolFor(emb.get(s)!, q.question_id, SUBK)); dbCalls++; } }
@@ -309,9 +317,12 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
     for (const p of pools) for (const c of p) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) present.add(sid);
     const covered = (set: Set<string>) => gold.size <= 5 && [...gold].every((g) => set.has(g));
     if (covered(present)) cover[q.question_type][0]++;
-    if (subs.length > 1) { // fired-only: union vs blended over the same questions
+    if (subs.length > 1) { // fired-only: union vs blended over the same questions.
+      // Same-depth control: the blended pool is truncated to SUBK, the depth each
+      // sub-pool is retrieved at, so the comparison is not confounded by the
+      // baseline pool's greater POOL (30) depth.
       const blend = new Set<string>();
-      for (const c of basePools[i]) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) blend.add(sid);
+      for (const c of basePools[i].slice(0, SUBK)) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) blend.add(sid);
       coverFiredU[q.question_type] ??= [0, 0]; coverFiredB[q.question_type] ??= [0, 0];
       coverFiredU[q.question_type][1]++; coverFiredB[q.question_type][1]++;
       if (covered(present)) coverFiredU[q.question_type][0]++;
@@ -343,8 +354,9 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
         let best = Infinity;
         for (const p of pools) { const r = rankIn(p, g); if (r >= 0) best = Math.min(best, r); }
         (probe[q.question_type] ??= blank())[bucket(best === Infinity ? -1 : best)]++;
-        // blended baseline (same question): the gold's rank in the ONE blended pool.
-        (probeBlend[q.question_type] ??= blank())[bucket(rankIn(basePools[i], g))]++;
+        // blended baseline (same question): the gold's rank in the ONE blended pool,
+        // truncated to SUBK so the two rows are compared at the same pool depth.
+        (probeBlend[q.question_type] ??= blank())[bucket(rankIn(basePools[i].slice(0, SUBK), g))]++;
       }
     }
     if (process.env.OB1_DECOMP_DUMP) dump.push({ qid: q.question_id, type: q.question_type, question: q.question, subs });
