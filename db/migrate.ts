@@ -9,22 +9,27 @@
  *   bun db/migrate.ts --url postgres://user:pass@host:5432/dbname
  *   DATABASE_URL=... bun db/migrate.ts
  *   bun db/migrate.ts --dry-run        # show what would run, touch nothing
- *   bun db/migrate.ts --reapply 021    # re-run 021 and every recorded migration after it
+ *   bun db/migrate.ts --reapply        # re-run every recorded migration, in one transaction
  *
  * Applied migrations are recorded in schema_migrations, so re-running is a no-op.
  * Every migration is also individually idempotent, so a database created by hand
  * from docs/01-getting-started.md can be adopted: mark the ones already applied
  * with --baseline, or just run them — they will not duplicate anything.
  *
- * --reapply <migration> re-runs a migration the ledger records, and every
- * recorded one after it, in order; pending ones apply as usual and the ledger is
- * not touched. It is the remedy for a database adopted with --baseline whose
- * schema is older than its ledger says — reembed.ts and preflight name the
- * command where they find that. After it, not it alone: a later migration may
- * redefine what an earlier one created (022 and 025 redefine 021's
- * upsert_thought), and since every file is idempotent the run restores the
- * latest definition of everything from that point. The one file not run
- * verbatim is 021 — see reapply021 below (SMD-1193).
+ * --reapply re-runs every migration the ledger records, in order, in ONE
+ * transaction; pending ones then apply as usual, and the ledger is not touched.
+ * It is the remedy for a database adopted with --baseline whose schema is older
+ * than its ledger says — reembed.ts and preflight name the command where they
+ * find that. Every recorded file, not a range from the one a symptom names: a
+ * later migration may redefine what an earlier one created (022 and 025
+ * redefine 021's upsert_thought; 020 drops a form 014 recreates), and a file's
+ * body may reference what only an earlier file installs (025's upsert_thought
+ * reads a column 021 adds, resolved when the function first RUNS, not when it
+ * is created) — so a start point is safe only when everything before it is
+ * really present, which nothing can check cheaply. Every file is idempotent, so
+ * the run restores the latest definition of everything. One transaction, so a
+ * failure part-way leaves the schema as it was rather than with some objects
+ * at an older definition than before (SMD-1193).
  */
 
 import { SQL } from "bun";
@@ -33,14 +38,11 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
-  ACCEPTED_CAVEAT_PREFIX,
-  ACCEPTED_EVIDENCE_COUNT_SQL,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
   HNSW_SEEDS,
-  LABEL_FROM_CLAIMS_SQL,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
   migrationValues,
@@ -60,19 +62,38 @@ const flag = (name: string): string | undefined => {
 };
 const has = (name: string) => args.includes(`--${name}`);
 
+// Every argument accounted for: a flag the runner does not have, a value where
+// no flag takes one, or a flag that takes a value followed by none, is refused
+// rather than dropped — `--reapply=021`, or a misspelt flag, would otherwise be
+// a silent plain run that exits 0 (reembed.ts scans its arguments the same way).
+{
+  const TAKES_ONE = new Set(["url"]);
+  const TAKES_NONE = new Set(["dry-run", "baseline", "reapply"]);
+  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --reapply";
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const name = a.startsWith("--") ? a.slice(2) : null;
+    if (name !== null && TAKES_ONE.has(name)) {
+      if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+        console.error(`--${name} takes a value.\n${USAGE}`);
+        process.exit(2);
+      }
+      i++;
+      continue;
+    }
+    if (name !== null && TAKES_NONE.has(name)) continue;
+    console.error(`unknown argument: ${a}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
+    process.exit(2);
+  }
+}
+
 const url = flag("url") ?? process.env.DATABASE_URL;
 const dryRun = has("dry-run");
 const baseline = has("baseline");
 const reapply = has("reapply");
-/** `--reapply 021`, or `--reapply 021_embedding_model_per_row.sql`: where the re-run starts. */
-const reapplyArg = flag("reapply");
 
 if (!url) {
   console.error("No database URL. Pass --url or set DATABASE_URL.");
-  process.exit(2);
-}
-if (reapply && (reapplyArg === undefined || reapplyArg.startsWith("--"))) {
-  console.error("--reapply takes the migration to start from: its number (021) or its filename.");
   process.exit(2);
 }
 if (reapply && baseline) {
@@ -146,51 +167,6 @@ if (migrations.length === 0) {
   process.exit(2);
 }
 
-/**
- * The migration --reapply starts from, resolved by number or by name against
- * the files present — exactly one, or the run stops before it connects.
- */
-const reapplyFrom: Migration | null = (() => {
-  if (!reapply) return null;
-  const want = reapplyArg!.replace(/\.sql$/, "");
-  const hits = migrations.filter((m) => m.name.slice(0, -4) === want || (/^\d+$/.test(want) && m.name.startsWith(`${want}_`)));
-  if (hits.length !== 1) {
-    console.error(
-      hits.length === 0
-        ? `--reapply ${reapplyArg}: no migration by that number or name in ${MIGRATIONS_DIR}`
-        : `--reapply ${reapplyArg} names ${hits.length} migrations: ${hits.map((m) => m.name).join(", ")}`
-    );
-    process.exit(2);
-  }
-  return hits[0];
-})();
-
-/**
- * 021 is the one file --reapply does not run verbatim. Its evidence backfill —
- * the `DO $bf$ … $bf$;` block, the tag unique to that file — labels a thought
- * from its latest succeeded claim row under a key naming a model, and since
- * SMD-1067 a succeeded row can be the operator's acceptance of a FAILURE
- * (`--accept-failed`), whose thought is by decision not at that model. The file
- * is applied and hashed, so the rule cannot be corrected where it is written:
- * the block is replaced by LABEL_FROM_CLAIMS_SQL — 021's rule with accepted
- * rows excluded, spelled once in config.mjs — and the rest of the file runs as
- * written, before and after it, in the one transaction. The trigger hold is
- * 021's own: the label is a fact about a vector already there, not an edit
- * (SMD-1193). Returns what the run should say about it.
- */
-const BACKFILL_021 = /DO \$bf\$[\s\S]*?\$bf\$;/;
-async function reapply021(tx: SQL, m: Migration): Promise<string> {
-  const parts = m.sql.split(BACKFILL_021);
-  if (parts.length !== 2) throw new Error(`${m.name} should hold exactly one DO $bf$ … $bf$ block, its evidence backfill; found ${parts.length - 1}`);
-  await tx.unsafe(parts[0]);
-  await tx.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
-  const labelled = await tx.unsafe(LABEL_FROM_CLAIMS_SQL, [ACCEPTED_CAVEAT_PREFIX]);
-  await tx.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
-  await tx.unsafe(parts[1]);
-  const [{ n: accepted }] = await tx.unsafe(ACCEPTED_EVIDENCE_COUNT_SQL, [ACCEPTED_CAVEAT_PREFIX]);
-  return ` — its evidence backfill labelled ${labelled.count} row(s); ${accepted} accepted row(s) under a key naming a model were not read as evidence`;
-}
-
 console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 // Printed because it is the one setting that changes what the schema CONTAINS
 // rather than how wide a column is, and because it only takes effect the first
@@ -214,20 +190,14 @@ const applied = new Map<string, string>(
   )
 );
 
-/** Recorded in the ledger, and at or after where --reapply starts: re-run rather than skipped. */
-const reapplies = (m: Migration): boolean => reapplyFrom !== null && m.name >= reapplyFrom.name && applied.has(m.name);
+/** Recorded in the ledger under --reapply: re-run rather than skipped. */
+const reapplies = (m: Migration): boolean => reapply && applied.has(m.name);
 
-// --reapply is judged whole before anything runs: the start must be recorded
-// (a pending migration is applied by a plain run), and no file in the range may
-// have changed since it was applied — the drift check below reports a drifted
-// file and moves on, which for a re-run would skip one file's definitions and
+// --reapply is judged whole before anything runs: no recorded file may have
+// changed since it was applied — the drift check below reports a drifted file
+// and moves on, which for a re-run would skip one file's definitions and
 // restore the next one's over whatever the skipped one left.
-if (reapplyFrom !== null) {
-  if (!applied.has(reapplyFrom.name)) {
-    console.error(`  ${reapplyFrom.name} is not recorded as applied; --reapply re-runs what the ledger records. Run without it to apply what is pending.`);
-    await sql.close();
-    process.exit(2);
-  }
+if (reapply) {
   const drifted = migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha);
   if (drifted.length > 0) {
     console.error(
@@ -237,9 +207,13 @@ if (reapplyFrom !== null) {
     await sql.close();
     process.exit(1);
   }
-  const after = migrations.filter((m) => reapplies(m)).length - 1;
+  const n = migrations.filter(reapplies).length;
   console.log(
-    `  re-applying ${reapplyFrom.name} and the ${after} recorded migration(s) after it, in order — a later file may redefine what an earlier one created; the ledger is not touched`
+    n === 0
+      ? "  --reapply: the ledger records nothing to re-run; what follows is a plain run"
+      : `  re-applying every recorded migration (${n}), in order, in one transaction — the ledger is not touched.\n` +
+          "  Stop the server and any re-embed or extraction worker first: 023's backfill call locks thoughts (OB1_BACKFILL_LIMIT\n" +
+          "  bounds it, as on a first apply) and 025 re-validates its constraints over the table."
   );
 }
 
@@ -305,6 +279,46 @@ let skipped = 0;
 let drifted = 0;
 let floorBlocked: Migration | null = null;
 
+// ── The re-run, one transaction ─────────────────────────────────────────────
+// Every recorded migration, in order, in ONE transaction: a failure part-way
+// would otherwise leave the files before it at their own definitions while a
+// later file's redefinition of the same objects — 022's and 025's of 021's
+// upsert_thought; 020's drop of the 4-argument match_thoughts that 014 and 019
+// recreate — was not yet restored, with nothing in the catalog to say so. All
+// or nothing, and the output says which. The floor is judged before BEGIN (the
+// drift, above). 023's call sets a 10 s lock_timeout for its transaction, which
+// is this one from then on: a lock not acquired in 10 s fails the whole re-run,
+// which rolls back — the banner says to stop the writers first. The seeds check
+// in the loop is a first apply's; a re-run changes no database-level setting.
+if (reapply && !dryRun && !baseline) {
+  const recorded = migrations.filter(reapplies);
+  const floor = recorded.find((m) => tooOldFor(m));
+  if (floor) {
+    console.error(`  ✗  ${floor.name}  refused` + floorMessage(floor));
+    await sql.close();
+    process.exit(1);
+  }
+  let current: Migration | null = null;
+  try {
+    await sql.begin(async (tx) => {
+      for (const m of recorded) {
+        current = m;
+        await tx.unsafe(m.sql);
+      }
+    });
+  } catch (err) {
+    console.error(`  ✗  ${current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
+    console.error(
+      "  The re-run is one transaction: it rolled back, nothing was re-applied, and the schema is as it was.\n" +
+        "  Fix the cause and run --reapply again."
+    );
+    await sql.close();
+    process.exit(1);
+  }
+  for (const m of recorded) console.log(`  ✓  ${m.name}  re-applied`);
+  reapplied = recorded.length;
+}
+
 for (const m of migrations) {
   const prior = applied.get(m.name);
 
@@ -315,12 +329,19 @@ for (const m of migrations) {
     drifted++;
     continue;
   }
-  if (prior && !reapplies(m)) {
+  if (prior && reapplies(m)) {
+    // Re-applied in the one transaction above; --dry-run says what it would be.
+    if (dryRun) {
+      console.log(`  →  ${m.name}  would re-apply (${m.sha})`);
+      reapplied++;
+    }
+    continue;
+  }
+  if (prior) {
     console.log(`  ·  ${m.name}  already applied`);
     skipped++;
     continue;
   }
-  const again = reapplies(m);
   if (dryRun) {
     if (tooOldFor(m)) {
       console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorLibrary} < ${tooOldFor(m)}`);
@@ -333,9 +354,8 @@ for (const m of migrations) {
       console.log(`  ·  ${m.name}  blocked behind ${floorBlocked.name}`);
       continue;
     }
-    console.log(`  →  ${m.name}  would ${again ? "re-apply" : "apply"} (${m.sha})`);
-    if (again) reapplied++;
-    else ran++;
+    console.log(`  →  ${m.name}  would apply (${m.sha})`);
+    ran++;
     continue;
   }
   if (baseline) {
@@ -356,16 +376,12 @@ for (const m of migrations) {
   // Each migration runs in its own transaction: a failure leaves earlier ones
   // applied and recorded, so a rerun resumes rather than starting over.
   try {
-    let note = "";
     await sql.begin(async (tx) => {
-      if (again && m.name.startsWith("021_")) note = await reapply021(tx, m);
-      else await tx.unsafe(m.sql);
-      // A re-run is already recorded; its row, sha and applied_at stand.
-      if (!again) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
+      await tx.unsafe(m.sql);
+      await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
     });
-    console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}${note}`);
-    if (again) reapplied++;
-    else ran++;
+    console.log(`  ✓  ${m.name}  applied`);
+    ran++;
   } catch (err) {
     const message = (err as Error).message;
     // Bun exposes the SQLSTATE as `errno`; the message is localised, the code

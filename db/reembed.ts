@@ -296,12 +296,16 @@
  * never edited — so a brain that accepted rows before 021 would have them
  * labelled at a model whose pass never wrote their vector. A re-run of 021's
  * body — the remedy for a --baseline'd brain whose schema is older, below —
- * would do the same to an accepted row whose thought is unlabelled, so the
- * re-run is the migrator's, not a paste: `migrate.ts --reapply 021` runs the
- * file with its backfill block replaced by LABEL_FROM_CLAIMS_SQL (config.mjs),
- * 021's rule with accepted rows excluded, and the recorded migrations after
- * it (SMD-1193). The rule for any successor that labels from claim rows: an
- * accepted row is not evidence — the latest succeeded row before it is.
+ * does the same to an accepted row whose thought is unlabelled, and a paste of
+ * the file alone did, for anyone who followed the remedy this tool printed
+ * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
+ * re-runs every recorded migration in one transaction — and migration 029
+ * carries the corrected rule, reached after 021 in the same run and applied
+ * once to every brain at upgrade: a label whose only evidence is an acceptance
+ * under the model's own key goes back to unknown, and the evidence rule labels
+ * with accepted rows excluded, so the latest succeeded row BEFORE an
+ * acceptance decides. Any successor that labels from claim rows carries the
+ * same exclusion; 029 is its spelling.
  *
  * What acceptance means to the two readers of the row, and its bound. The
  * data rule above returns a succeeded row whose thought is not at the target —
@@ -658,7 +662,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply it with the migrator, which re-runs 021 and every\n  recorded migration after it and runs 021's evidence backfill with accepted rows excluded (a paste of the file would read\n  an accepted row as proof the thought is at the key's model):\n    cd db && bun migrate.ts --url … --reapply 021"
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every recorded file in one transaction — 021's backfill as written, then 029, which returns a label whose only evidence is\n  an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's model). Stop the server\n  and any worker first:\n    cd db && bun migrate.ts --url … --reapply"
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────

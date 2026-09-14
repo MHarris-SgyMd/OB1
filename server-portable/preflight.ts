@@ -700,7 +700,7 @@ if (configFailed) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const byHand = "re-apply it with the migrator, which re-runs 023 and every recorded migration after it: cd db && bun migrate.ts --url … --reapply 023 (OB1_BACKFILL_LIMIT bounds the call as on a first apply).";
+              const byHand = "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which re-runs every recorded file in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).";
               add("fingerprint backfill", "warn",
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
@@ -1106,7 +1106,7 @@ if (configFailed) {
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
                 `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
-                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? "re-apply it with the migrator, which re-runs 014 and every recorded migration after it: cd db && bun migrate.ts --url … --reapply 014 (a plain run skips a recorded file — --baseline recorded it)" : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
+                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — since a plain run skips a recorded file (--baseline recorded it)" : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.
@@ -1127,7 +1127,7 @@ if (configFailed) {
             add("filtered search", "warn",
                 `match_thoughts ${setting}, and its body predates 014${dropped}${stale} — so ${EXPOSURE}`,
                 ledgerHas014
-                  ? "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts."
+                  ? "Re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which restores the last definer's body (a plain run skips a recorded file), or carry the SET clause into the migration that redefined match_thoughts."
                   : APPLY_014);
           }
         } catch (e) {

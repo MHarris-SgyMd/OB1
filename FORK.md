@@ -3768,8 +3768,8 @@ under `reembed:nightly` re-asks every accepted row on a switch. 021's evidence
 backfill is applied and never edited, and trusts a succeeded row whatever its
 caveat: the gate on 021 closes the upgrade path, and a hand re-run of 021's body
 over accepted rows whose thought is unlabelled is the case that remains, said in
-`reembed.ts`'s header (done in change 53: the migrator owns the re-run, and runs
-021's backfill with accepted rows excluded). The extraction worker has no
+`reembed.ts`'s header (done in change 53: the migrator owns the re-run, and
+migration 029 takes back a label whose only evidence is an acceptance). The extraction worker has no
 acknowledgement path of its own — its failed rows are 016's, and preflight does
 not read them.
 
@@ -5453,11 +5453,13 @@ failed the suite 59/60), `test-store-sql` 83/83, `test-update-delete` and
 **not applicable** — `server-portable/` and its two stores are the fork's
 (change 11).
 
-### 53. The migrator owns the re-run — `--reapply` re-runs a recorded migration and everything after it, and 021's backfill no longer reads an acceptance as evidence (SMD-1193)
+### 53. The migrator owns the re-run — `--reapply` re-runs every recorded migration in one transaction, and migration 029 takes back a label whose only evidence is an acceptance (SMD-1193)
 
-`db/migrate.ts`, `db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts` and
+`db/migrations/029_label_from_claims_excludes_accepted.sql`, `db/migrate.ts`,
+`db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts` and
 `server-portable/preflight.ts` (Linear SMD-1193, filed by change 39's first and
-second review passes). No migration.
+second review passes). One migration, 029: no column, no function, two UPDATEs
+of `thoughts.embedding_model` in one DO block.
 
 **The finding.** Migration 021's evidence backfill labels a thought from its
 latest *succeeded* claim row under a key naming a model, when nothing has
@@ -5466,87 +5468,138 @@ change 39, has no caveat filter, and — applied and hashed — is never edited.
 Since change 39 a succeeded row can be `--accept-failed`'s acceptance of a
 *failure*: the row says succeeded, the caveat says `kept the vector it had`, and
 the thought's vector is, by decision, **not** at that key's model. On an applied
-brain nothing runs that body again — except the remedy `reembed.ts` printed for
-a `--baseline`'d brain whose `update_thought` body is older than 021: re-run the
-file's body by hand, substituting the width. Over an accepted row whose thought
-is unlabelled (a pre-021 vector nothing vouched for — the common case for an old
-thought) that paste labels the thought at the key's model; from then on the pool
-never takes it, `vector models` counts it at the model, and no reader
-cross-checks the caveat against the label. The wrong vector is invisible to both
-readers for good. Change 39 closed the *upgrade* path (`--accept-failed` refuses
-a schema that is not 021's whole) and made the remedy say to return accepted
-rows first. What remained was a remedy asking the operator to paste SQL with a
-precondition the tool could enforce — and, on inspection, a precondition the
-operator could not meet: returning an accepted row is a run
+brain nothing runs that body again — except a re-run of the file: the remedy
+`reembed.ts` printed for a `--baseline`'d brain whose `update_thought` body is
+older than 021 (paste the body, substituting the width), and now the migrator's
+`--reapply`. Over an accepted row whose thought is unlabelled (a pre-021 vector
+nothing vouched for — the common case for an old thought) the block labels the
+thought at the key's model; from then on the pool never takes it, `vector
+models` counts it at the model, and no reader cross-checks the caveat against
+the label. The wrong vector is invisible to both readers for good. Change 39
+closed the *upgrade* path (`--accept-failed` refuses a schema that is not 021's
+whole) and made the remedy say to return accepted rows first — a precondition
+the operator could not meet on that brain: returning an accepted row is a run
 (`--retry-fallbacks`), a run refuses that schema, and `--retire` takes only a
-superseded key. The ticket's alternative — a re-run that *refuses* while
-accepted rows stand — would deadlock the same way, so it is not built; the
-exclusion is.
+superseded key. The ticket's alternative, a re-run that *refuses* while
+accepted rows stand, would deadlock the same way and is not built.
 
-**`--reapply <migration>`.** `migrate.ts` re-runs the named migration — by
-number (`021`) or filename — and every recorded migration after it, in order,
-one transaction each; pending ones apply as usual, and the ledger is not
-touched (its row, sha and `applied_at` stand — asserted). The start must be
-recorded (a pending file is a plain run's), `--baseline` beside it is refused,
-and a file anywhere in the range whose sha differs from the ledger's refuses
-the whole re-run *before anything runs* — the plain run's drift check reports a
-drifted file and moves on, which for a re-run would skip one file's definitions
-and restore the next one's over whatever the skipped one left. `--dry-run` says
-`would re-apply`, and the summary counts re-applied apart from applied. After
-it, not it alone: a later migration may redefine what an earlier one created —
-022 and 025 both redefine 021's 3-argument `upsert_thought`, and 021 by itself
-would put 021's body back, the very state preflight's `atomic capture` check
-warns about — and every file is idempotent (`test-upgrade` [3] re-applies the
-whole set over itself), so the run restores the latest definition of
-everything from that point. No file is named in the loop for
-this; one is named for the next paragraph.
+**The first commit, and what the review did to it.** The first shape was
+`--reapply <start>` — re-run the named recorded migration and every recorded
+one after it — with 021's `DO $bf$ … $bf$;` block split out by a regex and a
+config.mjs statement (021's rule with accepted rows excluded) run in its place,
+the rest of the file verbatim. A high-effort review pass took it apart, and the
+findings were right: a start point is safe only when everything before it is
+really present, which nothing checks — preflight's 023 remedy said `--reapply
+023` on a brain whose schema stops at 020, 025's `upsert_thought` body creates
+fine (plpgsql resolves a column when the function first *runs*) and the next
+capture fails on the column 021 never added; the same brain's 021 remedy fails
+on its first file, since the statement reads `thought_work_claims` (015). A
+failure part-way through the range left objects at an *older* definition than
+before the command (022's `upsert_thought` without 025's provenance; the
+4-argument `match_thoughts` 014 recreates beside 020's), with nothing to say so.
+The exclusion was keyed on *re-run*, so a first apply of 021 by the migrator
+over accepted rows — a hand-applied schema adopted by README §4's "just run
+them" — still trusted them. The count printed beside the labelled rows counted
+the claim table, not what the exclusion changed. And a rule corrected inside
+the migrator, for the re-run path only, left every brain already mislabelled by
+the old paste wrong for good, as a `startsWith("021_")` branch in a loop the
+tenth review pass of change 21 had scrubbed of filenames. So the shape changed
+in all three places, below.
 
-**021, the one file not run verbatim.** The file cannot change. The migrator
-splits its text at the `DO $bf$ … $bf$;` block — the dollar-quote tag unique to
-that file; exactly one match, or the run fails saying so — and runs the text
-before it, then `LABEL_FROM_CLAIMS_SQL` from `db/config.mjs`, then the text
-after, in the one transaction, 001's `updated_at` trigger held as 021 holds it
-(the label is a fact about a vector already there, not an edit; asserted, with
-the audit count). `LABEL_FROM_CLAIMS_SQL` is 021's statement with one clause
-added to the inner claim rows — `NOT (c.last_error IS NOT NULL AND
-starts_with(c.last_error, ACCEPTED_CAVEAT_PREFIX))`, the `IS NOT NULL` because
-`starts_with(NULL, …)` is NULL and `NOT NULL` is not true. Excluding the row
-*before* the `DISTINCT ON` means the latest row before the acceptance decides:
-an earlier pass that did write the vector labels the thought at that pass's
-model — exactly the vector the acceptance kept — and a thought with no such row
-stays NULL, unknown. The run says what it did: `its evidence backfill labelled
-2 row(s); 2 accepted row(s) under a key naming a model were not read as
-evidence`. The rule for any successor that labels from claim rows is stated in
-`reembed.ts`'s header and beside the statement: an accepted row is not
-evidence; this is its one spelling.
+**`--reapply`: every recorded migration, one transaction.** No start: the
+migrator re-runs every migration the ledger records, in order, in one
+transaction; pending ones then apply as usual, and the ledger is not touched
+(its rows, shas and `applied_at` stand — asserted). Every file is idempotent
+(`test-upgrade` [3] re-applies the whole set over itself), so the run restores
+the latest definition of everything, and a body that reads what an earlier file
+installs finds it there. One transaction, so a failure part-way rolls back and
+the schema is as it was; the output says so and says to run it again. A
+recorded file whose sha differs from the ledger's refuses the whole re-run
+before anything runs (the plain run's drift check reports a drifted file and
+moves on, which for a re-run would skip one file's definitions and restore the
+next one's over whatever the skipped one left); the pgvector floor is judged
+before `BEGIN` too. `--baseline` beside it is refused. Every argument is
+accounted for — a flag the runner does not have, or a value where no flag takes
+one, is refused rather than dropped, since `--reapply=021` or a misspelt flag
+was otherwise a silent plain run that exited 0. The banner says to stop the
+server and the workers first: 023's call runs again and locks `thoughts`
+(`OB1_BACKFILL_LIMIT` bounds it, as on a first apply), 025 re-validates its
+constraints over the table, and 023 sets a 10 s `lock_timeout` for the rest of
+the transaction, so an idle writer's lock fails the whole re-run — which rolls
+back. `--dry-run` says `would re-apply`, and the summary counts re-applied apart
+from applied. No file is named in the loop.
+
+**Migration 029: the corrected rule, applied once to every brain.** 021 cannot
+change, so its successor does two things in one DO block, 001's `updated_at`
+trigger held as 021 holds it (no row's `updated_at` moves and no audit row is
+written — asserted). First, a label whose *only* evidence is an acceptance goes
+back to NULL: the thought's latest succeeded row under a key naming a model is
+an accepted one under the model's **own** key (exactly `reembed:<model>@<dim>`,
+no suffix), the thought is labelled with that key's model, has a vector, and
+nothing has written it since the row finished. Under the own key a thought at
+the model is never pooled, so such a row exists only for a thought that was not
+at the model when the pass read it — and a label saying it is, with nothing
+written since, can only be 021's block having trusted the acceptance. An edit
+or re-capture since is a server's write and its label the server's: left
+alone. Second, 021's rule with accepted rows excluded from the claim rows it
+reads — `NOT (c.last_error IS NOT NULL AND starts_with(c.last_error,
+'{{ACCEPTED_CAVEAT_PREFIX}}'))`, the prefix substituted from config.mjs's one
+spelling like every other template value, the `IS NOT NULL` because
+`starts_with(NULL, …)` is NULL and `NOT NULL` is not true — applied to
+unlabelled rows only, so the latest row *before* an acceptance decides: an
+earlier pass that did write the vector labels the thought at that pass's model,
+exactly the vector the acceptance kept, and a thought with no such row stays
+NULL. What it leaves: an acceptance under a *suffixed* key is not read against
+the label — a backfill key pools thoughts at the model too, so such a label may
+be the server's own, and the two cannot be told apart; no new label is written
+from one either. Reached after 021 in the same `--reapply` transaction, and
+pending on every brain at its next plain run, so a brain that followed the old
+paste is corrected too. The rule for any successor that labels from claim rows
+is stated in the file and in `reembed.ts`'s header: an accepted row is not
+evidence; 029 is its spelling.
 
 **The remedies name the command.** `reembed.ts`'s ledgered 021 refusal says
-`cd db && bun migrate.ts --url … --reapply 021` and why a paste would not do;
-`--status`, which reads and answers on any schema and is what the operator
-reads first, now prints `a run would refuse: …` with it. Preflight's two paste
-remedies — 023's `backfill_content_fingerprints` absent under a ledger that
-says 023, and 014's body under a ledger that says 014 once pgvector is upgraded
-— name `--reapply 023` and `--reapply 014`; the ALTER FUNCTION remedy that puts
-014's SET clause back is a statement, not a paste of a file, and stays.
+`cd db && bun migrate.ts --url … --reapply`, what the re-run does with 021 and
+029, and to stop the writers first; `--status`, which reads and answers on any
+schema and is what the operator reads first, now prints `a run would refuse: …`
+with it. Preflight's three paste remedies — 023's `backfill_content_fingerprints`
+absent under a ledger that says 023, and 014's body under a ledger that says
+014, in both branches — name it too; the ALTER FUNCTION that puts 014's SET
+clause back is a statement, not a paste of a file, and stays.
+
+**Not done here.** The runner sets no `lock_timeout` of its own; 023's carries
+from that file on, and the banner says to stop the writers. The atomicity of
+the re-run is stated and reasoned, not tested — inducing a failure part-way
+needs a lock the runner would wait on for ever before 023's timeout applies.
+`db/README.md`'s migrations table stops at 023, and a row for 029 alone would
+mislead; it is not this change's.
 
 Verified: `test-upgrade` [7] builds the brain the ticket describes — the schema
 applied through 020, then `migrate.ts --baseline` so the ledger says every
-migration — plants four thoughts written two hours ago, and the claim rows: a
+migration — plants four thoughts written two hours ago and the claim rows (a
 plain succeeded row an hour later; an accepted row with the failure's own
 timestamps; an earlier pass's plain row under its key and the acceptance under
-the new key over the same thought. It asserts `reembed.ts --status` names the
-command and not the paste; `--dry-run` counts 021 and the seven after it and
-writes nothing; the run's line; the labels (`stub-embed`, NULL, `earlier-model`,
-NULL); no `updated_at` moved, no audit row, the trigger enabled after; the
-ledger byte-identical; the eight-argument `update_thought` alone and the
-3-argument `upsert_thought` carrying 022's sentinel *and* 025's provenance; five
-refusals (beside `--baseline`; a number no file has; no start; a start the
-ledger does not record, after which a plain run applies it; a drifted file in
-the range, before anything ran); and that the re-applied schema has a fresh
-apply's columns and functions. `test-preflight` pins the 023 wording.
-`test-upgrade` 73/73, `test-preflight` 164/164, `test-schema` 562/562,
-`test-live` 369/369, `tsc` clean, fork checker PASS. Upstream status: **not
-applicable** — the migrator, `reembed.ts` and preflight are the fork's
+the new key over the same thought), and asserts `reembed.ts --status` names the
+command and not the paste; `--dry-run` counts every recorded file and writes
+nothing; the run's banner and summary; the labels (`stub-embed`, NULL,
+`earlier-model`, NULL — 021's block labelled the accepted thought and 029 took
+it back, in one transaction); no `updated_at` moved, no audit row, the trigger
+enabled after; the ledger byte-identical; the eight-argument `update_thought`
+alone and the 3-argument `upsert_thought` carrying 022's sentinel *and* 025's
+provenance; four refusals (a value beside the flag, a flag the runner does not
+have, `--baseline` beside it, a drifted recorded file — before anything ran);
+and that the re-applied schema has a fresh apply's columns and functions. [8]
+applies 029 onto a populated 028 holding eight labels — a paste's mislabel
+(back to NULL), a real pass's label with a later acceptance under another
+model's key (stays), an acceptance under a suffixed key (stays), a mislabel
+edited since (stays), an unlabelled thought with an earlier pass then an
+acceptance (labelled at the earlier pass), a mislabel with an earlier pass
+(taken back and relabelled at it, in the one block), a plain row (labelled), a
+label with no claim row (not read) — no `updated_at` moved, no audit row, the
+trigger enabled, and a second apply a no-op. `test-preflight` pins the 023 and
+014 wordings. `test-upgrade` 84/84, `test-preflight` 164/164, `test-schema`
+564/564, `test-live` 369/369, `tsc` clean, fork checker PASS. Upstream status:
+**not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
 
 ## Detached from the fork network

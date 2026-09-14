@@ -314,7 +314,7 @@ else {
   // Re-applying 007 replaces the BODY as well as the clause, so this is the
   // "replaced its body" wording with the body re-run as the remedy.
   assert(/recorded as applied — --baseline recorded it without running it, or a later redefinition replaced its body/.test(dropped.out), "…and is described as recorded-but-not-in-effect (--baseline or a redefinition), not a missing migration");
-  assert(/Re-run the body of db\/migrations\/014/.test(dropped.out), "…with a remedy the migrator will not turn into a no-op");
+  assert(/Re-apply the recorded migrations with the migrator — cd db && bun migrate\.ts --url … --reapply/.test(dropped.out), "…with a remedy a plain run will not turn into a no-op: the migrator's re-run");
   // The other branch: 014's body intact, its SET clause gone — what a successor
   // that redefined the function without the clause leaves. (An earlier draft
   // asserted this wording with a regex alternative that could never match the
@@ -865,7 +865,7 @@ else {
   await claims.unsafe("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())");
   await claims.unsafe("INSERT INTO schema_migrations (name, sha256) VALUES ('023_content_fingerprint_backfill.sql', 'baseline') ON CONFLICT DO NOTHING");
   const baselined = await run(SQL_ENV);
-  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-apply it with the migrator, which re-runs 023 and every recorded migration after it: cd db && bun migrate\.ts --url … --reapply 023/.test(baselined.out),
+  assert(/fingerprint backfill\s+2 thought\(s\) without a fingerprint/.test(baselined.out) && /The ledger says 023 but backfill_content_fingerprints is absent \(adopted with --baseline\): re-apply the recorded migrations with the migrator — cd db && bun migrate\.ts --url … --reapply — which re-runs every recorded file in one transaction/.test(baselined.out),
          "…and where the ledger already says 023 the remedy is the migrator's re-run, not a migration a plain run would skip");
   await claims.unsafe("DROP TABLE schema_migrations");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("023") });
