@@ -2348,6 +2348,141 @@ other limits real.
   40,960), dilution only, and unmeasured here (SMD-1314). Before this change it
   was windowed at 1200 estimated tokens, which under-counted the same way.
 
+## Consolidation: what a pass that proposes supersessions finds, costs and gets wrong
+
+`eval-consolidate.ts` (SMD-1294; migration 029, `db/consolidate.ts`,
+`server-portable/consolidate.ts`). Migration 025 gave `thoughts` a `supersedes`
+column and nothing populated it but a caller who already knew. The pass pairs
+each thought with older thoughts that share an extracted entity, asks the
+metadata model whether they conflict and which is current, and files a
+conflict as a proposal for a reviewer; nothing is written to a thought until
+someone accepts one. The ticket's shipping test: "false-positive `conflict` low
+enough that a reviewer is not drowned; the number is chosen from the
+measurement, not before it." Three questions, one throwaway Postgres loaded with
+the 576-issue Linear corpus, its real vectors and capture dates, and the entity
+graph replayed from `eval-entities.ts --corpus`'s dump.
+
+```bash
+OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-consolidate.ts            # candidates + the judge on the labelled pairs
+… bun eval-consolidate.ts --full [--k N] [--min-sim F]                                                # + the pass itself, proposals to OB1_EVAL_OUT for grading
+… bun eval-consolidate.ts --replay /tmp/consolidate-verdicts-<model>.jsonl                            # re-score a pass's dump, no model
+```
+
+### The graph it ran on
+
+525 of 576 issues extracted under `qwen2.5:7b`; 521 carry at least one entity.
+The 51 without one are the longest documents (median 7,080 characters): the 7B
+model does not finish them inside a four-minute call, and at ten minutes it is
+still generating — 016's known timeout tail, not something this pass changes.
+They matter here because the labelled conflicts live in exactly those documents
+(below).
+
+### 1. Candidate pairs, before choosing k
+
+`consolidation_candidates` restricts to older thoughts (by a UTC calendar day)
+sharing an entity, nearest by exact cosine, at most k, at or above a floor. The
+judge cost is one call per pair, so the table is what k and the floor were
+chosen from:
+
+| k \ cosine floor | 0 | 0.4 | 0.5 | 0.6 | 0.7 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 394 | 367 | 324 | 243 | 137 |
+| 3 | 1,068 | 974 | 823 | **517** | 213 |
+| 5 | 1,636 | 1,487 | 1,198 | 672 | 230 |
+| 10 | 2,815 | 2,444 | 1,767 | 813 | 235 |
+
+Pairs; the thoughts with at least one candidate are 394 / 367 / 324 / 243 / 137
+across the floors. The candidates' cosines sit mostly in 0.5–0.7 (at k=5 and no
+floor: 526 in the 0.5s, 442 in the 0.6s, 191 in the 0.7s, 39 above). **k=3 and a
+0.6 floor** are the shipped defaults: 517 pairs, 0.99 judge calls per thought
+with entities — the same order of cost as extraction itself, which is what a
+recurring pass on every new capture has to be. By cosine alone at the same k and
+floor the corpus yields 1,090 pairs over 416 thoughts; the shared-entity rule
+hands the judge 47% of them.
+
+### 2. The judge on 98 labelled pairs
+
+`consolidate-labels.json`: every cross-reference in the corpus whose sentence
+carries supersession language (supersede, replace, revert, no longer, obsolete,
+instead of, duplicate, in favour of…), 98 unique pairs, each read and labelled
+— 6 conflict, 79 agree, 13 unrelated (ids only; a parent closed because its
+children landed, a follow-up, a split-out half are `agree`; a reference for an
+analogy is `unrelated`). The judge is called on each pair directly, whatever the
+candidate rule would do with it. `qwen2.5:7b`, temperature 0, 3.0 s per pair:
+
+| | |
+| --- | --- |
+| conflict precision | 29% (2 of 7 flagged) |
+| conflict recall | 33% (2 of 6) |
+| non-conflicts left alone | 87 of 87 (the 5 false flags are all in the `agree` set) |
+| direction on the 2 found | 1 right, 1 left unknown, 0 wrong |
+| reach | 1 of the 6 labelled conflicts is a candidate at k=3 / 0.6; 3 of the 6 pairs' issues are among the 51 unextracted |
+
+The misses are instructive. Two long decision documents about one policy
+(SMD-735 and SMD-901, the anonymous required-node set) came back `agree` at
+0.9 — "both discuss the anonymous required-node policy and its changes" — and
+two others `unrelated`: the model reads the shared subject and not the
+reversal buried in the second document's scope list. The false flags are the
+same cluster from the other side: SMD-734 recommends option A and records in
+its own closure that B won; paired with the tickets that implement B, the judge
+reads the recommendation and calls a conflict. Confidence does not separate
+either error: 0.8 on nearly every verdict, 0.5 on `unrelated`.
+
+### 3. The pass itself, at k=3 / 0.6
+
+`db/consolidate.ts` over the 521 thoughts with entities, two workers (Ollama
+serialises them), `--dump` for the verdicts:
+
+| | |
+| --- | --- |
+| pairs judged | 517 — 0.99 per thought with entities, 898 per thousand thoughts in the corpus |
+| wall clock | 21.3 min; 4.9 s of model time per pair |
+| prompt tokens (estimated, `chunk.ts`'s rule) | ~904,000 — ~1,750 per call, ~1.6M per thousand thoughts; what a hosted provider would bill |
+| verdicts | 441 unrelated, 63 agree, 13 conflict |
+| proposals | **13**, 10 of them without a direction; none under the 0.5 confidence floor |
+| graded by hand (`consolidate-labels.json` → `proposals`) | **6 real, 7 not — 46%** |
+| labelled conflicts proposed | 0 of 6 |
+
+The six real ones are the kind the ticket named: a billing bypass decoupled
+from the flag that used to grant it (SMD-333 → SMD-363), a tool-version source
+of truth replaced by another (SMD-600 → SMD-627), a pre-account summary
+specified and then decided post-signup (SMD-243 → SMD-734), a scope revised and
+a hold released (SMD-36 → SMD-103 → SMD-470), a gate's rule widened (SMD-440 →
+SMD-523, the borderline one). The seven false ones are siblings (a development
+and a production half of one retirement), two things sharing a word (the
+consent gate and the conversion gate card), and the SMD-734 cluster again.
+
+### What it says
+
+**A reviewer is not drowned**: two proposals per hundred thoughts, about half
+real, each with the judge's sentence and both texts. By the ticket's test the
+pass ships — default off, since nothing runs until the worker is invoked. **It
+does not find much**: a 7B judge's recall on genuine reversals in long tracker
+documents is a third; the shared-entity rule inherits extraction's blind spot on
+exactly the long decision documents where the reversals live; and the day rule
+skips the pairs a planning session produces in one afternoon (31 of the 98
+labelled pairs are same-day). The two levers are a stronger judge and 016's
+timeout tail, and neither is this change's mechanism; this harness is the
+instrument for both, and `--replay` re-scores a dump in seconds.
+
+### Caveats
+
+* One corpus, and a tracker at that: issues are long, cross-referenced and
+  revised in place (SMD-734 records its own supersession), which is both why
+  the labelled set has only six conflicts and why the judge misreads them. A
+  personal brain's captures are shorter and rarely self-correcting.
+* The labels were made by reading the pairs, not by their authors; three are
+  marked borderline in the file. Six positives is a small denominator.
+* No hosted provider was run (no credential on the machine); the estimated
+  prompt tokens stand in for the cost, and a hosted judge's accuracy is
+  unmeasured.
+* `--min-confidence` filtered nothing because the judge's confidence is flat;
+  the flag stays, at 0.5, for a judge whose confidence means something.
+* The corpus file is rebuilt from Linear by `build-linear-corpus.ts` and grows;
+  every number above is from the 2026-09-14 morning build of 576 issues, and a
+  later build (601 by that afternoon) changes the candidate table and can make
+  the entity dump's fingerprints stale for edited issues.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

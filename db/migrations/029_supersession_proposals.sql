@@ -86,7 +86,7 @@
 --   path does NOT do that `update_thought` would: nothing — the column is
 --   not part of the fingerprint, the vector or the windows. When
 --   `update_thought` grows a provenance envelope, acceptance should call it
---   and this function's UPDATE go; the follow-up is filed from the change.
+--   and this function's UPDATE go; that follow-up is SMD-1323.
 --
 --   Acceptance refuses what would leave the column wrong: the superseding
 --   thought already pointing at a THIRD thought (ALREADY_SUPERSEDES: the

@@ -26,7 +26,7 @@
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"]
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
- *   --k N (5)   --min-sim F (0.5)   --min-confidence F (0.5)
+ *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
  *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --timeout SECONDS (120, per model call)
  *
  * ── The cost ────────────────────────────────────────────────────────────────

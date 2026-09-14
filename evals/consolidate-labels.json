@@ -504,5 +504,84 @@
       "label": "agree"
     }
   ],
-  "proposals": []
+  "proposals": [
+    {
+      "older": "SMD-600",
+      "newer": "SMD-627",
+      "true": true,
+      "reason": "600 makes the root package.json the source of truth for tool versions; 627 replaces those declarations with Dependabot-managed manifest pins read from elsewhere: the plan that replaced the plan"
+    },
+    {
+      "older": "SMD-243",
+      "newer": "SMD-734",
+      "true": true,
+      "reason": "243 specifies a pre-account Medical History Summary; 734 records the decision that it is generated only after signup"
+    },
+    {
+      "older": "SMD-226",
+      "newer": "SMD-734",
+      "true": false,
+      "reason": "226 is about the summary's structure and tone, whenever it is generated; nothing in it is contradicted by moving generation after signup"
+    },
+    {
+      "older": "SMD-493",
+      "newer": "SMD-742",
+      "true": false,
+      "reason": "493 shipped a split of two consent gates; 742 keeps a different, funnel-driven redesign out of launch scope; two subjects sharing the words consent gate"
+    },
+    {
+      "older": "SMD-440",
+      "newer": "SMD-523",
+      "true": true,
+      "reason": "440's gate is satisfied only by a future appointment; 523 changes the rule so an occurred past appointment satisfies it too: a later state of the same rule (borderline: a fix, but it does contradict 440's acceptance)"
+    },
+    {
+      "older": "SMD-734",
+      "newer": "SMD-957",
+      "true": false,
+      "reason": "957 implements the copy the closed decision in 734 calls for; the judge read 734's recommendation (A) and not its closure (B)"
+    },
+    {
+      "older": "SMD-742",
+      "newer": "SMD-867",
+      "true": false,
+      "reason": "742 is the consent gate, 867 the conversion gate card: two gates, no shared claim"
+    },
+    {
+      "older": "SMD-333",
+      "newer": "SMD-363",
+      "true": true,
+      "reason": "333 bypasses billing under the public-intake flag; 363 says that flag controls public intake only and a dedicated flag bypasses billing: a reversal of 333's rule"
+    },
+    {
+      "older": "SMD-566",
+      "newer": "SMD-570",
+      "true": false,
+      "reason": "development and production halves of one retirement; siblings, not a contradiction"
+    },
+    {
+      "older": "SMD-27",
+      "newer": "SMD-103",
+      "true": false,
+      "reason": "27 moved social sign-in out of the parent; 103 says it stays out until confirmed: agreement"
+    },
+    {
+      "older": "SMD-36",
+      "newer": "SMD-103",
+      "true": true,
+      "reason": "36 lists social sign-in enablement in the pilot's scope; 103 takes it out of the active MVP path pending a decision: a scope and its revision (borderline: 36 says 'where supported')"
+    },
+    {
+      "older": "SMD-103",
+      "newer": "SMD-470",
+      "true": true,
+      "reason": "103 holds social sign-in out of scope pending a decision; 470 implements it: the decision was taken and 103's hold is no longer current"
+    },
+    {
+      "older": "SMD-1091",
+      "newer": "SMD-1215",
+      "true": false,
+      "reason": "1091 is the onboarding checklist provider, 1215 widens a scheduling enum the provider reads from; both mention blocked_reason and disagree on nothing"
+    }
+  ]
 }

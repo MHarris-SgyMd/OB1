@@ -41,8 +41,8 @@ export type Direction = "newer" | "older" | "unknown";
  * (evals/eval-consolidate.ts; evals/README.md has the table) and both are the
  * worker's --k and --min-sim flags.
  */
-export const DEFAULT_CANDIDATES = 5;
-export const DEFAULT_MIN_SIMILARITY = 0.5;
+export const DEFAULT_CANDIDATES = 3;
+export const DEFAULT_MIN_SIMILARITY = 0.6;
 
 /** Below this the judge is guessing; a conflict under it is not recorded. The worker's --min-confidence. */
 export const DEFAULT_MIN_CONFIDENCE = 0.5;

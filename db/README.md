@@ -102,7 +102,7 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 51).
+029 change 53).
 
 ## What changed relative to the guide
 
@@ -633,7 +633,7 @@ bun consolidate.ts --url … --list [pending|accepted|rejected|all]
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
-#   --k N (5)  --min-sim F (0.5)  --min-confidence F (0.5)
+#   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
 #   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (120, per model call)
 ```
 
@@ -642,8 +642,11 @@ thought with entities, recurring: every thought extracted after a run is judged
 against its older neighbours by the next run or a `--follow` process. Locally
 that is compute; on a hosted provider it is money per pair and BOTH thoughts'
 text goes to the provider. `--dry-run` says how many thoughts a run would
-judge before it judges any. `evals/README.md` has the measured calls per
-thousand thoughts, prompt tokens and wall clock on the fork's corpus.
+judge before it judges any. Measured on the fork's 576-issue corpus at the
+shipped `--k 3 --min-sim 0.6` with `qwen2.5:7b`: 517 pairs, one call per thought
+with entities, 21 minutes, about 1,750 prompt tokens a call; 13 proposals, six
+of them real on a hand grading — two per hundred thoughts, half worth accepting
+(`evals/README.md` has the table and what the judge gets wrong).
 
 **Reviewing.** `--list` prints the queue most confident first, each with the
 judge's reason, both thoughts with their capture dates and `ID:` lines, and
