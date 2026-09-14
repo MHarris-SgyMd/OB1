@@ -2566,4 +2566,70 @@ console.log("\n[26] Migration 027: search_thoughts_hybrid admits relative to the
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// ── 27. Migration 028: the caveat rule is stated at the table (SMD-1052) ──────
+
+console.log("\n[27] Migration 028: thought_work_claims.last_error and release_thought carry the caveat rule (SMD-1052)");
+{
+  // SMD-1021 gave last_error a second meaning — on a succeeded row, when set, a
+  // caveat: the write stands, and this is what the worker could not do — and
+  // reembed.ts reads every such row through one predicate (withCaveat) for the
+  // count, the list and --retry-fallbacks. Until 028 the schema said nothing:
+  // 015 commented work_type, worker_id and attempt_count and not this column,
+  // and release_thought's comment did not mention p_error at all. A reader of
+  // the table (\d+, a future consumer) must be able to learn the rule from the
+  // table, so both comments are asserted here rather than trusted to prose.
+  const colComment = (await db.query<{ c: string | null }>(
+    `SELECT col_description('thought_work_claims'::regclass, a.attnum) AS c
+       FROM pg_attribute a WHERE a.attrelid = 'thought_work_claims'::regclass AND a.attname = 'last_error'`)).rows[0]?.c ?? "";
+  assert(colComment.length > 0, "thought_work_claims.last_error carries a comment");
+  assert(/failed row:\s*why it failed/i.test(colComment), "…that gives the failed-row meaning (why it failed)");
+  assert(/succeeded row, when set:.*caveat.*the write stands.*what the worker could not do/is.test(colComment),
+    "…and the succeeded-row meaning: when set, a caveat — the write stands, and this is what the worker could not do");
+  assert(/NULL on a succeeded row is a clean success/.test(colComment), "…and what NULL means on a succeeded row");
+  assert(/--retry-fallbacks returns it to the pool/.test(colComment) && /must not store any other note here on success/.test(colComment),
+    "…and the consequence for a consumer: every non-NULL note on a succeeded row is read as a caveat and returned by --retry-fallbacks");
+
+  const fnComment = (await db.query<{ c: string | null }>(
+    `SELECT obj_description('release_thought(uuid, text, text, text, text)'::regprocedure, 'pg_proc') AS c`)).rows[0]?.c ?? "";
+  assert(/Only the holder of a still-claimed row may; returns false otherwise/.test(fnComment), "release_thought's comment keeps 015's sentence (the holder rule)");
+  assert(/p_error is stored in last_error whatever p_status is/.test(fnComment), "…and says p_error is stored whatever the status");
+  assert(/on succeeded, when given, a caveat.*the write stands/is.test(fnComment) && /Pass NULL for a clean success/.test(fnComment),
+    "…what it means on success, and what to pass for a clean one");
+
+  // The last migration to comment release_thought must carry the p_error
+  // sentence: CREATE OR REPLACE keeps a comment, but a redefinition that
+  // re-issues 015's one-sentence COMMENT (SMD-1043 is the candidate) would
+  // silently drop it — the trap 028's header names.
+  const commentRe = /^\s*COMMENT ON FUNCTION (?:public\.)?release_thought\(/m;
+  const lastCommenter = [...files].reverse().find((x) => commentRe.test(readFileSync(join(MIGRATIONS, x), "utf8")))!;
+  assert(lastCommenter.startsWith("028"), `028 is the last migration to comment release_thought (${lastCommenter})`);
+  const colRe = /^\s*COMMENT ON COLUMN (?:public\.)?thought_work_claims\.last_error\s/m;
+  const lastColCommenter = [...files].reverse().find((x) => colRe.test(readFileSync(join(MIGRATIONS, x), "utf8")))!;
+  assert(lastColCommenter.startsWith("028"), `028 is the last migration to comment thought_work_claims.last_error (${lastColCommenter})`);
+
+  // The fact the comments state, exercised: a release with p_error on a
+  // SUCCEEDED row stores it (the caveat), on a failed row stores it (the
+  // error), and a NULL leaves the column NULL — the shape withCaveat() reads.
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "test:caveat";
+  const [a, b, c] = (await db.query<{ id: string }>(
+    `INSERT INTO thoughts (content) VALUES ('caveat probe a'), ('caveat probe b'), ('caveat probe c') RETURNING id`)).rows.map((r) => r.id);
+  await db.query(`SELECT enqueue_thoughts($1, $2::uuid[])`, [JOB, [a, b, c]]);
+  const leased = (await db.query<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, 'W', 3, 900, 3)`, [JOB])).rows.map((r) => r.thought_id);
+  assert(leased.length === 3, `the probe rows are leased (${leased.length} of 3)`);
+  await db.query(`SELECT release_thought($1::uuid, $2, 'W', 'succeeded', 'stored the head window: provider refused the whole content (413)')`, [a, JOB]);
+  await db.query(`SELECT release_thought($1::uuid, $2, 'W', 'succeeded', NULL)`, [b, JOB]);
+  await db.query(`SELECT release_thought($1::uuid, $2, 'W', 'failed', 'provider 500')`, [c, JOB]);
+  const rows = (await db.query<{ thought_id: string; status: string; last_error: string | null }>(
+    `SELECT thought_id, status, last_error FROM thought_work_claims WHERE work_type = $1`, [JOB])).rows;
+  const of = (id: string) => rows.find((r) => r.thought_id === id)!;
+  assert(of(a).status === "succeeded" && /refused the whole content/.test(of(a).last_error ?? ""), "a succeeded release with p_error stores it: the row is succeeded AND carries the caveat");
+  assert(of(b).status === "succeeded" && of(b).last_error === null, "a succeeded release with NULL is a clean success — last_error NULL");
+  assert(of(c).status === "failed" && of(c).last_error === "provider 500", "a failed release stores the error, as 015 always did");
+  const caveats = (await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = $1 AND status = 'succeeded' AND last_error IS NOT NULL`, [JOB])).rows[0].n;
+  assert(caveats === 1, `reembed.ts's withCaveat() predicate (succeeded AND last_error IS NOT NULL) finds exactly the caveat row (${caveats})`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();

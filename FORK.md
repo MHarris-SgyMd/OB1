@@ -2533,9 +2533,10 @@ refusal stays silent as change 27 decided — `test-chunking.ts` [0] drives a 50
 through the server before [1]'s 400 can latch. And the default's rationale now
 says the budget is per request but the queue is shared, so against a provider
 that serves one request at a time the last window is timed against the whole
-queue. The caveat rule lives in the tool and this file and not on the column
+queue. The caveat rule lived in the tool and this file and not on the column
 (015 cannot be edited, and a comment-only migration is a second mechanism):
-SMD-1052, to ride with SMD-1043's redefinition. Declined: dropping the server's
+SMD-1052, meant to ride with SMD-1043's redefinition; it landed alone as
+migration 028 (change 49). Declined: dropping the server's
 latch or latching on the shortest refused length — change 27 measured and
 decided that latch and its test still holds. The reason first recorded here,
 that a length latch "infers one row's answer from another's", was wrong and the
@@ -4824,6 +4825,49 @@ Upstream status: **not applicable** — a fork-internal correction to the fork's
 SMD-1301 (candidate window), SMD-1302 (temporal/date-aware retrieval), SMD-1303
 (a natural-language keyword arm), SMD-1304 (a reranker re-look). **Unfiled**
 upstream.
+
+### 49. The caveat rule is stated at the table — `thought_work_claims.last_error` on a succeeded row, and `release_thought`'s `p_error`, carry a COMMENT (SMD-1052)
+
+Change 34 gave `thought_work_claims.last_error` a second meaning: on a
+**succeeded** row, when set, it is a **caveat** — the write stands, and this is
+what the worker could not do (a long thought stored with its head window's vector
+because the provider refused the whole content; since change 39, a failure the
+operator accepted with `--accept-failed`). `db/reembed.ts` reads every such row
+through one predicate (`withCaveat()`) for the count, the list and
+`--retry-fallbacks`, and its header and `db/README.md` state the rule. The
+**schema said nothing**: 015 commented `work_type`, `worker_id` and
+`attempt_count` and not this column, and `release_thought`'s comment said only
+"Mark one claim succeeded or failed" — nothing about `p_error`, which it stores
+whatever the status. A reader of the table (`\d+`, a future consumer of the claim
+table) had no way to learn that any note on a succeeded row is read as the
+caveat and returned to the pool by `--retry-fallbacks`; `extract-entities.ts`
+releases success with NULL and so never collided, but only by accident of not
+having anything to say.
+
+**Migration 028** is the two statements, and nothing else: an idempotent
+`COMMENT ON COLUMN thought_work_claims.last_error` giving both meanings by status
+— failed: why it failed; succeeded, when set: a caveat, the write stands, NULL is
+a clean success — and the consequence for a consumer (do not store any other note
+there on success); and `release_thought`'s `COMMENT ON FUNCTION` re-issued with
+015's holder sentence kept and one added: `p_error` is stored in `last_error`
+whatever `p_status` is, and what it means on success. No DDL on data, no body
+change, no ACL change, no placeholder. The ticket's preferred ride was SMD-1043's
+redefinition or 023's backfill; 023 landed without it and 1043 is open, so the
+comments travel alone — a docs-only migration is heavy for two statements, and the
+alternative was the rule staying where a reader of the schema cannot see it.
+
+The trap a successor must not fall into: `CREATE OR REPLACE FUNCTION` keeps a
+function's comment, but a migration that redefines `release_thought` and re-issues
+015's one-sentence `COMMENT` would silently drop the `p_error` sentence. So
+`test-schema` [27] asserts the text of both comments (`col_description`,
+`obj_description`), that **028 is the last migration to comment either**, and the
+fact they state — a succeeded release with `p_error` stores it, one with NULL
+leaves the column NULL, a failed release stores the error, and `withCaveat()`'s
+shape finds exactly the caveat row. Green at both widths (562 assertions);
+`test-upgrade` green (the shape comparison of columns and signatures is
+unaffected by a comment).
+
+Upstream status: **not applicable** — the claim table is the fork's (015).
 
 ## Detached from the fork network
 

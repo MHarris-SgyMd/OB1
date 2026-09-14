@@ -421,8 +421,11 @@ from one function. `--status` counts and lists succeeded rows with *a caveat*,
 in the rule's words rather than one caveat's, and each row's text says which. Until SMD-1021 a
 refused row was indistinguishable from any other succeeded row, one summary line
 was the only trace, and a terminal claim meant no re-run would look at it again.
-The rule is stated only here and in the tool; putting it on the column itself is
-SMD-1052. The server still remembers a refusal for the life of its process;
+Since migration 028 (SMD-1052) the rule is also stated where a reader of the
+table finds it: `COMMENT ON COLUMN thought_work_claims.last_error` gives both
+meanings by status, and `release_thought`'s comment says `p_error` is stored
+whatever the status and what it means on success; `test-schema` [27] asserts
+both and that 028 stays the last migration to comment either. The server still remembers a refusal for the life of its process;
 shaping that latch is SMD-1054.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —
