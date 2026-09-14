@@ -2094,7 +2094,11 @@ those windows bought recall had never been measured.
 No reload. A load with no windows writes the same whole vector — the same
 text under the same model and prompt — so the whole vectors already in the
 LongMemEval store *are* that load, and the question is answered by reading
-the store three ways. One exact scan per question fetches every thought in
+the store three ways. That premise was checked rather than assumed: 40 random
+rows per model, re-embedded through the same endpoint singly and in batches of
+eight other sessions, sit at cosine 1.000000 to the stored vector to six
+decimals, and every stored text equals the corpus render (batch composition
+does not move these models' vectors). One exact scan per question fetches every thought in
 the history with its whole-vector similarity and its best window's (`OFFSET 0`
 fences the sort from the HNSW index, so the arms compare vectors, not plans),
 and each arm is a rule over those two numbers:
