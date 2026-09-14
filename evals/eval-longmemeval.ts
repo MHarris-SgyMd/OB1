@@ -79,7 +79,10 @@
  * that limit are embedded and stored under the thought's id in
  * OB1_EVAL_LME_CHUNKS — the store's whole vectors untouched — so windows at
  * another limit can be scored beside the shipped 1200 without a 14-hour
- * reload. Resumable by thought.
+ * reload. Resumable by thought. The windows carry chunk.ts's default overlap,
+ * which is the server's for any limit of 1200 or more (the server scales it
+ * down only for a window that derived smaller); a side table under 1200 would
+ * need the overlap passed too.
  */
 import { SQL } from "bun";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";

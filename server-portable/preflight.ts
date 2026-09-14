@@ -157,6 +157,14 @@ add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credent
     add("chunk window", "warn",
         `OB1_CHUNK_TOKENS=${chunk.tokens} is over ${windowText} — a window that long is cut at ${chunk.window} tokens silently, which is the failure the windows exist to prevent`,
         `Unset OB1_CHUNK_TOKENS to derive the rule from the window, or set it under ${chunk.window}.`);
+  } else if (chunk.from === "OB1_CHUNK_TOKENS" && chunk.window !== undefined && chunk.tokens > Math.floor((chunk.window * DEFAULT_MAX_TOKENS) / DEFAULT_MODEL_WINDOW)) {
+    // Under the window but over the headroom the estimate needs: chunk.ts
+    // assembled a 1730-token window against a 1200 target on randomised prose
+    // before its post-condition, and the estimate itself is a guess — the
+    // ratio the constant fixes is the measured margin (second review pass).
+    add("chunk window", "warn",
+        `OB1_CHUNK_TOKENS=${chunk.tokens} leaves little headroom under ${windowText} — the token count is an estimate, and a window that overshoots is cut at ${chunk.window} tokens silently`,
+        `Set OB1_CHUNK_TOKENS at or under ${Math.floor((chunk.window * DEFAULT_MAX_TOKENS) / DEFAULT_MODEL_WINDOW)}, the ratio the default keeps, or unset it.`);
   } else if (chunk.from === "OB1_CHUNK_TOKENS") {
     add("chunk window", "ok", `${rule}, from OB1_CHUNK_TOKENS (${windowText})`);
   } else if (chunk.from === "window") {

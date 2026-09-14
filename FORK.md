@@ -4978,7 +4978,8 @@ so the shipped behaviour is one variable away. `chunkContent` takes the threshol
 apart from the window size; `embed.ts` resolves the rule through `config.mjs` so
 the server, `reembed.ts` and preflight cannot disagree about it; preflight's
 `chunk window` line prints the rule and its source, and warns when an explicit
-limit is over the model's window. Found in passing: `chunkContent`'s segmenter
+limit is over the model's window or over the headroom under it (the ratio the
+constant fixes). Found in passing: `chunkContent`'s segmenter
 read the default limit rather than the caller's — invisible at 1200, wrong either
 side of it.
 

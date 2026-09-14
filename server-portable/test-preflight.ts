@@ -107,6 +107,12 @@ console.log("\n[3b] The chunk window is derived from the model, and named");
   assert(/chunk window\s+OB1_CHUNK_TOKENS=3000 is over embeddinggemma's 2048-token window — a window that long is cut at 2048 tokens silently/.test(over.out)
          && /Unset OB1_CHUNK_TOKENS to derive the rule from the window, or set it under 2048/.test(over.out),
          "a limit over the model's window is a warning naming the cut and the two ways out");
+  const tight = await run({ ...base, OB1_EMBEDDING_MODEL: "embeddinggemma", OB1_EMBEDDING_DIM: "768", OB1_CHUNK_TOKENS: "2000" });
+  assert(/chunk window\s+OB1_CHUNK_TOKENS=2000 leaves little headroom under embeddinggemma's 2048-token window/.test(tight.out) && /at or under 1200/.test(tight.out),
+         "…and one under the window but over the headroom the estimate needs warns too, naming the ratio's value");
+  const tagged = await run({ ...base, OB1_EMBEDDING_MODEL: "granite-embedding:278m", OB1_EMBEDDING_DIM: "384" });
+  assert(/chunk window\s+captures over 300 tokens are windowed at 300, derived from granite-embedding:278m's 512-token window/.test(tagged.out),
+         "a tagged local name finds its untagged entry — a miss here would be the silent cut");
 }
 
 console.log("\n[4] Unreachable database fails rather than hanging");

@@ -266,14 +266,17 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     chunkThreshold: chunk.threshold,
     chunkTokensFrom: chunk.from,
     modelWindow: chunk.window,
-    // The overlap follows a window that derived SMALLER than the constant
+    // The overlap follows a window that DERIVED smaller than the constant
     // (first review pass): at 300 tokens chunk.ts clamps the default 150 to
     // half the window, and its carry rule — never carry the whole buffer —
     // then carries nothing out of a two-segment window, so a granite-embedding
     // capture had no overlap at all. Scaled at the ratio the constant fixes
-    // (150 of 1200 → 37 of 300); an explicit OB1_CHUNK_OVERLAP still wins.
+    // (150 of 1200 → 37 of 300). Gated on the SOURCE, not the size (second
+    // pass): an explicit OB1_CHUNK_TOKENS keeps the 150 it always had, so a
+    // pinned store does not change shape on upgrade; OB1_CHUNK_OVERLAP wins
+    // over both.
     chunkOverlap: numberOr(env.OB1_CHUNK_OVERLAP,
-      chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
+      chunk.from === "window" && chunk.tokens < DEFAULT_MAX_TOKENS ? Math.floor((DEFAULT_OVERLAP_TOKENS * chunk.tokens) / DEFAULT_MAX_TOKENS) : DEFAULT_OVERLAP_TOKENS,
       "non-negative"),
     chunkContext: resolveChunkContext(env.OB1_CHUNK_CONTEXT),
     metadataModel: env.OB1_METADATA_MODEL || DEFAULT_METADATA_MODEL,

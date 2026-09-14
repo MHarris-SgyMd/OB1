@@ -141,6 +141,11 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(granite.chunkOverlap === 37 && gemma.chunkOverlap === DEFAULT_OVERLAP_TOKENS && qwen.chunkOverlap === DEFAULT_OVERLAP_TOKENS,
          "the overlap scales with a window that derived smaller (37 of 300) and stays 150 for one that did not");
   assert(resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "granite-embedding", OB1_CHUNK_OVERLAP: "20" }).chunkOverlap === 20, "…and OB1_CHUNK_OVERLAP still wins");
+  assert(resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "granite-embedding", OB1_CHUNK_TOKENS: "300" }).chunkOverlap === DEFAULT_OVERLAP_TOKENS,
+         "an explicit OB1_CHUNK_TOKENS keeps the 150 it always had — the scaling follows the window's source, not its size, so a pinned store does not change shape on upgrade");
+  const tagged = resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "granite-embedding:278m" });
+  assert(tagged.chunkTokens === 300 && tagged.modelWindow === 512, "a tagged local name finds its untagged entry");
+  assert(resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "qwen3-embedding:8b" }).chunkTokensFrom === "default", "…but a tag whose base is not listed stays unlisted: qwen3-embedding:8b is not measured");
   const paras = Array.from({ length: 40 }, (_, i) => Array.from({ length: 100 }, (__, j) => `p${i}w${j}`).join(" ")).join("\n\n"); // ~130-token paragraphs
   const total = (ws: { content: string }[]) => ws.reduce((a, w) => a + estimateTokens(w.content), 0);
   assert(total(chunkContent(paras, { maxTokens: 300, overlapTokens: 37 })) > total(chunkContent(paras, { maxTokens: 300, overlapTokens: 150 })),

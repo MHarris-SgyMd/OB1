@@ -1898,7 +1898,7 @@ thought per session, windows from `server-portable/chunk.ts`'s `chunkContent`,
 the document prompt from `db/config.mjs`, the 4-argument `upsert_thought` with
 the 021 envelope. 19,829 distinct session ids (25,112 memberships — a session
 sits in several histories), 19,825 rows after 003's fingerprint folded four
-twins, 56,267 chunk rows; median session 2,589 tokens, p90 4,253, and 15,737 of
+twins, 56,267 chunk rows; median session 2,589 tokens, p90 4,253, and 15,743 of
 them long enough to chunk. The session's date leads its text, as a pasted
 transcript's would.
 
@@ -1912,7 +1912,7 @@ that fails either prints no table. It passed on all 2,820 calls.
 Load, embedding requests batched 32 inputs: **50,103 s (13.9 h)** for 19,829
 sessions at `qwen3-embedding:4b@1024`, the default (0.40 sessions/s, ~1,000
 content tokens/s); 11,303 s for 19,564 at `qwen3-embedding:0.6b@1024` (1.73/s,
-~4,400 content tokens/s). The windows are half of that — 15,737 sessions
+~4,400 content tokens/s). The windows are half of that — 15,743 sessions
 chunked — and what they buy is measured in the next section. Scoring: 10 s for
 470 questions × 3 arms × 2 k; **1.3–1.5 ms per search call**, mean, over
 19,825 rows with a filter that admits ~50.

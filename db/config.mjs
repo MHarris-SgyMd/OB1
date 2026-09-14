@@ -244,7 +244,13 @@ export const MAX_WHOLE_TOKENS = 4096;
  */
 export function resolveChunkTokens(raw, model, fallback) {
   const n = raw ? Number(raw) : NaN;
-  const window = KNOWN_MODEL_WINDOW[model];
+  // Exact name first; then the name without its Ollama tag (`granite-embedding:278m`
+  // → `granite-embedding`), because a miss here is not harmless as it is for
+  // KNOWN_MODEL_DIMS: a 512-token model that misses the table keeps 1200-token
+  // windows and has them cut silently. A tag that names a different window is a
+  // different entry (`qwen3-embedding:0.6b`, `:4b`); a base that is not listed
+  // stays unlisted (second review pass).
+  const window = KNOWN_MODEL_WINDOW[model] ?? KNOWN_MODEL_WINDOW[model.replace(/:[^:]*$/, "")];
   if (Number.isFinite(n) && n > 0) return { tokens: n, threshold: n, from: "OB1_CHUNK_TOKENS", window, capped: false };
   if (window === undefined) return { tokens: fallback, threshold: fallback, from: "default", window, capped: false };
   const atRatio = Math.floor((window * fallback) / DEFAULT_MODEL_WINDOW);
