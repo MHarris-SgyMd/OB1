@@ -210,7 +210,8 @@ if (Number(tables) < 3) {
  */
 let agentId: string | null = null;
 let actorName = "consolidate";
-const WRITES = !(STATUS_ONLY || DRY_RUN || LIST !== undefined || STALE_DAYS > 0) || ACCEPT !== undefined || REJECT !== undefined;
+// A run, or a review: both write and are attributed. --status, --dry-run, --list and --stale only read.
+const WRITES = ACCEPT !== undefined || REJECT !== undefined || !(STATUS_ONLY || DRY_RUN || REVIEW_ONLY);
 if (WRITES) {
   const rawKey = process.env.OB1_WORKER_KEY;
   if (rawKey) {

@@ -173,11 +173,11 @@ const sideOf = async (issue: string): Promise<Side | null> => {
 };
 type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
 const replayLines: DumpLine[] = REPLAY ? readFileSync(REPLAY, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine) : [];
-const replayed_ = new Map(replayLines.map((l) => [`${l.older}|${l.newer}`, l]));
+const replayByPair = new Map(replayLines.map((l) => [`${l.older}|${l.newer}`, l]));
 
 const judgeOne = async (older: Side, newer: Side): Promise<Judgement | null> => {
   if (REPLAY) {
-    const l = replayed_.get(`${older.id}|${newer.id}`);
+    const l = replayByPair.get(`${older.id}|${newer.id}`);
     if (!l) return null;
     return { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
   }

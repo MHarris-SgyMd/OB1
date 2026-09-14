@@ -1,5 +1,6 @@
 
 import { normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES } from "./thoughts.ts";
+import { cleanForDisplay } from "./consolidate.ts";
 import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedKind, type EmbeddedCapture } from "./embed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
@@ -756,7 +757,6 @@ function buildServer(principal: Principal): McpServer {
         const day = (d: string) => new Date(d).toLocaleDateString();
         // Thought content and the judge's reason are untrusted text; the same
         // cleaner the CLI renders through (server-portable/consolidate.ts).
-        const { cleanForDisplay } = await import("./consolidate.ts");
         const snip = (c: string) => { const t = cleanForDisplay(c).replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
         const phrase = (v: string) =>
           v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
