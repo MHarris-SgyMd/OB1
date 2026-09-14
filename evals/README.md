@@ -2182,9 +2182,11 @@ by the best 1200-token window, and by the best of both:
 **The whole vector is the signal; the windows are a small complement to it.**
 Under the 4b the whole vector alone scores 88.7% and the shipped windows
 alone 85.5%; together 89.6%. The windows add 0.9 points — four questions in
-470 — for 2.12× the tokens embedded, and every one of those points sits above
-2048 estimated tokens, 1.8 of them above 4096. Under the 0.6b the same shape:
-+1.3 for the windows, 3.6 of it above 4096, nothing at all in 2049–4096.
+470 — for 2.12× the tokens embedded, and every one of those four questions has
+a gold session over 2048 estimated tokens, three of them over 4096, where the
+>4096 slice alone gains 1.8 points (82.6% against 80.8% on its 167). Under the
+0.6b the same shape: +1.3 for the windows, six questions, all with a gold
+session over 4096, where that slice gains 3.6; nothing at all in 2049–4096.
 
 **Window size matters more than coverage.** 4096-token windows over the same
 2,615 long sessions bought nothing under the 4b — 88.7% with them, 88.7%
@@ -2259,6 +2261,13 @@ other limits real.
 * Strict recall counts sessions; a reader model was not run, so whether the
   two or three sessions the shipped windows recover would have changed an
   answer is not known.
+* The 4096 cap is in `chunk.ts`'s estimated tokens, and the estimate is
+  pessimistic only for text with spaces: `words × 1.3` collapses on a script
+  without them and `chars / 4` under-counts CJK by three to five times, so a
+  14,000-character Japanese note estimates at ~3,500 tokens and is now embedded
+  whole under a qwen model at ~12,000 real tokens — no truncation (the window is
+  40,960), dilution only, and unmeasured here (SMD-1314). Before this change it
+  was windowed at 1200 estimated tokens, which under-counted the same way.
 
 ## Related
 

@@ -4973,7 +4973,15 @@ nothing). The qwen models window
 only past 4096, at 1200 a window: under the 4b 88.9% against the shipped 89.6%
 (three questions in 470), 94.9% against 94.9% at k=10, for 61% of the tokens and
 a quarter of the chunk rows — about five hours of a fourteen-hour import. A model
-the table does not know keeps 1200 for both. `OB1_CHUNK_TOKENS` still sets both,
+the table does not know keeps 1200 for both. **Upgrading a store changes nothing
+already written**: a row's 1200-token windows stay (022 keeps them while the
+label vouches for the vector), an edit through `update_thought` regenerates
+them under the rule (none for a 3,000-token thought), and the own-key re-embed
+pass skips rows already at the model — so the chunk table does not shrink until
+a backfill pass, `bun reembed.ts --url $DATABASE_URL --job reembed:<model>@<dim>:window`,
+regenerates every row's windows. A mixed store in the meantime is scored by
+`match_thoughts`' best-of as before; the eval's 2049–4096 row puts the cost of
+windowed distractors beside an unwindowed gold at one question. `OB1_CHUNK_TOKENS` still sets both,
 so the shipped behaviour is one variable away. `chunkContent` takes the threshold
 apart from the window size; `embed.ts` resolves the rule through `config.mjs` so
 the server, `reembed.ts` and preflight cannot disagree about it; preflight's

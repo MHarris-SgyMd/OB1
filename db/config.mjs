@@ -213,7 +213,8 @@ export const DEFAULT_MODEL_WINDOW = 2048;
 /**
  * The longest capture a whole vector alone was measured to hold, in chunk.ts's
  * estimated tokens: the length a derived rule windows above, whatever the
- * window. Measured on LongMemEval-S under both qwen3-embedding models
+ * window. The estimate under-counts scripts without spaces (evals/README.md,
+ * the caveats; SMD-1314), so in real tokens the cap sits higher there. Measured on LongMemEval-S under both qwen3-embedding models
  * (evals/README.md, SMD-1305): with the whole vector alone, strict recall held
  * within half a point of best-of-whole-and-windows for every question whose
  * longest gold session was under 4096 estimated tokens, and fell 1.8 (4b) and
