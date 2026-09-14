@@ -2187,7 +2187,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const list = await consolidate("--list");
   assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /conflict, direction not stated/.test(list.out),
          "--list names both verdicts");
-  assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction newer|older`),
+  assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction <newer|older>`),
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
 
   // The review path, through the worker's flags, audited under the key's name.

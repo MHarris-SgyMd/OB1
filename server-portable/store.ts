@@ -388,8 +388,9 @@ export type SupersessionProposal = {
   reviewNote: string | null;
   /** While accepted: the thought whose supersedes column the acceptance wrote. */
   supersedingId: string | null;
-  older: { id: string; content: string; created_at: string };
-  newer: { id: string; content: string; created_at: string };
+  /** Each thought as it is now; `edited` when its text has changed since the pair was judged (the verdict was about the earlier text). */
+  older: { id: string; content: string; created_at: string; edited: boolean };
+  newer: { id: string; content: string; created_at: string; edited: boolean };
 };
 
 /** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
@@ -407,8 +408,8 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
     reviewedAt: r.reviewed_at == null ? null : iso(r.reviewed_at),
     reviewNote: r.review_note == null ? null : String(r.review_note),
     supersedingId: r.superseding_id == null ? null : String(r.superseding_id),
-    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at) },
-    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at) },
+    older: { id: String(r.older_id), content: String(r.older_content), created_at: iso(r.older_created_at), edited: r.older_edited === true },
+    newer: { id: String(r.newer_id), content: String(r.newer_content), created_at: iso(r.newer_created_at), edited: r.newer_edited === true },
   };
 }
 

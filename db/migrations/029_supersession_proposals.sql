@@ -88,9 +88,13 @@
 --   `ob1.actor` as 009's functions do, locks the superseding row, and writes
 --   `supersedes` in one UPDATE. 025's audit trigger diffs that column, so the
 --   change is recorded with the reviewer as actor exactly as an edit through
---   `update_thought` would be; 001's trigger moves `updated_at`. What this
---   path does NOT do that `update_thought` would: nothing — the column is
---   not part of the fingerprint, the vector or the windows. When
+--   `update_thought` would be; 001's trigger moves `updated_at` — which two
+--   readers take as an edit: a client's `if_unchanged_since` from before the
+--   acceptance is refused STALE_READ, and 021's evidence rule (a row nothing
+--   wrote since the pass) stops vouching for the superseding thought's vector,
+--   as it would after any edit. What this path does NOT do that
+--   `update_thought` would: nothing else — the column is not part of the
+--   fingerprint, the vector or the windows. When
 --   `update_thought` grows a provenance envelope, acceptance should call it
 --   and this function's UPDATE go; that follow-up is SMD-1323.
 --
@@ -105,7 +109,11 @@
 --   value) and no further: a pointer set at capture that the acceptance merely
 --   found, or a later edit that pointed the thought elsewhere, is not this
 --   proposal's to clear. Acceptances are serialised on one transaction-scoped
---   advisory lock, so the cycle walk reads committed pointers.
+--   advisory lock, so the cycle walk reads committed pointers. And the verdict
+--   is about the texts as judged: each proposal records both fingerprints
+--   (016's rule) as it is written, the queue says when either text has changed
+--   since, and accept refuses such a pair (EDITED_SINCE) unless the reviewer,
+--   reading both texts as they are now, passes p_force.
 --
 -- Staleness, the same pass's second output
 --   `stale_entities(older_than)` — per entity, the newest capture among the
@@ -161,6 +169,11 @@ CREATE TABLE IF NOT EXISTS supersession_proposals (
   reason             text,
   -- Cosine between the two whole vectors when the pair was judged.
   similarity         real,
+  -- 016's fingerprint of each text AS JUDGED (NULL when a thought had none to
+  -- hash). The verdict is about those texts; list_supersession_proposals says
+  -- when either has changed since, and accept refuses unless told to.
+  older_fingerprint  text,
+  newer_fingerprint  text,
   -- The pass that judged it: consolidate:<model>@p<prompt version>.
   judge_key          text         NOT NULL CHECK (judge_key <> ''),
   judged_at          timestamptz  NOT NULL DEFAULT now(),
@@ -262,7 +275,9 @@ COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
 -- Inserts a pending row for a conflict; returns its id, or NULL when the pair
 -- already has a row in any state (the second judge of a pair, a re-run over a
 -- cleared claim table). The pair's order is the caller's: older_id captured
--- before newer_id.
+-- before newer_id. Both texts' fingerprints (016's rule) are taken as the row
+-- is written — the worker judged the texts as they are now — so a later edit
+-- is visible to the reviewer.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION record_supersession_proposal(
   p_older_id   uuid,
@@ -286,10 +301,12 @@ BEGIN
   IF p_judge_key IS NULL OR p_judge_key = '' THEN
     RAISE EXCEPTION 'record_supersession_proposal: p_judge_key must name the pass, e.g. consolidate:<model>@p1';
   END IF;
-  INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, similarity, judge_key, canonical_agent_id)
+  INSERT INTO supersession_proposals (older_id, newer_id, verdict, confidence, reason, similarity, judge_key, canonical_agent_id, older_fingerprint, newer_fingerprint)
   VALUES (p_older_id, p_newer_id, p_verdict,
           LEAST(GREATEST(COALESCE(p_confidence, 0), 0), 1),
-          p_reason, p_similarity, p_judge_key, p_agent_id)
+          p_reason, p_similarity, p_judge_key, p_agent_id,
+          (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_older_id),
+          (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_newer_id))
   ON CONFLICT (older_id, newer_id) DO NOTHING
   RETURNING id INTO v_id;
   RETURN v_id;
@@ -307,20 +324,23 @@ COMMENT ON FUNCTION record_supersession_proposal(uuid, uuid, text, numeric, text
 -- 'reject' marks the row and, if the row was accepted, undoes its write while
 -- it still stands. p_direction ('newer' or 'older') is required to accept an
 -- undirected verdict and overrides a directed one. p_actor is the reviewer,
--- set on `ob1.actor` for the audit trigger as 009's functions do.
+-- set on `ob1.actor` for the audit trigger as 009's functions do. p_force
+-- accepts a proposal whose thought has been edited since it was judged.
 --
 -- Returns jsonb: {ok:true, id, status, superseding_id, superseded_id, written}
 -- on accept (written=false when the pointer already held this value);
 -- {ok:true, id, status, cleared} on reject; {ok:false, error, ...} for
--- NOT_FOUND, DIRECTION_REQUIRED, ALREADY_ACCEPTED, ALREADY_SUPERSEDES (with
--- `current`, the third thought the column names) and WOULD_CYCLE.
+-- NOT_FOUND, DIRECTION_REQUIRED, ALREADY_ACCEPTED, EDITED_SINCE (with
+-- older_edited/newer_edited), ALREADY_SUPERSEDES (with `current`, the third
+-- thought the column names) and WOULD_CYCLE.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION review_supersession_proposal(
   p_id        uuid,
   p_decision  text,
   p_note      text  DEFAULT NULL,
   p_direction text  DEFAULT NULL,
-  p_actor     jsonb DEFAULT NULL
+  p_actor     jsonb DEFAULT NULL,
+  p_force     boolean DEFAULT false
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -328,6 +348,8 @@ AS $$
 DECLARE
   r           supersession_proposals%ROWTYPE;
   v_dir       text;
+  v_old_edited boolean;
+  v_new_edited boolean;
   v_sup       uuid;
   v_old       uuid;
   v_current   uuid;
@@ -381,6 +403,19 @@ BEGIN
   ELSE                    v_sup := r.older_id; v_old := r.newer_id;
   END IF;
 
+  -- The verdict was about the texts as judged. Either edited since (016's
+  -- fingerprint differs; an unknown fingerprint counts as unchanged) is
+  -- refused unless the reviewer, shown both texts, says p_force (review
+  -- pass 3). updated_at is not the signal: this function moves it itself.
+  SELECT r.older_fingerprint IS NOT NULL AND r.older_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_old_edited FROM thoughts WHERE id = r.older_id;
+  SELECT r.newer_fingerprint IS NOT NULL AND r.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_new_edited FROM thoughts WHERE id = r.newer_id;
+  IF NOT COALESCE(p_force, false) AND (COALESCE(v_old_edited, false) OR COALESCE(v_new_edited, false)) THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE', 'id', p_id,
+                              'older_edited', COALESCE(v_old_edited, false), 'newer_edited', COALESCE(v_new_edited, false));
+  END IF;
+
   -- Acceptances are serialised on one advisory lock (transaction-scoped, as
   -- 018's): the cycle walk below reads other rows' pointers, and two accepts
   -- running at once — A over B in one, B over A in the other — would each
@@ -426,8 +461,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb) IS
-  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes: accept writes the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought or one that would close a loop; reject marks the row and undoes an accepted write while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029.';
+COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb, boolean) IS
+  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes: accept writes the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop, or a pair whose text changed since it was judged unless p_force; reject marks the row and undoes an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029.';
 
 -- ---------------------------------------------------------------------------
 -- list_supersession_proposals — the review queue, with both thoughts
@@ -455,7 +490,9 @@ RETURNS TABLE (
   older_created_at timestamptz,
   newer_id         uuid,
   newer_content    text,
-  newer_created_at timestamptz
+  newer_created_at timestamptz,
+  older_edited     boolean,
+  newer_edited     boolean
 )
 LANGUAGE sql
 STABLE
@@ -463,7 +500,9 @@ AS $$
   SELECT p.id, p.status, p.verdict, p.confidence, p.reason, p.similarity, p.judge_key,
          p.judged_at, p.reviewed_at, p.review_note, p.superseding_id,
          o.id, o.content, o.created_at,
-         n.id, n.content, n.created_at
+         n.id, n.content, n.created_at,
+         p.older_fingerprint IS NOT NULL AND p.older_fingerprint IS DISTINCT FROM content_fingerprint_of(o.content),
+         p.newer_fingerprint IS NOT NULL AND p.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(n.content)
     FROM supersession_proposals p
     JOIN thoughts o ON o.id = p.older_id
     JOIN thoughts n ON n.id = p.newer_id
@@ -473,7 +512,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION list_supersession_proposals(text, int) IS
-  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time. At most 200. Migration 029.';
+  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time as they are NOW, and whether either text has changed since the pair was judged. At most 200. Migration 029.';
 
 -- ---------------------------------------------------------------------------
 -- consolidation_pool — the thoughts a pass under p_work_type would judge

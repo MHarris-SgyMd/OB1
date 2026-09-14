@@ -1,5 +1,5 @@
 {
-  "note": "Hand labels for eval-consolidate.ts (SMD-1294): issue ids from the Linear corpus and a verdict, no text. `pairs` were drawn from every cross-reference in the corpus whose surrounding sentence carries supersession language (supersede, replace, revert, no longer, obsolete, instead of, duplicate, in favour of, ...), 98 unique pairs, each read and labelled: `older` was captured before `newer`; label conflict|agree|unrelated; for a conflict, `supersedes` is which is current as the TEXTS say it (newer|older|unknown). A parent closed because its children landed, a follow-up, a split-out half, a prerequisite are `agree`; a reference for an analogy or an example is `unrelated`. `proposals` grade what a full pass proposed (true = a real supersession or contradiction), filled from the review file eval-consolidate.ts --full writes.",
+  "note": "Hand labels for eval-consolidate.ts (SMD-1294): issue ids from the Linear corpus and a verdict, and NOTHING of the text \u2014 the corpus is internal and stays out of git (evals/README.md), so the reasons behind each label live with the review file the eval writes, not here. `pairs` were drawn from every cross-reference in the corpus whose surrounding sentence carries supersession language (supersede, replace, revert, no longer, obsolete, instead of, duplicate, in favour of, ...), 98 unique pairs, each read and labelled: `older` was captured before `newer`; label conflict|agree|unrelated; for a conflict, `supersedes` is which is current as the TEXTS say it (newer|older|unknown). A parent closed because its children landed, a follow-up, a split-out half, a prerequisite are `agree`; a reference for an analogy or an example is `unrelated`. `proposals` grade what a full pass proposed (true = a real supersession or contradiction), filled from the review file eval-consolidate.ts --full writes; two of the six true ones were borderline.",
   "pairs": [
     {
       "older": "SMD-18",
@@ -70,8 +70,7 @@
       "older": "SMD-734",
       "newer": "SMD-905",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "734 recommends generating the summary anonymously (A); 905 records the decision to generate it only on post-signup form completion, and 734 marks itself superseded"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-735",
@@ -82,22 +81,19 @@
       "older": "SMD-735",
       "newer": "SMD-745",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "735 proposes the eight-node front_door set; 745 re-points the policy value to one with no required nodes because that plan was superseded"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-735",
       "newer": "SMD-901",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "735 keeps the safety screen second in the anonymous conversation; 901 lifts the safety floor and moves every clinical question to the post-signup form"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-735",
       "newer": "SMD-904",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "735 places the direct suicide screen in the anonymous conversation; 904 records it moved to the post-signup form with a crisis link in its place"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-735",
@@ -188,15 +184,13 @@
       "older": "SMD-901",
       "newer": "SMD-961",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "901's comment says volunteered facts are still recorded under the welcome policy; 961 says that cannot stand with SMD-900 and decides otherwise"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-901",
       "newer": "SMD-972",
       "label": "conflict",
-      "supersedes": "newer",
-      "reason": "901 shipped a red-risk hold on welcome runs; 972 decides welcome runs never hold or assess risk, and 901 marks the line superseded"
+      "supersedes": "newer"
     },
     {
       "older": "SMD-856",
@@ -508,80 +502,67 @@
     {
       "older": "SMD-600",
       "newer": "SMD-627",
-      "true": true,
-      "reason": "600 makes the root package.json the source of truth for tool versions; 627 replaces those declarations with Dependabot-managed manifest pins read from elsewhere: the plan that replaced the plan"
+      "true": true
     },
     {
       "older": "SMD-243",
       "newer": "SMD-734",
-      "true": true,
-      "reason": "243 specifies a pre-account Medical History Summary; 734 records the decision that it is generated only after signup"
+      "true": true
     },
     {
       "older": "SMD-226",
       "newer": "SMD-734",
-      "true": false,
-      "reason": "226 is about the summary's structure and tone, whenever it is generated; nothing in it is contradicted by moving generation after signup"
+      "true": false
     },
     {
       "older": "SMD-493",
       "newer": "SMD-742",
-      "true": false,
-      "reason": "493 shipped a split of two consent gates; 742 keeps a different, funnel-driven redesign out of launch scope; two subjects sharing the words consent gate"
+      "true": false
     },
     {
       "older": "SMD-440",
       "newer": "SMD-523",
-      "true": true,
-      "reason": "440's gate is satisfied only by a future appointment; 523 changes the rule so an occurred past appointment satisfies it too: a later state of the same rule (borderline: a fix, but it does contradict 440's acceptance)"
+      "true": true
     },
     {
       "older": "SMD-734",
       "newer": "SMD-957",
-      "true": false,
-      "reason": "957 implements the copy the closed decision in 734 calls for; the judge read 734's recommendation (A) and not its closure (B)"
+      "true": false
     },
     {
       "older": "SMD-742",
       "newer": "SMD-867",
-      "true": false,
-      "reason": "742 is the consent gate, 867 the conversion gate card: two gates, no shared claim"
+      "true": false
     },
     {
       "older": "SMD-333",
       "newer": "SMD-363",
-      "true": true,
-      "reason": "333 bypasses billing under the public-intake flag; 363 says that flag controls public intake only and a dedicated flag bypasses billing: a reversal of 333's rule"
+      "true": true
     },
     {
       "older": "SMD-566",
       "newer": "SMD-570",
-      "true": false,
-      "reason": "development and production halves of one retirement; siblings, not a contradiction"
+      "true": false
     },
     {
       "older": "SMD-27",
       "newer": "SMD-103",
-      "true": false,
-      "reason": "27 moved social sign-in out of the parent; 103 says it stays out until confirmed: agreement"
+      "true": false
     },
     {
       "older": "SMD-36",
       "newer": "SMD-103",
-      "true": true,
-      "reason": "36 lists social sign-in enablement in the pilot's scope; 103 takes it out of the active MVP path pending a decision: a scope and its revision (borderline: 36 says 'where supported')"
+      "true": true
     },
     {
       "older": "SMD-103",
       "newer": "SMD-470",
-      "true": true,
-      "reason": "103 holds social sign-in out of scope pending a decision; 470 implements it: the decision was taken and 103's hold is no longer current"
+      "true": true
     },
     {
       "older": "SMD-1091",
       "newer": "SMD-1215",
-      "true": false,
-      "reason": "1091 is the onboarding checklist provider, 1215 widens a scheduling enum the provider reads from; both mention blocked_reason and disagree on nothing"
+      "true": false
     }
   ]
 }

@@ -2420,7 +2420,7 @@ candidate rule would do with it. `qwen2.5:7b`, temperature 0, 3.0 s per pair:
 | reach | 1 of the 6 labelled conflicts is a candidate at k=3 / 0.6; 3 of the 6 pairs' issues are among the 51 unextracted |
 
 The misses are instructive. Two long decision documents about one policy
-(SMD-735 and SMD-901, the anonymous required-node set) came back `agree` at
+(SMD-735 and SMD-901) came back `agree` at
 0.9 — "both discuss the anonymous required-node policy and its changes" — and
 two others `unrelated`: the model reads the shared subject and not the
 reversal buried in the second document's scope list. The false flags are the

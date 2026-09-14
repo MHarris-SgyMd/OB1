@@ -754,18 +754,24 @@ function buildServer(principal: Principal): McpServer {
           return { content: [{ type: "text" as const, text: `No ${status === "all" ? "" : status + " "}supersession proposals. The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by).` }] };
         }
         const day = (d: string) => new Date(d).toLocaleDateString();
-        const snip = (c: string) => { const t = c.replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
+        // Thought content and the judge's reason are untrusted text; the same
+        // cleaner the CLI renders through (server-portable/consolidate.ts).
+        const { cleanForDisplay } = await import("./consolidate.ts");
+        const snip = (c: string) => { const t = cleanForDisplay(c).replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 200) + "…" : t; };
         const phrase = (v: string) =>
           v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
           : v === "older_supersedes_newer" ? "the OLDER thought supersedes the newer"
-          : "conflict, direction not stated — accepting needs --direction newer|older";
+          : "conflict, direction not stated — accepting needs --direction newer or older";
         const results = data.map((p, i) => {
+          const edited = p.older.edited || p.newer.edited;
+          const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
           const review = p.status === "pending"
-            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}   reject: … --reject ${p.id}`
-            : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${p.reviewNote}` : ""}`;
-          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.reason ? `\n   ${p.reason}` : ""}` +
-            `\n   newer [${day(p.newer.created_at)}]: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
-            `\n   older [${day(p.older.created_at)}]: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
+            ? `   accept: cd db && bun consolidate.ts --url $DATABASE_URL --accept ${p.id}${dir}${edited ? " --force" : ""}   reject: … --reject ${p.id}` +
+              (edited ? "\n   (a thought was edited after the pair was judged, so the verdict is about an earlier text; --force accepts it anyway)" : "")
+            : `   ${p.status}${p.reviewedAt ? ` on ${day(p.reviewedAt)}` : ""}${p.reviewNote ? `: ${cleanForDisplay(p.reviewNote)}` : ""}`;
+          return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.reason ? `\n   ${cleanForDisplay(p.reason)}` : ""}` +
+            `\n   newer [${day(p.newer.created_at)}]${p.newer.edited ? " (edited since judged)" : ""}: ${snip(p.newer.content)}\n      ID: ${p.newer.id}` +
+            `\n   older [${day(p.older.created_at)}]${p.older.edited ? " (edited since judged)" : ""}: ${snip(p.older.content)}\n      ID: ${p.older.id}` +
             `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
         });
         return {

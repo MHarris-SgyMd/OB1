@@ -87,7 +87,7 @@ const FUNCTIONS = [
   // 029 (SMD-1294)
   "consolidation_candidates(uuid, int, float)",
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid)",
-  "review_supersession_proposal(uuid, text, text, text, jsonb)",
+  "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)",
   "list_supersession_proposals(text, int)",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",

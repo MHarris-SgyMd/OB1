@@ -2661,8 +2661,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const EXTRACT = "extract:stub@p1";
   const cols = (await db.query<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
-  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
-    `supersession_proposals has the fifteen columns, in order (${cols.join(",")})`);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
+    `supersession_proposals has the seventeen columns, in order (${cols.join(",")})`);
   for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
@@ -2759,10 +2759,10 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
 
   // The review path. accept writes supersedes on the NEWER thought — the
   // verdict's direction — through the audit trigger with the reviewer as actor.
-  const review = async (id: string, decision: string, extra: { note?: string; direction?: string; actor?: unknown } = {}) =>
+  const review = async (id: string, decision: string, extra: { note?: string; direction?: string; actor?: unknown; force?: boolean } = {}) =>
     (await db.query<{ r: Record<string, unknown> }>(
-      `SELECT review_supersession_proposal($1::uuid, $2, $3, $4, $5::jsonb) AS r`,
-      [id, decision, extra.note ?? null, extra.direction ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor)])).rows[0].r;
+      `SELECT review_supersession_proposal($1::uuid, $2, $3, $4, $5::jsonb, $6::boolean) AS r`,
+      [id, decision, extra.note ?? null, extra.direction ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor), extra.force ?? false])).rows[0].r;
   const auditBefore = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const acc = await review(pid, "accept", { note: "confirmed in the June minutes", actor: { name: "reviewer", source: "test" } });
   assert(acc.ok === true && acc.status === "accepted" && acc.superseding_id === reversal && acc.superseded_id === decision && acc.written === true,
@@ -2848,6 +2848,26 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const chk = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c'`)).rows[0].c;
   assert(chk === 9, `the table carries nine CHECK constraints, the state machine's among them (${chk})`);
 
+  // The verdict is about the texts as judged. Edit the newer thought after
+  // the proposal: the queue says so, accept refuses EDITED_SINCE, --force
+  // accepts (review pass 3). The fingerprints were taken at judging.
+  const edOld = await seed("edited: the first plan", 7, 8); const edNew = await seed("edited: the second plan, replacing the first", 7, 0);
+  await mention(edOld, ["plans"]); await mention(edNew, ["plans"]);
+  const edPid = await propose(edOld, edNew, "newer_supersedes_older");
+  const fps = (await db.query<{ o: string | null; n: string | null }>(`SELECT older_fingerprint AS o, newer_fingerprint AS n FROM supersession_proposals WHERE id = $1`, [edPid])).rows[0];
+  assert(fps.o === (await fpOf("edited: the first plan")) && fps.n === (await fpOf("edited: the second plan, replacing the first")), "a proposal records both texts' fingerprints as judged");
+  const [beforeEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [edPid])).rows;
+  assert(beforeEdit.older_edited === false && beforeEdit.newer_edited === false, "…and the queue says neither has changed");
+  await db.query(`SELECT update_thought($1::uuid, $2, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`, [edNew, "edited: the second plan, withdrawn; the first stands"]);
+  const [afterEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [edPid])).rows;
+  assert(afterEdit.older_edited === false && afterEdit.newer_edited === true, "after an edit through update_thought the queue flags the newer thought as edited since judged");
+  const edRefused = await review(edPid!, "accept");
+  assert(edRefused.ok === false && edRefused.error === "EDITED_SINCE" && edRefused.newer_edited === true && edRefused.older_edited === false, `accepting a pair whose text moved is refused, naming which side (${JSON.stringify(edRefused)})`);
+  assert((await supersedesOf(edNew)) === null, "…and nothing was written");
+  const edForced = await review(edPid!, "accept", { force: true });
+  assert(edForced.ok === true && (await supersedesOf(edNew)) === edOld, "…and p_force accepts it, the reviewer having read both texts as they are now");
+  await review(edPid!, "reject");
+
   const missing = await review("00000000-0000-4000-8000-000000000000", "accept");
   assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown proposal id is NOT_FOUND");
   let badDecision = "";
@@ -2860,7 +2880,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const pendingList = await list("pending");
   assert(pendingList.length === 1 && pendingList[0].id === loopPid, `one proposal is pending — the loop one (${pendingList.length})`);
   const all = await list(null);
-  assert(all.length === 4 && Number(all[0].confidence) >= Number(all[1].confidence) && Number(all[2].confidence) >= Number(all[3].confidence),
+  assert(all.length === 5 && all.every((r, i) => i === 0 || Number(all[i - 1].confidence) >= Number(r.confidence)),
     `NULL lists every state, most confident first (${all.map((r) => `${r.status}@${r.confidence}`).join(", ")})`);
   const shown = all.find((r) => r.id === pid)!;
   assert(shown.older_id === decision && shown.newer_id === reversal && /bill monthly/.test(String(shown.older_content)) && /annually/.test(String(shown.newer_content)) && shown.status === "rejected",

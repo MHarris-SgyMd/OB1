@@ -23,11 +23,11 @@
  *   bun db/consolidate.ts --url … --retry-failed          # failed rows back into the pool first
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|all]   # the queue, with both thoughts
- *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"]
+ *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --timeout SECONDS (120, per model call)
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
  *
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
@@ -86,7 +86,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import {
-  consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
+  cleanForDisplay, consolidateKey, judgePair, proposalVerdict, DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY,
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
@@ -155,6 +155,7 @@ const ACCEPT = flag("accept");
 const REJECT = flag("reject");
 const STALE_DAYS = has("stale") ? numberFlag("stale", 90, 1, { optional: true }) : 0;
 const DIRECTION = flag("direction");
+const FORCE = has("force");
 const NOTE = flag("note");
 if (LIST !== undefined && !["pending", "accepted", "rejected", "all"].includes(LIST)) {
   console.error(`--list takes pending, accepted, rejected or all, got "${LIST}"`);
@@ -172,6 +173,10 @@ if (ACCEPT && REJECT) {
 }
 if (DIRECTION !== undefined && (!ACCEPT || !["newer", "older"].includes(DIRECTION))) {
   console.error("--direction takes newer or older, and only with --accept.");
+  process.exit(2);
+}
+if (FORCE && !ACCEPT) {
+  console.error("--force goes with --accept: it accepts a proposal whose thought was edited after it was judged.");
   process.exit(2);
 }
 const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
@@ -250,8 +255,11 @@ type Listed = {
   id: string; status: string; verdict: string; confidence: string; reason: string | null; similarity: number | null;
   judge_key: string; judged_at: string; reviewed_at: string | null; review_note: string | null; superseding_id: string | null;
   older_id: string; older_content: string; older_created_at: string; newer_id: string; newer_content: string; newer_created_at: string;
+  older_edited: boolean; newer_edited: boolean;
 };
-const snippet = (s: string, n = 160) => s.replace(/\s+/g, " ").trim().slice(0, n) + (s.replace(/\s+/g, " ").trim().length > n ? "…" : "");
+// Thought content and entity names are untrusted; cleanForDisplay strips what
+// would move the cursor or rewrite the ID: line a reviewer is about to paste.
+const snippet = (s: string, n = 160) => { const t = cleanForDisplay(s).replace(/\s+/g, " ").trim(); return t.slice(0, n) + (t.length > n ? "…" : ""); };
 const day = (d: string) => new Date(d).toISOString().slice(0, 10);
 const verdictPhrase = (v: string) =>
   v === "newer_supersedes_older" ? "the NEWER thought supersedes the older"
@@ -267,12 +275,16 @@ async function printList(status: string | undefined, limit = 50): Promise<number
   console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
   rows.forEach((p, i) => {
     console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${p.review_note}` : ""})` : ""}`);
-    if (p.reason) console.log(`     ${p.reason}`);
-    console.log(`     newer [${day(p.newer_created_at)}] ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
-    console.log(`     older [${day(p.older_created_at)}] ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
+    if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
+    console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
+    console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
     console.log(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
     if (p.status === "pending") {
-      console.log(`     --accept ${p.id}${p.verdict === "conflict_undirected" ? " --direction newer|older" : ""}    --reject ${p.id}`);
+      // Commands as they run: a placeholder the shell cannot parse rather
+      // than `newer|older`, which it would read as a pipe (review pass 3).
+      const dir = p.verdict === "conflict_undirected" ? " --direction <newer|older>" : "";
+      const force = p.older_edited || p.newer_edited ? " --force" : "";
+      console.log(`     --accept ${p.id}${dir}${force}    --reject ${p.id}`);
     }
     console.log("");
   });
@@ -287,7 +299,7 @@ async function printStale(days: number): Promise<void> {
     return;
   }
   console.log(`  stale: ${rows.length} entit${rows.length === 1 ? "y" : "ies"} nothing has mentioned in ${days} days (oldest first; reported, not acted on):`);
-  for (const r of rows) console.log(`    ${r.entity_type.padEnd(12)} ${r.name.slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
+  for (const r of rows) console.log(`    ${r.entity_type.padEnd(12)} ${cleanForDisplay(r.name).slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
 }
 
 if (REVIEW_ONLY) {
@@ -297,8 +309,8 @@ if (REVIEW_ONLY) {
     const id = (ACCEPT ?? REJECT)!;
     const actor = { name: actorName, source: "consolidate", session: JOB, ...(agentId ? { agent_id: agentId } : {}) };
     const [{ r }] = await sql`
-      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${actor}::jsonb) AS r`;
-    const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string };
+      SELECT review_supersession_proposal(${id}::uuid, ${decision}::text, ${NOTE ?? null}::text, ${DIRECTION ?? null}::text, ${actor}::jsonb, ${FORCE}::boolean) AS r`;
+    const res = r as { ok: boolean; error?: string; status?: string; superseding_id?: string; superseded_id?: string; written?: boolean; cleared?: boolean; current?: string; verdict?: string; older_edited?: boolean; newer_edited?: boolean };
     if (res.ok) {
       if (decision === "accept") {
         console.log(`  accepted ${id}: ${res.superseding_id} now supersedes ${res.superseded_id}${res.written ? "" : " (the pointer already held that value)"}; the change is in thought_audit under ${actorName}`);
@@ -311,6 +323,7 @@ if (REVIEW_ONLY) {
         NOT_FOUND: "no such proposal (or the thought it names is gone)",
         DIRECTION_REQUIRED: `the judge did not say which is current (${res.verdict}); pass --direction newer or --direction older`,
         ALREADY_ACCEPTED: `already accepted (${res.superseding_id} carries the pointer); --reject it first to undo`,
+        EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,
         ALREADY_SUPERSEDES: `${res.superseding_id} already supersedes a third thought, ${res.current}; the column holds one predecessor, so decide which — edit that thought, or --reject this`,
         WOULD_CYCLE: `writing this pointer would close a loop through ${res.superseded_id}; refused`,
       };
@@ -646,6 +659,7 @@ const stop = () => {
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
+let firstPass = true;
 async function pass(): Promise<Counts> {
   // The pool rule, every pass, from migration 029's consolidation_pool (one
   // definition for this, --status and preflight). No trigger feeds it (see
@@ -655,6 +669,8 @@ async function pass(): Promise<Counts> {
   const added = Number((await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(SELECT consolidation_pool(${JOB}))) AS added`)[0].added);
   const before = await counts();
   if (added > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
+  if (firstPass && before.thoughts === 0) console.log("  no thought has extracted entities and a vector — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share" + (FOLLOW ? ", and will poll until some do" : ""));
+  firstPass = false;
   total += before.pending + before.claimed;
   if (before.pending + before.claimed === 0) return before;
   if (!FOLLOW || added > 0 || before.pending > 0) printCounts(before, "before");

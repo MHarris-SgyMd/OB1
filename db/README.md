@@ -640,7 +640,8 @@ bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "�
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
-#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (120, per model call)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
+bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
 ```
 
 **The cost, stated up front.** Up to `--k` calls to the metadata model per
@@ -665,6 +666,14 @@ thought (the column holds one predecessor; which is the reviewer's call), or a
 pointer that would close a loop. `--reject` marks the row and, if it had been
 accepted, clears the pointer while it still holds this proposal's value. A
 decided pair is never proposed again, whatever happens to the claim table.
+The verdict is about the texts as judged: each proposal records both
+fingerprints when it is written, `--list` and the tool mark a thought edited
+since, and `--accept` refuses such a pair unless `--force` says the reviewer
+has read both texts as they are now. Accepting moves the superseding thought's
+`updated_at` (001's trigger fires on any column), which two readers take as an
+edit: a client's `if_unchanged_since` from before the acceptance is refused,
+and 021's evidence rule stops vouching for that thought's vector, as after any
+edit.
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
 `MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is
