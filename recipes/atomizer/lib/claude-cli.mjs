@@ -43,10 +43,13 @@ export function buildCleanEnv() {
  */
 export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null) {
   return new Promise((resolve, reject) => {
+    // No shell (SMD-1251): args is an argv array and the prompt travels on
+    // stdin, so nothing here is interpreted. A shell would read metacharacters
+    // in CLAUDE_CLI_PATH. On Windows the path must be the real executable —
+    // Node refuses to spawn an npm `.cmd` shim without a shell (EINVAL).
     const child = spawn(args[0], args.slice(1), {
       stdio: [stdinData ? "pipe" : "ignore", "pipe", "pipe"],
       env,
-      shell: true,
     });
 
     let stdout = "";

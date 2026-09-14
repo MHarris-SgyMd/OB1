@@ -196,7 +196,7 @@ Reply YES to apply or NO to skip.
 
 ## Weather
 
-During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key):
+During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key). Run the command exactly as written below, with `-s` and the URL in double quotes — the scoped permission rule in README Step 6 matches this exact prefix, and a rephrased command pauses the loop on a permission prompt:
 
 ```bash
 curl -s "https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto"

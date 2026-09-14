@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty numbered changes on top of the pin. Seven fix defects found in an
+Fifty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–50 are the numbered `###` sections** further down, which is
+sections. Changes **18–51 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -5001,6 +5001,84 @@ green.
 Upstream status: **not applicable** — the windows are the fork's own (change 007
 and after). **Unfiled** upstream.
 
+### 51. Two vendored recipes stop handing untrusted content a shell — `gmail-smart-pull`'s Codex branch is deleted as upstream deleted `atomizer`'s, `life-engine`'s allowlist is scoped, and a standing check holds the line (SMD-1251)
+
+Both lived in this tree at the pin; both would have carried our name the first
+time anyone ran them.
+
+**`recipes/gmail-smart-pull/scripts/lib/atomize-text.mjs`** spawned the Codex
+CLI over Gmail message bodies — attacker-supplied text by definition. Two
+problems stacked. Both CLI spawns used `shell: true` with the binary path taken
+from an environment variable, an injection surface independent of anything the
+model does. And `GMAIL_ATOMIZE_CODEX_BYPASS=1` appended Codex's
+sandbox-bypass flag: one environment variable turned email-body-driven model
+output into unsandboxed local execution. The comment above it was careful — the
+flag was "deliberately not passed by default" — and the result was a
+prompt-injection → local-code-execution primitive one `export` away. The
+decisive fact: **upstream had already removed this exact path from the sibling
+recipe.** `recipes/atomizer`'s README and module header both document that the
+identical `codex` provider was deleted "because the LLM is fed arbitrary
+user-controlled memory/email text". Upstream fixed one copy and missed the
+other; we inherited the one they missed.
+
+The fix follows the precedent: the `codex` provider is **deleted** — the
+function, its nested-session guard, its dispatch branch and its entry in the
+known-provider set — so `--atomize-provider=codex` is now "unknown provider",
+and the recipe's own header and README say why in the words the atomizer used.
+The remaining `claude-cli` spawn drops `shell: true`: it was already an argv
+array with the prompt on stdin, so nothing on the command line is interpreted
+now, and the path from `CLAUDE_CLI_PATH` is executed as given. The one cost is
+said rather than hidden: without a shell, Node refuses to run an npm `.cmd`
+shim, so on Windows `CLAUDE_CLI_PATH` must name the real `claude` executable —
+the module's spawn-error message says so when it sees `EINVAL` on `win32`, and
+the README's troubleshooting has the entry. `recipes/atomizer/lib/claude-cli.mjs`
+had the same `shell: true` on the same shape of spawn and gets the same
+one-line fix, so the ticket's verify grep is clean rather than carrying an
+exception for the sibling.
+
+**`recipes/life-engine/README.md`** recommended a `.claude/settings.json` that
+allowed `Bash(*)`, offered `--dangerously-skip-permissions` as a testing option
+in a table and a shell line, and defended the wildcard with: scoped patterns
+"are fragile because the LLM may vary its exact command syntax", and "Rule 11
+(prompt injection guard) prevents dangerous Bash execution from external
+triggers". That defends a shell allowlist with a prompt rule addressed to the
+model being injected — and Life Engine ingests Telegram or Discord messages, a
+weather API response and calendar events on every cycle. The section is
+rewritten: the skill runs exactly two shell commands, so the allowlist carries
+exactly two scoped rules, `Bash(date:*)` and
+`Bash(curl -s "https://api.open-meteo.com/v1/forecast:*)`, in the
+`Bash(prefix:*)` form Claude Code matches; the skill file now tells the model to
+run the `curl` line exactly as written, since the prefix rule is what the
+"fragility" argument was really about; the callout says **what actually breaks**
+(a rephrased command pauses the loop on a prompt — add the variant you saw, do
+not widen); and the skip-permissions option is gone from the table, the shell
+line and the later pointer. The `--allowedTools` form is rewritten to pass each
+rule as its own argument, since the `curl` rule carries double quotes.
+
+**The general rule, written down.** The community tree is vendored from
+upstream wholesale, so we ship its worst advice with its best. The decision
+this ticket asked for is taken as: **audit once, hold the delta, and let a
+standing check carry the audit** — "Vendored content" above, beside the rebase
+procedure it governs. `scripts/check-fork-consistency.mjs` gains check 6: every
+`.mjs/.js/.ts/.md/.json/.sh/.toml/.yaml` file under the seven contribution
+directories is scanned for the two bypass flags, a wildcard `Bash` allow and a
+`shell: true` spawn; a hit fails CI with the file, the line and the rule. Two
+reviewed exceptions, each with its reason in the source: the atomizer's README
+warning and module header, which name the deleted flag in order to say it was
+deleted. An exception that no longer matches anything is itself a violation, so
+the list shrinks when the prose it excuses is rewritten. Proven on a throwaway
+probe file carrying all four strings (four hits, each named), then the tree:
+118 contributions, no violations. The new prose in this fork names none of the
+strings literally — "a wildcard `Bash` allow", "the sandbox-bypass flag" — so it
+passes its own check without an exception.
+
+Three `metadata.json` files take a patch version and today's date
+(`gmail-smart-pull` 1.0.1, `atomizer` 1.0.1, `life-engine` 1.1.1); authorship
+is unchanged, the content is upstream's with a fork delta. Upstream status:
+**contributable in principle** — these are recipe files, not the core server —
+but issue #482 reports the upstream gate failing every fork-originated PR; the
+atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -5068,6 +5146,27 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 ```
 
 Then update the pin table at the top of this file.
+
+### Vendored content: audit once, hold the delta
+
+Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
+`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+vendored wholesale at the pin. That means we ship its worst advice with its
+best, under this repository's name, in a repo whose stated differentiator is
+that the core is tested and the auth path is hardened. The rule (SMD-1251,
+change 51): **we audit the tree once and hold the delta**, and a standing check
+carries the audit so a rebase cannot quietly undo it. Today the audited rule is
+shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on a
+sandbox-bypass or skip-permissions flag, a wildcard `Bash` allow, or a
+`shell: true` spawn anywhere in those seven directories, with a reviewed
+exception list for prose that names a flag in order to say it was removed. A
+rebase that brings a new hit fails CI, and the choice is the same as it was at
+the pin: fix the vendored file and record the delta here, or list the exception
+with its reason. Three sibling tickets hold the rest of the standard —
+SMD-1250 (vendored SQL that redefines core functions), SMD-1252 (vendored
+extensions authenticating with a plaintext key compare) and SMD-1228
+(integrations writing around `update_thought`) — and each should land as a
+fix plus a check, in the same shape.
 
 ### Landing a rebase on `main`, which is protected
 

@@ -14,6 +14,8 @@
  *   3. relative links in contribution READMEs resolve
  *   4. requires_primitives / requires_skills point at directories that exist
  *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
+ *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
+ *      or skip-permissions flag, no wildcard Bash allow, no shell spawn
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
@@ -145,13 +147,13 @@ function checkDeps(meta, { rel }) {
 
 // ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
 
-function walk(dir, out = []) {
+function walk(dir, out = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
     if (name === ".git" || name === "node_modules") continue;
     const p = join(dir, name);
     const s = statSync(p);
-    if (s.isDirectory()) walk(p, out);
-    else if (/\.(sql|md)$/.test(name)) out.push(p);
+    if (s.isDirectory()) walk(p, out, match);
+    else if (match.test(name)) out.push(p);
   }
   return out;
 }
@@ -170,6 +172,63 @@ function checkSqlGuards() {
   }
 }
 
+// ── 6: shipped content never hands untrusted input a shell ───────────────────
+//
+// SMD-1251. Two vendored recipes did. `gmail-smart-pull` kept a `codex exec`
+// branch over Gmail message bodies that one environment variable turned into a
+// sandbox-bypass run — upstream had already deleted the identical branch from
+// `atomizer` and missed this copy — and its CLI spawns used `shell: true` with
+// the binary path from an environment variable. `life-engine`'s recommended
+// settings.json allowed `Bash(*)` beside a skip-permissions launch, defended by
+// a prompt rule addressed to the model being injected. Both were fixed on that
+// ticket; this is what keeps the next rebase from bringing them back.
+//
+// The rule this enforces, written down here because the tree is vendored from
+// upstream wholesale (FORK.md, "Vendored content"): we audit once and hold the
+// delta, and a standing check carries the audit. Content that ships under this
+// repo's name does not run an agent with its sandbox off, does not recommend a
+// wildcard shell allow, and does not spawn a CLI through a shell. A file that
+// must name one of these strings in order to say it was removed is listed as
+// an exception, with the reason, so the exception is reviewed rather than
+// silent.
+const SHELL_HAZARDS = [
+  { re: /--dangerously-bypass-approvals-and-sandbox/, what: "Codex's sandbox-bypass flag" },
+  { re: /--dangerously-skip-permissions/, what: "Claude Code's skip-permissions flag" },
+  { re: /Bash\(\*\)/, what: "a wildcard Bash allow" },
+  { re: /\bshell:\s*true\b/, what: "a shell spawn (spawn an argv array without a shell)" },
+];
+const SHELL_HAZARD_EXCEPTIONS = new Map([
+  // Prose that names the deleted flag in order to say it was deleted.
+  ["recipes/atomizer/README.md", "the warning that documents the codex provider's removal"],
+  ["recipes/atomizer/lib/atomize-text.mjs", "the header note that documents the same removal"],
+]);
+const SHELL_HAZARD_FILES = /\.(mjs|cjs|js|ts|tsx|md|json|sh|toml|ya?ml)$/;
+
+function checkShellHazards() {
+  for (const cat of CATEGORIES) {
+    const base = join(ROOT, cat);
+    if (!existsSync(base)) continue;
+    for (const file of walk(base, [], SHELL_HAZARD_FILES)) {
+      const rel = file.slice(ROOT.length + 1);
+      if (SHELL_HAZARD_EXCEPTIONS.has(rel)) continue;
+      readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+        for (const { re, what } of SHELL_HAZARDS) {
+          if (re.test(line)) {
+            fail(`${rel}:${i + 1}`, `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`);
+          }
+        }
+      });
+    }
+  }
+  // An exception that no longer matches anything is a stale exception: say so,
+  // so the list shrinks when the prose it excuses is rewritten.
+  for (const [rel, why] of SHELL_HAZARD_EXCEPTIONS) {
+    const file = join(ROOT, rel);
+    const hit = existsSync(file) && SHELL_HAZARDS.some(({ re }) => re.test(readFileSync(file, "utf8")));
+    if (!hit) fail(rel, `listed as a shell-hazard exception (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`);
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -179,6 +238,7 @@ for (const d of dirs) {
   checkDeps(meta, d);
 }
 checkSqlGuards();
+checkShellHazards();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

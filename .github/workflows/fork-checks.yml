@@ -68,7 +68,7 @@ jobs:
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there.
-      - name: Check metadata, links, dependencies and SQL guards
+      - name: Check metadata, links, dependencies, SQL guards and shell hazards
         run: node scripts/check-fork-consistency.mjs
 
   deno-check:

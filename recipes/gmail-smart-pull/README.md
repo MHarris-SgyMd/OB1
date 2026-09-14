@@ -158,7 +158,7 @@ The pack file is the handoff. Your ingest pipeline (whatever it is — a `supaba
 | `--override-labels=LABEL1,LABEL2` | `STARRED,IMPORTANT` | Labels that bypass the engagement filter |
 | `--no-atomize` | off | Skip LLM atomization entirely |
 | `--atomize-min-words=N` | `150` | Only atomize messages >= N words |
-| `--atomize-provider=P` | `anthropic` | `anthropic` \| `openrouter` \| `claude-cli` \| `codex` |
+| `--atomize-provider=P` | `anthropic` | `anthropic` \| `openrouter` \| `claude-cli` |
 | `--skip-contacts-refresh` | off | Silence the "contacts cache missing/stale" warning |
 
 ## Sensitivity routing
@@ -250,7 +250,10 @@ Writing the upsert job itself is out of scope for this recipe — the shape of a
 
 Long emails often bundle several distinct ideas (decisions, questions, commitments, context). Storing the whole message as one embedding-addressable thought hurts retrieval. The recipe's atomizer runs an LLM over any message >= `--atomize-min-words` (default 150) and splits it into a JSON array of atomic thoughts. Each atom becomes its own pack record with `memoryId = gmail:<id>#atom:<index>`. Short emails skip atomization and remain one record.
 
-**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. CLI providers (`claude-cli`, `codex`) are for environments where you're already running a CLI session and want to reuse its compute — they're opt-in. The CLI providers pipe the prompt via **stdin** rather than the `-p` argument because on Windows `shell:true` mangles multi-line prompts and the LLM silently receives a truncated input.
+**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. The `claude-cli` provider is for a machine that already has the Claude CLI signed in and no API key to spare — opt-in, standalone terminal only. It pipes the prompt via **stdin** rather than the `-p` argument, so the email body never touches a command line, and it spawns the CLI as an argv array with **no shell**. On Windows, point `CLAUDE_CLI_PATH` at the real `claude` executable (the native install), not an npm `.cmd` shim — Node refuses to run those without a shell.
+
+> [!WARNING]
+> This recipe used to ship a fourth provider, `codex`, that ran `codex exec` over the email body, and one environment variable turned that run into a sandbox-bypass one. Email bodies are attacker-supplied text; an agent with tools, fed untrusted input, with its sandbox off, is a prompt-injection → local-code-execution primitive. Upstream deleted the identical branch from [`recipes/atomizer`](../atomizer/) for that reason and missed this copy; it is deleted here too (SMD-1251). The three providers above only generate text.
 
 **Failure handling.** If atomization fails for a specific message (timeout, non-JSON response, API error), the message falls back to a single whole-message record and the run continues. You never lose data to an atomizer hiccup.
 
@@ -286,7 +289,7 @@ After a successful run you should see:
 
 - **Content fingerprint dedup.** The pack's `fingerprint` field follows the convention documented in [recipes/content-fingerprint-dedup](../../recipes/content-fingerprint-dedup/). Your ingest pipeline should use this for idempotency.
 - **Optional: CRM person tiers.** If you run a `schemas/crm-person-tiers/` style schema, the contacts cache can be generated from it. This recipe does not depend on that schema being present — it's a performance enhancement, not a requirement.
-- **Optional: atomization fixes for the wider import pipeline.** The atomizer in `scripts/lib/atomize-text.mjs` includes two fixes that surfaced during real-world use: (1) multi-line prompts now pipe via stdin instead of the `-p` command-line flag (fixes silent truncation on Windows `shell:true`), and (2) a `codex` provider for running under Codex orchestration without crossing streams with Claude. If you run a separate re-atomization batch job elsewhere, consider adopting the same patterns — see [`scripts/lib/atomize-text.mjs`](./scripts/lib/atomize-text.mjs) for the reference implementation.
+- **Optional: atomization fixes for the wider import pipeline.** The atomizer in `scripts/lib/atomize-text.mjs` pipes multi-line prompts via stdin instead of the `-p` command-line flag (fixes silent truncation under a Windows shell) and spawns the CLI without a shell. If you run a separate re-atomization batch job elsewhere, adopt the same pattern — see [`scripts/lib/atomize-text.mjs`](./scripts/lib/atomize-text.mjs) for the reference implementation.
 
 ## Troubleshooting
 
@@ -304,6 +307,9 @@ Expected. The engagement filter, auto-generated noise filter, and 10-word minimu
 
 **Atomization always fails with `no JSON array found`**
 Usually an LLM budget issue or prompt-mangling. With `--atomize-provider=anthropic`, check `ANTHROPIC_API_KEY` is set and has credit. With `--atomize-provider=claude-cli`, make sure you're running from a standalone terminal, not nested inside a Claude Code session. Set `--no-atomize` to confirm the rest of the pipeline works without the LLM hop.
+
+**`claude-cli spawn error: spawn EINVAL` on Windows**
+The CLI is spawned without a shell, and Node refuses to run an npm `.cmd` shim that way. Set `CLAUDE_CLI_PATH` to the real `claude` executable (the native Windows install), or use `--atomize-provider=anthropic`.
 
 **`Cache stale but --skip-contacts-refresh — using old cache`**
 The contacts cache file is older than 7 days. Regenerate it from whatever source you used in [Relationship tier](#relationship-tier), or accept the stale cache for this run.

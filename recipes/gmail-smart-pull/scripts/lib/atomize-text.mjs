@@ -8,18 +8,30 @@
  * Providers:
  *   - 'anthropic'  (default)  Direct Anthropic Messages API. Needs ANTHROPIC_API_KEY.
  *   - 'openrouter'            OpenRouter's OpenAI-compatible chat endpoint. Needs OPENROUTER_API_KEY.
- *   - 'claude-cli'            Shells out to the local `claude` CLI (standalone terminal only).
- *   - 'codex'                 Shells out to `codex exec` (OpenAI-compatible CLI).
+ *   - 'claude-cli'            Runs the local `claude` CLI (standalone terminal only).
  *
  * Why multiple providers:
  *   - Most OB1 users will want 'anthropic' or 'openrouter' since OB1 is
  *     cloud-first and those are already set up.
- *   - The CLI providers exist so Claude Code / Codex orchestration can do LLM
- *     work inline without burning an extra API key. The gotcha is
- *     "don't cross the streams": Claude CLI can't be invoked from inside a
- *     Claude Code session, and Codex CLI can't be invoked from inside Codex
- *     (both have nested-process guards). This module detects the environment
- *     and refuses to run a provider that won't work.
+ *   - The CLI provider exists so a Claude Code user can do the LLM work with
+ *     the CLI they already have, without a second API key. The gotcha is
+ *     "don't cross the streams": the Claude CLI can't be invoked from inside a
+ *     Claude Code session (nested-process guard). This module detects that and
+ *     refuses.
+ *
+ * Security note (SMD-1251): this module used to carry a fourth provider,
+ * 'codex', that ran `codex exec` over the email body, and one environment
+ * variable (GMAIL_ATOMIZE_CODEX_BYPASS=1) added Codex's sandbox-bypass flag to
+ * that run. Email bodies are attacker-supplied text. An agent with tools, fed
+ * untrusted input, with its sandbox off, is a prompt-injection → local code
+ * execution primitive, and upstream had already deleted the identical branch
+ * from the sibling recipe (recipes/atomizer) for that reason. It is deleted
+ * here too; every provider below only generates text. The remaining CLI spawn
+ * uses an argv array with no shell, so no part of the command line is
+ * interpreted — the prompt travels on stdin and the binary path from
+ * CLAUDE_CLI_PATH is executed as given. On Windows that path must be the
+ * real executable (the native `claude.exe`), not an npm `.cmd` shim: Node
+ * refuses to run `.cmd`/`.bat` files without a shell.
  *
  * API:
  *   atomizeText(text, {
@@ -79,10 +91,6 @@ function inClaudeCodeSession() {
     process.env.CLAUDECODE ||
     process.env.CLAUDE_CODE_ENTRYPOINT
   );
-}
-
-function inCodexSession() {
-  return !!process.env.CODEX_THREAD_ID;
 }
 
 /**
@@ -211,12 +219,14 @@ async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey,
   }
 }
 
-// ── Provider: claude-cli (local shell) ───────────────────────────────────────
+// ── Provider: claude-cli (local CLI, no shell) ───────────────────────────────
 //
-// The prompt is piped via stdin rather than the -p command-line arg. Multi-
-// line prompts with quotes and newlines get mangled under Windows shell:true
-// (every attempt produced "Looks like your message got cut off"). Stdin
-// avoids all shell escaping.
+// The prompt is piped via stdin rather than the -p command-line arg, so the
+// email body never touches a command line. The spawn is an argv array with no
+// shell (SMD-1251): a shell would interpret metacharacters in CLAUDE_CLI_PATH,
+// and it was the shell that mangled multi-line prompts on Windows in the first
+// place. On Windows, CLAUDE_CLI_PATH must name the real executable — Node
+// refuses to spawn an npm `.cmd` shim without a shell (EINVAL).
 
 async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
   const fullPrompt = `${prompt}\n\nINPUT THOUGHT:\n${text}\n\nOUTPUT (JSON array of atomic thoughts):`;
@@ -224,7 +234,6 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
     const cliPath = process.env.CLAUDE_CLI_PATH || "claude";
     const child = spawn(cliPath, ["-p"], {
       stdio: ["pipe", "pipe", "pipe"],
-      shell: true,
       env: buildCleanEnv(),
     });
     let stdout = "";
@@ -241,7 +250,10 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
     }, timeoutMs);
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(new Error(`claude-cli spawn error: ${err.message}`));
+      const hint = err.code === "EINVAL" && process.platform === "win32"
+        ? " (on Windows, set CLAUDE_CLI_PATH to the real claude executable, not an npm .cmd shim — this spawn uses no shell)"
+        : "";
+      reject(new Error(`claude-cli spawn error: ${err.message}${hint}`));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -261,70 +273,9 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
   });
 }
 
-// ── Provider: codex (OpenAI-compatible CLI) ──────────────────────────────────
-//
-// Codex is a sensible choice when this script is already being orchestrated
-// by Codex — no nested-Claude tunneling, no stdin/shell-escape issues.
-// Requires `codex` on PATH.
-//
-// SECURITY: email bodies are UNTRUSTED input and can contain prompt-injection
-// payloads. We deliberately do NOT pass --dangerously-bypass-approvals-and-sandbox
-// here: if the child agent is ever lured into tool use by a poisoned message,
-// the default sandbox is the only thing preventing filesystem/network side
-// effects. Users who need to bypass approvals for an atomization-only run
-// must set the GMAIL_ATOMIZE_CODEX_BYPASS=1 env var and understand the risk.
-
-async function atomizeViaCodex(text, { prompt, timeoutMs }) {
-  const fullPrompt = `${prompt}\n\nINPUT THOUGHT:\n${text}\n\nRespond with ONLY a JSON array of strings. No prose, no markdown fences, no commentary. Example: ["thought one", "thought two"]`;
-  return await new Promise((resolve, reject) => {
-    const codexPath = process.env.CODEX_CLI_PATH || "codex";
-    const execArgs = ["exec"];
-    if (process.env.GMAIL_ATOMIZE_CODEX_BYPASS === "1") {
-      execArgs.push("--dangerously-bypass-approvals-and-sandbox");
-    }
-    execArgs.push("-");
-    const child = spawn(
-      codexPath,
-      execArgs,
-      { stdio: ["pipe", "pipe", "pipe"], shell: true },
-    );
-    let stdout = "";
-    let stderr = "";
-    let killed = false;
-    child.stdout.on("data", (d) => { stdout += d; });
-    child.stderr.on("data", (d) => { stderr += d; });
-    child.stdin.write(fullPrompt);
-    child.stdin.end();
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill();
-      reject(new Error(`codex exec timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs);
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(new Error(`codex spawn error: ${err.message}`));
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (killed) return;
-      if (code !== 0) {
-        reject(new Error(
-          `codex exec exited with code ${code}.\nStderr: ${stderr.slice(0, 500)}\nStdout: ${stdout.slice(0, 300)}`,
-        ));
-        return;
-      }
-      try {
-        resolve(parseAtomsFromResponse(stdout));
-      } catch (err) {
-        reject(err);
-      }
-    });
-  });
-}
-
 // ── Public API ───────────────────────────────────────────────────────────────
 
-const KNOWN_PROVIDERS = new Set(["anthropic", "openrouter", "claude-cli", "codex"]);
+const KNOWN_PROVIDERS = new Set(["anthropic", "openrouter", "claude-cli"]);
 
 /**
  * Atomize a block of text into a list of atomic strings.
@@ -351,14 +302,9 @@ export async function atomizeText(text, opts = {}) {
   if (provider === "claude-cli" && inClaudeCodeSession()) {
     throw new Error(
       "atomizeText: claude-cli cannot be invoked from inside a Claude Code " +
-      "session (nested detection fails). Use provider='anthropic' or delegate " +
-      "to Codex.",
+      "session (nested detection fails). Use provider='anthropic' or " +
+      "'openrouter', or run from a standalone terminal.",
     );
-  }
-  if (provider === "codex" && inCodexSession()) {
-    // Codex running Codex is allowed only with --dangerously-bypass flags set
-    // on the outer session. We don't attempt to detect that; warn but try.
-    // This is a no-op branch kept as a seam for future tightening.
   }
 
   let atoms;
@@ -366,10 +312,8 @@ export async function atomizeText(text, opts = {}) {
     atoms = await atomizeViaAnthropic(text, { prompt, timeoutMs, anthropicApiKey, anthropicModel });
   } else if (provider === "openrouter") {
     atoms = await atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey, openrouterModel });
-  } else if (provider === "claude-cli") {
-    atoms = await atomizeViaClaudeCli(text, { prompt, timeoutMs });
   } else {
-    atoms = await atomizeViaCodex(text, { prompt, timeoutMs });
+    atoms = await atomizeViaClaudeCli(text, { prompt, timeoutMs });
   }
 
   if (atoms.length < minAtoms) {

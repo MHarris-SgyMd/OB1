@@ -512,7 +512,8 @@ Life Engine runs autonomously via `/loop`. If Claude encounters a tool it doesn'
 | **`settings.json` allowlist** *(recommended)* | Scoped permissions that persist across sessions | Low — scoped + persistent |
 | **`--allowedTools` (CLI flag)** | Same scoping, but must be re-typed each launch | Low — scoped |
 | **`--permission-mode auto`** | A middle ground — automatic but with some guardrails | Medium |
-| **`--dangerously-skip-permissions`** | Quick testing on a dedicated, trusted machine | High — bypasses ALL checks |
+
+Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. If a test run needs a tool the list below lacks, add that tool by name.
 
 ### 6.2 Option A: settings.json Allowlist (Recommended)
 
@@ -532,7 +533,8 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
       "mcp__open-brain__thought_stats",
       "mcp__open-brain__capture_thought",
       "mcp__supabase__execute_sql",
-      "Bash(*)",
+      "Bash(date:*)",
+      "Bash(curl -s \"https://api.open-meteo.com/v1/forecast:*)",
       "CronCreate",
       "CronDelete"
     ]
@@ -540,7 +542,7 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
 }
 ```
 
-> **Why `Bash(*)` instead of scoped patterns?** Life Engine uses `date` (date anchor) and `curl` (weather API) — both benign, read-only commands. Scoped patterns like `Bash(date *)` or `Bash(curl -s *api.open-meteo.com*)` are fragile because the LLM may vary its exact command syntax between runs, causing silent permission blocks. `Bash(*)` eliminates this fragility while MCP tools remain individually scoped above. Rule 11 (prompt injection guard) prevents dangerous Bash execution from external triggers.
+> **Why two scoped `Bash` rules, and what breaks.** The skill runs exactly two shell commands: `date "+%Y-%m-%d %H:%M:%S %Z"` for the date anchor and one `curl -s "https://api.open-meteo.com/v1/forecast?…"` for the rain forecast. A `Bash(prefix:*)` rule matches any command that begins with the prefix, so these two rules cover both — including your own latitude and longitude, which come after the prefix. What can break: if the model rephrases a command (single quotes around the URL, `--silent` for `-s`, a different flag order) the prefix no longer matches and the session pauses on a prompt. The skill file pins both commands word for word and tells the model to run them exactly as written; if you still see a prompt, add the exact variant you saw as one more rule. Do not widen to a wildcard `Bash` allow: that hands every incoming message a shell, and the previous version of this guide did exactly that.
 
 Then launch with just the channel flag:
 
@@ -556,11 +558,12 @@ claude --channels plugin:discord@claude-plugins-official
 
 ### 6.3 Option B: --allowedTools (CLI Flag)
 
-Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions:
+Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. The `curl` rule contains double quotes, so each rule is its own argument:
 
 ```bash
 claude --channels plugin:telegram@claude-plugins-official \
-  --allowedTools "mcp__plugin_telegram_telegram__reply \
+  --allowedTools \
+    mcp__plugin_telegram_telegram__reply \
     mcp__plugin_telegram_telegram__react \
     mcp__plugin_telegram_telegram__edit_message \
     mcp__google-calendar__gcal_list_events \
@@ -570,8 +573,9 @@ claude --channels plugin:telegram@claude-plugins-official \
     mcp__open-brain__thought_stats \
     mcp__open-brain__capture_thought \
     mcp__supabase__execute_sql \
-    'Bash(*)' \
-    CronCreate CronDelete"
+    'Bash(date:*)' \
+    'Bash(curl -s "https://api.open-meteo.com/v1/forecast:*)' \
+    CronCreate CronDelete
 ```
 
 ### 6.4 Option C: Auto Permission Mode
@@ -584,18 +588,7 @@ claude --channels plugin:telegram@claude-plugins-official --permission-mode auto
 
 (Swap `telegram` for `discord` if using Discord.)
 
-### 6.5 Option D: Skip Permissions (Testing Only)
-
-For initial setup and testing on a machine you fully trust:
-
-```bash
-claude --channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions
-```
-
-> [!CAUTION]
-> This means Claude can run any tool, any bash command, write any file — without asking. Use this for initial testing, then switch to Option A for daily operation.
-
-### 6.6 Test Before You Walk Away
+### 6.5 Test Before You Walk Away
 
 1. Start Claude Code with your chosen permission strategy
 2. Run `/life-engine` manually
@@ -623,7 +616,7 @@ claude --channels plugin:telegram@claude-plugins-official
 claude --channels plugin:discord@claude-plugins-official
 ```
 
-Or append your preferred permission flag from Step 6 if you didn't use `settings.json`.
+Or pass the `--allowedTools` list from Step 6 (Option B) if you didn't use `settings.json`.
 
 ### 7.2 Test the Skill Manually
 
