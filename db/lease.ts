@@ -18,18 +18,26 @@
  * busy, a slow round trip — cannot let a lease lapse. A pair that breaks it is
  * refused before anything is claimed (`leaseRefusal`), and when no interval is
  * given it is derived from the lease (`heartbeatFor`): 60 s, or a third of the
- * lease when that is shorter, so any lease of three seconds or more has a
- * heartbeat that fits.
+ * lease when that is shorter, at least one second, so any lease of two seconds
+ * or more has a heartbeat that fits and only a one-second lease is refused.
  *
  * What a beat learns. `renew_claims` returns the ids still held. A row the
  * worker thought it held that is not among them was reaped — the beats stopped
  * for a whole lease, which under a live process means the database was
  * unreachable for that long — and is another worker's now: it goes into
  * `lost`, the loop skips it rather than repeating the provider's work, and the
- * run's summary counts it. A row the loop has already released is removed from
- * `held` BEFORE the release is sent, so a beat in flight across a release does
- * not read the release as a loss: a loss is an id that was held when the beat
- * was sent AND is still held when it returns AND was not returned.
+ * run's summary counts it. Two things keep that reading honest. A row the loop
+ * has finished is removed from `held` BEFORE its release is sent, so a beat in
+ * flight across a release does not read the release as a loss: a loss is an id
+ * that was held when the beat was sent AND is still held when it returns AND
+ * was not returned. And a claim made while a beat was in flight voids that
+ * beat's verdict: the loop hands every batch to `claimed()`, which bumps a
+ * generation the beat compares on return, because an id released and won back
+ * inside one round trip would otherwise look lost. `claimed()` also takes the
+ * ids out of `lost` — a claim returning an id is proof the lease is this
+ * worker's again (016's edit trigger requeues a row mid-extraction, and a
+ * near-empty pool hands it straight back), and a row marked lost for ever
+ * would be skipped while held, returned by the finally, and reported pending.
  */
 
 import type { SQL } from "bun";
@@ -50,19 +58,21 @@ export function leaseRefusal(ttlS: number, heartbeatS: number): string | null {
   return (
     `--ttl ${ttlS} s cannot cover two heartbeats of --heartbeat ${heartbeatS} s: one delayed beat would let the lease expire, and another worker\n` +
     `  would repeat rows this one is still working on. The lease is how long a dead worker's rows stay out of the pool, and nothing else\n` +
-    `  since migration 030; it need not cover the batch. Raise --ttl or lower --heartbeat.`
+    `  since migration 030; it need not cover the batch. ${heartbeatS <= 1 ? "Raise --ttl." : "Raise --ttl or lower --heartbeat."}`
   );
 }
 
 export type Heartbeat = {
-  /** Ids this worker holds and has not yet released. The loop adds a batch after the claim and removes each row before releasing it. */
+  /** Ids this worker holds and has not yet released. `claimed()` adds a batch; the loop removes each row before releasing it. */
   held: Set<string>;
+  /** A batch the claim returned: into `held`, out of `lost` (the claim is proof the lease is ours again), and any beat in flight is voided. */
+  claimed(ids: string[]): void;
   /** Ids a beat found no longer this worker's — reaped and re-leased. The loop skips them. */
   lost: Set<string>;
   /** Beats sent, and the current run of consecutive errors (0 after a beat that answered). */
   beats: number;
   consecutiveErrors: number;
-  /** Stop the timer. Idempotent; the worker's finally calls it. */
+  /** Stop the timer, and void any beat still in flight. Idempotent; the worker's finally calls it before returning the leases. */
   stop(): void;
 };
 
@@ -89,27 +99,44 @@ export function startHeartbeat(opts: {
   const held = new Set<string>();
   const lost = new Set<string>();
   let inFlight = false;
+  let stopped = false;
+  // Bumped by every claim; a beat whose generation moved while it was in
+  // flight draws no verdict (see the header).
+  let generation = 0;
   const hb: Heartbeat = {
     held,
     lost,
     beats: 0,
     consecutiveErrors: 0,
+    claimed(ids) {
+      generation++;
+      for (const id of ids) {
+        lost.delete(id);
+        held.add(id);
+      }
+    },
     stop() {
+      stopped = true;
       clearInterval(timer);
     },
   };
   const beat = async () => {
-    if (inFlight || held.size === 0) return;
+    if (inFlight || stopped || held.size === 0) return;
     inFlight = true;
     const sent = [...held];
+    const sentAt = generation;
     try {
       hb.beats++;
       const rows = (await opts.sql`SELECT thought_id FROM renew_claims(${opts.job}, ${opts.workerId}, ${opts.ttlS})`) as { thought_id: string }[];
       hb.consecutiveErrors = 0;
+      // Stopped meanwhile: the finally is returning the leases, and this beat
+      // would read every one of them as lost. Claimed meanwhile: an id may
+      // have been released and won back inside this round trip.
+      if (stopped || sentAt !== generation) return;
       const still = new Set(rows.map((r) => r.thought_id));
       // Lost: held when the beat was sent, still held now, not renewed. A row
       // released meanwhile left `held` before its release went out, so it is
-      // not read as lost; a row claimed meanwhile was not in `sent`.
+      // not read as lost.
       const gone = sent.filter((id) => held.has(id) && !still.has(id));
       if (gone.length > 0) {
         for (const id of gone) {

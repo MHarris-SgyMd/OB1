@@ -572,8 +572,8 @@ statistics), then per worker `claim_thoughts` → do the work → `release_thoug
 per row, and `release_claims_for_worker` on shutdown — unconditionally, in a
 `finally`, so a worker that stops for any reason hands its leases back rather
 than leaving them to expire. Beat while you hold rows: `lease.ts`'s
-`startHeartbeat` beside the worker id, the batch added to its `held` set after
-the claim, each row removed from it BEFORE its release goes out, any id it
+`startHeartbeat` beside the worker id, each batch handed to `claimed()` after
+the claim, each row removed from `held` BEFORE its release goes out, any id it
 reports `lost` skipped rather than repeated, and `stop()` in the same
 `finally`; take `--ttl` and `--heartbeat` through `heartbeatFor` and
 `leaseRefusal` so the three workers refuse the same pairs. Give every process a

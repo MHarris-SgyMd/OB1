@@ -426,6 +426,7 @@ let done = 0;
 let failed = 0;
 let vanished = 0;
 let lost = 0;
+let beats = 0;
 let llmMs = 0;
 const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0 };
 const activeWorkers = new Set<string>();
@@ -571,7 +572,7 @@ async function worker(n: number): Promise<void> {
         reserved -= want - batch.length;
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
-        for (const id of ids) hb.held.add(id);
+        hb.claimed(ids);
         const rows = (await sql`
           SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
@@ -669,6 +670,7 @@ async function worker(n: number): Promise<void> {
     }
   } finally {
     hb.stop();
+    beats += hb.beats;
     try {
       const [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       if (freed > 0 && !FOLLOW) console.error(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
@@ -727,7 +729,7 @@ if (FOLLOW) {
 const elapsed = (Date.now() - started) / 1000;
 console.log(
   `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed.toFixed(1)}s ` +
-    `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s))`
+    `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(
   `  ${totals.pairs} pair(s) judged${done ? ` — ${(totals.pairs / done).toFixed(2)} per thought, ${Math.round((totals.pairs / done) * 1000)} calls per thousand thoughts` : ""}; ` +

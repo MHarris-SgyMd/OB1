@@ -38,8 +38,9 @@
 --   The sizing rule that replaces "the TTL must cover the batch": the lease
 --   must cover a missed heartbeat, p_ttl_seconds >= 2 × the interval. The
 --   consumers refuse a pair that does not (exit 2, the arithmetic shown) and
---   derive the interval from the lease when none is given, so the default pair
---   — 900 s and 60 s — survives fourteen missed beats.
+--   derive the interval from the lease when none is given (a third of it, at
+--   most 60 s, at least 1 s), so the default pair — 900 s and 60 s — survives
+--   fourteen missed beats, and only a one-second lease has no pair that fits.
 --
 --   The reaper's cap keeps the meaning 015's header gave it. Under a
 --   heartbeating worker a lease expires only when the beats stop for the whole
@@ -88,8 +89,8 @@
 --   flight, keyed by worker_id — then filtered to the key: the rows a worker
 --   holds are its batch, a handful, whatever the size of the pass. At the
 --   default interval that is one small UPDATE a minute per worker against
---   provider calls of seconds to minutes. db/test-live.ts [8e] prints the
---   round trip beside the claim's.
+--   provider calls of seconds to minutes. db/test-live.ts [8e] asserts the
+--   plan reads that index and prints the round trip.
 --
 -- Safety
 --   * Additive: one function, one column comment. `thoughts` gains no columns

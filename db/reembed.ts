@@ -532,7 +532,10 @@ const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
 const HEARTBEAT = flag("heartbeat") === undefined ? heartbeatFor(TTL) : numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1);
 // Read-only modes never claim, so they answer whatever the lease; --dry-run
 // reports the refusal a run would make, alongside the 018 check below.
-const refusalTtl: string | null = leaseRefusal(TTL, HEARTBEAT);
+const refusalTtl: string | null = (() => {
+  const r = leaseRefusal(TTL, HEARTBEAT);
+  return r === null ? null : ` ${r}`;
+})();
 
 console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}, ${embedConfig.timeoutMs / 1000} s per call`);
@@ -1378,6 +1381,7 @@ let done = 0;
 let failed = 0;
 let vanished = 0;
 let lost = 0;
+let beats = 0;
 /** Worker ids with leases possibly outstanding, for a forced exit. */
 const activeWorkers = new Set<string>();
 const started = Date.now();
@@ -1530,7 +1534,7 @@ async function worker(n: number): Promise<void> {
           SELECT thought_id, attempt FROM claim_thoughts(${JOB}, ${workerId}, ${BATCH}, ${TTL})`) as { thought_id: string; attempt: number }[];
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
-        for (const id of ids) hb.held.add(id);
+        hb.claimed(ids);
         const rows = (await sql`
           SELECT id, content, COALESCE(updated_at, created_at) AS updated_at FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
@@ -1614,6 +1618,7 @@ async function worker(n: number): Promise<void> {
     }
   } finally {
     hb.stop();
+    beats += hb.beats;
     // Unconditionally: a worker that stops for any reason — an empty pool, a
     // signal, a database error — must not leave its leases to expire. Normally
     // there is nothing to return and this is one cheap statement.
@@ -1655,7 +1660,7 @@ progress(true);
 
 const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed}s`);
+console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
 printCounts(after, "after");
 await printDuplicateGroups();
 if (after.fellBack > 0) await printFallbacks(after.fellBack);

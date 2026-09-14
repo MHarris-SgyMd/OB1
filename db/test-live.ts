@@ -768,8 +768,11 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // deadline keeps its rows — a claim made after the ORIGINAL deadline gets
   // none of them and its release succeeds — and a worker that stops renewing
   // loses them on the RENEWED deadline, not the original, to a second worker
-  // that completes them. Five-second leases: the margins are two seconds and
-  // more each side, as (c)'s.
+  // that completes them. Five-second leases. Every wait is a lower bound from
+  // Bun.sleep, so a slow runner only makes the "after" claims later; the one
+  // step with an upper bound — the claim at 5.5 s must land before the renewed
+  // deadline at 7.5 s — has two seconds, and the beat at 2.5 s has the same
+  // before the original deadline.
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
@@ -804,10 +807,19 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
       FROM thought_work_claims WHERE work_type = ${JOB4}`;
   assert(Number(hbDone) === 6 && Number(hbFailed) === 0, `…and every row ends succeeded, none failed (${hbDone}/${hbFailed})`);
   console.log(`     a beat renewing four leases: ${beatMs.toFixed(2)} ms on the function's first call (plan included), ${beat2Ms.toFixed(2)} ms renewing three on the next`);
+  // The beat's statement plans through 015's partial worker index, as the
+  // claim's does through the pending one — asserted on the same statement
+  // shape with literal values, as (d) asserts the claim's.
+  const beatPlan = (await sql.unsafe(
+    `EXPLAIN UPDATE thought_work_claims c SET ttl_expires_at = GREATEST(c.ttl_expires_at, now() + make_interval(secs => 5)) WHERE c.work_type = 'test:heartbeat' AND c.worker_id = 'alive' AND c.status = 'claimed'`
+  )).map((r: Record<string, string>) => Object.values(r)[0]).join(" ");
+  assert(/thought_work_claims_worker_idx/.test(beatPlan), `…and the beat's statement plans through the partial worker index (${beatPlan.replace(/\s+/g, " ").slice(0, 120)})`);
   // The rule the three workers share, from the module they share.
-  assert(heartbeatFor(900) === 60 && heartbeatFor(10) === 3 && heartbeatFor(1) === 1, "heartbeatFor: 60 s, or a third of the lease, at least one second");
-  assert(leaseRefusal(900, 60) === null && leaseRefusal(4, 2) === null && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(leaseRefusal(3, 2) ?? ""),
-    "leaseRefusal: a lease of two heartbeats passes, one under is refused with the arithmetic");
+  assert(heartbeatFor(900) === 60 && heartbeatFor(10) === 3 && heartbeatFor(2) === 1 && heartbeatFor(1) === 1, "heartbeatFor: 60 s, or a third of the lease, at least one second");
+  assert(leaseRefusal(900, 60) === null && leaseRefusal(4, 2) === null && leaseRefusal(2, 1) === null && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(leaseRefusal(3, 2) ?? "") && /Raise --ttl or lower --heartbeat\.$/.test(leaseRefusal(3, 2) ?? ""),
+    "leaseRefusal: a lease of two heartbeats passes — two seconds at the one-second floor included — and one under is refused with the arithmetic");
+  assert(/--ttl 1 s cannot cover two heartbeats of --heartbeat 1 s/.test(leaseRefusal(1, 1) ?? "") && /Raise --ttl\.$/.test(leaseRefusal(1, 1) ?? ""),
+    "…and at the heartbeat's floor the remedy is the lease alone");
 
   await sql`DELETE FROM thoughts`;
 }
@@ -1573,6 +1585,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
   assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/lost to an expired lease/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
+  const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
+  assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fourteen seconds (${slowBeats})`);
   const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
@@ -1639,6 +1653,9 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   };
   let calls = 0;
   let hemlockIsProse = true;
+  // While set, every answer takes this long: the first run, so the heartbeat
+  // (migration 030) has time to beat.
+  let slowMs = 0;
   const model = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -1646,7 +1663,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
       calls++;
       // The thought is the user message; the rules are the system message.
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
-      await Bun.sleep(5);
+      await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(prompt)) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
       }
@@ -1700,9 +1717,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out),
     `…while a batch of four at a 300 s timeout, refused until 030 as able to outlive the lease, is not: the heartbeat sizes the lease now (exit ${bigBatch.code})`);
 
-  // A 6 s lease, so the 2 s heartbeat it derives beats during the run.
-  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "6");
-  assert(!/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out), "the heartbeat runs through the first pass without error, and no row reaches a second worker");
+  // A 3 s lease with the 1 s heartbeat it derives, and 400 ms answers — ten
+  // thoughts across two workers, some two seconds each — so the beats fire
+  // during the run, and the summary counts them.
+  slowMs = 400;
+  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "3");
+  slowMs = 0;
+  const firstBeats = Number(/, (\d+) heartbeat\(s\)/.exec(first.out)?.[1] ?? 0);
+  assert(firstBeats >= 1 && !/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out),
+    `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
   assert(first.code === 1 && /9 extracted, 1 failed/.test(first.out), `the first run extracts nine and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
   assert(/not JSON of the expected shape/.test(first.out), "…naming the failure");
   const [{ key }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -2144,6 +2167,9 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let calls = 0;
   let hemlockIsProse = true;
   const seen: { a: string; b: string }[] = [];
+  // While set, every verdict takes this long: the first run, so the heartbeat
+  // (migration 030) has time to beat.
+  let slowMs = 0;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -2153,7 +2179,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
       const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
       const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
       seen.push({ a, b });
-      await Bun.sleep(5);
+      await Bun.sleep(5 + slowMs);
       if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
       let answer: Record<string, unknown>;
       if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.92, reason: "monthly billing against annual" };
@@ -2225,9 +2251,15 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
-  // A 6 s lease, so the 2 s heartbeat it derives beats during the run.
-  const first = await consolidate("--workers", "2", "--dump", dump, "--ttl", "6");
-  assert(!/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out), "the heartbeat runs through the first pass without error, and no row reaches a second worker");
+  // A 3 s lease with the 1 s heartbeat it derives, and 700 ms verdicts — five
+  // pairs across two workers, some three and a half seconds of model time — so
+  // the beats fire during the run, and the summary counts them.
+  slowMs = 700;
+  const first = await consolidate("--workers", "2", "--dump", dump, "--ttl", "3");
+  slowMs = 0;
+  const firstBeats = Number(/, (\d+) heartbeat\(s\)/.exec(first.out)?.[1] ?? 0);
+  assert(firstBeats >= 1 && !/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out),
+    `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
   assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(/5 pair\(s\) judged — 0\.50 per thought, 500 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
