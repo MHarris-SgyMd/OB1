@@ -370,9 +370,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // were, and a ledger that says every migration. reembed.ts refuses to run
   // there and names the remedy; this is the remedy.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
+  // The migrator's shell: the parent's, with the suite's width and model. The
+  // schema above was applied with the parent's OB1_CHUNK_CONTEXT (applyMigrations
+  // reads it), so the child must see the same value or --reapply rightly refuses
+  // to re-record it. reembed.ts --status gets the narrower environment test-live
+  // gives it.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_, OB1_EMBEDDING_DIM: String(OPTS.dim), OB1_EMBEDDING_MODEL: OPTS.model }))
-    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|CHUNK_CONTEXT|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+  const statusEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) if (k !== "OB1_CHUNK_CONTEXT") statusEnv[k] = v;
   const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
@@ -409,7 +416,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env, cwd: HERE });
+  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: statusEnv, cwd: HERE });
   const column = async () => Number((await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
@@ -421,7 +428,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // --dry-run says what a re-run is, and writes nothing.
   const dry = await migrate("--reapply", "--dry-run");
-  assert(dry.code === 0 && /021_embedding_model_per_row\.sql\s+would re-apply/.test(dry.out) && new RegExp(`would apply 0, would re-apply ${MIGRATIONS.length}, skipped 0`).test(dry.out),
+  assert(dry.code === 0 && /would re-apply every migration/.test(dry.out) && !/^\s+re-applying every migration/m.test(dry.out) &&
+           /021_embedding_model_per_row\.sql\s+would re-apply/.test(dry.out) && new RegExp(`would apply 0, would re-apply ${MIGRATIONS.length}, skipped 0`).test(dry.out),
          `--reapply --dry-run says it would re-apply every recorded migration (exit ${dry.code})`);
   assert((await column()) === 0, "…and writes nothing");
 
@@ -431,6 +439,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(otherShell.code === 2 && /refusing --reapply: ob1_config records embedding_model = stub-embed and this shell would re-record it as other-embed/.test(otherShell.out),
          `a shell whose model differs from the record is refused — 006 would re-record it (exit ${otherShell.code})`);
   assert((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0].value === OPTS.model && (await column()) === 0, "…and nothing was written");
+  const otherDry = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
+  assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out),
+         `…and --dry-run from that shell says it would refuse, the same judgement (exit ${otherDry.code})`);
   // An acceptance under a SUFFIXED key over an unlabelled thought: 021's block,
   // run as written, would label it, and 029 cannot tell that label from the
   // server's own. Refused, listing the row; returned to its pool, the run goes.
@@ -440,8 +451,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${SUFFIXED}`;
   const hazard = await migrate("--reapply");
   assert(hazard.code === 2 && /refusing --reapply: 021's evidence backfill, re-run as written, would label 1 unlabelled thought\(s\) from an\n\s+acceptance under a suffixed key \(reembed:stub-embed@8:ctx\)/.test(hazard.out) &&
-           new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(hazard.out) && /--job <key> --retry-fallbacks/.test(hazard.out),
-         `an acceptance under a suffixed key over an unlabelled thought refuses the re-run, naming the row and the way back (exit ${hazard.code})`);
+           new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(hazard.out) &&
+           // This schema predates 021, so the way back is not a reembed.ts command it would refuse but the statement --retry-fallbacks runs.
+           /This schema predates 021, so reembed\.ts refuses to run against it/.test(hazard.out) &&
+           new RegExp(`UPDATE thought_work_claims SET status = 'pending', claimed_at = NULL, finished_at = NULL, ttl_expires_at = NULL, last_error = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id = '${suffixedHazard}';`).test(hazard.out) &&
+           !/--retry-fallbacks, which spends/.test(hazard.out),
+         `an acceptance under a suffixed key over an unlabelled thought refuses the re-run, naming the row and a way back this schema allows (exit ${hazard.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // What --retry-fallbacks does to the row: back to the pool, the caveat gone.
   await sql`UPDATE thought_work_claims SET status = 'pending', claimed_at = NULL, finished_at = NULL, last_error = NULL WHERE work_type = ${SUFFIXED}`;

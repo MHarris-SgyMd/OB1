@@ -5663,9 +5663,12 @@ and restore the next one's over whatever the skipped one left); the pgvector
 floor; a shell configured differently from the brain (006 and 013 write their
 `INSERT … ON CONFLICT DO UPDATE` into `ob1_config` again — a re-run from a shell
 still carrying model A would flip a brain switched to B back to A, silently,
-and every reader of the record with it); and an accepted row under a *suffixed*
-key standing over an unlabelled thought (below). `--baseline` beside it is
-refused. Every argument is accounted for — a flag the runner does not have, a
+and every reader of the record with it; the model and the chunk-context flag,
+not the width, which is the column's own and 006's to judge); and an accepted
+row under a *suffixed* key standing over an unlabelled thought (below). Every
+refusal is reported, not the first, and `--dry-run` makes the same judgements
+and says "would refuse", so a green dry run is never followed by a red run.
+`--baseline` beside it is refused. Every argument is accounted for — a flag the runner does not have, a
 value where no flag takes one, or a flag given twice (`--url A --url B` ran
 against A), is refused rather than dropped, since `--reapply=021` or a misspelt
 flag was otherwise a silent plain run that exited 0. The banner says to stop
@@ -5707,8 +5710,15 @@ the label — a backfill key pools thoughts at the model too, so such a label ma
 be the server's own, and the two cannot be told apart; 029 writes no new label
 from one, and because 021's block, re-run as written, *would*, the migrator
 refuses `--reapply` while such a row stands over an unlabelled thought, naming
-the row and the way back (`reembed.ts --job <key> --retry-fallbacks`, which is
-possible on that brain, or `--retire <key>`). Reached after 021 in the same
+the rows and a way back the schema allows: on 021's whole, `reembed.ts --job
+<key> --retry-fallbacks` or `--retire <key>`; on an older schema, where
+`reembed.ts` refuses to run and `--accept-failed` could not have written the
+row, the statement `--retry-fallbacks` would run, per row — otherwise the tool
+loops the operator between two refusals. The claim-key grammar 029 and that
+query read is `config.mjs`'s, as two template values and two constants, and
+the latest row is chosen by `finished_at` and then by key, since two rows
+released in one transaction share `now()` and which wins decides whether a
+label is taken back. Reached after 021 in the same
 `--reapply` transaction, and pending on every brain at its next plain run, so a
 brain that followed the old paste is corrected too. The rule for any successor that labels from claim rows
 is stated in the file and in `reembed.ts`'s header: an accepted row is not
@@ -5745,10 +5755,35 @@ comments); `--url` twice ran against the first (refused). Not taken: one
 `scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
 not need, and folding them is a change to that tool.
 
+**Review, third pass (high), triaged — the second consecutive stop signal, so
+the loop ends here.** Every finding was a seam of the second pass's fixes, and
+most were right: the suffixed-key refusal named two `reembed.ts` commands that
+tool refuses on the very brain the re-run is for (fixed: the way back follows
+the schema); `--dry-run` under `--reapply` printed the live banner and skipped
+the record and hazard checks, so a green dry run preceded a red run (fixed: one
+pre-check for both, every refusal reported); the pgvector floor's remedy said
+"migrations before it are applied and recorded" when nothing had run (fixed);
+the width was compared against `ob1_config` when the column is the authority
+and 006 judges it (dropped); the hazard list said `50+` at exactly fifty and
+derived its keys from the truncated rows (no limit; fifty shown, the rest
+counted); `DISTINCT ON … ORDER BY finished_at DESC` had no tiebreak, and 029 is
+the first consumer whose outcome depends on *which* row wins (the key); the
+claim-key regexes were spelled inline eight times across 029 and the hazard
+query (two constants in `config.mjs`, two template values); `reembed.ts --status
+--dry-run` printed the refusal twice and `--status` judged only 021 where a run
+judges three (fixed); test [7] stripped `OB1_CHUNK_CONTEXT` from the child's
+shell after applying the schema with the parent's, so a developer with the flag
+on saw the new refusal fire (fixed); the README's FORK pointer list and its
+`test-schema` count were behind (fixed). Not taken: pre-filtering 029's three
+scans to candidate thoughts (a few seconds, once; 021's shape); a configurable
+lock timeout to spare CI ten seconds; 028's column comment, which still presents
+021's trust as the standing exception (a comment is hashed with its file, and
+029 adds none).
+
 **Not done here.** `db/README.md`'s migrations table stops at 023, and a row
-for 029 alone would mislead; it is not this change's. The argument scanner is
-the migrator's own, a third hand-rolled copy beside `reembed.ts`'s and
-`extract-entities.ts`'s.
+for 029 alone would mislead; its FORK pointer list names 029. The argument
+scanner is the migrator's own, a third hand-rolled copy beside `reembed.ts`'s
+and `extract-entities.ts`'s.
 
 Verified: `test-upgrade` [7] builds the brain the ticket describes — the schema
 applied through 020, then `migrate.ts --baseline` so the ledger says every
@@ -5770,7 +5805,8 @@ and the thought stays NULL), a session holding a lock on `thoughts` (the run
 fails at 001 within the lock timeout and rolls back whole), a value beside the
 flag, a flag the runner does not have, `--baseline` beside it, a drifted
 recorded file; and that the re-applied schema has a fresh apply's columns and
-functions. [8] applies 029 onto a populated 028 holding nine labels — a
+functions; and that `--dry-run` from a differing shell says "would refuse".
+[8] applies 029 onto a populated 028 holding nine labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
 a mislabel edited since (stays), a head window the worker wrote between the
@@ -5779,7 +5815,7 @@ thought with an earlier pass then an acceptance (labelled at the earlier pass),
 a mislabel with an earlier pass (taken back and relabelled at it, in the one
 block), a plain row (labelled), a label with no claim row (not read) — no
 `updated_at` moved, no audit row, the trigger enabled, and a second apply a
-no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 92/92,
+no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 93/93,
 `test-preflight` 164/164, `test-schema` 564/564, `test-live` 369/369, `tsc`
 clean, fork checker PASS. Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's

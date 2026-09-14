@@ -1235,9 +1235,14 @@ if (STATUS_ONLY || DRY_RUN) {
   printCounts(c, STATUS_ONLY ? "status" : "before");
   const corpus = await printCorpusByModel();
   if (STATUS_ONLY) printPreflightNote(c, corpus, judgedAsPreflight(false));
-  // The schema fact a run would refuse on, said here too: --status is the mode
-  // the operator reads first, and the remedy is the migrator's (SMD-1193).
-  if (STATUS_ONLY && refusal021) console.error(`\n  a run would refuse:${refusal021}`);
+  // What a run would refuse on, said here too: --status is the mode the
+  // operator reads first, and the 021 remedy is the migrator's (SMD-1193). The
+  // same three a run judges; not beside --dry-run, whose "would: refuse" line
+  // below is the same text.
+  {
+    const refusal = refusalJob ?? refusalTtl ?? refusal021;
+    if (STATUS_ONLY && !DRY_RUN && refusal) console.error(`\n  a run would refuse:${refusal}`);
+  }
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry

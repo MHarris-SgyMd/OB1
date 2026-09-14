@@ -672,9 +672,12 @@ export function migrationValues(overrides = {}) {
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
     // 023's one call: NULL is every row waiting; an integer, one batch.
     BACKFILL_LIMIT: String((overrides.backfillLimit === undefined ? resolveBackfillLimit(ENV.OB1_BACKFILL_LIMIT) : overrides.backfillLimit) ?? "NULL"),
-    // 029 reads the caveat prefix an accepted row carries (SMD-1067); the one
-    // spelling is the constant below, substituted into the file (SMD-1193).
+    // 029 reads the caveat prefix an accepted row carries (SMD-1067) and the
+    // claim-key grammar; the one spelling of each is the constant below,
+    // substituted into the file (SMD-1193).
     ACCEPTED_CAVEAT_PREFIX,
+    REEMBED_KEY_MODEL_RE: REEMBED_KEY_MODEL_SQL_RE,
+    REEMBED_OWN_KEY_RE: REEMBED_OWN_KEY_SQL_RE,
     // Not operator configuration — ALTER DATABASE owns that — but the one
     // definition of what 014 seeds, so the SQL, the migrator's remedy,
     // preflight's report and the schema test cannot disagree about it.
@@ -816,6 +819,18 @@ export const REEMBED_KEY_PREFIX = "reembed:";
 export function reembedKey(model, dim) {
   return `${REEMBED_KEY_PREFIX}${model}@${dim}`;
 }
+
+/**
+ * The same grammar for SQL that reads claim rows, as Postgres regexes: the
+ * model up to the LAST "@" of `reembed:<model>@<dim>[:suffix]`, and the OWN-key
+ * shape (no suffix) that poolModelFor names. 021 spells the first inline and is
+ * hashed; 029 takes both as template values ({{REEMBED_KEY_MODEL_RE}},
+ * {{REEMBED_OWN_KEY_RE}}) and migrate.ts's --reapply hazard query reads the
+ * constants, so a change to the grammar reaches every reader but 021 from here
+ * (SMD-1193's third review pass counted eight inline spellings).
+ */
+export const REEMBED_KEY_MODEL_SQL_RE = "^reembed:(.+)@[0-9]+(?::[^@]*)?$";
+export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@[0-9]+$";
 
 /**
  * @param {string} key

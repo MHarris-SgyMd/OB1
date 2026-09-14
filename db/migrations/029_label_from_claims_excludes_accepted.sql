@@ -55,7 +55,13 @@
 --      row stays NULL, unknown. Applied to unlabelled rows only, as 021's is.
 --
 --   `last_error IS NOT NULL AND starts_with(last_error, <prefix>)` guards the
---   prefix test: starts_with(NULL, …) is NULL, and NOT NULL is not true.
+--   prefix test: starts_with(NULL, …) is NULL, and NOT NULL is not true. The
+--   key grammar is config.mjs's, substituted ({{REEMBED_KEY_MODEL_RE}},
+--   {{REEMBED_OWN_KEY_RE}}), as the prefix is. The latest row is chosen by
+--   finished_at and then by key: two rows released in one transaction share
+--   now(), and the winner decides whether a label is taken back, so it must be
+--   the same row on every run — 021 has no tiebreak, and its outcome does not
+--   depend on which row wins beyond the model it names.
 --
 -- What it leaves
 --   An acceptance under a SUFFIXED key (`reembed:<model>@<dim>:ctx`, a
@@ -112,15 +118,19 @@ BEGIN
     FROM (
       SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.claimed_at, k.finished_at, k.accepted, k.own_key
         FROM (
-          SELECT c.thought_id, c.claimed_at, c.finished_at,
-                 substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model,
-                 c.work_type ~ '^reembed:.+@[0-9]+$' AS own_key,
+          SELECT c.thought_id, c.work_type, c.claimed_at, c.finished_at,
+                 substring(c.work_type FROM '{{REEMBED_KEY_MODEL_RE}}') AS model,
+                 c.work_type ~ '{{REEMBED_OWN_KEY_RE}}' AS own_key,
                  (c.last_error IS NOT NULL AND starts_with(c.last_error, '{{ACCEPTED_CAVEAT_PREFIX}}')) AS accepted
             FROM thought_work_claims c
            WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL
         ) k
        WHERE k.model IS NOT NULL
-       ORDER BY k.thought_id, k.finished_at DESC
+       -- The key breaks a tie on finished_at: two rows released in one
+       -- transaction (a hand repair under `psql -1`) share now(), and which
+       -- one wins decides whether the label is taken back — so it must be the
+       -- same one on every run for the block to be idempotent.
+       ORDER BY k.thought_id, k.finished_at DESC, k.work_type
     ) e
    WHERE t.id = e.thought_id
      AND e.accepted AND e.own_key
@@ -135,14 +145,14 @@ BEGIN
     FROM (
       SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.finished_at
         FROM (
-          SELECT c.thought_id, c.finished_at,
-                 substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model
+          SELECT c.thought_id, c.work_type, c.finished_at,
+                 substring(c.work_type FROM '{{REEMBED_KEY_MODEL_RE}}') AS model
             FROM thought_work_claims c
            WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL
              AND NOT (c.last_error IS NOT NULL AND starts_with(c.last_error, '{{ACCEPTED_CAVEAT_PREFIX}}'))
         ) k
        WHERE k.model IS NOT NULL
-       ORDER BY k.thought_id, k.finished_at DESC
+       ORDER BY k.thought_id, k.finished_at DESC, k.work_type
     ) e
    WHERE t.id = e.thought_id
      AND t.embedding_model IS NULL
