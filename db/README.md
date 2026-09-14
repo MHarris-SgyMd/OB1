@@ -669,11 +669,13 @@ decided pair is never proposed again, whatever happens to the claim table.
 The verdict is about the texts as judged: each proposal records both
 fingerprints when it is written, `--list` and the tool mark a thought edited
 since, and `--accept` refuses such a pair unless `--force` says the reviewer
-has read both texts as they are now. Accepting moves the superseding thought's
-`updated_at` (001's trigger fires on any column), which two readers take as an
-edit: a client's `if_unchanged_since` from before the acceptance is refused,
-and 021's evidence rule stops vouching for that thought's vector, as after any
-edit.
+has read both texts as they are now. The fingerprints are of the texts the
+judge was sent, taken with the text, so an edit that lands during the judge
+call is visible too. When an acceptance writes the pointer (not when the column
+already held the value) it moves the superseding thought's `updated_at` (001's
+trigger fires on any column), which two readers take as an edit: a client's
+`if_unchanged_since` from before the acceptance is refused, and 021's evidence
+rule stops vouching for that thought's vector, as after any edit.
 
 **Identity** as `extract-entities.ts`: `OB1_WORKER_KEY` a key whose hash is in
 `MCP_ACCESS_KEYS`; proposals carry the resolved agent id, and an acceptance is

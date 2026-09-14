@@ -2061,7 +2061,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 {
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_entities`;
-  const KEY = "consolidate:stub-judge@p1";
+  const KEY = "consolidate:stub-judge@p2";
   const EXTRACT = "extract:stub@p1";
   let calls = 0;
   let hemlockIsProse = true;
@@ -2213,6 +2213,24 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   const p2 = await proposals();
   assert(p2.find((p) => p.id === directed.id)?.status === "rejected" && p2.find((p) => p.id === undirected.id)?.status === "accepted" && p2.find((p) => p.id === undirected.id)?.superseding_id === green,
          "the rows say rejected and accepted, the accepted one naming the thought it wrote");
+  // The staleness guard through the CLI: edit the older thought after the
+  // verdict, and the queue marks it, accept refuses with the fix, --force
+  // without --accept is refused, --accept --force writes, and a reject
+  // clears (review pass 4 pinned what pass 3 promised).
+  await sql`SELECT update_thought(${decision}::uuid, ${"We bill monthly, decided in March (minutes attached)."}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const listEdited = await consolidate("--list", "all");
+  assert(/older \[[0-9-]+\] EDITED SINCE JUDGED/.test(listEdited.out) && listEdited.out.includes(`--accept ${directed.id} --force`) === false,
+         `--list marks the edited side (the directed pair is rejected, so no accept line for it) (${listEdited.out.split("\n").find((l) => /EDITED SINCE/.test(l))?.trim()})`);
+  const staleAccept = await consolidate("--accept", directed.id);
+  assert(staleAccept.code === 1 && /older thought has been edited since the pair was judged/.test(staleAccept.out) && /pass --force/.test(staleAccept.out) && (await supersedesOf(reversal)) === null,
+         "accepting a pair whose text moved is refused, naming the side and the flag, and writes nothing");
+  const forceAlone = await consolidate("--reject", directed.id, "--force");
+  assert(forceAlone.code === 2 && /--force goes with --accept/.test(forceAlone.out), "--force without --accept is refused");
+  const forced = await consolidate("--accept", directed.id, "--force");
+  assert(forced.code === 0 && (await supersedesOf(reversal)) === decision, "--accept --force writes the pointer");
+  const unforced = await consolidate("--reject", directed.id);
+  assert(unforced.code === 0 && (await supersedesOf(reversal)) === null, "…and the reject clears it again");
+
   const statusAfter = await consolidate("--status");
   assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
 
@@ -2227,7 +2245,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY}`;
   seen.length = 0;
   const over = await consolidate();
-  assert(over.code === 0 && /10 thought\(s\) judged/.test(over.out), `with the claim rows cleared every thought is judged again — every one but blue, which green now supersedes and the pool leaves out (exit ${over.code}: ${over.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
+  // Nine, not eleven: blue, which green now supersedes, and the decision,
+  // whose edit through update_thought above replaced its text with no vector
+  // (the tool's re-embed is the server's job) — both out by the pool rule.
+  assert(over.code === 0 && /9 thought\(s\) judged/.test(over.out), `with the claim rows cleared every pooled thought is judged again — all but the superseded one and the one whose edit left it vectorless (exit ${over.code}: ${over.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(!seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)), "…but the rejected pair is not shown to the judge again");
   assert(!seen.some((p) => /blue/.test(p.a) || /green/.test(p.b)), "…nor the accepted pair, whose thoughts are now superseded and superseding");
   assert(seen.some((p) => /deploy/.test(p.a)), "…while an undecided pair is");
@@ -2246,7 +2267,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   // The worker never wrote thought_audit itself: the three rows under its name
   // are the two acceptances and the rejection's clearing.
   const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
-  assert(Number(actorRows) === 3, `the worker's audit rows are exactly the reviews: two accepts and one cleared reject (${actorRows})`);
+  assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
 
   judge.stop(true);
   try { unlinkSync(dump); } catch { /* already gone */ }

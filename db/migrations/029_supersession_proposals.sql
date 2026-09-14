@@ -88,11 +88,12 @@
 --   `ob1.actor` as 009's functions do, locks the superseding row, and writes
 --   `supersedes` in one UPDATE. 025's audit trigger diffs that column, so the
 --   change is recorded with the reviewer as actor exactly as an edit through
---   `update_thought` would be; 001's trigger moves `updated_at` — which two
---   readers take as an edit: a client's `if_unchanged_since` from before the
---   acceptance is refused STALE_READ, and 021's evidence rule (a row nothing
---   wrote since the pass) stops vouching for the superseding thought's vector,
---   as it would after any edit. What this path does NOT do that
+--   `update_thought` would be; and when the pointer is written (not when the
+--   column already held the value), 001's trigger moves `updated_at` — which
+--   two readers take as an edit: a client's `if_unchanged_since` from before
+--   the acceptance is refused STALE_READ, and 021's evidence rule (a row
+--   nothing wrote since the pass) stops vouching for the superseding thought's
+--   vector, as it would after any edit. What this path does NOT do that
 --   `update_thought` would: nothing else — the column is not part of the
 --   fingerprint, the vector or the windows. When
 --   `update_thought` grows a provenance envelope, acceptance should call it
@@ -110,8 +111,8 @@
 --   found, or a later edit that pointed the thought elsewhere, is not this
 --   proposal's to clear. Acceptances are serialised on one transaction-scoped
 --   advisory lock, so the cycle walk reads committed pointers. And the verdict
---   is about the texts as judged: each proposal records both fingerprints
---   (016's rule) as it is written, the queue says when either text has changed
+--   is about the texts as judged: each proposal records 016's fingerprint of
+--   both texts as the judge saw them, the queue says when either text has changed
 --   since, and accept refuses such a pair (EDITED_SINCE) unless the reviewer,
 --   reading both texts as they are now, passes p_force.
 --
@@ -275,19 +276,24 @@ COMMENT ON FUNCTION consolidation_candidates(uuid, int, float) IS
 -- Inserts a pending row for a conflict; returns its id, or NULL when the pair
 -- already has a row in any state (the second judge of a pair, a re-run over a
 -- cleared claim table). The pair's order is the caller's: older_id captured
--- before newer_id. Both texts' fingerprints (016's rule) are taken as the row
--- is written — the worker judged the texts as they are now — so a later edit
--- is visible to the reviewer.
+-- before newer_id. p_older_fingerprint / p_newer_fingerprint are 016's hash of
+-- the texts THE JUDGE WAS SENT — the worker reads content and hash together and
+-- passes both, so an edit that lands during the judge call is a fingerprint
+-- that already differs from the row (the queue shows it; accept refuses it);
+-- a caller passing NULL gets the hash as of the write (the eval's replay,
+-- which has no text of its own).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION record_supersession_proposal(
-  p_older_id   uuid,
-  p_newer_id   uuid,
-  p_verdict    text,
-  p_confidence numeric,
-  p_reason     text,
-  p_similarity float,
-  p_judge_key  text,
-  p_agent_id   uuid DEFAULT NULL
+  p_older_id          uuid,
+  p_newer_id          uuid,
+  p_verdict           text,
+  p_confidence        numeric,
+  p_reason            text,
+  p_similarity        float,
+  p_judge_key         text,
+  p_agent_id          uuid DEFAULT NULL,
+  p_older_fingerprint text DEFAULT NULL,
+  p_newer_fingerprint text DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -305,16 +311,16 @@ BEGIN
   VALUES (p_older_id, p_newer_id, p_verdict,
           LEAST(GREATEST(COALESCE(p_confidence, 0), 0), 1),
           p_reason, p_similarity, p_judge_key, p_agent_id,
-          (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_older_id),
-          (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_newer_id))
+          COALESCE(p_older_fingerprint, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_older_id)),
+          COALESCE(p_newer_fingerprint, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = p_newer_id)))
   ON CONFLICT (older_id, newer_id) DO NOTHING
   RETURNING id INTO v_id;
   RETURN v_id;
 END;
 $$;
 
-COMMENT ON FUNCTION record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid) IS
-  'Record one conflict the pass found, pending review. Returns the new row''s id, or NULL when the pair already has a row in any state. Migration 029.';
+COMMENT ON FUNCTION record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid, text, text) IS
+  'Record one conflict the pass found, pending review, with 016''s fingerprint of each text as the judge saw it (NULL: as of the write). Returns the new row''s id, or NULL when the pair already has a row in any state. Migration 029.';
 
 -- ---------------------------------------------------------------------------
 -- review_supersession_proposal — the reviewer's decision, and the ONLY path
@@ -403,19 +409,6 @@ BEGIN
   ELSE                    v_sup := r.older_id; v_old := r.newer_id;
   END IF;
 
-  -- The verdict was about the texts as judged. Either edited since (016's
-  -- fingerprint differs; an unknown fingerprint counts as unchanged) is
-  -- refused unless the reviewer, shown both texts, says p_force (review
-  -- pass 3). updated_at is not the signal: this function moves it itself.
-  SELECT r.older_fingerprint IS NOT NULL AND r.older_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
-    INTO v_old_edited FROM thoughts WHERE id = r.older_id;
-  SELECT r.newer_fingerprint IS NOT NULL AND r.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
-    INTO v_new_edited FROM thoughts WHERE id = r.newer_id;
-  IF NOT COALESCE(p_force, false) AND (COALESCE(v_old_edited, false) OR COALESCE(v_new_edited, false)) THEN
-    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE', 'id', p_id,
-                              'older_edited', COALESCE(v_old_edited, false), 'newer_edited', COALESCE(v_new_edited, false));
-  END IF;
-
   -- Acceptances are serialised on one advisory lock (transaction-scoped, as
   -- 018's): the cycle walk below reads other rows' pointers, and two accepts
   -- running at once — A over B in one, B over A in the other — would each
@@ -427,6 +420,22 @@ BEGIN
   SELECT supersedes INTO v_current FROM thoughts WHERE id = v_sup FOR NO KEY UPDATE;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'id', p_id, 'thought_id', v_sup);
+  END IF;
+  -- The verdict was about the texts as judged. Either edited since (016's
+  -- fingerprint differs; an unknown fingerprint counts as unchanged) is
+  -- refused unless the reviewer, shown both texts, says p_force (review
+  -- pass 3). Read here, under the advisory lock and after the superseding
+  -- row is locked, so that row's text is what the UPDATE will see; the
+  -- superseded thought's text is read unlocked, and an edit landing in that
+  -- instant under a human-paced call is the residue (review pass 4).
+  -- updated_at is not the signal: this function moves it itself.
+  SELECT r.older_fingerprint IS NOT NULL AND r.older_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_old_edited FROM thoughts WHERE id = r.older_id;
+  SELECT r.newer_fingerprint IS NOT NULL AND r.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_new_edited FROM thoughts WHERE id = r.newer_id;
+  IF NOT COALESCE(p_force, false) AND (COALESCE(v_old_edited, false) OR COALESCE(v_new_edited, false)) THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE', 'id', p_id,
+                              'older_edited', COALESCE(v_old_edited, false), 'newer_edited', COALESCE(v_new_edited, false));
   END IF;
   IF v_current IS NOT NULL AND v_current <> v_old THEN
     RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_SUPERSEDES', 'id', p_id,

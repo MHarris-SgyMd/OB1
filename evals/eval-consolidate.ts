@@ -166,9 +166,9 @@ console.log(`  cosine of the k=${K} candidates, by tenth: ${simDist.map((r) => `
 
 // ── 2. The judge on labelled pairs ───────────────────────────────────────────
 
-type Side = { id: string; content: string; created_at: string; source: string | null };
+type Side = { id: string; content: string; created_at: string };
 const sideOf = async (issue: string): Promise<Side | null> => {
-  const rows = (await sql`SELECT id, content, created_at, metadata->>'source' AS source FROM thoughts WHERE id = ${linearThoughtId(issue)}::uuid`) as Side[];
+  const rows = (await sql`SELECT id, content, created_at FROM thoughts WHERE id = ${linearThoughtId(issue)}::uuid`) as Side[];
   return rows[0] ?? null;
 };
 type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
@@ -181,8 +181,8 @@ const judgeOne = async (older: Side, newer: Side): Promise<Judgement | null> => 
     if (!l) return null;
     return { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
   }
-  return judgePair({ content: older.content, createdAt: older.created_at, source: older.source },
-                   { content: newer.content, createdAt: newer.created_at, source: newer.source },
+  return judgePair({ content: older.content, createdAt: older.created_at },
+                   { content: newer.content, createdAt: newer.created_at },
                    cfg, AbortSignal.timeout(180_000));
 };
 
@@ -254,9 +254,9 @@ if (FULL || REPLAY) {
   // with the worker's own prompt builder, estimated by chunk.ts's rule.
   let promptTokens = 0;
   for (const l of lines) {
-    const [o] = (await sql`SELECT content, created_at, metadata->>'source' AS source FROM thoughts WHERE id = ${l.older}::uuid`) as Side[];
-    const [n] = (await sql`SELECT content, created_at, metadata->>'source' AS source FROM thoughts WHERE id = ${l.newer}::uuid`) as Side[];
-    if (o && n) promptTokens += estimateTokens(buildJudgeMessages({ content: o.content, createdAt: o.created_at, source: o.source }, { content: n.content, createdAt: n.created_at, source: n.source })[0].content);
+    const [o] = (await sql`SELECT content, created_at FROM thoughts WHERE id = ${l.older}::uuid`) as Side[];
+    const [n] = (await sql`SELECT content, created_at FROM thoughts WHERE id = ${l.newer}::uuid`) as Side[];
+    if (o && n) promptTokens += estimateTokens(buildJudgeMessages({ content: o.content, createdAt: o.created_at }, { content: n.content, createdAt: n.created_at })[0].content);
   }
   const byVerdict = lines.reduce((m, l) => { m[l.verdict] = (m[l.verdict] ?? 0) + 1; return m; }, {} as Record<string, number>);
   console.log(`  ${lines.length} verdicts: ${Object.entries(byVerdict).map(([v, n]) => `${n} ${v}`).join(", ")}; ${lines.filter((l) => l.recorded === "proposed").length} proposed, ${lines.filter((l) => l.recorded === "under-confidence").length} conflicts under the confidence floor`);

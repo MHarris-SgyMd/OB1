@@ -27,8 +27,13 @@
 import type { EmbedConfig } from "./embed.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
-/** Bumped when the prompt or the parsing rules change what gets recorded. Part of the pass key. */
-export const CONSOLIDATE_PROMPT_VERSION = 1;
+/**
+ * Bumped when the prompt or the parsing rules change what gets recorded. Part
+ * of the pass key. 2: the header line no longer carries `metadata.source`
+ * (review pass 3); the numbers in evals/README.md were measured under 1,
+ * whose only difference was a constant `, source linear` on every row.
+ */
+export const CONSOLIDATE_PROMPT_VERSION = 2;
 
 export const VERDICTS = ["agree", "unrelated", "conflict"] as const;
 export type Verdict = (typeof VERDICTS)[number];
@@ -61,13 +66,13 @@ export type Judgement = {
 };
 
 /**
- * One side of a pair as the prompt presents it. `source` is accepted for the
- * callers' convenience and NOT rendered: the ticket asked that the judge see
- * date and source, and `metadata.source` is caller-controlled text — placed
- * on the trusted header line it would sit outside the only region the prompt
- * tells the judge to distrust (review pass 3). The date is the row's own.
+ * One side of a pair as the prompt presents it: the text and the row's own
+ * capture date. Not `metadata.source`, though the ticket asked that the judge
+ * see it: it is caller-controlled text, and on the trusted header line it
+ * would sit outside the only region the prompt tells the judge to distrust
+ * (review pass 3).
  */
-export type PairSide = { content: string; createdAt: string | Date; source?: string | null };
+export type PairSide = { content: string; createdAt: string | Date };
 
 /**
  * One user message holding the rules and both thoughts, the shape entities.ts

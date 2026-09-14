@@ -2867,6 +2867,28 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const edForced = await review(edPid!, "accept", { force: true });
   assert(edForced.ok === true && (await supersedesOf(edNew)) === edOld, "…and p_force accepts it, the reviewer having read both texts as they are now");
   await review(edPid!, "reject");
+  // The older side, a whitespace-only edit, and force on an unedited pair.
+  await db.query(`UPDATE thoughts SET content = $2 WHERE id = $1`, [edOld, "edited:   the first   plan"]);
+  const [wsEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals(NULL, 50) WHERE id = $1`, [edPid])).rows;
+  assert(wsEdit.older_edited === false, "a whitespace-only edit normalises to the same fingerprint (016's rule) and is not flagged");
+  await db.query(`UPDATE thoughts SET content = $2 WHERE id = $1`, [edOld, "edited: the first plan, now with a caveat"]);
+  const [oldEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals(NULL, 50) WHERE id = $1`, [edPid])).rows;
+  assert(oldEdit.older_edited === true && oldEdit.newer_edited === true, "an edit to the older side is flagged on that side");
+  const bothRefused = await review(edPid!, "accept");
+  assert(bothRefused.ok === false && bothRefused.error === "EDITED_SINCE" && bothRefused.older_edited === true, "…and refused naming it");
+  const plainForce = await review(pid, "accept", { force: true });
+  assert(plainForce.ok === true && plainForce.written === true, "p_force on an unedited pair is a plain accept");
+  await review(pid, "reject");
+  // The fingerprint recorded is the caller's — the text the judge was sent —
+  // so an edit that landed during the judge call already reads as edited.
+  const raceOld = await seed("race: the text the judge read", 8, 6); const raceNew = await seed("race: the later text", 8, 0);
+  await mention(raceOld, ["race"]); await mention(raceNew, ["race"]);
+  const racePid = (await db.query<{ id: string }>(
+    `SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, NULL, 0.9, $3, NULL, $4, $5) AS id`,
+    [raceOld, raceNew, KEY, await fpOf("race: what the judge actually read, since edited"), await fpOf("race: the later text")])).rows[0].id;
+  const [raceRow] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [racePid])).rows;
+  assert(raceRow.older_edited === true && raceRow.newer_edited === false, "a proposal recorded with the judged text's fingerprint reads as edited when the row moved during the call");
+  await review(racePid, "reject");
 
   const missing = await review("00000000-0000-4000-8000-000000000000", "accept");
   assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown proposal id is NOT_FOUND");
@@ -2880,7 +2902,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   const pendingList = await list("pending");
   assert(pendingList.length === 1 && pendingList[0].id === loopPid, `one proposal is pending — the loop one (${pendingList.length})`);
   const all = await list(null);
-  assert(all.length === 5 && all.every((r, i) => i === 0 || Number(all[i - 1].confidence) >= Number(r.confidence)),
+  assert(all.length === 6 && all.every((r, i) => i === 0 || Number(all[i - 1].confidence) >= Number(r.confidence)),
     `NULL lists every state, most confident first (${all.map((r) => `${r.status}@${r.confidence}`).join(", ")})`);
   const shown = all.find((r) => r.id === pid)!;
   assert(shown.older_id === decision && shown.newer_id === reversal && /bill monthly/.test(String(shown.older_content)) && /annually/.test(String(shown.newer_content)) && shown.status === "rejected",

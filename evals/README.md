@@ -2479,6 +2479,11 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   unmeasured.
 * `--min-confidence` filtered nothing because the judge's confidence is flat;
   the flag stays, at 0.5, for a judge whose confidence means something.
+* The numbers were measured under prompt version 1, whose header line carried
+  `, source linear` after each date; the third review pass removed that slot
+  (a capture controls `metadata.source`, and it sat outside the untrusted
+  block), and the shipped prompt is version 2. The difference is a constant on
+  every corpus row; the table was not re-run for it.
 * A stronger local judge was tried and not finished: `qwen3.8:27b` on the first
   21 labelled pairs found the same 2 of 6 conflicts (both with the right
   direction, at 0.95) and flagged 1 of 15 non-conflicts, at 40 s a pair — three

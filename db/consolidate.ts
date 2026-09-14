@@ -274,7 +274,7 @@ async function printList(status: string | undefined, limit = 50): Promise<number
   }
   console.log(`  ${rows.length} ${status ?? ""} proposal(s), most confident first:\n`);
   rows.forEach((p, i) => {
-    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${p.review_note}` : ""})` : ""}`);
+    console.log(`  ${i + 1}. [${Number(p.confidence).toFixed(2)}] ${verdictPhrase(p.verdict)}${p.status !== "pending" ? `  (${p.status}${p.reviewed_at ? ` ${day(p.reviewed_at)}` : ""}${p.review_note ? `: ${cleanForDisplay(p.review_note).replace(/\s+/g, " ")}` : ""})` : ""}`);
     if (p.reason) console.log(`     ${cleanForDisplay(p.reason)}`);
     console.log(`     newer [${day(p.newer_created_at)}]${p.newer_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.newer_content)}\n        ID: ${p.newer_id}`);
     console.log(`     older [${day(p.older_created_at)}]${p.older_edited ? " EDITED SINCE JUDGED" : ""} ${snippet(p.older_content)}\n        ID: ${p.older_id}`);
@@ -299,7 +299,9 @@ async function printStale(days: number): Promise<void> {
     return;
   }
   console.log(`  stale: ${rows.length} entit${rows.length === 1 ? "y" : "ies"} nothing has mentioned in ${days} days (oldest first; reported, not acted on):`);
-  for (const r of rows) console.log(`    ${r.entity_type.padEnd(12)} ${cleanForDisplay(r.name).slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
+  // Names are one line each: control characters stripped and whitespace
+  // collapsed, so a name cannot start a forged row (review pass 4).
+  for (const r of rows) console.log(`    ${r.entity_type.padEnd(12)} ${cleanForDisplay(r.name).replace(/\s+/g, " ").slice(0, 50).padEnd(50)} ${r.thoughts} thought(s), last ${day(r.newest_at)}`);
 }
 
 if (REVIEW_ONLY) {
@@ -437,7 +439,8 @@ function progress(force = false): void {
   );
 }
 
-type Row = { id: string; content: string; created_at: string; source: string | null };
+/** A thought as read for judging: the text and 016's hash of it, taken together, so the proposal records what the judge saw. */
+type Row = { id: string; content: string; created_at: string; fingerprint: string };
 type Candidate = { older_id: string; similarity: number; shared_entities: number };
 type Outcome = { outcome: "succeeded" } | { outcome: "failed"; error: string } | { outcome: "vanished" };
 
@@ -448,7 +451,7 @@ async function processRow(row: Row): Promise<Outcome> {
     return { outcome: "succeeded" };
   }
   const olders = (await sql`
-    SELECT id, content, created_at, metadata->>'source' AS source FROM thoughts
+    SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint FROM thoughts
     WHERE id = ANY(${sql.array(candidates.map((c) => c.older_id), "TEXT")}::uuid[])`) as Row[];
   const byId = new Map(olders.map((o) => [o.id, o]));
   const problems: string[] = [];
@@ -461,8 +464,8 @@ async function processRow(row: Row): Promise<Outcome> {
     const t0 = Date.now();
     let j: Judgement;
     try {
-      j = await judgePair({ content: older.content, createdAt: older.created_at, source: older.source },
-                          { content: row.content, createdAt: row.created_at, source: row.source },
+      j = await judgePair({ content: older.content, createdAt: older.created_at },
+                          { content: row.content, createdAt: row.created_at },
                           cfg, AbortSignal.timeout(TIMEOUT_S * 1000));
     } catch (e) {
       llmMs += Date.now() - t0;
@@ -490,10 +493,13 @@ async function processRow(row: Row): Promise<Outcome> {
         totals.underConfidence++;
         recorded = "under-confidence";
       } else {
+        // The fingerprints of the texts the judge was sent, not of the rows as
+        // they are at this write: an edit that landed during the call is then
+        // visible to the reviewer (review pass 4).
         const [{ id }] = await sql`
           SELECT record_supersession_proposal(${c.older_id}::uuid, ${row.id}::uuid, ${verdict}::text,
                                               ${j.confidence}::numeric, ${j.reason || null}::text, ${c.similarity}::float,
-                                              ${JOB}::text, ${agentId}::uuid) AS id`;
+                                              ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text) AS id`;
         proposalId = (id as string | null) ?? null;
         if (proposalId) { totals.proposed++; recorded = "proposed"; if (verdict === "conflict_undirected") totals.undirected++; }
         else { totals.alreadyProposed++; recorded = "already"; }
@@ -551,7 +557,7 @@ async function worker(n: number): Promise<void> {
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
         const rows = (await sql`
-          SELECT id, content, created_at, metadata->>'source' AS source
+          SELECT id, content, created_at, content_fingerprint_of(content) AS fingerprint
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
         byId = new Map(rows.map((r) => [r.id, r]));
       } catch (e) {
