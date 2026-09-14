@@ -44,8 +44,6 @@ import type {
 const STATS_PAGE_SIZE = 1000;
 const STATS_MAX_ROWS = 100_000;
 
-/** Canonical hyphenated uuid; a malformed id is treated as no-match by the 025 read methods. */
-
 export class PostgrestStore implements ThoughtStore {
   readonly kind = "postgrest" as const;
   private client: SupabaseClient;
@@ -206,16 +204,14 @@ export class PostgrestStore implements ThoughtStore {
           for (const t of m.topics) if (t != null) topics[t as string] = (topics[t as string] || 0) + 1;
         if (Array.isArray(m.people))
           for (const p of m.people) if (p != null) people[p as string] = (people[p as string] || 0) + 1;
-      }
-
-      // Ordered newest-first, so the first dated row of the first page is the
-      // newest overall and the last dated row of the final page is the oldest.
-      // A NULL created_at sorts first under DESC and is skipped, as 024's
-      // min/max skip it on the SQL store (see store.ts:ThoughtMeta).
-      for (const r of page) {
-        if (r.created_at === null) continue;
-        if (newest === null) newest = r.created_at;
-        oldest = r.created_at;
+        // Ordered newest-first, so the first dated row of the first page is the
+        // newest overall and the last dated row of the final page is the
+        // oldest. A NULL created_at sorts first under DESC and is skipped, as
+        // 024's min/max skip it on the SQL store (see store.ts:ThoughtMeta).
+        if (r.created_at !== null) {
+          if (newest === null) newest = r.created_at;
+          oldest = r.created_at;
+        }
       }
       aggregated += page.length;
 

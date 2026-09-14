@@ -5362,6 +5362,54 @@ per-method conformance sweep over the whole `ThoughtStore` interface — with
 every read method on a `store.ts` normaliser and [3d] reading each back, it
 would re-assert what [3d] asserts.
 
+**A third pass (high effort, triaged) — the second consecutive stop signal:
+its top findings were pass 2's own rules meeting each other, so the loop ends
+here.** Fixed:
+
+- `isoTimestampOrNull` tested `== null`, so `undefined` — a column missing
+  from the row, which `isoTimestamp` throws on by rule — became `null` for
+  every nullable column: a dropped `updated_at` in a SELECT, or 024 renaming
+  `last_ts`, would have printed a null edit time or an empty stats range with
+  every suite green. It tests `=== null` now; `normaliseMutation`'s pre-018
+  envelope, the one place absence is legitimate, says so explicitly.
+- Pass 2 wrapped the SQL suite's page-walk comparisons in `String()` to
+  satisfy the widened type, which made them vacuous (`"null"` sorts above
+  every digit). [5] asserts every page row's `created_at` is non-null ISO.
+- [3d] asserted the infinity row by position (`list[0]`, `page[0]`), which a
+  NULL — sorting above +infinity under DESC — would displace; by id and by
+  value now. Its plant-to-delete span is a `try/finally`, so a thrown store
+  call cannot leak the row into the next run. [8]'s oracle was a second
+  formatter (`new Date(x).toISOString()`, which throws on the infinity and
+  fabricates on an empty range); it is `isoTimestampOrNull`.
+- Deleting the two local `UUID_RE`s left each file's JSDoc for it sitting
+  above the class declaration; gone, the useful sentence moved onto the
+  export. `normaliseProvenanceNode` renamed a key, ran the derivative
+  normaliser, destructured the id back out and spread the rest AFTER its
+  explicit fields, an overwrite direction TypeScript would not flag; a shared
+  `derivationFields` is spread first in both. The stats walk's null-skip loop
+  folds into the tally loop it duplicated.
+
+Corrected, not fixed: `isoTimestamp`'s docblock said a value with no ISO form
+comes out "the same on both clients". It does not. Verified live by the
+reviewer: for a BC date or a year past ±275760, Bun's driver hands the SQL
+store `Date(NaN)` (or, on a parameterised query, an extended-year Date whose
+`toISOString` fails `ISO_RE`) before the store sees it, so the SQL store
+returns JS's "Invalid Date" where PostgREST's text survives. The docblock
+says so and names the remedy (`created_at::text` beside the column). Folded
+into SMD-1328 with two more facts the reviewer surfaced: this PR changed
+the default store's answer for an undated row from JSON null to the epoch
+string — parity with the SQL store's long-standing behaviour, but a visible
+change (`fetch`'s `metadata.created_at`, the search citation title) that
+had gone unannounced; and no test pins what the tools print for a sentinel,
+so the eventual fix has nothing to flip. Ticketed: SMD-1336 — the PostgREST
+store's client-side stats walk mimics 024 rule by rule (this ticket added
+the NULL-skip), but `thought_stats_summary()` is a plain zero-arg jsonb
+function it could call over `rpc`, with the walk kept only as the pre-024
+fallback; 024's "PostgREST cannot aggregate server-side" premise looks
+false. Declined: pinning "Invalid Date" in `test-server` as expected output
+(pinning a bug), and widening `ThoughtListItem.created_at` here (SMD-1328's
+decision, five reader sites).
+
 Verified: `test-store-postgrest` 77/77 (60 before this ticket; the first
 commit's format assertion, run against `main`'s store, reported
 `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)` and

@@ -114,15 +114,20 @@ export type ThoughtHybridMatch = {
  * shape (SMD-1040; FORK.md §52 has the history).
  *
  * The rule. A finite timestamp is `toISOString`. One with no ISO form keeps
- * Postgres's own text, the same on both clients: the column allows `infinity`,
- * which migration 020 ranks by design, and a BC date or a year past ±275760
- * that JS Date rejects — one odd row stays one odd row rather than failing the
- * caller's whole result. A NULL column comes out as the epoch, the Date(null)
- * convention every mapper here has always had; `isoTimestampOrNull` is for
- * the columns whose type says null. `undefined` throws: the column is missing
- * from the row, a bug in the SELECT, not data. Whether NULL and the
- * no-ISO-form rows should be `null` under a widened type, and what the tools
- * print for them (today: "Invalid Date" for the sentinels), is SMD-1328.
+ * the text it arrived as rather than failing the caller's whole result — one
+ * odd row stays one odd row. The column allows `infinity`, which migration
+ * 020 ranks by design; both clients' spellings of it come out as Postgres's.
+ * A BC date or a year past ±275760 is the case the two clients do NOT agree
+ * on: PostgREST's text survives (`0044-03-15T00:00:00+00:00 BC`), but Bun's
+ * driver has already turned it into `Date(NaN)` — or, on a parameterised
+ * query, a Date whose `toISOString` is the extended-year form — before the
+ * store sees it, so the SQL store hands back JS's "Invalid Date". Recovering
+ * the text there means selecting `created_at::text` beside the column; that,
+ * and whether NULL (the epoch, the Date(null) convention every mapper here
+ * has always had) and the no-ISO-form rows should be `null` under a widened
+ * type, and what the tools print for them (today "Invalid Date"), is
+ * SMD-1328. `undefined` throws: the column is missing from the row, a bug in
+ * the SELECT, not data.
  */
 export function isoTimestamp(v: unknown): string {
   if (v === undefined) throw new Error("isoTimestamp: the row has no such column");
@@ -132,9 +137,13 @@ export function isoTimestamp(v: unknown): string {
   return Number.isNaN(d.getTime()) ? String(v) : d.toISOString();
 }
 
-/** `isoTimestamp` for a nullable column — `updated_at`, a stats range, `ThoughtMeta.created_at`. */
+/**
+ * `isoTimestamp` for a column whose type says null — `updated_at`, a stats
+ * range, `ThoughtMeta.created_at`. Only SQL NULL becomes null; a missing
+ * column (`undefined`) still throws, as above.
+ */
 export function isoTimestampOrNull(v: unknown): string | null {
-  return v == null ? null : isoTimestamp(v);
+  return v === null ? null : isoTimestamp(v);
 }
 
 /**
@@ -239,7 +248,12 @@ export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
   };
 }
 
-/** A well-formed thought id. Both stores refuse anything else before it reaches a uuid cast. */
+/**
+ * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
+ * column or argument, not a not-found; both stores' read methods treat it as
+ * no-match so a bad id from an MCP client gets a clean answer, not a Postgres
+ * error string — the same answer whichever store is configured.
+ */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -314,9 +328,9 @@ export type Derivative = {
   created_at: string;
 };
 
-export function normaliseDerivative(r: Record<string, unknown>): Derivative {
+/** The five columns 025's two functions share; spread FIRST, so an explicit field can never be overwritten by it. */
+function derivationFields(r: Record<string, unknown>) {
   return {
-    id: String(r.id),
     content: String(r.content),
     type: r.type == null ? null : String(r.type),
     sourceType: r.source_type == null ? null : String(r.source_type),
@@ -325,13 +339,16 @@ export function normaliseDerivative(r: Record<string, unknown>): Derivative {
   };
 }
 
+export function normaliseDerivative(r: Record<string, unknown>): Derivative {
+  return { ...derivationFields(r), id: String(r.id) };
+}
+
 export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceNode {
-  const { id: _id, ...rest } = normaliseDerivative({ ...r, id: r.thought_id });
   return {
+    ...derivationFields(r),
     thoughtId: String(r.thought_id),
     depth: Number(r.depth),
     parentId: r.parent_id ? String(r.parent_id) : null,
-    ...rest,
     cycle: r.cycle === true,
   };
 }
@@ -380,7 +397,9 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
       // same column through normaliseThoughtRecord. Passing the ISO value back
       // as if_unchanged_since is safe — 021 compares both sides at millisecond
       // precision.
-      updatedAt: isoTimestampOrNull(r.updated_at) ?? undefined,
+      // `== null`, not isoTimestampOrNull: a pre-018 envelope has no
+      // updated_at key at all, and that absence is legitimate here.
+      updatedAt: r.updated_at == null ? undefined : isoTimestamp(r.updated_at),
       duplicateOf: r.duplicate_of ? String(r.duplicate_of) : undefined,
       // Another row holds this text's key under different text — a stale
       // fingerprint — so this row could not take the fingerprint it should have.
@@ -390,7 +409,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Updat
   return {
     ok: false,
     error: (r.error as MutationError) ?? "NOT_FOUND",
-    currentUpdatedAt: isoTimestampOrNull(r.current_updated_at) ?? undefined,
+    currentUpdatedAt: r.current_updated_at == null ? undefined : isoTimestamp(r.current_updated_at),
   };
 }
 
@@ -501,7 +520,7 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
       ok: false,
       error: "REVOKED",
       agentId: r.agent_id,
-      revokedAt: isoTimestampOrNull(r.revoked_at) ?? "",
+      revokedAt: r.revoked_at == null ? "" : isoTimestamp(r.revoked_at),
       reason: typeof r.reason === "string" ? r.reason : null,
     };
   }

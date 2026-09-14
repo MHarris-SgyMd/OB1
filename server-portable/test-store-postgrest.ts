@@ -27,7 +27,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
-import { isoTimestamp } from "./store.ts";
+import { isoTimestamp, isoTimestampOrNull } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -242,20 +242,28 @@ console.log("\n[3d] Every read method returns the SQL store's timestamp form —
   // Postgres's spelling. vec(6) is an axis no section before this one has used.
   const sql = new SQL({ url: URL_, max: 1 });
   const plantedId = await plantLegacyRow(sql, "a row dated infinity", "[" + vec(6).join(",") + "]", "infinity");
-  const far = await store.matchThoughts({ embedding: vec(6), threshold: 0.5, limit: 5, filter: {} });
-  const hit = far.find((r) => r.id === plantedId);
-  assert(hit !== undefined, `the infinite row is returned, not thrown on (${far.length} rows)`);
-  assert(hit?.created_at === "infinity", `…with created_at spelled as Postgres does (got ${hit?.created_at})`);
-  const list = await store.listThoughts({ limit: 50 });
-  assert(list[0]?.created_at === "infinity" && list.slice(1).every((r) => ISO_RE.test(r.created_at)),
-         `listThoughts: infinity sorts first, every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
-  const page = await store.pageThoughtMeta(0, 50);
-  assert(page[0]?.created_at === "infinity" && page.slice(1).every((r) => ISO_RE.test(String(r.created_at))), "pageThoughtMeta: the same on the stats walk's rows");
-  const got = await store.getThought(plantedId);
-  assert(got?.created_at === "infinity", "getThought: the same");
-  // Gone before [8]'s date-range assertions, which expect a finite span.
-  await sql`DELETE FROM thoughts WHERE id = ${plantedId}::uuid`;
-  await sql.close();
+  try {
+    const far = await store.matchThoughts({ embedding: vec(6), threshold: 0.5, limit: 5, filter: {} });
+    const hit = far.find((r) => r.id === plantedId);
+    assert(hit !== undefined, `the infinite row is returned, not thrown on (${far.length} rows)`);
+    assert(hit?.created_at === "infinity", `…with created_at spelled as Postgres does (got ${hit?.created_at})`);
+    // By id, not position: a NULL created_at sorts above +infinity under DESC,
+    // so a later undated fixture must not turn this into a misleading failure.
+    const list = await store.listThoughts({ limit: 50 });
+    assert(list.find((r) => r.id === plantedId)?.created_at === "infinity" && list.filter((r) => r.id !== plantedId).every((r) => ISO_RE.test(r.created_at)),
+           `listThoughts: the planted row is "infinity", every other created_at is ISO (${list.map((r) => r.created_at).join(" ").slice(0, 80)})`);
+    const page = await store.pageThoughtMeta(0, 50);
+    assert(page.some((r) => r.created_at === "infinity") && page.filter((r) => r.created_at !== "infinity").every((r) => r.created_at !== null && ISO_RE.test(r.created_at)),
+           "pageThoughtMeta: the same on the stats walk's rows");
+    const got = await store.getThought(plantedId);
+    assert(got?.created_at === "infinity", "getThought: the same");
+  } finally {
+    // Gone before [8]'s date-range assertions, which expect a finite span —
+    // and gone even if a store call above threw, so the row cannot leak into
+    // the next run's shared database.
+    await sql`DELETE FROM thoughts WHERE id = ${plantedId}::uuid`;
+    await sql.close();
+  }
 }
 
 console.log("\n[4] A thought is deduplicated across its own chunks");
@@ -396,7 +404,10 @@ console.log("\n[8] statsSummary aggregates the corpus through the page walk this
   const undatedId = await plantLegacyRow(sql, "a row with no date", "[" + vec(7).join(",") + "]", null);
   const [range] = await sql`SELECT min(created_at) AS oldest, max(created_at) AS newest FROM thoughts`;
   const s = await store.statsSummary();
-  assert(s.newest === new Date(range.newest).toISOString() && s.oldest === new Date(range.oldest).toISOString(),
+  // The store's own formatter as the oracle, not a second one: on the edges this
+  // PR added (an infinity, an empty range) `new Date(x).toISOString()` throws or
+  // fabricates where the store returns "infinity" or null.
+  assert(s.newest === isoTimestampOrNull(range.newest) && s.oldest === isoTimestampOrNull(range.oldest),
          `the date range ignores the undated row, as 024's min/max do (${s.oldest} → ${s.newest})`);
   assert(s.total === (await store.countThoughts()), "statsSummary.total equals countThoughts");
   await sql`DELETE FROM thoughts WHERE id = ${undatedId}::uuid`;

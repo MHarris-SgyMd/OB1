@@ -264,6 +264,9 @@ console.log("\n[5] Stats counting and paging");
   assert(p1.length === 2 && p2.length === 2, "pages fill to the requested size");
   assert(p3.length === 0, "a page past the end is empty, which ends the loop");
 
+  // Every seeded row is dated, so the walk's column must come back ISO on each —
+  // a null here would mean the column went missing, not that a row is undated.
+  assert([...p1, ...p2].every((r) => r.created_at !== null && ISO_RE.test(r.created_at)), "every page row carries an ISO created_at");
   const seen = new Set([...p1, ...p2].map((r) => String(r.created_at) + JSON.stringify(r.metadata)));
   assert(seen.size === 4, "pages do not overlap");
   assert(String(p1[0].created_at) >= String(p2[p2.length - 1].created_at), "ordering is stable across pages");

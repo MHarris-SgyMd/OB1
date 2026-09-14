@@ -50,12 +50,6 @@ function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
-/**
- * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
- * column/argument, not a not-found; the read methods treat it as no-match so a
- * bad id from an MCP client gets a clean answer, not a Postgres error string.
- */
-
 export class SqlStore implements ThoughtStore {
   readonly kind = "sql" as const;
   private sql: SQL;
