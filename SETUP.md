@@ -163,7 +163,7 @@ The short version:
   whole vector was measured to hold to about that length and larger windows were
   measured to buy nothing (`evals/README.md`, SMD-1305). `preflight.ts` prints the
   rule and where it came from. Windows already written stay until an edit or a
-  backfill re-embed pass (`FORK.md` §49). Short thoughts are untouched. Raising `num_batch`
+  backfill re-embed pass (`FORK.md` §50). Short thoughts are untouched. Raising `num_batch`
   is therefore optional — it lets each window be larger, nothing more; a model
   rebuilt that way has a new name, so set `OB1_CHUNK_TOKENS` for it.
 
