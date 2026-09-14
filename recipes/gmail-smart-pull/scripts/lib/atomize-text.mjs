@@ -245,15 +245,20 @@ function describeSpawnError(err) {
     ? "CLAUDE_CLI_PATH names a file that does not exist — check the path; it must be a bare executable path (no ~, no $VAR, no flags), since this spawn uses no shell"
     : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
   const notRunnable = "CLAUDE_CLI_PATH is not an executable file (a directory, or a file without the exec bit)";
+  const notDir = "a component of CLAUDE_CLI_PATH is not a directory (a trailing slash on the executable, or a file where a directory should be)";
   const win = "on Windows the npm install's claude.cmd shim cannot be run without a shell; use Anthropic's native Windows installer, which provides claude.exe, and point CLAUDE_CLI_PATH at it — or use the anthropic/openrouter provider";
+  // Branch on the code first: EINVAL is Node refusing a .cmd/.bat by name (the
+  // file exists), ENOTDIR is a bad path component, EACCES a non-executable —
+  // each gets its own remedy, and ENOENT on Windows also names the shim.
   const hint =
-    process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
-    err.code === "ENOENT" ? ` — ${notFound}` :
-    err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOTDIR" ? ` — ${notRunnable}` :
+    err.code === "EINVAL" && process.platform === "win32" ? ` — ${win}` :
+    err.code === "ENOENT" ? ` — ${notFound}${process.platform === "win32" ? `; ${win}` : ""}` :
+    err.code === "ENOTDIR" ? ` — ${notDir}` :
+    err.code === "EACCES" || err.code === "EPERM" ? ` — ${notRunnable}` :
     "";
   const e = new Error(`claude-cli spawn error: ${err.message}${hint}`);
-  // Spawn failures carry paths and errno text, never model output or email
-  // text, so the caller may log them whole.
+  // Spawn failures carry paths and errno text, never model output or memory
+  // text, so a caller that slices other errors may log these whole.
   e.safeToLog = true;
   return e;
 }
@@ -304,7 +309,11 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
         const detail = debug
           ? `\nStderr: ${stderr.slice(0, 500)}\nStdout: ${stdout.slice(0, 300)}`
           : ` (stderr ${stderr.length}B, stdout ${stdout.length}B — set ATOMIZE_DEBUG=1 to see)`;
-        reject(new Error(`claude-cli exited with code ${code}.${detail}`));
+        const e = new Error(`claude-cli exited with code ${code}.${detail}`);
+        // The operator asked for the snippets; a caller that slices errors to
+        // keep email text out of its log must not cut them off again.
+        e.safeToLog = debug;
+        reject(e);
         return;
       }
       try {

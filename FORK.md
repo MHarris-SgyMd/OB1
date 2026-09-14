@@ -5119,16 +5119,28 @@ recipe writes its packs and OAuth state under `recipes/gmail-smart-pull/data/`
 by default, full email bodies, and `recipes/*/data/` is now in `.gitignore` —
 so untrusted text a recipe pulled onto a maintainer's machine cannot decide
 whether the tree passes, and cannot be committed by a stray `git add -A`. A hit
-fails CI with the file, the line and the rule. Exceptions are per **file and pattern and counted**: the atomizer's
+fails CI with the file, the line and the rule. Two shapes are read across lines rather
+than per line: a quoted bare `"Bash"` counts only inside an `allow` list,
+however it is printed — so a pretty-printed `deny` list, a hook `matcher`, a
+`metadata.json` `tools` entry or prose naming the tool in quotes is not it, and
+a `deny` on the same line as an `allow` does not excuse the allow; and in code
+files the `shell` option is flagged with *any* value but `false` (`shell:
+isWin,` on its own line included), where in prose and YAML it needs a code
+value so a `shell: bash` step key is not it. The prefix rule catches the glob
+spelling too — `Bash(curl *)`, `Bash(curl -s *api.open-meteo.com*)` — which
+Claude Code 2.1 now labels the current form and `:*` the legacy one; and the
+Codex pattern catches `approval_policy = "never"`, the config key behind the
+flags. Exceptions are per **file and pattern and counted**: the atomizer's
 README warning and module header are exempt from the bypass-flag pattern for
 exactly one line each, because they name it to say it was deleted, and are
 scanned for everything else — one more line naming the flag (a rebase re-adding
 a usage block beside the warning) fails, one fewer (the prose rewritten) fails
-too. Two probe lists run against the patterns on every invocation: forty-one
-strings the five must catch, and eighteen ordinary lines they must not — this
-repo's own prose, a regex `.exec(`, `shell: false`, "Restart your shell:", a
-GitHub Actions `shell: bash` step, a `deny` or `disallowedTools` list and a hook
-`matcher` naming `"Bash"` (those *narrow* Bash), `Bash(git status:*)`. The first pass's version had a file-wide exception (the
+too. Probe lists run against the patterns on every invocation through the same
+machinery the scan uses: fifty-five strings the five must catch (two of them
+code-file-only), and twenty-five ordinary lines they must not — this repo's own
+prose, a regex `.exec(`, `shell: false`, "Restart your shell:", a GitHub
+Actions `shell: bash` step, a pretty-printed `deny` list, a hook's `tool_name
+=== "Bash"`, a `metadata.json` `tools` entry, `Bash(git status:*)`. The first pass's version had a file-wide exception (the
 excepted module could regain a real shell spawn unnoticed), four literal
 patterns, an extension allowlist that skipped `.py`, `.example` and every
 extensionless file, `\` separators in the exception keys on Windows, a
@@ -5141,8 +5153,17 @@ handler with no shell; the third pass's version had patterns that fired on
 ordinary prose ("Restart your shell:", `codex exec (the CLI)`) and on the deny
 lists and hook matchers that narrow Bash, missed the kebab `--allowed-tools`, a
 YAML `- Bash` list item, `--ask-for-approval=never`, `sh -lc`, an imported
-`exec`, and scanned the recipe's own pulled email packs. Paths are normalised
-to `/`, the scan walks
+`exec`, and scanned the recipe's own pulled email packs; the fourth pass's
+version listed ignored files repo-wide through a 1 MiB buffer and swallowed the
+overflow into an empty set (a maintainer with a built dashboard would have had
+the skip switch itself off silently — now scoped to the seven directories,
+unbounded, and loud on failure), guarded the quoted `"Bash"` with a whole-line
+lookahead that was both a false negative and a false positive, matched only
+the legacy `:*` prefix spelling, missed `approval_policy`, and kept a
+display-time `_template` filter whose only live effect was to hide a check-5
+hit in a template SQL file every contributor copies (deleted; the placeholder
+link it excused has not been produced since the filter was written). Paths are
+normalised to `/`, the scan walks
 `contributionDirs()`, and check 5 shares the line scanner. Proven each time:
 probe files with the new spellings (seven hits on the last, an extensionless
 `Dockerfile` among them), a usage block appended beside the excepted warning
@@ -5183,12 +5204,25 @@ ordinary prose and on deny lists, the 400-character log slice whose premise
 the parser, the startup guard closing one of four configuration errors and
 blocking `--list-labels`, the Windows prose naming a `claude.exe` the npm
 install never provides, and the set-but-missing hint asserting the value was
-malformed. All fixed here, except the one every pass named: the duplication
-between the two recipes' Claude-CLI spawns (two `buildCleanEnv`, two
-`STRIP_KEYS`, two spawn wrappers, two `describeSpawnError`s, each patched three
-times this ticket) is SMD-1317. The gmail copy's error also stops putting
-stderr and stdout (email text) into the run's log by default, behind the same
-`ATOMIZE_DEBUG=1` switch the atomizer uses. Upstream status:
+malformed. A fourth pass, ten more, again edges of the third's own fixes — the
+second consecutive stop signal, so the loop ends here: the ignored-file skip's
+silent overflow, the `_template` filter, the quoted-`"Bash"` lookahead, the
+`shell: isWin` and namespaced `execSync` and `/bin/sh` spellings, the glob
+prefix form, `approval_policy`, the `ATOMIZE_DEBUG=1` detail still cut by the
+160-character slice (it is the opt-in whose purpose is those snippets; marked
+safe to log when on), the errno table giving `EINVAL` the "does not exist"
+remedy and `ENOTDIR` the "no exec bit" one (branched on the code first now,
+with a trailing-slash hint), the `.gitignore` comment promising cover for an
+atomizer data root that resolves from the current directory (`/data/atomic-
+memories/` added), and the atomizer's hint table lacking the `safeToLog` mark
+its own slicing callers would need (hoisted to an exported
+`describeSpawnError` mirroring the gmail copy). All fixed here, except the one
+every pass named: the duplication between the two recipes' Claude-CLI spawns
+(two `buildCleanEnv`, two `STRIP_KEYS`, two spawn wrappers, two
+`describeSpawnError`s, each patched four times this ticket) is SMD-1317. The
+gmail copy's error also stops putting stderr and stdout (email text) into the
+run's log by default, behind the same `ATOMIZE_DEBUG=1` switch the atomizer
+uses. Upstream status:
 **contributable in principle** — these are recipe files, not the core server —
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.

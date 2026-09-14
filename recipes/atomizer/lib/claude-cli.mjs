@@ -41,6 +41,36 @@ export function buildCleanEnv() {
  * @param {string} [stdinData] - optional data to pipe to stdin
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
+/**
+ * One shape for every way the spawn can fail, with the hint that fits. The
+ * same table as recipes/gmail-smart-pull/scripts/lib/atomize-text.mjs (SMD-1317
+ * will give it one home); `safeToLog` tells a slicing caller the message holds
+ * no memory text.
+ */
+export function describeSpawnError(err) {
+  const configured = Boolean(process.env.CLAUDE_CLI_PATH);
+  const notFound = configured
+    ? "CLAUDE_CLI_PATH names a file that does not exist — check the path; it must be a bare executable path (no ~, no $VAR, no flags), since this spawn uses no shell"
+    : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
+  const notRunnable = "CLAUDE_CLI_PATH is not an executable file (a directory, or a file without the exec bit)";
+  const notDir = "a component of CLAUDE_CLI_PATH is not a directory (a trailing slash on the executable, or a file where a directory should be)";
+  const win = "on Windows the npm install's claude.cmd shim cannot be run without a shell; use Anthropic's native Windows installer, which provides claude.exe, and point CLAUDE_CLI_PATH at it — or use an HTTP provider";
+  // Branch on the code first: EINVAL is Node refusing a .cmd/.bat by name (the
+  // file exists), ENOTDIR is a bad path component, EACCES a non-executable —
+  // each gets its own remedy, and ENOENT on Windows also names the shim.
+  const hint =
+    err.code === "EINVAL" && process.platform === "win32" ? ` — ${win}` :
+    err.code === "ENOENT" ? ` — ${notFound}${process.platform === "win32" ? `; ${win}` : ""}` :
+    err.code === "ENOTDIR" ? ` — ${notDir}` :
+    err.code === "EACCES" || err.code === "EPERM" ? ` — ${notRunnable}` :
+    "";
+  const e = new Error(`Claude CLI spawn error: ${err.message}${hint}`);
+  // Spawn failures carry paths and errno text, never model output or memory
+  // text, so a caller that slices other errors may log these whole.
+  e.safeToLog = true;
+  return e;
+}
+
 export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null) {
   return new Promise((resolve, reject) => {
     // No shell (SMD-1251): args is an argv array and the prompt travels on
@@ -49,20 +79,6 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
     // ~, no $VAR, no flags), and on Windows the native claude.exe — the bare
     // name is not found through an npm .cmd shim (ENOENT) and a .cmd/.bat the
     // path names is refused (EINVAL, thrown synchronously by spawn()).
-    const describe = (err) => {
-      const configured = Boolean(process.env.CLAUDE_CLI_PATH);
-      const notFound = configured
-        ? "CLAUDE_CLI_PATH names a file that does not exist — check the path; it must be a bare executable path (no ~, no $VAR, no flags), since this spawn uses no shell"
-        : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
-      const notRunnable = "CLAUDE_CLI_PATH is not an executable file (a directory, or a file without the exec bit)";
-      const win = "on Windows the npm install's claude.cmd shim cannot be run without a shell; use Anthropic's native Windows installer, which provides claude.exe, and point CLAUDE_CLI_PATH at it — or use an HTTP provider";
-      const hint =
-        process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
-        err.code === "ENOENT" ? ` — ${notFound}` :
-        err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOTDIR" ? ` — ${notRunnable}` :
-        "";
-      return new Error(`Claude CLI spawn error: ${err.message}${hint}`);
-    };
     let child;
     try {
       child = spawn(args[0], args.slice(1), {
@@ -70,7 +86,7 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
         env,
       });
     } catch (err) {
-      reject(describe(err));
+      reject(describeSpawnError(err));
       return;
     }
 
@@ -99,7 +115,7 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(describe(err));
+      reject(describeSpawnError(err));
     });
 
     child.on("close", (code) => {
