@@ -17,11 +17,7 @@ import { createAssert, ISO_RE, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
 import { createStore } from "./store.ts";
 import { SQL } from "bun";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS = join(HERE, "..", "db", "migrations");
 const URL_ = process.env.DATABASE_URL;
 
 if (!URL_) {
@@ -29,17 +25,9 @@ if (!URL_) {
   process.exit(2);
 }
 
-/**
- * db/migrations/*.sql are templates — migrate.ts substitutes these at apply time.
- * Applying them raw fails with `syntax error at or near "{"`.
- */
+/** The schema's shape for this suite; resetSchema substitutes them into the migration templates. */
 const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
 const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
-}
 
 const { assert, report } = createAssert();
 

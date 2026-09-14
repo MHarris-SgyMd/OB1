@@ -23,8 +23,6 @@
 
 import { SQL } from "bun";
 import { createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createClient } from "../compat/supabase-sql/index.ts";
 import { PostgrestStore } from "./store-postgrest.ts";
 import { isoTimestamp, isoTimestampOrNull } from "./store.ts";

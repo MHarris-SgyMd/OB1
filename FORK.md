@@ -5437,6 +5437,12 @@ Ticketed: SMD-1338 — the malformed-id rule is enforced per store read method
 while `update_thought` and `delete_thought` take a bare `z.string()` and hand
 it to Postgres; validate once at the tool boundary.
 
+A boyscout commit took what `--noUnusedLocals` finds in the touched files: an
+unused `MutationError` type import in each store, two path imports in the
+PostgREST suite for a migrations directory it no longer computes, and the SQL
+suite's hand-rolled template substitution (`HERE`, `MIGRATIONS`, `subst()`
+and its docblock), superseded by `resetSchema` and never read.
+
 Verified: `test-store-postgrest` 77/77 (60 before this ticket; the first
 commit's format assertion, run against `main`'s store, reported
 `got object Mon Sep 14 2026 11:27:09 GMT-0500 (Central Daylight Time)` and

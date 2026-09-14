@@ -30,7 +30,6 @@ import type {
   CaptureResult,
   Derivative,
   ListFilters,
-  MutationError,
   MutationResult,
   ProvenanceNode,
   ThoughtHybridMatch,
