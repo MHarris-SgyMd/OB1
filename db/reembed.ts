@@ -294,10 +294,14 @@
  * read against the label, and 021's evidence backfill trusts every succeeded
  * row under a key naming a model — it predates acceptance and, applied, is
  * never edited — so a brain that accepted rows before 021 would have them
- * labelled at a model whose pass never wrote their vector. A hand re-run of
- * 021's body (the remedy for a --baseline'd brain, below) on a brain with
- * accepted rows whose thought is unlabelled would do the same, and that remedy
- * says so: --retry-fallbacks them first, or retire the key.
+ * labelled at a model whose pass never wrote their vector. A re-run of 021's
+ * body — the remedy for a --baseline'd brain whose schema is older, below —
+ * would do the same to an accepted row whose thought is unlabelled, so the
+ * re-run is the migrator's, not a paste: `migrate.ts --reapply 021` runs the
+ * file with its backfill block replaced by LABEL_FROM_CLAIMS_SQL (config.mjs),
+ * 021's rule with accepted rows excluded, and the recorded migrations after
+ * it (SMD-1193). The rule for any successor that labels from claim rows: an
+ * accepted row is not evidence — the latest succeeded row before it is.
  *
  * What acceptance means to the two readers of the row, and its bound. The
  * data rule above returns a succeeded row whose thought is not at the target —
@@ -654,7 +658,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}} — after returning any accepted rows (--status lists\n  them) with --retry-fallbacks, or retiring their key: the backfill in that body trusts a succeeded row whatever its caveat."
+      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply it with the migrator, which re-runs 021 and every\n  recorded migration after it and runs 021's evidence backfill with accepted rows excluded (a paste of the file would read\n  an accepted row as proof the thought is at the key's model):\n    cd db && bun migrate.ts --url … --reapply 021"
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 
 // ── Where the pass stands ───────────────────────────────────────────────────
@@ -1227,6 +1231,9 @@ if (STATUS_ONLY || DRY_RUN) {
   printCounts(c, STATUS_ONLY ? "status" : "before");
   const corpus = await printCorpusByModel();
   if (STATUS_ONLY) printPreflightNote(c, corpus, judgedAsPreflight(false));
+  // The schema fact a run would refuse on, said here too: --status is the mode
+  // the operator reads first, and the remedy is the migrator's (SMD-1193).
+  if (STATUS_ONLY && refusal021) console.error(`\n  a run would refuse:${refusal021}`);
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry

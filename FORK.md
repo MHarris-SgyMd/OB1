@@ -68,13 +68,13 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-two numbered changes on top of the pin. Seven fix defects found in an
+Fifty-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2).
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–52 are the numbered `###` sections** further down, which is
+sections. Changes **18–53 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -3768,8 +3768,10 @@ under `reembed:nightly` re-asks every accepted row on a switch. 021's evidence
 backfill is applied and never edited, and trusts a succeeded row whatever its
 caveat: the gate on 021 closes the upgrade path, and a hand re-run of 021's body
 over accepted rows whose thought is unlabelled is the case that remains, said in
-`reembed.ts`'s header. The extraction worker has no acknowledgement path of its
-own — its failed rows are 016's, and preflight does not read them.
+`reembed.ts`'s header (done in change 53: the migrator owns the re-run, and runs
+021's backfill with accepted rows excluded). The extraction worker has no
+acknowledgement path of its own — its failed rows are 016's, and preflight does
+not read them.
 
 ### 40. A re-capture's windows stay while the label vouches for them — migration 022 redefines the 3-argument `upsert_thought`
 
@@ -5450,6 +5452,102 @@ failed the suite 59/60), `test-store-sql` 83/83, `test-update-delete` and
 `test-agents` unchanged, `test-server` 71/71, `tsc` clean. Upstream status:
 **not applicable** — `server-portable/` and its two stores are the fork's
 (change 11).
+
+### 53. The migrator owns the re-run — `--reapply` re-runs a recorded migration and everything after it, and 021's backfill no longer reads an acceptance as evidence (SMD-1193)
+
+`db/migrate.ts`, `db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts` and
+`server-portable/preflight.ts` (Linear SMD-1193, filed by change 39's first and
+second review passes). No migration.
+
+**The finding.** Migration 021's evidence backfill labels a thought from its
+latest *succeeded* claim row under a key naming a model, when nothing has
+written the thought since (`updated_at <= finished_at`). It was written before
+change 39, has no caveat filter, and — applied and hashed — is never edited.
+Since change 39 a succeeded row can be `--accept-failed`'s acceptance of a
+*failure*: the row says succeeded, the caveat says `kept the vector it had`, and
+the thought's vector is, by decision, **not** at that key's model. On an applied
+brain nothing runs that body again — except the remedy `reembed.ts` printed for
+a `--baseline`'d brain whose `update_thought` body is older than 021: re-run the
+file's body by hand, substituting the width. Over an accepted row whose thought
+is unlabelled (a pre-021 vector nothing vouched for — the common case for an old
+thought) that paste labels the thought at the key's model; from then on the pool
+never takes it, `vector models` counts it at the model, and no reader
+cross-checks the caveat against the label. The wrong vector is invisible to both
+readers for good. Change 39 closed the *upgrade* path (`--accept-failed` refuses
+a schema that is not 021's whole) and made the remedy say to return accepted
+rows first. What remained was a remedy asking the operator to paste SQL with a
+precondition the tool could enforce — and, on inspection, a precondition the
+operator could not meet: returning an accepted row is a run
+(`--retry-fallbacks`), a run refuses that schema, and `--retire` takes only a
+superseded key. The ticket's alternative — a re-run that *refuses* while
+accepted rows stand — would deadlock the same way, so it is not built; the
+exclusion is.
+
+**`--reapply <migration>`.** `migrate.ts` re-runs the named migration — by
+number (`021`) or filename — and every recorded migration after it, in order,
+one transaction each; pending ones apply as usual, and the ledger is not
+touched (its row, sha and `applied_at` stand — asserted). The start must be
+recorded (a pending file is a plain run's), `--baseline` beside it is refused,
+and a file anywhere in the range whose sha differs from the ledger's refuses
+the whole re-run *before anything runs* — the plain run's drift check reports a
+drifted file and moves on, which for a re-run would skip one file's definitions
+and restore the next one's over whatever the skipped one left. `--dry-run` says
+`would re-apply`, and the summary counts re-applied apart from applied. After
+it, not it alone: a later migration may redefine what an earlier one created —
+022 and 025 both redefine 021's 3-argument `upsert_thought`, and 021 by itself
+would put 021's body back, the very state preflight's `atomic capture` check
+warns about — and every file is idempotent (`test-upgrade` [3] re-applies the
+whole set over itself), so the run restores the latest definition of
+everything from that point. No file is named in the loop for
+this; one is named for the next paragraph.
+
+**021, the one file not run verbatim.** The file cannot change. The migrator
+splits its text at the `DO $bf$ … $bf$;` block — the dollar-quote tag unique to
+that file; exactly one match, or the run fails saying so — and runs the text
+before it, then `LABEL_FROM_CLAIMS_SQL` from `db/config.mjs`, then the text
+after, in the one transaction, 001's `updated_at` trigger held as 021 holds it
+(the label is a fact about a vector already there, not an edit; asserted, with
+the audit count). `LABEL_FROM_CLAIMS_SQL` is 021's statement with one clause
+added to the inner claim rows — `NOT (c.last_error IS NOT NULL AND
+starts_with(c.last_error, ACCEPTED_CAVEAT_PREFIX))`, the `IS NOT NULL` because
+`starts_with(NULL, …)` is NULL and `NOT NULL` is not true. Excluding the row
+*before* the `DISTINCT ON` means the latest row before the acceptance decides:
+an earlier pass that did write the vector labels the thought at that pass's
+model — exactly the vector the acceptance kept — and a thought with no such row
+stays NULL, unknown. The run says what it did: `its evidence backfill labelled
+2 row(s); 2 accepted row(s) under a key naming a model were not read as
+evidence`. The rule for any successor that labels from claim rows is stated in
+`reembed.ts`'s header and beside the statement: an accepted row is not
+evidence; this is its one spelling.
+
+**The remedies name the command.** `reembed.ts`'s ledgered 021 refusal says
+`cd db && bun migrate.ts --url … --reapply 021` and why a paste would not do;
+`--status`, which reads and answers on any schema and is what the operator
+reads first, now prints `a run would refuse: …` with it. Preflight's two paste
+remedies — 023's `backfill_content_fingerprints` absent under a ledger that
+says 023, and 014's body under a ledger that says 014 once pgvector is upgraded
+— name `--reapply 023` and `--reapply 014`; the ALTER FUNCTION remedy that puts
+014's SET clause back is a statement, not a paste of a file, and stays.
+
+Verified: `test-upgrade` [7] builds the brain the ticket describes — the schema
+applied through 020, then `migrate.ts --baseline` so the ledger says every
+migration — plants four thoughts written two hours ago, and the claim rows: a
+plain succeeded row an hour later; an accepted row with the failure's own
+timestamps; an earlier pass's plain row under its key and the acceptance under
+the new key over the same thought. It asserts `reembed.ts --status` names the
+command and not the paste; `--dry-run` counts 021 and the seven after it and
+writes nothing; the run's line; the labels (`stub-embed`, NULL, `earlier-model`,
+NULL); no `updated_at` moved, no audit row, the trigger enabled after; the
+ledger byte-identical; the eight-argument `update_thought` alone and the
+3-argument `upsert_thought` carrying 022's sentinel *and* 025's provenance; five
+refusals (beside `--baseline`; a number no file has; no start; a start the
+ledger does not record, after which a plain run applies it; a drifted file in
+the range, before anything ran); and that the re-applied schema has a fresh
+apply's columns and functions. `test-preflight` pins the 023 wording.
+`test-upgrade` 73/73, `test-preflight` 164/164, `test-schema` 562/562,
+`test-live` 369/369, `tsc` clean, fork checker PASS. Upstream status: **not
+applicable** — the migrator, `reembed.ts` and preflight are the fork's
+(changes 11 and 29).
 
 ## Detached from the fork network
 

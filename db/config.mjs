@@ -920,6 +920,52 @@ export const ACCEPTED_BY_MODEL_SQL =
   "AND COALESCE(t.updated_at, t.created_at) <= COALESCE(k.claimed_at, k.finished_at, '-infinity'::timestamptz)) GROUP BY 1";
 
 /**
+ * Migration 021's evidence backfill as the migrator re-runs it (SMD-1193): the
+ * rule the file's own DO block applies, with one clause added — a succeeded
+ * row that is the operator's ACCEPTANCE of a failure (ACCEPTED_CAVEAT_PREFIX)
+ * is not evidence. 021 predates acceptance and, applied, is never edited; a
+ * re-run of its body — the remedy for a --baseline'd brain whose schema is
+ * older than its ledger says — would read an accepted row as proof the thought
+ * is at the key's model, when the acceptance says the vector is by decision
+ * NOT at it, and neither reader ever cross-checks the label against the
+ * caveat: the wrong vector would be invisible to both for good. So
+ * `migrate.ts --reapply` runs 021 with its backfill block replaced by this
+ * statement and the rest of the file as written. Everything else is 021's,
+ * unchanged: the latest succeeded row under a key naming a model
+ * (`reembed:<model>@<dim>[:suffix]`, the model read up to the LAST "@"), the
+ * thought unlabelled, with a vector, and not written since the row finished
+ * (`updated_at <= finished_at`; a NULL updated_at cannot be judged).
+ * Excluding the accepted row means the latest row BEFORE it decides — an
+ * earlier pass that did write the vector labels the thought at that pass's
+ * model, which is exactly the vector the acceptance kept; a thought with no
+ * such row stays NULL, unknown. `last_error IS NOT NULL AND` guards the
+ * prefix test: starts_with(NULL, …) is NULL, and NOT NULL is not true.
+ *
+ * Parameter: $1 ACCEPTED_CAVEAT_PREFIX. Run with 001's updated_at trigger held
+ * off, as 021 does — the label is a fact about a vector already there, not an
+ * edit. Any future backfill that labels from claim rows carries the same
+ * exclusion; this is its one spelling.
+ */
+export const LABEL_FROM_CLAIMS_SQL =
+  "UPDATE thoughts t SET embedding_model = e.model FROM (" +
+  "SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.finished_at FROM (" +
+  "SELECT c.thought_id, c.finished_at, substring(c.work_type FROM '^reembed:(.+)@[0-9]+(?::[^@]*)?$') AS model " +
+  "FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL " +
+  "AND NOT (c.last_error IS NOT NULL AND starts_with(c.last_error, $1))" +
+  ") k WHERE k.model IS NOT NULL ORDER BY k.thought_id, k.finished_at DESC" +
+  ") e WHERE t.id = e.thought_id AND t.embedding_model IS NULL AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at";
+
+/**
+ * The rows LABEL_FROM_CLAIMS_SQL leaves aside: accepted rows under a key naming
+ * a model — what 021's own block would have read as evidence. Counted by the
+ * migrator beside the rows it labelled, so the re-run says what it did not
+ * trust. Parameter: $1 ACCEPTED_CAVEAT_PREFIX.
+ */
+export const ACCEPTED_EVIDENCE_COUNT_SQL =
+  "SELECT count(*)::int AS n FROM thought_work_claims WHERE status = 'succeeded' AND last_error IS NOT NULL " +
+  "AND starts_with(last_error, $1) AND work_type ~ '^reembed:.+@[0-9]+(:[^@]*)?$'";
+
+/**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
  * extversion. Compared numerically per component — as strings, "0.10.0" sorts
  * before "0.8.0" — and defined once so preflight.ts and the live suite cannot

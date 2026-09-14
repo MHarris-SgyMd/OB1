@@ -22,14 +22,15 @@ import { SQL } from "bun";
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, updatedAtTriggerState } from "./test-support.ts";
-import { UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
+import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { ACCEPTED_CAVEAT_PREFIX, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
 
 const OPTS = { dim: 8, model: "stub-embed" };
-const MIGRATIONS = readdirSync(join(dirname(fileURLToPath(import.meta.url)), "migrations"))
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS = readdirSync(join(HERE, "migrations"))
   .filter((f) => f.endsWith(".sql"))
   .sort();
 
@@ -360,6 +361,137 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   assert((await fns()) === 1 && Number(found) === 0 && (await rows()) === before + 1,
          "re-applying 023 is a no-op: the function once, a further call writes nothing");
   await sql.close();
+}
+
+console.log("\n[7] Migration 021 re-applied by the migrator onto a --baseline'd 020 — an accepted row is not evidence (SMD-1193)");
+{
+  await dropSchema(URL_);
+  // A brain adopted with --baseline: the schema as far as 020, by hand as it
+  // were, and a ledger that says every migration. reembed.ts refuses to run
+  // there and names the remedy; this is the remedy.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_, OB1_EMBEDDING_DIM: String(OPTS.dim), OB1_EMBEDDING_MODEL: OPTS.model }))
+    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|CHUNK_CONTEXT|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+  const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
+
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
+  const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
+  // Written two hours ago, so every pass below — the earlier one an hour ago,
+  // the acceptances now — finished after the thought was written: 021's bound
+  // (updated_at <= finished_at) holds for each row, and only the rule decides.
+  const plant = async (content: string) =>
+    (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, now() - interval '2 hours') RETURNING id`)[0].id as string;
+  const vouched = await plant("a finished pass wrote this vector");
+  const accepted = await plant("the provider refused this; the operator accepted the failure");
+  const earlierThenAccepted = await plant("an earlier pass wrote this; the pass to the new model was refused and accepted");
+  const noEvidence = await plant("nothing ever re-embedded this");
+  // The claim rows as the tool leaves them. A plain succeeded row under the
+  // model's own key. An ACCEPTED row (SMD-1067): succeeded, the caveat prefix,
+  // and the failure's own timestamps — the attempt read the thought after it
+  // was written, so 021's bound (updated_at <= finished_at) holds and the file's
+  // own backfill would label the thought at a model whose pass never wrote its
+  // vector. And a thought with both: an earlier pass's plain row under its key,
+  // then the acceptance under the new key — the latest row, which 021 trusts.
+  const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
+  await enqueue(EARLIER, [earlierThenAccepted]);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${EARLIER}`;
+  await enqueue(KEY, [vouched, accepted, earlierThenAccepted]);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${vouched}::uuid`;
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "the provider refused the content on every attempt"}
+             WHERE work_type = ${KEY} AND thought_id IN (${accepted}::uuid, ${earlierThenAccepted}::uuid)`;
+  const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  assert(absent.c === 0, "the schema stands at 020 — no embedding_model column — whatever the ledger says");
+
+  // What the operator reads first. --status runs against any schema and says
+  // what a run would refuse on; the ledgered remedy is the migrator's command.
+  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env, cwd: HERE });
+  assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
+           /schema_migrations records 021 as\n\s+applied \(--baseline\?\) but the schema installed is older\. Re-apply it with the migrator/.test(status.out) &&
+           /cd db && bun migrate\.ts --url … --reapply 021/.test(status.out) && !/re-run the body/.test(status.out),
+         `reembed.ts --status on the baselined brain names \`migrate.ts --reapply 021\`, not a paste (exit ${status.code})`);
+
+  const stampsBefore = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  const ledgerBefore = JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
+  const fromTwentyOne = MIGRATIONS.filter((f) => f >= "021").length;
+  const before = MIGRATIONS.length - fromTwentyOne;
+
+  // --dry-run says what a re-run is, and writes nothing.
+  const dry = await migrate("--reapply", "021", "--dry-run");
+  assert(dry.code === 0 && /021_embedding_model_per_row\.sql\s+would re-apply/.test(dry.out) && new RegExp(`would apply 0, would re-apply ${fromTwentyOne}, skipped ${before}`).test(dry.out),
+         `--reapply 021 --dry-run says it would re-apply 021 and the ${fromTwentyOne - 1} after it (exit ${dry.code})`);
+  const [stillAbsent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
+  assert(stillAbsent.c === 0, "…and writes nothing");
+
+  const run = await migrate("--reapply", "021");
+  assert(run.code === 0, `--reapply 021 exits 0 (${run.code})${run.code === 0 ? "" : `:\n${run.out}`}`);
+  assert(new RegExp(`re-applying 021_embedding_model_per_row\\.sql and the ${fromTwentyOne - 1} recorded migration\\(s\\) after it, in order`).test(run.out) &&
+           /021_embedding_model_per_row\.sql\s+re-applied — its evidence backfill labelled 2 row\(s\); 2 accepted row\(s\) under a key naming a model were not read as evidence/.test(run.out) &&
+           new RegExp(`applied 0, re-applied ${fromTwentyOne}, skipped ${before}`).test(run.out),
+         "…says what it re-ran, and what 021's backfill did and did not trust");
+  const models = Object.fromEntries(
+    ((await sql`SELECT id, embedding_model AS m FROM thoughts`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m])
+  );
+  assert(models[vouched] === OPTS.model, `a thought a finished pass vouches for is labelled from its plain succeeded row (${models[vouched]})`);
+  assert(models[accepted] === null, `a thought whose only row is the operator's acceptance stays NULL — unknown, not labelled at a model whose pass never wrote its vector (${models[accepted]})`);
+  assert(models[earlierThenAccepted] === "earlier-model", `with the acceptance excluded the latest row before it decides: the earlier pass that did write the vector (${models[earlierThenAccepted]})`);
+  assert(models[noEvidence] === null, "a thought no pass touched stays NULL");
+  const stampsAfter = Object.fromEntries(
+    ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
+  );
+  assert(Object.keys(stampsBefore).every((id) => stampsBefore[id] === stampsAfter[id]), "labelling moves no row's updated_at — the trigger was held as 021 holds it");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
+  assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
+  assert(JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`) === ledgerBefore, "the ledger is not touched: every row, sha and applied_at as before");
+
+  // After it, not it alone: 022 and 025 redefine 021's 3-argument upsert_thought,
+  // and a re-run of 021 by itself would have put 021's body back — the very
+  // state preflight's `atomic capture` check warns about.
+  const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
+  assert(forms.length === 1 && Number(forms[0].n) === 8, `the eight-argument update_thought, alone (${forms.map((f) => f.n).join(",")})`);
+  const body3 = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)[0].prosrc as string;
+  assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
+
+  // Refused, nothing written: with --baseline; a number no file has; no start;
+  // a start the ledger does not record; a file changed since it was applied.
+  const both = await migrate("--reapply", "021", "--baseline");
+  assert(both.code === 2 && /One or the other/.test(both.out), `--reapply beside --baseline is refused (exit ${both.code})`);
+  const none = await migrate("--reapply", "099");
+  assert(none.code === 2 && /--reapply 099: no migration by that number or name/.test(none.out), `a number no file has is refused (exit ${none.code})`);
+  const bare = await migrate("--reapply");
+  assert(bare.code === 2 && /--reapply takes the migration to start from/.test(bare.out), `--reapply with no start is refused (exit ${bare.code})`);
+  const last = MIGRATIONS[MIGRATIONS.length - 1];
+  await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
+  const pending = await migrate("--reapply", last.slice(0, 3));
+  assert(pending.code === 2 && new RegExp(`${last} is not recorded as applied; --reapply re-runs what the ledger records`).test(pending.out), `a start the ledger does not record is refused (exit ${pending.code})`);
+  const plain = await migrate();
+  assert(plain.code === 0 && new RegExp(`applied 1, skipped ${MIGRATIONS.length - 1}`).test(plain.out), "…and a plain run applies it, as before");
+  await sql`UPDATE schema_migrations SET sha256 = 'edited-after-apply' WHERE name LIKE '024%'`;
+  const drift = await migrate("--reapply", "021");
+  assert(drift.code === 1 && /refusing --reapply: 024_thought_stats_summary\.sql \(was edited-after-apply, now [0-9a-f]{12}\) changed after being applied/.test(drift.out),
+         `a drifted file in the range refuses the whole re-run before anything runs (exit ${drift.code})`);
+  assert(!/re-applied/.test(drift.out), "…and nothing was re-applied");
+
+  // The mirror: a schema this re-run produced is the schema a fresh apply
+  // produces. The ledger is the migrator's, not the schema's — applyMigrations
+  // never creates one — so it is dropped before the two are compared.
+  await sql`DROP TABLE schema_migrations`;
+  const reapplied = await shape(sql);
+  await sql.close();
+  await resetSchema(URL_, OPTS);
+  const fresh = new SQL({ url: URL_, max: 1 });
+  const scratch = await shape(fresh);
+  await fresh.close();
+  assert(reapplied.columns === scratch.columns, "the re-applied schema has the same columns as a fresh one");
+  assert(reapplied.functions === scratch.functions, "…and the same functions");
 }
 
 report();

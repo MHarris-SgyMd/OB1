@@ -64,6 +64,31 @@ database sitting at 009 it would mark 010 applied too, and the agent registry
 would never be created. For one migration, insert the one `schema_migrations`
 row; `--dry-run` prints the `sha256` to use beside each name.
 
+### 5. Re-applying what the ledger already records
+
+A database adopted with `--baseline` can say 028 in its ledger while its
+functions are the guide's: a plain run skips every recorded file, and
+`reembed.ts` and preflight refuse or warn on the body they find and name this:
+
+```bash
+bun migrate.ts --url ... --reapply 021
+```
+
+`--reapply` re-runs the named migration **and every recorded migration after
+it**, in order, in one transaction each; pending ones apply as usual and the
+ledger is not touched. After it rather than it alone, because a later migration
+may redefine what an earlier one created — 022 and 025 both redefine 021's
+`upsert_thought`, and 021 alone would put 021's body back — and every file is
+idempotent, so the run restores the latest definition of everything from that
+point. A file that changed since it was applied refuses the whole re-run before
+anything runs, as the drift check does for a plain run; `--dry-run` says what
+would re-run. One file is not run verbatim: 021's evidence backfill labels a
+thought from its latest succeeded claim row, and since `--accept-failed` a
+succeeded row can be the operator's acceptance of a failure whose vector is, by
+decision, *not* at that model — so the re-run applies 021's rule with accepted
+rows excluded (`LABEL_FROM_CLAIMS_SQL` in `config.mjs`) and says how many rows
+it labelled and how many accepted rows it did not read as evidence.
+
 ## Expected outcome
 
 `bun test-schema.ts` prints `505 assertions: 505 passed, 0 failed` and `PASS`.
@@ -363,8 +388,9 @@ worker fingerprints a legacy row still raises that violation, which lands as a
 failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
-adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
-the file's body rather than to apply a migration the migrator will skip.
+adopted with `--baseline` — ledger says 021, body says 013 — is told to
+`migrate.ts --reapply 021` rather than to apply a migration a plain run skips
+(§5 above; the re-run applies 021's backfill with accepted rows excluded).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;
