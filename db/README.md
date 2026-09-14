@@ -97,12 +97,14 @@ shell whose `OB1_EMBEDDING_MODEL` or `OB1_CHUNK_CONTEXT` differs from what
 `ob1_config` records (006 and 013 would re-record it — run from a shell
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; the width is the column's own and 006 judges it); and an
-accepted claim row under a *suffixed* key (`reembed:<model>@<dim>:ctx`) standing
-over an unlabelled thought, which 021's backfill would label and 030 cannot tell
-from the server's own label — return it with `reembed.ts --job <key>
---retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
-where `reembed.ts` refuses to run, the refusal prints the statement
-`--retry-fallbacks` would run for each row.
+accepted claim row 021's backfill would label an unlabelled thought from and 030
+would not take back — under a *suffixed* key (`reembed:<model>@<dim>:ctx`), or
+over a thought written since the row was enqueued — return it with `reembed.ts
+--job <key> --retry-fallbacks`, or `--retire` the key, first; on a schema older
+than 021, where `reembed.ts` refuses to run, the refusal prints the statement
+`--retry-fallbacks` would run for each row. A *plain* run on that brain, where
+030 is pending, fails at 030 with what is missing and this command, rather than
+a bare "does not exist".
 
 **Stop the server and any re-embed or extraction worker first.** 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
@@ -1113,7 +1115,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 564 properties (at migration 030), including:
+asserts 640 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

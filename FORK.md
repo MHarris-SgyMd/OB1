@@ -5816,16 +5816,19 @@ written — asserted). First, a label whose *only* evidence is an acceptance goe
 back to NULL: the thought's latest succeeded row under a key naming a model is
 an accepted one under the model's **own** key (exactly `reembed:<model>@<dim>`,
 no suffix), the thought is labelled with that key's model, has a vector, and
-nothing has written it since the attempt *read* it — `claimed_at`, the bound
-every reader of an acceptance applies since change 39, not 021's `finished_at`:
-the worker writes a head window or bare windows through `update_thought`
-before the row's outcome is chosen, so an accepted row may sit over a thought
-the worker itself labelled at the model between the claim and the release, and
-that label is right. Under the own key a thought at the model is never pooled,
-so such a row exists only for a thought that was not at the model when the
-pass read it — and a label saying it is, with nothing written since the read,
-can only be 021's block having trusted the acceptance. An edit or re-capture
-since is a server's write and its label the server's: left alone. Second, 021's rule with accepted rows excluded from the claim rows it
+nothing has written it since the row was *enqueued* — not 021's `finished_at`,
+and not the claim either: the pool is built from the rows not at the model, so
+a thought the pool took was not at it *then*, and a label saying it is, with
+nothing written since, can only be 021's block having trusted the acceptance;
+anything written after the enqueue is a server's or the worker's, and its label
+is theirs — a capture at the model landing between the enqueue and the claim
+(the worker re-embeds regardless, may fail, and `--accept-failed` accepts a
+thought already at the target whatever its timestamps), a head window the
+worker wrote through `update_thought` before the row's outcome was chosen, an
+edit or re-capture since. Every accepted own-key row at the thought's latest
+`finished_at` counts, not one of a tie: two releases in one transaction share
+`now()`, 021 picks one without a tiebreak, and a reader that picked the other
+would leave 021's label standing. Second, 021's rule with accepted rows excluded from the claim rows it
 reads — `NOT (c.last_error IS NOT NULL AND starts_with(c.last_error,
 '{{ACCEPTED_CAVEAT_PREFIX}}'))`, the prefix substituted from config.mjs's one
 spelling like every other template value, the `IS NOT NULL` because
@@ -5883,8 +5886,45 @@ comments); `--url` twice ran against the first (refused). Not taken: one
 `scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
 not need, and folding them is a change to that tool.
 
+**Review, fourth pass (high), at the user's call, triaged.** The loop had
+ended; this pass found four defects worth the name in the third's seams, and
+took them. 030's first statement bounded on the claim, so a correct label the
+server wrote *between a row's enqueue and its claim* — the pool took the
+thought unlabelled, a capture at the model landed, the worker failed, the
+operator accepted, which `--accept-failed` allows for a thought at the target
+whatever its timestamps — would have been taken back for good, with the
+standing acceptance keeping the thought out of every pool: the bound is the
+enqueue now, and [8] plants the row. 030 was the first pending file to read
+015's table and 021's column, so a *plain* run on the very brain this change is
+for failed at 030 with a bare "does not exist" — and the compose stack gates
+the server on the migrator: 030 opens with a prerequisite check that raises
+with what is missing and the `--reapply` command as its HINT (ASCII only: Bun
+hands a HINT holding a non-ASCII character back one letter per NUL), and [7]
+runs the plain migrator on the baselined brain and reads it. The `--reapply`
+gate encoded one case — a suffixed key — where the definition is the
+difference of the two rules: whatever 021 labels (its bound the release) that
+030 does not take back (its bound the enqueue) is refused, which also closes
+the own-key row written between the claim and the release; and it takes every
+accepted row at the latest time, as 030 does, since 021 picks one of a tie
+without saying which. The claim rows both read are one text now,
+`CLAIM_EVIDENCE_ROWS_SQL` in `config.mjs`, a template value for 030 and a
+constant for the gate — the third hand-spelling is gone, and with it the
+quoting seam. Smaller: a leading-zero width (`@08`) made the SQL grammar call a
+key the model's own while `parseReembedKey` did not (both refuse it now);
+`has_edit` lacked 018's sentinel test that `reembed.ts`'s probe has; the
+re-run's catch lacked the plain run's hnsw decode (one `explainFailure` for
+both, printing a raised HINT too); 030 returns before the trigger hold's lock
+when no succeeded row names a model. Left, and said in 030's header: a label
+021's block wrote that a metadata-only edit has since moved past the enqueue
+stands, since `update_thought` keeps the label when no content arrives and
+nothing here tells such an edit from a re-capture — the alternative is a second
+evidence rule over 008's audit rows. Left as tidy-ups: the refusal precedence
+spelled three times in `reembed.ts`, the remedy command at seven sites, the
+argument scanner, and the plain loop's drift and floor branches, unreachable
+under `--reapply --dry-run` now that the pre-check exits first.
+
 **Review, third pass (high), triaged — the second consecutive stop signal, so
-the loop ends here.** Every finding was a seam of the second pass's fixes, and
+the loop ends there.** Every finding was a seam of the second pass's fixes, and
 most were right: the suffixed-key refusal named two `reembed.ts` commands that
 tool refuses on the very brain the re-run is for (fixed: the way back follows
 the schema); `--dry-run` under `--reapply` printed the live banner and skipped
@@ -5933,19 +5973,23 @@ and the thought stays NULL), a session holding a lock on `thoughts` (the run
 fails at 001 within the lock timeout and rolls back whole), a value beside the
 flag, a flag the runner does not have, `--baseline` beside it, a drifted
 recorded file; and that the re-applied schema has a fresh apply's columns and
-functions; and that `--dry-run` from a differing shell says "would refuse".
-[8] applies 030 onto a populated 028 holding nine labels — a
+functions; that `--dry-run` from a differing shell says "would refuse"; and
+that a plain run on the baselined brain, 030 pending, fails at 030 naming what
+is missing and `--reapply`. [8] applies 030 onto a populated 029 holding eleven
+labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
 a mislabel edited since (stays), a head window the worker wrote between the
-claim and the failure (stays — the bound is `claimed_at`), an unlabelled
-thought with an earlier pass then an acceptance (labelled at the earlier pass),
+claim and the failure (stays), a capture the server made between the enqueue
+and the claim (stays — the bound is the enqueue), an unlabelled thought with an
+earlier pass then an acceptance (labelled at the earlier pass),
 a mislabel with an earlier pass (taken back and relabelled at it, in the one
 block), a plain row (labelled), a label with no claim row (not read) — no
 `updated_at` moved, no audit row, the trigger enabled, and a second apply a
-no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 93/93,
-`test-preflight` 164/164, `test-schema` 564/564, `test-live` 369/369, `tsc`
-clean, fork checker PASS. Upstream status:
+no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 97/97,
+`test-preflight` 174/174, `test-schema` 640/640, `test-live` 419/419, `tsc`
+clean, fork checker PASS (on the tree with SMD-1304's and SMD-1294's changes
+merged in). Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
 

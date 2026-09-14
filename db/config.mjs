@@ -678,6 +678,7 @@ export function migrationValues(overrides = {}) {
     ACCEPTED_CAVEAT_PREFIX,
     REEMBED_KEY_MODEL_RE: REEMBED_KEY_MODEL_SQL_RE,
     REEMBED_OWN_KEY_RE: REEMBED_OWN_KEY_SQL_RE,
+    CLAIM_EVIDENCE_ROWS: CLAIM_EVIDENCE_ROWS_SQL,
     // Not operator configuration — ALTER DATABASE owns that — but the one
     // definition of what 014 seeds, so the SQL, the migrator's remedy,
     // preflight's report and the schema test cannot disagree about it.
@@ -829,8 +830,8 @@ export function reembedKey(model, dim) {
  * constants, so a change to the grammar reaches every reader but 021 from here
  * (SMD-1193's third review pass counted eight inline spellings).
  */
-export const REEMBED_KEY_MODEL_SQL_RE = "^reembed:(.+)@[0-9]+(?::[^@]*)?$";
-export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@[0-9]+$";
+export const REEMBED_KEY_MODEL_SQL_RE = "^reembed:(.+)@(0|[1-9][0-9]*)(?::[^@]*)?$";
+export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@(0|[1-9][0-9]*)$";
 
 /**
  * @param {string} key
@@ -838,7 +839,10 @@ export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@[0-9]+$";
  */
 export function parseReembedKey(key) {
   if (!key.startsWith(REEMBED_KEY_PREFIX)) return null;
-  const m = /^(.+)@(\d+)(?::[^@]*)?$/.exec(key.slice(REEMBED_KEY_PREFIX.length));
+  // The width is canonical — no leading zero — so `reembed:m@08` names no
+  // model here AND in the SQL regexes above; a JS `Number("08")` would have
+  // called it the model's own key while SQL did not (fourth review pass).
+  const m = /^(.+)@(0|[1-9]\d*)(?::[^@]*)?$/.exec(key.slice(REEMBED_KEY_PREFIX.length));
   return m ? { model: m[1], dim: Number(m[2]) } : null;
 }
 
@@ -946,6 +950,28 @@ export const ACCEPTED_BY_MODEL_SQL =
   "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.work_type = $1 " +
   "AND k.status = 'succeeded' AND k.last_error IS NOT NULL AND starts_with(k.last_error, $2) " +
   "AND COALESCE(t.updated_at, t.created_at) <= COALESCE(k.claimed_at, k.finished_at, '-infinity'::timestamptz)) GROUP BY 1";
+
+/**
+ * The claim rows an evidence backfill reads (SMD-1193): every succeeded row
+ * under a key naming a model, with the model, whether the key is the model's
+ * OWN (no suffix), whether the row is the operator's acceptance, its three
+ * timestamps, and `latest` — the greatest finished_at among the thought's such
+ * rows, so a reader can take EVERY row at the latest time rather than one of a
+ * tie (two releases in one transaction share now(); 021 picks one of them and
+ * says nothing about which). Spelled once: migration 030 takes it as the
+ * template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's --reapply gate reads
+ * the constant, so the rows the gate refuses and the rows 030 corrects are
+ * decided by one text. The caveat prefix is inlined as a literal, so it may
+ * hold no quote — asserted below.
+ */
+export const CLAIM_EVIDENCE_ROWS_SQL =
+  "SELECT c.thought_id, c.work_type, c.enqueued_at, c.claimed_at, c.finished_at, " +
+  `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +
+  `c.work_type ~ '${REEMBED_OWN_KEY_SQL_RE}' AS own_key, ` +
+  `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted, ` +
+  "max(c.finished_at) OVER (PARTITION BY c.thought_id) AS latest " +
+  `FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL AND c.work_type ~ '${REEMBED_KEY_MODEL_SQL_RE}'`;
+if (ACCEPTED_CAVEAT_PREFIX.includes("'")) throw new Error("ACCEPTED_CAVEAT_PREFIX is inlined into SQL as a literal and may not contain a quote");
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's

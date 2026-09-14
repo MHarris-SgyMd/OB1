@@ -45,9 +45,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
-  ACCEPTED_CAVEAT_PREFIX,
-  REEMBED_KEY_MODEL_SQL_RE,
-  REEMBED_OWN_KEY_SQL_RE,
+  CLAIM_EVIDENCE_ROWS_SQL,
   UPDATE_THOUGHT_SIGNATURE,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
@@ -282,6 +280,37 @@ let drifted = 0;
 let floorBlocked: Migration | null = null;
 
 /**
+ * What a failed statement means, beyond its message — read by the plain run's
+ * catch and the re-run's alike. Bun exposes the SQLSTATE as `errno`; the
+ * message is localised, the code is not. 42602 (invalid_name) on an hnsw.*
+ * setting is the reserved-prefix rejection: the loaded library predates the
+ * setting, and only a server upgrade helps — the re-run reaches it when the
+ * floor probe could not read the library's version. 42501
+ * (insufficient_privilege) on an hnsw.* setting is a non-superuser in a session
+ * that has not loaded pgvector — 014 loads it first, so this is reachable only
+ * from a hand-run statement, but say what it means. 55P03 (lock_not_available)
+ * is the re-run's 10 s lock_timeout. A HINT the statement raised with — 030's
+ * names --reapply — is printed as it came.
+ */
+function explainFailure(err: unknown, m: Migration | null): string[] {
+  const message = (err as Error).message;
+  const { errno: sqlstate, hint } = err as { errno?: string; hint?: string };
+  const lines: string[] = [];
+  if (/hnsw\./.test(message) && sqlstate === "42602") {
+    lines.push(`\n  ${m?.name ?? "the migration"} needs pgvector ${m?.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
+  } else if (/hnsw\./.test(message) && sqlstate === "42501") {
+    lines.push(
+      `\n  A non-superuser may set hnsw.* settings only after pgvector's library is loaded in the session.\n` +
+        `  Run SELECT '[1]'::vector; first in the same session, then the statement that failed.`
+    );
+  } else if (sqlstate === "55P03") {
+    lines.push("  A lock was not granted within 10 s: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.");
+  }
+  if (hint) lines.push(`  ${hint}`);
+  return lines;
+}
+
+/**
  * A migration that seeds database-level settings does so from a DO block that
  * can only RAISE WARNING when the role does not own the database — and this
  * client surfaces no warnings. So look at the result rather than trust the
@@ -364,7 +393,8 @@ if (reapply) {
     SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
            to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
            EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model') AS has_label,
-           to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS has_edit`) as
+           EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
+                     AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') AS has_edit`) as
     { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean }[];
   if (has_config) {
     // The width is not compared: the column's own type is its authority, and
@@ -386,25 +416,20 @@ if (reapply) {
     }
   }
   if (has_claims) {
-    // The rows 021's block, run as written, would read as evidence and 030 would
-    // leave: the thought's latest succeeded row under a key naming a model is an
-    // acceptance under a suffixed key, the thought has a vector, is unlabelled
-    // (every thought is, before 021), and 021's bound holds. The grammar is
-    // config.mjs's, as 030 has it.
+    // The rows 021's block, run as written, would label from an acceptance and
+    // 030 would then leave: the difference of the two rules, not a case
+    // encoded by hand. 021 labels an unlabelled thought with a vector from a
+    // row at its latest finished_at when `updated_at <= finished_at` — one
+    // row of a tie, unnamed, so every accepted row at that time counts here.
+    // 030 takes the label back only for an own-key acceptance over a thought
+    // not written since the row's enqueue. Whatever 021 labels that 030 does
+    // not revert is refused. The rows are config.mjs's, as 030 reads them.
     const hazards = (await sql.unsafe(
-      "SELECT t.id::text AS id, e.work_type FROM thoughts t JOIN (" +
-        "SELECT DISTINCT ON (k.thought_id) k.thought_id, k.work_type, k.finished_at, k.accepted, k.own_key FROM (" +
-        "SELECT c.thought_id, c.work_type, c.finished_at, " +
-        `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +
-        `c.work_type ~ '${REEMBED_OWN_KEY_SQL_RE}' AS own_key, ` +
-        "(c.last_error IS NOT NULL AND starts_with(c.last_error, $1)) AS accepted " +
-        "FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL" +
-        ") k WHERE k.model IS NOT NULL ORDER BY k.thought_id, k.finished_at DESC, k.work_type" +
-        ") e ON e.thought_id = t.id " +
-        "WHERE e.accepted AND NOT e.own_key AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
+      `SELECT DISTINCT t.id::text AS id, e.work_type FROM thoughts t JOIN (${CLAIM_EVIDENCE_ROWS_SQL}) e ON e.thought_id = t.id ` +
+        "WHERE e.finished_at = e.latest AND e.accepted AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
         (has_label ? " AND t.embedding_model IS NULL" : "") +
-        " ORDER BY e.work_type, t.id",
-      [ACCEPTED_CAVEAT_PREFIX]
+        " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" +
+        " ORDER BY 2, 1"
     )) as { id: string; work_type: string }[];
     if (hazards.length) {
       const keys = [...new Set(hazards.map((h) => h.work_type))];
@@ -424,8 +449,8 @@ if (reapply) {
       refusals.push({
         code: 2,
         text:
-          `021's evidence backfill, re-run as written, would label ${hazards.length} unlabelled thought(s) from an\n` +
-          `  acceptance under a suffixed key (${keys.join(", ")}), which migration 030 cannot tell from the server's own label:\n` +
+          `021's evidence backfill, re-run as written, would label ${hazards.length} unlabelled thought(s) from an acceptance that\n` +
+          `  migration 030 would not take back — under a suffixed key, or written since the row was enqueued (${keys.join(", ")}):\n` +
           shown.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
           (hazards.length > shown.length ? `\n    … and ${hazards.length - shown.length} more` : "") +
           "\n" + wayBack,
@@ -459,11 +484,8 @@ if (reapply && !dryRun) {
       }
     });
   } catch (err) {
-    const sqlstate = (err as { errno?: string }).errno;
     console.error(`  ✗  ${current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
-    if (sqlstate === "55P03") {
-      console.error("  A lock was not granted within 10 s: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.");
-    }
+    for (const line of explainFailure(err, current)) console.error(line);
     console.error(
       "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
         "  Fix the cause and run --reapply again."
@@ -541,23 +563,8 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     console.log(`  ✓  ${m.name}  applied`);
     ran++;
   } catch (err) {
-    const message = (err as Error).message;
-    // Bun exposes the SQLSTATE as `errno`; the message is localised, the code
-    // is not. 42602 (invalid_name) is the reserved-prefix rejection: the loaded
-    // library predates the hnsw.* setting, and only a server upgrade helps.
-    // 42501 (insufficient_privilege) on an hnsw.* setting is a non-superuser
-    // in a session that has not loaded pgvector — 014 now loads it first, so
-    // this is reachable only from a hand-run statement, but say what it means.
-    const sqlstate = (err as { errno?: string }).errno;
-    console.error(`  ✗  ${m.name}  FAILED: ${message}`);
-    if (/hnsw\./.test(message) && sqlstate === "42602") {
-      console.error(`\n  ${m.name} needs pgvector ${m.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n${PGVECTOR_REMEDY}`);
-    } else if (/hnsw\./.test(message) && sqlstate === "42501") {
-      console.error(
-        `\n  A non-superuser may set hnsw.* settings only after pgvector's library is loaded in the session.\n` +
-          `  Run SELECT '[1]'::vector; first in the same session, then the statement that failed.`
-      );
-    }
+    console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);
+    for (const line of explainFailure(err, m)) console.error(line);
     await sql.close();
     process.exit(1);
   }
