@@ -2107,6 +2107,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   await seed("lowconf: the second reading", 4, 0, ["readings"]);
   const noEntities = await seed("A thought nothing has extracted yet.", 5, 0);
   await seed("The archive migration, long finished.", 6, 30, ["archive"]);
+  // Entities but no vector: extracted, embedding failed at capture. Out of the
+  // pool until reembed.ts fills the vector (review pass 1's gate, pinned here).
+  const vectorless = ((await sql`SELECT upsert_thought(${"A billing note whose embedding failed."}, ${{ metadata: {} }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  await sql`SELECT record_thought_entities(${vectorless}::uuid, ${EXTRACT}, ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
 
   const rawKey = "b".repeat(64);
   const { hashKey } = await import("../server-portable/auth.ts");
@@ -2132,7 +2136,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
 
   const dry = await consolidate("--dry-run");
   assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 11 thoughts to the pool/.test(dry.out),
-         `--dry-run counts the eleven thoughts with entities, not the twelfth, and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300)})`);
+         `--dry-run counts the eleven thoughts with entities and a vector — not the one without entities, nor the one without a vector — and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0 && (await proposals()).length === 0, "…no claim row, no proposal");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'consolidator'`)[0].c === 0, "…and it did not register the worker's agent either");
   const tooLong = await consolidate("--batch", "4", "--k", "5", "--timeout", "120");
@@ -2150,7 +2154,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
   assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
   const callsAfterFirst = calls;
-  assert(seen.every((p) => !/nothing has extracted/.test(p.a + p.b)), "the thought without entities was never shown to the judge");
+  assert(seen.every((p) => !/nothing has extracted/.test(p.a + p.b) && !/embedding failed/.test(p.a + p.b)), "neither the thought without entities nor the one without a vector was shown to the judge");
   assert(seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)) && !seen.some((p) => /annually/.test(p.a)),
          "each pair is shown older as A and newer as B");
   const [agent] = await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'consolidator'`;
@@ -2223,7 +2227,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY}`;
   seen.length = 0;
   const over = await consolidate();
-  assert(over.code === 0 && /11 thought\(s\) judged/.test(over.out), `with the claim rows cleared every thought is judged again (exit ${over.code})`);
+  assert(over.code === 0 && /10 thought\(s\) judged/.test(over.out), `with the claim rows cleared every thought is judged again — every one but blue, which green now supersedes and the pool leaves out (exit ${over.code}: ${over.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(!seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)), "…but the rejected pair is not shown to the judge again");
   assert(!seen.some((p) => /blue/.test(p.a) || /green/.test(p.b)), "…nor the accepted pair, whose thoughts are now superseded and superseding");
   assert(seen.some((p) => /deploy/.test(p.a)), "…while an undecided pair is");

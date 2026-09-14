@@ -5522,7 +5522,8 @@ it lands the accept path should call it.
 **Measured** (`evals/eval-consolidate.ts`, `evals/README.md`), on the 576-issue
 Linear corpus with `qwen2.5:7b` as judge, the entity graph from 016's worker
 (525 of 576 extracted; 51 of the longest documents time out under the 7B model —
-016's known tail — and carry no entities, so they are outside this pass), and 98
+016's known tail — and with 4 that extracted to nothing, 55 carry no entities and
+are outside this pass), and 98
 hand-labelled pairs drawn from every cross-reference carrying supersession
 language (6 conflicts, 79 agree, 13 unrelated):
 
@@ -5533,7 +5534,7 @@ language (6 conflicts, 79 agree, 13 unrelated):
 | the full pass | 21.3 min wall, 4.9 s of model time per pair, ~1,750 estimated prompt tokens per call (~1.6M per thousand thoughts) |
 | verdicts | 441 unrelated, 63 agree, **13 conflict → 13 proposals** (10 without a direction) |
 | the 13 proposals, graded by hand | **6 real, 7 not** — 46% precision, about 2 proposals per hundred thoughts |
-| the judge on the 98 labelled pairs, called directly | conflict precision 29% (2/7), recall 33% (2/6); 87 of 87 non-conflicts left alone |
+| the judge on the 98 labelled pairs, called directly | conflict precision 29% (2/7), recall 33% (2/6); 87 of 92 non-conflicts left alone |
 | labelled conflicts the pass could reach | 1 of 6 at the shipped k and floor; 3 of the 6 pairs' issues are among the 51 unextracted, and the pass proposed 0 of 6 |
 
 **What it says, and the decision.** The ticket's shipping test was "false-positive

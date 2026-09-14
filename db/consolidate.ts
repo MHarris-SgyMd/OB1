@@ -39,8 +39,10 @@
  * the wall clock at the shipped --k and --min-sim, which were chosen there.
  *
  * ── The pool ────────────────────────────────────────────────────────────────
- * Thoughts with at least one extracted entity, a vector, and no claim row
- * under this key. Built by this run, on every pass — no trigger feeds it, on
+ * Thoughts with at least one extracted entity, a vector, that nothing
+ * supersedes, and no claim row under this key — migration 029's
+ * consolidation_pool(), the one definition this run, --status and preflight
+ * read. Built by this run, on every pass — no trigger feeds it, on
  * purpose: a capture has no entities until db/extract-entities.ts reaches it
  * (and no vector while its embedding failed, until reembed.ts does), and a
  * thought judged before that would have no candidates and a terminal claim
@@ -71,9 +73,11 @@
  * thought is recorded failed when ANY of its pairs was malformed or timed out,
  * so --retry-failed re-judges its pairs (the ones already proposed are skipped
  * by the candidate rule). A rate limit, a server error or a lost connection is
- * paused and retried; if it persists the worker stops, leaving its leases to
- * return to the pool. A 401/403/404, or a 400 about the request itself, stops
- * every worker at once with nothing marked failed.
+ * paused and retried three times; if it persists, the thought in hand is
+ * recorded failed with the error (so a thought that reliably draws a 500 is
+ * visible rather than cycling for ever) and the worker stops, its other
+ * leases returning to the pool. A 401/403/404, or a 400 about the request
+ * itself, stops every worker at once with nothing marked failed.
  */
 
 import { SQL } from "bun";
@@ -326,13 +330,12 @@ async function counts(): Promise<Counts> {
   const rows = (await sql`
     SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${JOB} GROUP BY status`) as { status: string; c: number }[];
   const by = Object.fromEntries(rows.map((r) => [r.status, Number(r.c)]));
-  // The pass's universe is the thoughts with entities AND a vector (the
-  // header's pool rule): a thought without either has no candidates.
+  // The pass's universe and its pool, from the one definition (migration
+  // 029's consolidation_pool): entities, a vector, not superseded; the pool
+  // is those with no row under this key.
   const [{ unpooled, thoughts }] = await sql`
-    SELECT count(*)::int AS thoughts,
-           count(*) FILTER (WHERE NOT EXISTS (
-             SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${JOB}))::int AS unpooled
-    FROM (SELECT DISTINCT e.thought_id AS id FROM thought_entities e JOIN thoughts x ON x.id = e.thought_id WHERE x.embedding IS NOT NULL) t`;
+    SELECT (SELECT count(*)::int FROM consolidation_pool(NULL)) AS thoughts,
+           (SELECT count(*)::int FROM consolidation_pool(${JOB})) AS unpooled`;
   const [{ proposals }] = await sql`SELECT count(*)::int AS proposals FROM supersession_proposals WHERE status = 'pending'`;
   return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, succeeded: by.succeeded ?? 0, failed: by.failed ?? 0, unpooled: Number(unpooled), thoughts: Number(thoughts), proposals: Number(proposals) };
 }
@@ -644,16 +647,12 @@ process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
 async function pass(): Promise<Counts> {
-  // The pool rule, every pass: thoughts with entities and no row under the
-  // key. No trigger feeds this pool (see the header), so a --follow poll
-  // re-runs the query — a DISTINCT over thought_entities, which is what it
-  // costs to be sure a thought is judged only once extraction has reached it.
-  const added = Number((await sql`
-    SELECT enqueue_thoughts(${JOB}, ARRAY(
-      SELECT DISTINCT e.thought_id FROM thought_entities e
-      JOIN thoughts x ON x.id = e.thought_id
-      WHERE x.embedding IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = e.thought_id AND c.work_type = ${JOB}))) AS added`)[0].added);
+  // The pool rule, every pass, from migration 029's consolidation_pool (one
+  // definition for this, --status and preflight). No trigger feeds it (see
+  // the header), so a --follow poll re-runs the query — a scan of thoughts
+  // against the entity table, which is what it costs to be sure a thought is
+  // judged only once extraction has reached it.
+  const added = Number((await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(SELECT consolidation_pool(${JOB}))) AS added`)[0].added);
   const before = await counts();
   if (added > 0 || !FOLLOW) console.log(`  pool: ${added} thought(s) added`);
   total += before.pending + before.claimed;

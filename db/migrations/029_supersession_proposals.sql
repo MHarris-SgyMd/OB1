@@ -35,7 +35,8 @@
 --       register than two claims about one thing; the judge cost is per pair,
 --       so the pool is narrowed by the cheap signal before the expensive one.
 --       Consequence: a thought with no extracted entities has no candidates,
---       and the worker pools only thoughts that have some, and a vector
+--       and the worker pools only thoughts that have some, and a vector, and
+--       that nothing supersedes — `consolidation_pool()`, the one definition
 --       (extraction first). The gate cannot see the other side of a pair: a
 --       newer thought judged while an older neighbour is still unextracted
 --       is judged without it, and the pair is not revisited (pairs are
@@ -131,7 +132,8 @@
 --   * ON DELETE CASCADE from `thoughts` on both sides: a deleted thought takes
 --     its proposals with it; 008's delete row keeps its content.
 --   * No DELETE in this file. Rejection is an UPDATE of status.
---   * Idempotent: IF NOT EXISTS, CREATE OR REPLACE, drop-then-add constraints.
+--   * Idempotent: IF NOT EXISTS and CREATE OR REPLACE; the constraints are
+--     inline in the CREATE TABLE, so an edited 029 re-run changes none of them.
 --   * Plain functions, SECURITY INVOKER, no GRANT: the application connects as
 --     the owner (db/README.md), and PostgREST reaches them over rpc.
 --
@@ -140,7 +142,7 @@
 --   (thoughts.supersedes). Applied by `bun db/migrate.ts`.
 --
 -- Expected outcome
---   `supersession_proposals` exists, empty, with four functions beside it. The
+--   `supersession_proposals` exists, empty, with six functions beside it. The
 --   corpus is unchanged until `db/consolidate.ts` runs, and `thoughts` is
 --   unchanged until someone accepts a proposal.
 -- ============================================================================
@@ -472,6 +474,35 @@ $$;
 
 COMMENT ON FUNCTION list_supersession_proposals(text, int) IS
   'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time. At most 200. Migration 029.';
+
+-- ---------------------------------------------------------------------------
+-- consolidation_pool — the thoughts a pass under p_work_type would judge
+--
+-- The pool rule, in one place (the worker's pass, its --status and preflight
+-- all read it; three copies disagreed by the second review pass): a thought
+-- with at least one extracted entity AND a vector — without either it has no
+-- candidates — that no thought already supersedes (a superseded thought is
+-- out of the pass on either side, so pooling it would only leave a terminal
+-- claim row; if its pointer is later cleared it re-enters the pool on the
+-- next run), with no claim row under p_work_type. NULL p_work_type is the
+-- universe: the same thoughts whether or not a row exists.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION consolidation_pool(p_work_type text DEFAULT NULL)
+RETURNS SETOF uuid
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT t.id
+    FROM thoughts t
+   WHERE t.embedding IS NOT NULL
+     AND EXISTS (SELECT 1 FROM thought_entities e WHERE e.thought_id = t.id)
+     AND NOT EXISTS (SELECT 1 FROM thoughts s WHERE s.supersedes = t.id)
+     AND (p_work_type IS NULL OR NOT EXISTS (
+           SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = p_work_type))
+$$;
+
+COMMENT ON FUNCTION consolidation_pool(text) IS
+  'The thoughts a consolidation pass judges: with an entity (016) and a vector, not superseded by any thought, and (unless p_work_type is NULL) with no claim row under the key. The one definition db/consolidate.ts and preflight read. Migration 029.';
 
 -- ---------------------------------------------------------------------------
 -- stale_entities — subjects nothing has been written about within a window

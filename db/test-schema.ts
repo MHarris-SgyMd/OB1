@@ -2663,7 +2663,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
   assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
     `supersession_proposals has the fifteen columns, in order (${cols.join(",")})`);
-  for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "stale_entities"]) {
+  for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
     assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
   }
   const fks = (await db.query<{ conname: string; deltype: string }>(
@@ -2706,6 +2706,24 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   await mention(noShare, ["deployments"]);
   await mention(farAxis, ["billing"]);
 
+  // The pool rule, one definition: entities AND a vector AND not superseded,
+  // minus the rows under a key. A thought with entities and no vector, and a
+  // superseded thought, are out (the first review pass's gate, pinned here).
+  const pool = async (key: string | null) => (await db.query<{ id: string }>(`SELECT consolidation_pool($1) AS id`, [key])).rows.map((r) => r.id);
+  const vectorless = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, '{"metadata":{}}'::jsonb, NULL::vector) AS r`, ["billing note whose embedding failed"])).rows[0].r.id;
+  await mention(vectorless, ["billing"]);
+  const universe = await pool(null);
+  assert(universe.length === 5 && !universe.includes(vectorless), `the universe is the five thoughts with entities and a vector; the vectorless one is out (${universe.length})`);
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [sameDay, farAxis]);
+  assert(!(await pool(null)).includes(farAxis) && (await pool(null)).includes(sameDay), "a thought some thought supersedes is out of the pool; the superseding one stays");
+  await db.query(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [sameDay]);
+  assert((await pool(null)).includes(farAxis), "…and re-enters it when the pointer is cleared");
+  await db.query(`SELECT enqueue_thoughts($1, $2::uuid[])`, [KEY, [decision]]);
+  const pooled = await pool(KEY);
+  assert(pooled.length === 4 && !pooled.includes(decision), `under a key, a thought with a claim row is not pooled again (${pooled.length})`);
+  await db.query(`DELETE FROM thought_work_claims WHERE work_type = $1`, [KEY]);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [vectorless]);
+
   const c1 = await candidates(reversal);
   assert(c1.length === 2 && c1[0].older_id === decision && Math.abs(Number(c1[0].similarity) - 1) < 1e-6 && c1[1].older_id === farAxis,
     `the reversal's candidates are the older thoughts sharing an entity, nearest first: the decision (cosine 1) then the far one (${c1.map((c) => `${c.older_id === decision ? "decision" : c.older_id === farAxis ? "far" : "?"}@${Number(c.similarity).toFixed(2)}`).join(", ")})`);
@@ -2729,6 +2747,10 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   let badVerdict = "";
   try { await propose(decision, reversal, "agree"); } catch (e) { badVerdict = (e as Error).message; }
   assert(/p_verdict must be/.test(badVerdict), "a verdict outside the three is refused, not stored");
+  const clampOld = await seed("clamp: earlier", 6, 3); const clampNew = await seed("clamp: later", 6, 0);
+  const clamped = await propose(clampOld, clampNew, "conflict_undirected", 1.7);
+  assert(Number((await db.query<{ c: string }>(`SELECT confidence AS c FROM supersession_proposals WHERE id = $1`, [clamped])).rows[0].c) === 1, "a confidence over 1 is clamped to 1, not refused");
+  await db.query(`DELETE FROM supersession_proposals WHERE id = $1`, [clamped]);
   const row = (await db.query<{ status: string; confidence: string; judge_key: string; similarity: number }>(
     `SELECT status, confidence, judge_key, similarity FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
   assert(row.status === "pending" && Number(row.confidence) === 0.9 && row.judge_key === KEY && Math.abs(Number(row.similarity) - 0.99) < 1e-5,
@@ -2766,6 +2788,15 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   assert((await supersedesOf(reversal)) === null, "…and thoughts.supersedes is NULL again");
   assert((await db.query<{ s: string | null }>(`SELECT superseding_id AS s FROM supersession_proposals WHERE id = $1`, [pid])).rows[0].s === null, "…with superseding_id cleared");
   assert((await candidates(reversal)).every((c) => c.older_id !== decision), "a rejected pair is never a candidate again");
+  // A pointer a later edit moved elsewhere is not this proposal's to clear
+  // either: accept (written), move the pointer by hand, reject → untouched.
+  const moved = await review(pid, "accept");
+  assert(moved.ok === true && moved.written === true, "(re-accepted, the pointer written again)");
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [reversal, farAxis]);
+  const rejMoved = await review(pid, "reject");
+  assert(rejMoved.ok === true && rejMoved.cleared === false && (await supersedesOf(reversal)) === farAxis,
+    "rejecting after a later edit repointed the thought clears nothing: the pointer is no longer this proposal's");
+  await db.query(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [reversal]);
   const rejAgain = await review(pid, "reject");
   assert(rejAgain.ok === true && rejAgain.cleared === false, "rejecting a rejected proposal is idempotent and clears nothing");
   // ...and a reviewer may change their mind: a rejected proposal can be accepted.

@@ -599,7 +599,9 @@ stated rather than hidden). The shared-entity restriction is the cheap signal
 before the expensive one: a conflict is about a subject both name, and the
 judge cost is per pair. It also means a thought with no extracted entities has
 no candidates, which is why the pool is **thoughts with entities, a vector,
-and no row under the key** — extraction first, then consolidation, made
+that nothing supersedes, and no row under the key** (`consolidation_pool()`,
+one definition read by the worker, its `--status` and preflight) — extraction
+first, then consolidation, made
 structural rather than left to a trigger that would judge a capture before
 016's worker reached it and leave a terminal claim row behind. The gate cannot
 see the other side of a pair: a newer thought judged while an older neighbour
@@ -620,7 +622,8 @@ model on the row as 021 puts the embedding model beside the vector. The
 worker's agent id rides along as 016's mentions carry theirs.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
-the entities nothing has mentioned within the window, newest capture first.
+the entities nothing has mentioned within the window, quietest first, each
+with its newest capture.
 `--stale` prints it; nobody acts on it.
 
 ### `consolidate.ts`

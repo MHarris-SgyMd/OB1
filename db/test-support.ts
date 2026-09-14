@@ -89,6 +89,7 @@ const FUNCTIONS = [
   "record_supersession_proposal(uuid, uuid, text, numeric, text, float, text, uuid)",
   "review_supersession_proposal(uuid, text, text, text, jsonb)",
   "list_supersession_proposals(text, int)",
+  "consolidation_pool(text)",
   "stale_entities(interval, int)",
 ];
 

@@ -2371,7 +2371,8 @@ OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-con
 ### The graph it ran on
 
 525 of 576 issues extracted under `qwen2.5:7b`; 521 carry at least one entity.
-The 51 without one are the longest documents (median 7,080 characters): the 7B
+The 51 unextracted are the longest documents (median 7,080 characters), and 4
+more extracted to no entity at all: the 7B
 model does not finish them inside a four-minute call, and at ten minutes it is
 still generating — 016's known timeout tail, not something this pass changes.
 They matter here because the labelled conflicts live in exactly those documents
@@ -2414,7 +2415,7 @@ candidate rule would do with it. `qwen2.5:7b`, temperature 0, 3.0 s per pair:
 | --- | --- |
 | conflict precision | 29% (2 of 7 flagged) |
 | conflict recall | 33% (2 of 6) |
-| non-conflicts left alone | 87 of 87 (the 5 false flags are all in the `agree` set) |
+| non-conflicts left alone | 87 of 92 (the 5 false flags are all in the `agree` set) |
 | direction on the 2 found | 1 right, 1 left unknown, 0 wrong |
 | reach | 1 of the 6 labelled conflicts is a candidate at k=3 / 0.6; 3 of the 6 pairs' issues are among the 51 unextracted |
 

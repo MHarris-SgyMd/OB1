@@ -26,7 +26,7 @@
  *
  *   OB1_EVAL_CORPUS=/tmp/linear-corpus-full.json ../db/with-postgres.sh bun eval-consolidate.ts          # 1 + 2
  *   … bun eval-consolidate.ts --full [--k N] [--min-sim F]                                              # + 3
- *   … bun eval-consolidate.ts --replay /tmp/consolidate-verdicts.jsonl                                  # 2 and 3 scored from a worker dump, no model
+ *   … bun eval-consolidate.ts --replay /tmp/consolidate-verdicts-<model>.jsonl                          # 2 and 3 scored from a worker dump, no model
  *   … bun eval-consolidate.ts --no-judge                                                                # 1 only
  *   … --allow-stale-dump    replay entity answers whose fingerprints no longer match the loaded text, by id (a corpus rebuilt since the extraction)
  *
@@ -76,9 +76,12 @@ const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
 const spec = parseSpec(EMBED_MODEL);
 const DIM = spec.dims ?? Number(process.env.OB1_EMBEDDING_DIM || 1024);
 const OUT = process.env.OB1_EVAL_OUT ?? "/tmp/consolidate-proposals.md";
-const DUMP = REPLAY ?? (process.env.OB1_EVAL_VERDICTS ?? `/tmp/consolidate-verdicts-${new Date().toISOString().slice(0, 10)}.jsonl`);
 const cfg = resolveEmbedConfig(process.env);
 const JOB = consolidateKey(cfg.metadataModel);
+// The pass's verdicts, per judge model (OB1_EVAL_VERDICTS moves it); a --full
+// run starts it empty, since the worker appends and a second run the same day
+// would otherwise report the sum of both (review pass 2).
+const DUMP = REPLAY ?? (process.env.OB1_EVAL_VERDICTS ?? `/tmp/consolidate-verdicts-${cfg.metadataModel.replace(/[^A-Za-z0-9.-]+/g, "_")}.jsonl`);
 const { path: corpusPath, docs } = loadLinearCorpus();
 const answersPath = entityAnswersPath(cfg.metadataModel);
 if (!existsSync(answersPath)) {
@@ -168,7 +171,7 @@ const sideOf = async (issue: string): Promise<Side | null> => {
   const rows = (await sql`SELECT id, content, created_at, metadata->>'source' AS source FROM thoughts WHERE id = ${linearThoughtId(issue)}::uuid`) as Side[];
   return rows[0] ?? null;
 };
-type DumpLine = { newer: string; older: string; similarity?: number; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
+type DumpLine = { newer: string; older: string; similarity?: number; key?: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
 const replayLines: DumpLine[] = REPLAY ? readFileSync(REPLAY, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine) : [];
 const replayed_ = new Map(replayLines.map((l) => [`${l.older}|${l.newer}`, l]));
 
@@ -227,6 +230,7 @@ if (FULL || REPLAY) {
   let wall = 0;
   let out = "";
   if (FULL) {
+    writeFileSync(DUMP, "");
     const t = Date.now();
     const run = await runScript(["bun", join(HERE, "..", "db", "consolidate.ts"), "--url", URL_, "--k", String(K), "--min-sim", String(MIN_SIM), "--workers", "2", "--dump", DUMP],
       { cwd: join(HERE, "..", "db"), env: { ...process.env, DATABASE_URL: URL_ } as Record<string, string> });
@@ -240,7 +244,8 @@ if (FULL || REPLAY) {
       const j: Judgement = { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
       const v = proposalVerdict(j);
       if (v && l.recorded === "proposed") {
-        await sql`SELECT record_supersession_proposal(${l.older}::uuid, ${l.newer}::uuid, ${v}::text, ${l.confidence}::numeric, ${l.reason || null}::text, ${l.similarity ?? null}::float, ${JOB}::text, NULL::uuid)`;
+        // Under the key the dump line carries — the judge that made the verdict — not this run's.
+        await sql`SELECT record_supersession_proposal(${l.older}::uuid, ${l.newer}::uuid, ${v}::text, ${l.confidence}::numeric, ${l.reason || null}::text, ${l.similarity ?? null}::float, ${l.key ?? JOB}::text, NULL::uuid)`;
       }
     }
   }
