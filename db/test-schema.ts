@@ -2489,4 +2489,81 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// ── 26. Migration 027: admission relative to the top match (SMD-1300) ─────────
+
+console.log("\n[26] Migration 027: search_thoughts_hybrid admits relative to the top match (SMD-1300)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  // 027 replaces 020's absolute 0.5 cosine floor — which drops the right answer
+  // on a long capture, whose short-question cosine is 0.2–0.4 — with a cutoff
+  // RELATIVE to the top candidate: admit the strongest match and every row
+  // within half of it. The shape must actually have changed (the ob1:relative-
+  // floor sentinel, the v_relfloor * top comparison), and 027 must be the last
+  // definer.
+  assert(lastDefinerOf("search_thoughts_hybrid").startsWith("027"),
+    `027 is the last definer of search_thoughts_hybrid (${lastDefinerOf("search_thoughts_hybrid")})`);
+  // [20] re-applied 020's file to test the recency blend, and 020 defines
+  // search_thoughts_hybrid too — so the shipped (027) body was reverted here.
+  // Restore it before inspecting or exercising it. Same trap SMD-1299 tracks:
+  // restoreShipped re-runs a whole file, and re-applying an earlier migration
+  // out of order clobbers a later redefinition (production applies 001→027 in
+  // order and is unaffected).
+  await restoreShipped("search_thoughts_hybrid");
+  const body = (await db.query<{ s: string }>(
+    `SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)).rows[0].s;
+  assert(/ob1:relative-floor/.test(body), "search_thoughts_hybrid carries the ob1:relative-floor sentinel a successor must keep");
+  assert(/v_relfloor\s*\*\s*GREATEST\(ts\.top, 0\.0\)/.test(body),
+    "…and admits relative to the top candidate's similarity (v_relfloor * GREATEST(top, 0))");
+  assert((await functionsNamed("search_thoughts_hybrid")) === 1,
+    "one search_thoughts_hybrid — 027 replaced the same signature, it did not overload");
+
+  // A query whose whole candidate set scores BELOW the old 0.5 floor — the long-
+  // capture case. Three rows at known cosines to the query unit(0):
+  //   top 0.30 · near 0.18 (≥ 0.5×top, kept) · far 0.10 (< 0.5×top, trimmed).
+  await db.query(`SELECT upsert_thought('the strongest but still low match', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.30, 0.9539)]);
+  await db.query(`SELECT upsert_thought('within half of the top', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.18, 0.9837)]);
+  await db.query(`SELECT upsert_thought('far below the top', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.10, 0.9950)]);
+
+  // The tools now send threshold 0, so the relative cutoff governs: the top two
+  // are admitted and the far row trimmed — where the old 0.5 floor dropped all
+  // three. A plain question carries no needle, so nothing is rescued by the
+  // keyword arm; this is the pure vector path.
+  const rel = (await db.query<{ content: string; similarity: number }>(
+    `SELECT content, similarity FROM search_thoughts_hybrid($1::vector, 'a plain question with no identifiers', 0.0, 10, '{}'::jsonb)`, [unit(0)])).rows;
+  assert(rel.length === 2, `threshold 0 admits the top and its near neighbour, not the far row (got ${rel.length})`);
+  assert(rel.some((r) => r.content === "the strongest but still low match") && rel.some((r) => r.content === "within half of the top"),
+    "the top match and the row within half of it are both returned — the long-capture fix");
+  assert(!rel.some((r) => r.content === "far below the top"), "the row below half the top's similarity is trimmed");
+  assert(Math.abs(rel[0].similarity - 0.30) < 0.02, `the % match stays the raw cosine (~0.30, got ${rel[0].similarity})`);
+
+  // The absolute floor is still available as an explicit tightening: at 0.5 none
+  // of these clear it, so the set is empty — what a caller who really wants a
+  // hard floor still gets.
+  const abs = (await db.query(
+    `SELECT content FROM search_thoughts_hybrid($1::vector, 'a plain question with no identifiers', 0.5, 10, '{}'::jsonb)`, [unit(0)])).rows;
+  assert(abs.length === 0, `a caller can still impose a hard absolute floor (0.5 excludes every sub-floor row here, got ${abs.length})`);
+
+  // A mixed query (a needle + words). The keyword arm is floor-exempt, but the
+  // yardstick for the vector rows is the vector arm's top, so an incidental
+  // keyword hit does not raise the bar and trim a genuine low-cosine vector row.
+  // Here the needle hit and the top vector row are the same row at 0.30; a
+  // needle-free vector row at 0.18 (≥ 0.5×0.30) is still admitted, and a 0.08
+  // row is trimmed.
+  await db.exec(`DELETE FROM thoughts`);
+  await db.query(`SELECT upsert_thought('SMD-100 the honda note', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.30, 0.9539)]);
+  await db.query(`SELECT upsert_thought('a long transcript about the car', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.18, 0.9837)]);
+  await db.query(`SELECT upsert_thought('an unrelated note', '{"metadata":{}}'::jsonb, $1::vector)`, [blend(0, 1, 0.08, 0.9968)]);
+  const mixed = (await db.query<{ content: string; matched_needles: string[] }>(
+    `SELECT content, matched_needles FROM search_thoughts_hybrid($1::vector, 'which car did I buy SMD-100', 0.0, 10, '{}'::jsonb)`, [unit(0)])).rows;
+  const mnames = mixed.map((r) => r.content);
+  assert(mnames.includes("SMD-100 the honda note") && mnames.includes("a long transcript about the car") && !mnames.includes("an unrelated note"),
+    `a keyword hit does not raise the bar: the needle row and the low-cosine vector row within half of the vector top are both kept, the 0.08 row trimmed (${mnames.join(" | ")})`);
+  assert(mixed.find((r) => r.content === "SMD-100 the honda note")?.matched_needles.join() === "SMD-100",
+    "the needle row reports its matched needle");
+  assert(mixed.find((r) => r.content === "a long transcript about the car")?.matched_needles.length === 0,
+    "the low-cosine vector row is admitted by the relative cutoff, not by any needle");
+
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();

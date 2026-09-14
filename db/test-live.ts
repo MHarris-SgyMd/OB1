@@ -2020,6 +2020,33 @@ console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node e
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[15] search_thoughts_hybrid admits relative to the top match on real pgvector (migration 027, SMD-1300)");
+{
+  await sql`DELETE FROM thoughts`;
+  // Three rows at known cosines to the query unit(0): top 0.30, near 0.18
+  // (≥ 0.5×top, kept), far 0.10 (< 0.5×top, trimmed). All sit BELOW the old 0.5
+  // floor — the long-capture case, where a short question scores a low cosine
+  // against a big document, and the floor dropped the right answer.
+  const at = (wa: number, wb: number) => { const v = new Array(EMBEDDING_DIM).fill(0); v[0] = wa; v[1] = wb; return `[${v.join(",")}]`; };
+  await sql`SELECT upsert_thought(${"top, still low"}, ${{ metadata: {} }}::jsonb, ${at(0.30, 0.9539)}::vector)`;
+  await sql`SELECT upsert_thought(${"within half"}, ${{ metadata: {} }}::jsonb, ${at(0.18, 0.9837)}::vector)`;
+  await sql`SELECT upsert_thought(${"far below"}, ${{ metadata: {} }}::jsonb, ${at(0.10, 0.9950)}::vector)`;
+
+  // Threshold 0 — what the tools send now: the relative cutoff governs. The top
+  // and the row within half of it come back; the far row is trimmed.
+  const rel = await sql`SELECT content, similarity FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.0, 10, ${{}}::jsonb)`;
+  const names = rel.map((r: { content: string }) => r.content);
+  assert(rel.length === 2 && names.includes("top, still low") && names.includes("within half") && !names.includes("far below"),
+    `threshold 0 keeps the top and the row within half of it, trims the far row (${names.join(" | ")})`);
+  assert(Math.abs(Number(rel[0].similarity) - 0.30) < 0.02, `the reported % match is still the raw cosine (~0.30, ${rel[0].similarity})`);
+
+  // The absolute floor is unchanged and still available: at 0.5 nothing here
+  // clears it — the whole set the shipped tool silently dropped before SMD-1300.
+  const floored = await sql`SELECT content FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.5, 10, ${{}}::jsonb)`;
+  assert(floored.length === 0, `an explicit 0.5 floor still excludes every sub-floor row (${floored.length})`);
+  await sql`DELETE FROM thoughts`;
+}
+
 await sql.close();
 
 report();

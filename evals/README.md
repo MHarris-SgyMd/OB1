@@ -2011,6 +2011,51 @@ retrievers are 17–18 points behind. The two things between this fork and
 GBrain's number are a reranker, measured flat on the tracker and worth
 re-deriving here, and a lexical arm over prose.
 
+### The floor, decided by measurement (SMD-1300), and the fix
+
+The two endpoints above (0.5 → 45.3%, −1 → 87.7%) said the floor was the defect;
+they did not say what to replace it with. `sweep-floor.ts` swept the admission
+rule — absolute thresholds and a cutoff relative to the top candidate — over the
+same 470 questions, bucketed by gold-document length. Strict recall_all@5:
+
+| admission rule | ALL | <1k | 1k–3k | >3k | mean rows |
+| --- | --- | --- | --- | --- | --- |
+| absolute 0.5 (shipped before) | 45.3% | 100% | 78.9% | 36.1% | 1.1 |
+| absolute 0.3 | 85.7% | 100% | 98.6% | 82.6% | 4.2 |
+| no floor (−1) | 87.7% | 100% | 100% | 84.7% | 5.0 |
+| **relative, f = 0.5** | **87.4%** | 100% | 100% | 84.4% | 4.3 |
+| relative, f = 0.6 | 86.2% | 100% | 100% | 82.8% | 3.7 |
+| relative, f = 0.7 | 82.1% | 100% | 100% | 77.8% | 2.9 |
+
+Two things the endpoints alone could not show. First, the damage is **entirely on
+long documents** — the `<1k` bucket is 100% under every rule, so no single
+absolute constant can be right for both lengths, which is the case against merely
+lowering it. Second, **`f = 0.5` ties the no-floor recall** (87.4% vs 87.7%) while
+returning fewer rows (4.3 vs 5.0) — it trims filler without dropping gold. `f ≥
+0.6` starts costing recall.
+
+So migration 027 replaces the absolute floor with the **relative** cutoff at
+`f = 0.5`: admit the top match and every row within half of its raw cosine
+(keyword hits exempt; a negative `match_threshold` disables it for the raw ranked
+list). The tools send `match_threshold` 0, so the cutoff governs. Re-run with 027
+applied, the shipped arm (`hybrid@0`) scores **87.4%**, and of its 119 short calls
+at k=5 only **1** drops a gold session — versus the old floor's 467 short / 256 lost. That
+is the honest line between the cutoff trimming noise and the floor losing the
+answer. (See `../FORK.md` §48.)
+
+*The short-corpus precision cost, measured (SMD-1300).* On the 576-issue Linear
+corpus (`qwen3-embedding:4b`), `threshold 0.5` on the 027 function is the old
+absolute floor exactly (`sim > 0.5` ⇒ `sim ≥ 0.5·top`), so it is the honest
+before; `threshold 0` is the shipped relative cutoff. `eval-hybrid.ts`: the
+control passed on all 749 queries and the four sets' rank-1 is healthy
+(identifier 98%, semantic 84%, mixed 92%, decoy 83%) — the floor is not what
+ranks, so the adversarial decoy set is unaffected. `decoy-admission.ts` over 576
+title→body queries: **rank-1 is unchanged (84.3%)** between 0.5 and 0 — the cutoff
+never displaces the answer — and the cost is **+0.7 non-target rows per
+ten-result query** (mean non-target 8.30 → 9.02), because a dominant top of ~0.8
+keeps rows ≥0.4 where the floor kept ≥0.5. A little more fill below the answer for
+the 45→87% long-capture recall: bounded and non-adversarial.
+
 ### Caveats
 
 * Two local models, both at 1024 dimensions. Nothing hosted has been

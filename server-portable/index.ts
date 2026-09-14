@@ -320,7 +320,11 @@ function buildServer(principal: Principal): McpServer {
         const data = await (await db()).hybridThoughts({
           query,
           embedding: qEmb,
-          threshold: 0.5,
+          // 0, not 0.5 (SMD-1300): admission is relative to the top match now
+          // (migration 027), so sending a low absolute floor lets it govern.
+          // This tool takes no threshold from the caller, so it could not follow
+          // the fix any other way — the whole point of the ticket's step 3.
+          threshold: 0,
           limit: 10,
           filter: {},
           recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT,
@@ -419,10 +423,15 @@ function buildServer(principal: Principal): McpServer {
         // ever reaching the function's int parameter.
         limit: z.number().optional().default(10).describe("Results to return, clamped to 1-100.")
           .transform((n) => Math.min(Math.max(Math.trunc(n), 1), 100)),
-        // Described, because 017 narrowed what it means: match_thoughts
-        // guaranteed every row cleared it, the fused function exempts exact hits.
-        threshold: z.number().optional().default(0.5)
-          .describe("Minimum similarity, 0-1, for results found by meaning alone. An exact hit on an identifier or quoted span from the query is exempt from it."),
+        // Default 0, not 0.5 (SMD-1300): admission is now RELATIVE to the top
+        // match (migration 027 keeps every row within half of the best result's
+        // similarity), because an absolute floor drops the right answer on a
+        // long capture — it scores low cosine against a short question. This
+        // value is an OPTIONAL absolute minimum layered on top; 0 lets the
+        // relative cutoff govern. An exact hit on an identifier or quoted span
+        // is exempt either way (017).
+        threshold: z.number().optional().default(0)
+          .describe("Optional absolute minimum similarity, 0-1, on top of the relative cutoff (results are kept within half of the best match's similarity). 0 (default) lets the relative cutoff decide. An exact hit on an identifier or quoted span from the query is exempt."),
         // Migration 020 (SMD-945): age blended into the order, after the
         // candidate scan, with the threshold still on raw similarity — so a
         // weight reorders relevant thoughts and cannot surface irrelevant recent
