@@ -80,9 +80,10 @@
  * OB1_EVAL_LME_CHUNKS — the store's whole vectors untouched — so windows at
  * another limit can be scored beside the shipped 1200 without a 14-hour
  * reload. Resumable by thought. The windows carry chunk.ts's default overlap,
- * which is the server's for any limit of 1200 or more (the server scales it
- * down only for a window that derived smaller); a side table under 1200 would
- * need the overlap passed too.
+ * which is what the server uses for any explicit OB1_CHUNK_TOKENS and for
+ * every derived window of 1200; only a window a small model DERIVES (a
+ * 512-token model's 300, overlap 37) differs, and no such model is measured
+ * here.
  */
 import { SQL } from "bun";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -310,26 +311,26 @@ async function score(): Promise<void> {
   // An object, not a JSON string: Bun stringifies a ::jsonb parameter itself,
   // and a string would arrive as a jsonb scalar that nothing contains.
   const filterFor = (q: Question) => ({ lme_q: [q.question_id] });
-  const ids = (rows: { id: string }[]) => rows.map((r) => r.id);
+  const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id);
   const shipped: Arm[] = [
     {
       key: "hybrid@0.5", label: "hybrid, threshold 0.5 (what search_thoughts sent before SMD-1300)",
-      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.5, ${k}, ${filterFor(q)}::jsonb)`),
+      run: async (qv, q, k) => idsOf(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.5, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
       // SMD-1300 / migration 027: the tools now send a threshold of 0, and the
       // function admits relative to the top match. This is the SHIPPED arm once
       // 027 is applied; against a pre-027 database it is the plain no-floor call.
       key: "hybrid@0 (027)", label: "hybrid, threshold 0 — the relative cutoff governs (search_thoughts today)",
-      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`),
+      run: async (qv, q, k) => idsOf(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, 0.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
       key: "hybrid@-1", label: "hybrid, threshold -1 — no floor of any kind (027 treats a negative threshold as the raw ranked list)",
-      run: async (qv, q, k) => ids(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
+      run: async (qv, q, k) => idsOf(await sql`SELECT id FROM search_thoughts_hybrid(${qv}::vector, ${q.question}, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
     {
       key: "vector@-1", label: "vector only (match_thoughts: best of the whole vector and the windows)",
-      run: async (qv, q, k) => ids(await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
+      run: async (qv, q, k) => idsOf(await sql`SELECT id FROM match_thoughts(${qv}::vector, -1.0, ${k}, ${filterFor(q)}::jsonb)`),
     },
   ];
   // The windows question (SMD-1305; the header explains the arms). One query

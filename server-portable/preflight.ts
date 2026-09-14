@@ -153,18 +153,20 @@ add("model provider", "ok", `${llmBase}${localProvider ? " (local — no credent
     ? `${embModel}'s ${chunk.window}-token window`
     : `${embModel}'s window, which db/config.mjs's KNOWN_MODEL_WINDOW does not list`;
   const rule = `captures over ${chunk.threshold} tokens are windowed at ${chunk.tokens}`;
+  /** The most an explicit limit can be and keep the ratio the default keeps under this window. */
+  const headroom = chunk.window !== undefined ? Math.floor((chunk.window * DEFAULT_MAX_TOKENS) / DEFAULT_MODEL_WINDOW) : undefined;
   if (chunk.from === "OB1_CHUNK_TOKENS" && chunk.window !== undefined && chunk.tokens > chunk.window) {
     add("chunk window", "warn",
         `OB1_CHUNK_TOKENS=${chunk.tokens} is over ${windowText} — a window that long is cut at ${chunk.window} tokens silently, which is the failure the windows exist to prevent`,
         `Unset OB1_CHUNK_TOKENS to derive the rule from the window, or set it under ${chunk.window}.`);
-  } else if (chunk.from === "OB1_CHUNK_TOKENS" && chunk.window !== undefined && chunk.tokens > Math.floor((chunk.window * DEFAULT_MAX_TOKENS) / DEFAULT_MODEL_WINDOW)) {
+  } else if (chunk.from === "OB1_CHUNK_TOKENS" && headroom !== undefined && chunk.tokens > headroom) {
     // Under the window but over the headroom the estimate needs: chunk.ts
     // assembled a 1730-token window against a 1200 target on randomised prose
     // before its post-condition, and the estimate itself is a guess — the
     // ratio the constant fixes is the measured margin (second review pass).
     add("chunk window", "warn",
         `OB1_CHUNK_TOKENS=${chunk.tokens} leaves little headroom under ${windowText} — the token count is an estimate, and a window that overshoots is cut at ${chunk.window} tokens silently`,
-        `Set OB1_CHUNK_TOKENS at or under ${Math.floor((chunk.window * DEFAULT_MAX_TOKENS) / DEFAULT_MODEL_WINDOW)}, the ratio the default keeps, or unset it.`);
+        `Set OB1_CHUNK_TOKENS at or under ${headroom}, the ratio the default keeps, or unset it.`);
   } else if (chunk.from === "OB1_CHUNK_TOKENS") {
     add("chunk window", "ok", `${rule}, from OB1_CHUNK_TOKENS (${windowText})`);
   } else if (chunk.from === "window") {
