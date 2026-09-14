@@ -34,6 +34,7 @@ import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS,
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { heartbeatFor, leaseRefusal } from "./lease.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -763,6 +764,51 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   assert(lat.length === 626, `626 calls empty the pool — 625 batches and one empty answer (got ${lat.length})`);
   assert(last <= first * 2, `the last hundred claims are within twice the first hundred (${last.toFixed(2)} ms vs ${first.toFixed(2)} ms)`);
 
+  // (e) The heartbeat (migration 030, SMD-1023). A worker that renews across its
+  // deadline keeps its rows — a claim made after the ORIGINAL deadline gets
+  // none of them and its release succeeds — and a worker that stops renewing
+  // loses them on the RENEWED deadline, not the original, to a second worker
+  // that completes them. Five-second leases: the margins are two seconds and
+  // more each side, as (c)'s.
+  const JOB4 = "test:heartbeat";
+  const six = [...pool].slice(8, 14);
+  await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
+  const t0 = Date.now();
+  const alive = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'alive', 4, 5)`).map((r: { thought_id: string }) => r.thought_id);
+  assert(alive.length === 4, `a worker takes four rows on a 5 s lease (got ${alive.length})`);
+  await Bun.sleep(2500);
+  const b0 = performance.now();
+  const beat1 = (await sql`SELECT thought_id FROM renew_claims(${JOB4}, 'alive', 5)`).map((r: { thought_id: string }) => r.thought_id);
+  const beatMs = performance.now() - b0;
+  assert(beat1.length === 4 && alive.every((id) => beat1.includes(id)), `a beat at 2.5 s renews all four (${beat1.length})`);
+  await Bun.sleep(3000); // 5.5 s: past the original deadline, 2 s before the renewed one
+  const afterOriginal = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).map((r: { thought_id: string }) => r.thought_id);
+  assert(afterOriginal.length === 2 && afterOriginal.every((id) => !alive.includes(id)),
+    `a claim after the original deadline gets only the two unclaimed rows — none of the heartbeating worker's (${afterOriginal.length}, at ${Date.now() - t0} ms)`);
+  const [{ ok: released }] = await sql`SELECT release_thought(${alive[0]}::uuid, ${JOB4}, 'alive', 'succeeded') AS ok`;
+  assert(released === true, "…and the heartbeating worker's release succeeds past the original deadline");
+  const b1 = performance.now();
+  const beat2 = (await sql`SELECT thought_id FROM renew_claims(${JOB4}, 'alive', 5)`).map((r: { thought_id: string }) => r.thought_id);
+  const beat2Ms = performance.now() - b1;
+  assert(beat2.length === 3 && !beat2.includes(alive[0]), `the next beat renews the three still held (${beat2.length})`);
+  // The worker dies here: no more beats. Its rows expire 5 s after beat2.
+  const tooSoonHb = (await sql`SELECT thought_id FROM claim_thoughts(${JOB4}, 'second', 10)`).length;
+  assert(tooSoonHb === 0, "before the renewed deadline a second worker gets nothing");
+  await Bun.sleep(5300);
+  const inherited = (await sql`SELECT thought_id, attempt FROM claim_thoughts(${JOB4}, 'second', 10)`) as { thought_id: string; attempt: number }[];
+  assert(inherited.length === 3 && inherited.every((r) => beat2.includes(r.thought_id) && r.attempt === 2),
+    `after the renewed deadline the second worker receives the dead worker's three, on their second attempt (${inherited.length})`);
+  for (const id of [...afterOriginal, ...inherited.map((r) => r.thought_id)]) await sql`SELECT release_thought(${id}::uuid, ${JOB4}, 'second', 'succeeded')`;
+  const [{ hbDone, hbFailed }] = await sql`
+    SELECT count(*) FILTER (WHERE status = 'succeeded')::int AS "hbDone", count(*) FILTER (WHERE status = 'failed')::int AS "hbFailed"
+      FROM thought_work_claims WHERE work_type = ${JOB4}`;
+  assert(Number(hbDone) === 6 && Number(hbFailed) === 0, `…and every row ends succeeded, none failed (${hbDone}/${hbFailed})`);
+  console.log(`     a beat renewing four leases: ${beatMs.toFixed(2)} ms on the function's first call (plan included), ${beat2Ms.toFixed(2)} ms renewing three on the next`);
+  // The rule the three workers share, from the module they share.
+  assert(heartbeatFor(900) === 60 && heartbeatFor(10) === 3 && heartbeatFor(1) === 1, "heartbeatFor: 60 s, or a third of the lease, at least one second");
+  assert(leaseRefusal(900, 60) === null && leaseRefusal(4, 2) === null && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(leaseRefusal(3, 2) ?? ""),
+    "leaseRefusal: a lease of two heartbeats passes, one under is refused with the arithmetic");
+
   await sql`DELETE FROM thoughts`;
 }
 
@@ -815,6 +861,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   // While set, every embedding request but the run's provider probe hangs, so
   // a run can be killed between recording the model and its first write.
   let frozen = false;
+  // While set, every embedding takes this long: the heartbeat run at the end.
+  let slowMs = 0;
   const modelsSeen = new Set<string>();
   const axisFor = (text: string) => {
     let h = 0;
@@ -847,6 +895,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
         tarpitOpen = false;
         await neverAnswers();
       }
+      if (slowMs > 0) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
@@ -978,20 +1027,24 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(refused.code === 2 && /--switch-model/.test(refused.out), `a model change without --switch-model is refused with exit 2 (exit ${refused.code})`);
   const [{ model: stillRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(stillRecorded === recordedModel && Object.keys(await claimCounts()).length === 0, "…touching neither ob1_config nor the pool");
-  // A lease shorter than a batch's worst case — eight rows at the 2 s timeout —
-  // is refused before anything is touched.
-  const shortLease = await reembed("--switch-model", "--ttl", "1");
-  assert(shortLease.code === 2 && /--ttl 1 s cannot cover --batch 8 × 2 s per call \(16 s\)/.test(shortLease.out) && /Raise --ttl or lower --batch/.test(shortLease.out),
-    `a --ttl the batch can outlive is refused with exit 2, showing the arithmetic (exit ${shortLease.code})`);
+  // A lease under two heartbeats is refused before anything is touched: since
+  // migration 030 the lease has to outlast a missed beat, not the batch.
+  const shortLease = await reembed("--switch-model", "--ttl", "3", "--heartbeat", "2");
+  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out) && /Raise --ttl or lower --heartbeat/.test(shortLease.out),
+    `a --ttl under two heartbeats is refused with exit 2, showing the arithmetic (exit ${shortLease.code})`);
   assert(Object.keys(await claimCounts()).length === 0, "…before the pool exists");
-  const statusShort = await reembed("--status", "--ttl", "1");
+  const statusShort = await reembed("--status", "--ttl", "3", "--heartbeat", "2");
   assert(statusShort.code === 0 && /status: \d+ thoughts/.test(statusShort.out), `…while --status answers whatever the lease, since it never claims (exit ${statusShort.code})`);
-  // claim_thoughts takes whole seconds, and OB1_LLM_TIMEOUT=120.3 is legal: the
-  // derived default lease is an integer — the floor rounded up, plus one row's
-  // worth of slack for a re-read — or every claim would fail on its signature.
-  const fractional = await reembedIn({ OB1_LLM_TIMEOUT: "120.3" }, "--dry-run");
-  assert(fractional.code === 0 && /8 per claim, 1084 s leases/.test(fractional.out),
-    `a fractional timeout gives a whole-second default lease: ceil(ceil(8 × 120.3) + 120.3) = 1084 (${fractional.out.match(/\d+ s leases/)?.[0]})`);
+  // Neither the batch nor the timeout sizes the lease any more: eight rows at
+  // any timeout run under the default 900 s lease and 60 s heartbeat (until 030
+  // this derived a 1084 s lease from a 120.3 s timeout), and a lease given
+  // without a heartbeat derives one of a third of it.
+  const defaults = await reembedIn({ OB1_LLM_TIMEOUT: "120.3" }, "--dry-run");
+  assert(defaults.code === 0 && /8 per claim, 900 s leases renewed every 60 s/.test(defaults.out),
+    `the default lease is 900 s with a 60 s heartbeat whatever the batch and timeout (${defaults.out.match(/\d+ s leases[^,]*/)?.[0]})`);
+  const derived = await reembed("--dry-run", "--ttl", "10");
+  assert(derived.code === 0 && /8 per claim, 10 s leases renewed every 3 s/.test(derived.out),
+    `a lease given without a heartbeat derives one of a third of it (${derived.out.match(/\d+ s leases[^,]*/)?.[0]})`);
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
@@ -1505,6 +1558,26 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   }
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
+  // The heartbeat end to end (migration 030): a batch whose work outlasts the
+  // lease, under workers that beat. Every embedding takes 600 ms, eight per
+  // claim, a 3 s lease with the 1 s heartbeat it derives: a batch runs near
+  // five seconds, and until 030 its lease expired mid-way — the rows went to
+  // the other worker on their second attempt, the first's releases returned
+  // false, and three such batches marked rows failed. A fresh backfill key, so
+  // the pool is every thought; the recorded model is the configured one here.
+  slowMs = 600;
+  const SLOW_KEY = `reembed:stub-embed@${DIM}:slow`;
+  const slow = await reembed("--job", SLOW_KEY, "--workers", "2", "--batch", "8", "--ttl", "3");
+  slowMs = 0;
+  assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /8 per claim, 3 s leases renewed every 1 s/.test(slow.out),
+    `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/lost to an expired lease/.test(slow.out) && !/heartbeat failed/.test(slow.out),
+    "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
+  const slowRows = (await sql`SELECT status, attempt_count::int AS attempts FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`) as { status: string; attempts: number }[];
+  assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
+    `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
+  await sql`DELETE FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`;
+
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   await sql`DELETE FROM thoughts`;
@@ -1621,10 +1694,15 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'entity-worker'`)[0].c === 0, "…and it did not register the worker's agent either");
   const bareLimit = await extract("--limit");
   assert(bareLimit.code === 2 && /--limit needs a value/.test(bareLimit.out), "a bare --limit is refused rather than read as no limit");
-  const tooLong = await extract("--batch", "4", "--timeout", "300");
-  assert(tooLong.code === 2 && /exceed the --ttl/.test(tooLong.out), "a batch that could outlive its lease is refused");
+  const shortLease = await extract("--ttl", "3", "--heartbeat", "2");
+  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
+  const bigBatch = await extract("--dry-run", "--batch", "4", "--timeout", "300");
+  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out),
+    `…while a batch of four at a 300 s timeout, refused until 030 as able to outlive the lease, is not: the heartbeat sizes the lease now (exit ${bigBatch.code})`);
 
-  const first = await extract("--workers", "2", "--batch", "2");
+  // A 6 s lease, so the 2 s heartbeat it derives beats during the run.
+  const first = await extract("--workers", "2", "--batch", "2", "--ttl", "6");
+  assert(!/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out), "the heartbeat runs through the first pass without error, and no row reaches a second worker");
   assert(first.code === 1 && /9 extracted, 1 failed/.test(first.out), `the first run extracts nine and fails the prose answer (exit ${first.code}: ${first.out.split("\n").find((l) => /extracted,/.test(l))?.trim()})`);
   assert(/not JSON of the expected shape/.test(first.out), "…naming the failure");
   const [{ key }] = await sql`SELECT value AS key FROM ob1_config WHERE key = 'entity_extraction_key'`;
@@ -2139,13 +2217,17 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
          `--dry-run counts the eleven thoughts with entities and a vector — not the one without entities, nor the one without a vector — and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300)})`);
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0 && (await proposals()).length === 0, "…no claim row, no proposal");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'consolidator'`)[0].c === 0, "…and it did not register the worker's agent either");
-  const tooLong = await consolidate("--batch", "4", "--k", "5", "--timeout", "120");
-  assert(tooLong.code === 2 && /exceed the --ttl/.test(tooLong.out), "a batch whose k calls could outlive its lease is refused");
+  const shortLease = await consolidate("--ttl", "3", "--heartbeat", "2");
+  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
+  const bigBatch = await consolidate("--dry-run", "--batch", "4", "--k", "5", "--timeout", "120");
+  assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out), `…while a batch whose k calls exceed the lease, refused until 030, is not: the heartbeat sizes the lease now (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 
   // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
-  const first = await consolidate("--workers", "2", "--dump", dump);
+  // A 6 s lease, so the 2 s heartbeat it derives beats during the run.
+  const first = await consolidate("--workers", "2", "--dump", dump, "--ttl", "6");
+  assert(!/heartbeat failed/.test(first.out) && !/attempt 2/.test(first.out), "the heartbeat runs through the first pass without error, and no row reaches a second worker");
   assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
   assert(/5 pair\(s\) judged — 0\.50 per thought, 500 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),

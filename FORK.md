@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-five numbered changes on top of the pin. Seven fix defects found in an
+Fifty-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Three (changes 31, 53, and 55) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–55 are the numbered `###` sections** further down, which is
+sections. Changes **18–56 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -5793,6 +5793,111 @@ not only LongMemEval.
 Upstream status: **not applicable** — a fork-internal measurement of the fork's
 own retrieval. **Unfiled** upstream. Reproduce: a persisted `eval-longmemeval.ts`
 load, then `bun evals/query-decompose.ts` (see `evals/README.md`).
+### 56. A lease outlasts a missed heartbeat, not a batch — `renew_claims`, and the one rule the three workers share (SMD-1023)
+
+Change 29's `claim_thoughts` stamped one `ttl_expires_at` per call, for every
+row in the batch, and nothing could move it. So a lease had to outlast the
+whole batch: the eighth row of a batch of eight is not started until the seven
+before it finish, and its clock has run since the claim. 015's header said so,
+and every consumer carried the coupling as arithmetic of its own —
+`reembed.ts` grew its default lease to `--batch` × `OB1_LLM_TIMEOUT` and
+refused a shorter one (change 34), `extract-entities.ts` and `consolidate.ts`
+refused a batch × timeout above the lease and defaulted to one thought per
+claim so the product stayed small (changes 30 and 54). When a batch overran
+anyway, the next claim by any worker returned its unfinished rows to the pool,
+a second worker took and repeated them, the first's `release_thought` returned
+false, and after three expiries the reaper marked the row failed — a cap
+written for a thought that kills every worker that touches it, applied to a
+healthy row that was slow. `reembed.ts`'s header called its arithmetic "a
+stand-in for per-row lease renewal (SMD-1023)". This is the renewal.
+
+**Migration 030: `renew_claims(work_type, worker_id, ttl_seconds)`.** Every
+row the worker holds under the key — status `claimed`, `worker_id` its own —
+has its deadline moved to `now() + ttl`, never backward (`GREATEST` with the
+current one), and the ids renewed are returned. Nothing else changes:
+`claim_thoughts`, `release_thought` and `release_claims_for_worker` are as 015
+wrote them, `test-schema` [29] asserts 015 is still the last file to define the
+first two, and the claim stays the single locking pass upstream kept it as when
+it left renewal out. A pending row, a terminal row and another worker's row are
+not the caller's to renew and are not returned. A lease past its deadline that
+no claim has yet reaped is still the holder's — the reaper runs at the start of
+`claim_thoughts` and nowhere else — and is renewed; a renewal and a reaper
+reaching the row together contend on its lock, and the loser re-evaluates its
+predicate on the winner's version under READ COMMITTED, so the row ends
+renewed-and-held or pending-and-unrenewed, never both. The ids returned are the
+rows still held: one of the batch not among them was reaped and is another
+worker's now. One column comment beside it, on `ttl_expires_at`, says what the
+lease means since 030; neither literal spells a flag with its dashes, which
+`test-schema` [10] requires and [29] asserts of the live text.
+
+**The heartbeat, once.** `db/lease.ts` is the implementation the three workers
+share, as `consolidation_pool()` was change 54's one pool rule: a timer per
+worker that calls `renew_claims` every `--heartbeat` seconds while the worker
+holds rows and sends nothing while it holds none; a `held` set the loop adds a
+batch to after the claim and removes each row from BEFORE its release goes out,
+so a beat in flight across a release does not read the released row as lost;
+a `lost` set for the ids a beat found no longer the worker's, which the loop
+skips rather than repeating the provider's work and the summary counts. Beats
+never overlap — a tick that finds one in flight is skipped — and the timer is
+unref'd, so it holds no process open. The three workers wire it identically:
+started beside the worker id, the batch added after the claim, each row removed
+before its release, stopped in the `finally` that returns the leases. A beat
+that fails is reported once per run of failures and the leases hold from the
+last one that answered; a process that cannot reach the database cannot beat,
+and its rows return to the pool as a dead worker's would, which is the right
+reading of it.
+
+**The rule that replaces "the TTL must cover the batch".** `--ttl` ≥ 2 ×
+`--heartbeat`, so one delayed beat cannot lapse a lease. A pair under it is
+refused before anything is claimed — exit 2, the arithmetic shown;
+`reembed.ts --status` answers regardless, as before — and a lease given without
+a heartbeat derives one of a third of itself, at most 60 s, so any lease of
+three seconds or more fits. `--ttl` now means one thing: how long a dead
+worker's rows stay out of the pool. Nothing about the batch, the timeout or the
+calls a thought costs sizes it, and the three refusals that did —
+`reembed.ts`'s derived floor with its long-lease warning,
+`extract-entities.ts`'s `--batch × --timeout`, `consolidate.ts`'s `--batch ×
+--k × --timeout` — are gone. The reaper's cap keeps the meaning 015 gave it:
+under a heartbeating worker a lease lapses only when the beats stop reaching
+the database for a whole lease, so a row expired three times is one whose
+worker died three times on it, not one that was slow.
+
+**Proof.** `test-live` [8e]: a worker on a 5 s lease beats at 2.5 s; a claim
+at 5.5 s — past the original deadline — gets only the unclaimed rows and the
+worker's release succeeds; it beats once more and stops; a claim before the
+renewed deadline gets nothing and one after it receives its three rows on their
+second attempt, every row ending succeeded and none failed. [8a] and [8b] hold
+as they were: the claim is untouched. [9] runs `reembed.ts` end to end with
+every embedding taking 600 ms, eight per claim, a 3 s lease and the 1 s
+heartbeat it derives: two workers re-embed all forty-two thoughts in batches
+near five seconds long, no row reaches a second worker, no release finds its
+lease gone, none is lost, every claim row succeeded on its first attempt — the
+ticket's first Verify bullet, which no arithmetic could pass. [10] and [16] run
+their first pass under a 6 s lease so the beats fire in the other two workers,
+and assert the old refusals are gone (a batch of four at a 300 s timeout is a
+`--dry-run` that exits 0) and the new one holds. `test-schema` [29] owns the
+state machine on one connection: the holder's rows and no others, never
+backward, expired-not-reaped is still held, reaped is not, 015's CHECK still in
+force under the new writer, both comments' text. A beat is one `UPDATE`
+through 015's partial worker index; [8e] prints its round trip beside the
+claim's — a few milliseconds on the function's first call, the plan included,
+and under a millisecond after.
+
+**What did not change, and why.** The default lease stays 900 s: shorter is
+now safe — a dead worker's rows return in `--ttl`, not `--ttl` plus the batch
+— but the default is the operator's to lower and the ticket did not ask.
+`extract-entities.ts` and `consolidate.ts` keep one thought per claim for the
+reason that survives: a claim costs half a millisecond against a model call of
+seconds, so a bigger batch buys nothing and a dead worker holds fewer rows.
+The read-only modes never beat, since they never claim. 028's comments on
+`last_error` and `release_thought` stand as applied — nothing here redefines
+either function, which is the case 028's header said a successor must mind.
+
+Upstream status: **not applicable** — upstream's `schemas/thought-work-claims`
+left mid-batch renewal out deliberately, to keep the claim one atomic
+statement, and its table is not this one (change 29's four departures). A
+separate renewal function keeps the property upstream wanted and could be
+offered against its schema; **unfiled** upstream.
 
 ## Detached from the fork network
 

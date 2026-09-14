@@ -19,7 +19,7 @@
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --timeout SECONDS (300, per model call)
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (300, per model call)
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought, recurring: every new capture is extracted too. On
@@ -83,6 +83,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, heartbeatFor, leaseRefusal, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -121,18 +122,24 @@ if (!url) {
 
 const WORKERS = numberFlag("workers", 2, 1);
 // One thought per claim. A claim costs half a millisecond against a model call
-// of ten seconds or more, and the lease is stamped per claim: a batch of four
-// at a 300 s timeout could outlive a 900 s lease, be reaped, and be extracted
-// twice.
+// of ten seconds or more, so a bigger batch buys nothing, and a worker that
+// dies holds fewer rows. (Until migration 030 there was a second reason: the
+// lease was stamped per claim and could not be moved, so a batch of four at a
+// 300 s timeout could outlive a 900 s lease and be extracted twice. The
+// heartbeat retires it.)
 const BATCH = numberFlag("batch", 1, 1);
-const TTL = numberFlag("ttl", 900, 1);
+// The lease is renewed on a heartbeat while the worker holds rows, so it has
+// to outlast a missed beat, not the batch — db/lease.ts holds the rule the
+// three consumers share, and the refusal below is its.
+const TTL = numberFlag("ttl", DEFAULT_TTL_S, 1);
+const HEARTBEAT = has("heartbeat") ? numberFlag("heartbeat", DEFAULT_HEARTBEAT_S, 1) : heartbeatFor(TTL);
 const TIMEOUT_S = numberFlag("timeout", 300, 1);
-if (BATCH * TIMEOUT_S > TTL) {
-  console.error(
-    `--batch ${BATCH} × --timeout ${TIMEOUT_S} s can exceed the --ttl ${TTL} s lease, which is stamped once per batch.\n` +
-      `A batch that outlives its lease is reaped and extracted again by another worker. Lower --batch or raise --ttl.`
-  );
-  process.exit(2);
+{
+  const refusal = leaseRefusal(TTL, HEARTBEAT);
+  if (refusal) {
+    console.error(refusal);
+    process.exit(2);
+  }
 }
 /** Append every model answer here as JSONL — {id, fingerprint, entities, relations} — for evals/eval-entities.ts --replay. */
 const DUMP = flag("dump");
@@ -324,6 +331,7 @@ let done = 0;
 let failed = 0;
 let vanished = 0;
 let superseded = 0;
+let lost = 0;
 let malformed = 0;
 let llmMs = 0;
 const totals = { entities: 0, newEntities: 0, mentions: 0, edges: 0, dropped: 0, ambiguous: 0 };
@@ -451,6 +459,11 @@ function limitReached(): boolean {
 async function worker(n: number): Promise<void> {
   const workerId = `extract-${hostname()}-${process.pid}-${n}-${randomUUID().slice(0, 8)}`;
   activeWorkers.add(workerId);
+  const hb = startHeartbeat({
+    sql, job: JOB, workerId, ttlS: TTL, everyS: HEARTBEAT,
+    onLost: (ids) => console.error(`  ${workerId}: ${ids.length} row(s) reaped while the heartbeat was not reaching the database for ${TTL} s — another worker has them; skipping`),
+    onError: (e, consecutive) => { if (consecutive === 1) console.error(`  ${workerId}: heartbeat failed (${e.message}); the leases hold ${TTL} s from the last beat that reached the database`); },
+  });
   try {
     while (!stopping && !limitReached()) {
       let batch: { thought_id: string; attempt: number }[];
@@ -465,6 +478,7 @@ async function worker(n: number): Promise<void> {
         reserved -= want - batch.length;
         if (batch.length === 0) return;
         const ids = batch.map((b) => b.thought_id);
+        for (const id of ids) hb.held.add(id);
         const rows = (await sql`
           SELECT id, content, COALESCE(content_fingerprint, content_fingerprint_of(content)) AS fingerprint
             FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
@@ -475,6 +489,13 @@ async function worker(n: number): Promise<void> {
       }
       for (const b of batch) {
         if (stopping) return;
+        if (hb.lost.has(b.thought_id)) {
+          // A beat found this row no longer ours: reaped and re-leased while
+          // the beats were not reaching the database. Another worker has it;
+          // repeating the provider's work here would only race its write.
+          lost++;
+          continue;
+        }
         const row = byId.get(b.thought_id);
         if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
         let outcome: Outcome | null = null;
@@ -514,6 +535,7 @@ async function worker(n: number): Promise<void> {
           }
           if (stopAfter) console.error(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
           if (stopAfter && outcome.outcome === "failed") {
+            hb.held.delete(b.thought_id);
             try {
               await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`;
             } catch (e) {
@@ -524,6 +546,9 @@ async function worker(n: number): Promise<void> {
             return;
           }
         }
+        // Out of the heartbeat's set before the release goes out, so a beat in
+        // flight across the release does not read the released row as lost.
+        hb.held.delete(b.thought_id);
         if (outcome.outcome === "vanished") {
           vanished++;
           continue;
@@ -558,7 +583,7 @@ async function worker(n: number): Promise<void> {
           // Either the lease expired, or the content was edited and migration
           // 016's trigger put the row back in the pool: it is pending again and
           // will be extracted from the new text.
-          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile or the lease expired; it is pending again`);
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile, or the heartbeat did not reach the database for ${TTL} s and the lease expired; it is pending again`);
         }
         if (outcome.outcome === "failed") {
           failed++;
@@ -570,6 +595,7 @@ async function worker(n: number): Promise<void> {
       }
     }
   } finally {
+    hb.stop();
     try {
       const [{ n: freed }] = await sql`SELECT release_claims_for_worker(${JOB}, ${workerId}) AS n`;
       if (freed > 0 && !FOLLOW) console.error(`  ${workerId}: returned ${freed} unfinished row(s) to the pool`);
@@ -613,7 +639,7 @@ async function pass(): Promise<Counts> {
   return counts();
 }
 
-console.log(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
+console.log(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s, ${TIMEOUT_S} s per model call${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
 
 let after = await pass();
 if (FOLLOW) {
@@ -627,7 +653,7 @@ if (FOLLOW) {
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
-  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass, in ${elapsed}s ` +
+  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} lost to an expired lease and left to the worker that holds them now` : ""}, in ${elapsed}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s))`
 );
 console.log(
@@ -642,7 +668,7 @@ if (after.failed > 0) {
   await printFailures();
 }
 if (after.claimed > 0 && !stopping) {
-  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s.`);
+  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat.`);
 }
 if (after.pending > 0 && !stopping && !limitReached()) {
   console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);

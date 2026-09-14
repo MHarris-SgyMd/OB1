@@ -2926,4 +2926,84 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   await db.exec(`DELETE FROM ob1_entities`);
 }
 
+// ── 29. Migration 030 — renew_claims ─────────────────────────────────────────
+//
+// The heartbeat, on one connection: which rows a beat moves (the holder's,
+// while claimed), which it leaves (another worker's, pending, terminal), that
+// it never brings a deadline forward, that a lease past its deadline no claim
+// has reaped is still the holder's, and that a reaped one is not. The timing —
+// a worker that beats across its deadline keeps its rows; one that stops loses
+// them on the RENEWED deadline — needs real time and is db/test-live.ts [8e];
+// the workers end to end are [9], [10] and [16] there.
+
+console.log("\n[29] Migration 030: renew_claims moves every lease the worker holds, and nothing else (SMD-1023)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  for (let i = 0; i < 6; i++) await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [`renew probe ${i}`]);
+  const JOB = "test:renew";
+  await db.query(`SELECT enqueue_thoughts($1)`, [JOB]);
+  const raises = async (q: string, params: unknown[] = []): Promise<string> => {
+    try { await db.query(q, params); return ""; } catch (e) { return (e as Error).message; }
+  };
+  const claim = async (worker: string, batch: number, ttl = 900) =>
+    (await db.query<{ thought_id: string }>(`SELECT thought_id FROM claim_thoughts($1, $2, $3, $4)`, [JOB, worker, batch, ttl])).rows.map((r) => r.thought_id);
+  const renew = async (worker: string, ttl: number) =>
+    (await db.query<{ thought_id: string }>(`SELECT thought_id FROM renew_claims($1, $2, $3)`, [JOB, worker, ttl])).rows.map((r) => r.thought_id).sort();
+  const deadlines = async (ids: string[]) =>
+    Object.fromEntries((await db.query<{ id: string; d: string | null }>(
+      `SELECT thought_id::text AS id, ttl_expires_at::text AS d FROM thought_work_claims WHERE work_type = $1 AND thought_id = ANY($2::uuid[])`, [JOB, ids])).rows.map((r) => [r.id, r.d])) as Record<string, string | null>;
+  const later = (a: string | null, b: string | null) => a !== null && b !== null && new Date(a).getTime() > new Date(b).getTime();
+
+  assert((await functionsNamed("renew_claims")) === 1, "renew_claims is defined once");
+  assert(lastDefinerOf("claim_thoughts") === "015_thought_work_claims.sql" && lastDefinerOf("release_thought") === "015_thought_work_claims.sql",
+    "…and 015 is still the last file to define claim_thoughts and release_thought: the renewal does not touch the claim statement");
+  const a = await claim("A", 3);
+  const b = await claim("B", 2);
+  const pending = (await db.query<{ id: string }>(`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = $1 AND status = 'pending'`, [JOB])).rows.map((r) => r.id);
+  assert(a.length === 3 && b.length === 2 && pending.length === 1, `A holds three, B two, one row is pending (${a.length}/${b.length}/${pending.length})`);
+  const before = await deadlines([...a, ...b, ...pending]);
+  const renewed = await renew("A", 1800);
+  assert(renewed.join() === [...a].sort().join(), `A's beat returns exactly A's three rows (${renewed.length})`);
+  const after = await deadlines([...a, ...b, ...pending]);
+  assert(a.every((id) => later(after[id], before[id])), "…each moved to a later deadline");
+  assert(b.every((id) => after[id] === before[id]), "…B's rows untouched");
+  assert(after[pending[0]] === null && before[pending[0]] === null, "…and the pending row still has no lease");
+  // Never backward.
+  const shorter = await renew("A", 1);
+  const held = await deadlines(a);
+  assert(shorter.length === 3 && a.every((id) => held[id] === after[id]), "a beat with a shorter lease than the claim's returns the rows and moves no deadline backward");
+  // Who a beat is for.
+  assert((await renew("nobody", 900)).length === 0, "a worker id that holds nothing renews nothing, without error");
+  assert(/must identify the worker/.test(await raises(`SELECT * FROM renew_claims($1, '', 900)`, [JOB])), "an empty worker id is refused");
+  assert(/must be positive/.test(await raises(`SELECT * FROM renew_claims($1, 'A', 0)`, [JOB])), "a non-positive lease is refused, not stamped as already expired");
+  // A released row leaves the beat.
+  await db.query(`SELECT release_thought($1, $2, 'A', 'succeeded')`, [a[0], JOB]);
+  const afterRelease = await renew("A", 900);
+  assert(afterRelease.length === 2 && !afterRelease.includes(a[0]), "after A releases a row its beat returns the two it still holds");
+  assert((await deadlines([a[0]]))[a[0]] === null, "…and the succeeded row keeps no lease");
+  // Past its deadline but not yet reaped: still the holder's.
+  await db.query(`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 second' WHERE thought_id = ANY($1::uuid[]) AND work_type = $2`, [a.slice(1), JOB]);
+  const revived = await renew("A", 900);
+  const revivedDeadlines = await deadlines(a.slice(1));
+  assert(revived.length === 2 && a.slice(1).every((id) => new Date(revivedDeadlines[id]!).getTime() > Date.now()),
+    "a lease past its deadline that no claim has reaped is still the holder's, and a beat brings it back to the future");
+  // Reaped: not the holder's any more.
+  await db.query(`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 second' WHERE thought_id = ANY($1::uuid[]) AND work_type = $2`, [a.slice(1), JOB]);
+  const c = await claim("C", 10);
+  assert(c.length === 3 && a.slice(1).every((id) => c.includes(id)) && c.includes(pending[0]), `C's claim reaps A's two expired rows and takes them with the pending one (${c.length})`);
+  assert((await renew("A", 900)).length === 0, "…and A's beat now returns nothing: the rows are C's");
+  assert((await renew("C", 900)).join() === [...c].sort().join(), "…while C's beat returns all three");
+  const late = (await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'succeeded') AS ok`, [a[1], JOB])).rows[0].ok;
+  assert(late === false, "…and A, finishing late, cannot release a row C holds, as 015 says");
+  assert(/check constraint/.test(await raises(`UPDATE thought_work_claims SET ttl_expires_at = NULL WHERE thought_id = $1 AND work_type = $2`, [c[0], JOB])),
+    "015's CHECK still keeps status and lease in step under the new writer");
+  // The two comments 030 writes, and the literal shape [10] requires of them.
+  const colComment = (await db.query<{ c: string | null }>(
+    `SELECT col_description('thought_work_claims'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_work_claims'::regclass AND attname = 'ttl_expires_at'`)).rows[0].c ?? "";
+  assert(/renew_claims/.test(colComment) && /missed heartbeat/.test(colComment), "ttl_expires_at's comment names the heartbeat and what the lease now means");
+  const fnComment = (await db.query<{ c: string | null }>(`SELECT obj_description('renew_claims(text, text, int)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
+  assert(/never backward/.test(fnComment) && !/--/.test(fnComment) && !/--/.test(colComment), "renew_claims's comment states the rule, and neither literal spells a flag with its dashes");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 report();

@@ -90,7 +90,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
 | `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
-| `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the consumer — see below | Ported from `schemas/thought-work-claims` |
+| `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL that `renew_claims` (030) moves forward on a heartbeat, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the first consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
 | `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` are not covered. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
@@ -102,7 +102,7 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54).
+029 change 54, 030 change 56).
 
 ## What changed relative to the guide
 
@@ -203,10 +203,15 @@ of ids) as `pending` rows under a job key; `claim_thoughts(key, worker, batch,
 ttl)` hands out up to `batch` of them with `FOR UPDATE SKIP LOCKED` under a
 lease, so two workers claiming at the same moment receive disjoint sets;
 `release_thought` marks one `succeeded` or `failed`, and only the holder may;
-`release_claims_for_worker` hands a stopping worker's rows straight back. A
-worker that dies keeps nothing: when its lease expires the next claim returns
-the rows to the pool with the attempt counted, and after three expiries a row
-is marked failed rather than handed out again. Terminal rows stay, so running
+`release_claims_for_worker` hands a stopping worker's rows straight back;
+`renew_claims` (migration 030) is the heartbeat — every `--heartbeat` seconds a
+worker moves the deadline of every lease it holds forward, so the lease has to
+outlast a missed beat rather than the batch, and `--ttl` means how long a dead
+worker's rows stay out of the pool. A worker that dies keeps nothing: when its
+lease expires the next claim returns the rows to the pool with the attempt
+counted, and after three expiries a row is marked failed rather than handed
+out again — which, under a heartbeating worker, means its worker died three
+times on it, not that it was slow. Terminal rows stay, so running
 a pass twice does nothing for the rows already done and picks up the thoughts
 captured since.
 
@@ -231,7 +236,7 @@ bun reembed.ts --url … --dry-run             # what a run would do; writes not
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model (keep the reembed: prefix — preflight reports by it)
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
-#   --workers N (2)   --batch N (8)   --ttl SECONDS (900, or --batch × OB1_LLM_TIMEOUT when that is longer)
+#   --workers N (2)   --batch N (8)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter)
 ```
 
 It reads the same variables the server does — model, width, provider URL and
@@ -411,12 +416,15 @@ own `--timeout` per model call): a call that never returns — before the header
 during the body — fails the row with the timeout named instead of parking the
 worker until the second Ctrl-C, and a blurb that times out under
 `OB1_CHUNK_CONTEXT=on` puts that reason on the row rather than "fix the metadata
-model". The lease has to outlast a batch whose every call runs to that timeout,
-so the default `--ttl` grows to `--batch` × the timeout (× two with chunk
-context on), plus one row's worth of slack for a re-read, when that exceeds
-900 s — whole seconds, since `claim_thoughts` takes an integer — and an explicit
-`--ttl` below the product is refused with the arithmetic shown (`--status`
-answers regardless, since it never claims). A row with two things wrong records
+model". The lease is not sized by that timeout since migration 030: while a
+worker holds rows it renews every lease it holds on a heartbeat (`lease.ts`,
+shared by the three workers), so `--ttl` has to outlast a missed beat — at least
+two `--heartbeat`s, refused otherwise with the arithmetic shown (`--status`
+answers regardless, since it never claims) — and means how long a dead worker's
+rows stay out of the pool; a heartbeat not given is a third of the lease, at
+most 60 s. Until 030 the default lease grew to `--batch` × the timeout and a
+shorter one was refused, because a lease was stamped per claim and could not be
+moved. A row with two things wrong records
 both: a refusal is appended to a blurb failure rather than lost behind it. What
 counts as a refusal is a 413, or a 400 whose own words name the length — read
 from the provider's body, its error code first, never from a message that also
@@ -440,9 +448,9 @@ the first draft cost instead (2.90 ms by the end, unchanged by `VACUUM`): the
 planner served "any sixteen pending rows" with a sequential scan that stops at
 sixteen hits, and the done rows accumulate at the front of the heap. Ordering
 by `enqueued_at` over a partial index is what makes the index the cheapest
-estimate whatever the statistics say. The lease is stamped per claim, so it has
-to outlast the whole batch: the defaults leave close to two minutes per
-thought.
+estimate whatever the statistics say. The heartbeat is one small `UPDATE` a
+minute per worker, through 015's partial index over the rows in flight;
+`test-live` [8e] prints its round trip.
 
 **Writing another consumer.** See the end of the next section. Entity
 extraction is the second pass built on the table, and `extract-entities.ts` is
@@ -511,7 +519,7 @@ bun extract-entities.ts --url … --limit 25              # a trial: this many, 
 bun extract-entities.ts --url … --status                # the pass, and the graph so far
 bun extract-entities.ts --url … --dry-run               # what a run would do; writes nothing
 bun extract-entities.ts --url … --retry-failed          # failed rows back into the pool first
-#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (300, per model call)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease)  --timeout SECONDS (300, per model call)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 ```
 
@@ -563,9 +571,14 @@ wants "PostgreSQL", which is exactly the duplicate the rule will not merge.
 statistics), then per worker `claim_thoughts` → do the work → `release_thought`
 per row, and `release_claims_for_worker` on shutdown — unconditionally, in a
 `finally`, so a worker that stops for any reason hands its leases back rather
-than leaving them to expire. Give every process a globally unique worker id
-(hostname, pid and a random suffix — `release_claims_for_worker` matches on it
-alone). `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is
+than leaving them to expire. Beat while you hold rows: `lease.ts`'s
+`startHeartbeat` beside the worker id, the batch added to its `held` set after
+the claim, each row removed from it BEFORE its release goes out, any id it
+reports `lost` skipped rather than repeated, and `stop()` in the same
+`finally`; take `--ttl` and `--heartbeat` through `heartbeatFor` and
+`leaseRefusal` so the three workers refuse the same pairs. Give every process a
+globally unique worker id (hostname, pid and a random suffix —
+`release_claims_for_worker` and `renew_claims` match on it alone). `extract-entities.ts` is the shape to copy; `consolidate.ts` (next) is
 the third consumer, and the one whose work is per PAIR rather than per thought.
 
 ## Consolidation: proposing which thoughts supersede which
@@ -640,7 +653,7 @@ bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "�
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90)
 #   --k N (3)  --min-sim F (0.6)  --min-confidence F (0.5)
-#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
+#   --workers N (2)  --batch N (1)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease)  --timeout SECONDS (120, per model call — this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
 bun consolidate.ts --url … --accept <id> --force            # a thought was edited since the pair was judged
 ```
 
@@ -977,8 +990,14 @@ container.
   then races four workers on four connections through a 600-row pool and
   asserts on ids: none claimed twice, the union exactly the pool. A worker
   "dies" on a 2 s lease and a second worker receives its rows after expiry,
-  on their second attempt. PGlite has one connection, so two sequential claims
-  there are disjoint whether or not `SKIP LOCKED` does anything.
+  on their second attempt. [8e] is the heartbeat (migration 030): a worker on
+  a 5 s lease beats at 2.5 s, a claim past the original deadline gets none of
+  its rows and its release succeeds; it stops beating and a claim after the
+  renewed deadline receives its rows on their second attempt. [9] then runs
+  `reembed.ts` with 600 ms embeddings, eight per claim and a 3 s lease — a
+  batch that outlasts its lease — and no row reaches a second worker. PGlite
+  has one connection, so two sequential claims there are disjoint whether or
+  not `SKIP LOCKED` does anything.
 - **Two legacy twins fingerprinted at once.** [6b] holds one connection's
   `update_thought` on the first twin open in a transaction while a second
   connection re-embeds the other: `pg_locks` shows the second waiting on the
