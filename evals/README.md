@@ -928,7 +928,9 @@ off a persisted `eval-longmemeval.ts` load. The cross-encoders need a torch env
 (Ollama serves no reranker — itself part of the finding): `rerank-crossencoder.py`
 for the sentence-transformers cross-encoder (bge-reranker-v2-m3), and
 `rerank-llm-reranker.py` for the causal-LM yes/no rerankers (Qwen3-Reranker,
-MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool.
+MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool, and
+`query-decompose.ts` measures the decomposition lever (the subsection after this
+one) off the same load.
 
 | reranker of the top-30 pool | MS strict | MS any-hit | temporal strict | temporal any-hit |
 | --- | --- | --- | --- | --- |
@@ -989,6 +991,81 @@ proximity blend gains at most +2 of 248 questions while hurting at any real weig
 recency-shaped signal SMD-945 already declined). The decline stands on the corpus
 that could have overturned it; the only untested lever is a *hosted* reranker
 (Voyage `rerank-2.5`), off the local-by-default path.
+
+### Query decomposition: it fixes what the nulls blamed, and strict@5 still barely moves (SMD-1318)
+
+The SMD-1301/1302/1304 nulls all pointed one way: a multi-hop counting/comparison
+question ("how many days between X and Y", "which came first") needs 2–3 distinct
+gold sessions in the top five, but **one blended query vector is the average of
+several events**, so each event's session lands mid-pool and no reorder of that
+one pool recovers the set. The untested fix: retrieve with **several** vectors —
+decompose the question into single-fact sub-questions, retrieve top-k per
+sub-question, union, fuse. This is the standard 2025–26 multi-hop RAG pipeline.
+The harness is `evals/query-decompose.ts`; every arm runs the identical pipeline
+(decompose → per-sub-query top-k → fuse → take five distinct sessions), and the
+baseline's decomposer just returns the question whole, so a question left atomic
+reuses the baseline pool unchanged — the harness confirms it routes every atomic
+question through that path (146/146 for the LLM split, 207/207 for the heuristic;
+true by construction rather than an independent replication).
+
+An LLM (`qwen2.5:7b`, temperature 0) decomposes cleanly and fires on 41% of the
+248 multi-session + temporal questions (mean 2.25 sub-questions); a cheap
+conjunction/comparison heuristic fires on 16.5%. Strict recall_all@5, versus the
+baseline 79.3% / 79.5% and the top-30 oracle 99.2% / 95.3% (`subk` = 20):
+
+| fusion of the sub-query pools | heuristic MS / temporal | LLM MS / temporal |
+| --- | --- | --- |
+| RRF (k₀ = 60) | 79.3% / 76.4% | 79.3% / 76.4% |
+| round-robin (interleave rank-1s) | **81.0%** / 79.5% | 80.2% / 78.7% |
+| max-sim pooling | 79.3% / 79.5% | **81.0%** / 78.0% |
+
+(The RRF row is identical for the two arms — verified by re-running each, not a
+duplicated cell. The two arms diverge under round-robin and max-sim, so the
+harness does distinguish them; RRF's flat k₀ = 60 weighting simply makes it a poor
+fusion here, and both arms land on the same tally under it.)
+
+**It corrects the ticket's premise, and it is not enough.** The premise was that
+one blended vector ranks each event mid-pool. But **coverage is not the
+bottleneck**. On the fired questions the decomposed union covers **100% / 96.2%**
+of the golds — and one blended query at the baseline depth (30) reaches exactly the
+same **100% / 96.2%** on those same questions. At *equal* per-query depth (`subk`
+20) the union does edge out one query (blended 98.0% / 92.3%), so several vectors
+retrieve marginally more than one for the same budget — but no further than one
+*deeper* query already goes; the crude heuristic even trails a deeper single query
+on temporal (86.4% union vs 90.9%). What an LLM split *does* change is per-event **rank** — each event's
+gold, given its own sub-pool, rises (best rank of each gold within any single
+sub-pool — natively `subk` 20 deep — vs its rank in the blended pool truncated to
+`subk` 20 for a same-depth comparison; fired questions):
+
+| gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ | absent |
+| --- | --- | --- | --- | --- | --- | --- |
+| multi-session, blended pool | 44 | 53 | 6 | 9 | 1 | 1 |
+| multi-session, best sub-pool | **70** | 32 | 7 | 3 | 2 | 0 |
+| temporal, blended pool | 46 | 53 | 5 | 11 | 2 | 4 |
+| temporal, best sub-pool | **74** | 30 | 6 | 8 | 2 | 1 |
+
+Rank-0 share goes 39% → 61% and the deep tail shrinks — yet strict@5 gains at most
++1.7 points (multi-session) and is flat-to-negative on temporal; RRF actively
+*regresses* temporal, because it sums shared appearances, so a topical distractor
+in two sub-pools outscores each event's single-pool gold. `subk` 10 → 30 barely
+moves strict, so the bottleneck is not scan depth either.
+
+The reason strict does not move is that **the multi-hop miss was never "each event
+is mid-pool" — it is set assembly.** With coverage already there and each gold
+individually near the top, the failure is fitting 2–3 mutually-competing golds
+plus their distractors into five slots of one ranking. Decomposition removes
+gold-vs-gold competition (each gold in its own pool at rank 0 61% of the time) but
+the merge re-introduces gold-vs-distractor competition, and no dumb fusion (RRF,
+round-robin, max-sim) can tell each sub-pool's one gold from its topical
+neighbours. That discrimination is precisely a reranker's single-hop strength
+(any-hit ~99% on one gold; the SMD-1304 finding) — which is why a reranker
+*destroys* a pre-decomposition multi-hop set yet belongs **after** decomposition,
+on the single-hop sub-pools. **Decision:** decomposition alone is declined for the
+default path (marginal strict gain at the cost of an LLM call plus N retrievals per
+query, on a local-by-default fork); the measured, motivated follow-up is
+**decompose-then-rerank** — lift each sub-pool's gold to rank 0, then interleave —
+whose headroom is the 39% of golds not yet at rank 0. Like the reranker itself
+(SMD-1304), that belongs on a *hard* held-out corpus, not only LongMemEval.
 
 ### Verifying Matryoshka support against the model cards
 
