@@ -25,6 +25,7 @@
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -233,25 +234,36 @@ function checkSqlGuards() {
 // kept honest in both directions.
 const SHELL_HAZARDS = [
   { name: "codex-bypass",
-    re: /--dangerously-bypass-approvals-and-sandbox|--yolo\b|danger-full-access|--ask-for-approval\s+never\b/,
+    re: /--dangerously-bypass-approvals-and-sandbox|--yolo\b|danger-full-access|--ask-for-approval[\s=]+never\b|(?<![\w-])-a\s+never\b/,
     what: "Codex's sandbox-bypass flag or one of its aliases" },
   { name: "skip-permissions",
     re: /--dangerously-skip-permissions|bypassPermissions/,
     what: "Claude Code's skip-permissions flag or mode" },
   { name: "wildcard-bash",
-    // Bash(*), Bash(:*), Bash(*:*); a quoted bare "Bash" anywhere (a JSON or JS
-    // allow entry); a line that is only `Bash` (a multi-line --allowedTools);
-    // a YAML `allowed-tools:` or a `--allowedTools` carrying the bare token.
-    re: /Bash\(\s*:?\*+\s*(?::\*)?\s*\)|["']Bash["']|^\s*Bash\s*\\?\s*$|allowed-tools:[^\n(]*(?<![\w(])Bash(?![\w(])|--allowedTools\b[^\n]*?(?<![\w(-])Bash(?![\w(])/,
+    // Bash(*), Bash(:*), Bash(*:*); a quoted bare "Bash" on a line that is not a
+    // deny list, a disallowedTools list or a hook matcher (those NARROW Bash); a
+    // line that is only `Bash`, or a YAML list item `- Bash`; an `allowed-tools:`
+    // (YAML) or `--allowedTools` / `--allowed-tools` (CLI) carrying the bare
+    // token anywhere after it, `Bash(git status:*)` and the like not counting.
+    re: /Bash\(\s*:?\*+\s*(?::\*)?\s*\)|^(?!.*\b(?:deny|disallowedTools|matcher)\b).*["']Bash["']|^\s*(?:-\s+)?Bash\s*\\?\s*$|allowed-tools:[^\n]*?(?<![\w(])Bash(?![\w(])|--allowed-?[Tt]ools\b[^\n]*?(?<![\w(-])Bash(?![\w(])/,
     what: "an allow rule that grants all of Bash" },
   { name: "bash-prefix-interpreter",
-    re: /Bash\(\s*(?:curl|wget|sh|bash|zsh|node|python\d?|npx|bunx?|deno|eval|ssh|scp|nc|perl|ruby|php)\b[^)]*:\*\s*\)/,
+    // A prefix rule (`:*`) on a network client, a shell, an interpreter or a
+    // package runner, by bare name or full path: everything after the prefix is
+    // approved, so `Bash(curl:*)` is `-d @file` to any host.
+    re: /Bash\(\s*(?:[\w./-]*\/)?(?:curl|wget|sh|bash|zsh|fish|pwsh|powershell|cmd|node|python\d?|npx|npm\s+exec|pnpm\s+(?:dlx|exec)|yarn\s+dlx|bunx?|deno|eval|ssh|scp|nc|ncat|socat|perl|ruby|php)\b[^)]*:\*\s*\)/,
     what: "a Bash prefix rule on a network client or interpreter (everything after the prefix is approved)" },
   { name: "shell-spawn",
-    // The `shell:` option with any value but false/0/null/undefined (`true`,
-    // "/bin/sh", a platform expression); Python's shell=True; exec()/execSync()
-    // outside a regex .exec(); os.system/os.popen; an explicit shell argv.
-    re: /\bshell["']?\s*[:=]\s*(?!false\b|False\b|0\b|null\b|undefined\b)\S|(?<![\w.$])(?:exec|execSync)\s*\(|child_process\.exec(?:Sync)?\s*\(|\bos\.(?:system|popen)\s*\(|["'](?:sh|bash|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']\s*,\s*\[\s*["'](?:-c|\/c|-Command)["']/,
+    // The `shell` option in a spawn-options context — after `{` or `,` with any
+    // value but false/0/null/undefined, or first on its own line with a code
+    // value (`true`, a quoted path, a `process.` expression) so a multi-line
+    // options object is caught and YAML's `shell: bash` step key is not;
+    // Python's shell=True; exec()/execSync() called or imported from
+    // child_process (always a shell), including via promisify; os.system and
+    // os.popen; an explicit shell argv — `sh -c`, `sh -lc`, `cmd /c`,
+    // `powershell -Command` — in a spawn, Bun.spawn or Deno.Command. A
+    // code-shaped `exec(` in prose is flagged too; the remedy is an exception.
+    re: /[{,]\s*["']?shell["']?\s*:\s*(?!false\b|0\b|null\b|undefined\b)\S|^\s*["']?shell["']?\s*:\s*(?:true\b|["'`]|process\.)|\bshell\s*=\s*True\b|(?<![\w.$`])(?:exec|execSync)\(|child_process\.exec(?:Sync)?\(|promisify\(\s*exec\s*\)|import\s*\{[^}]*\bexec(?:Sync)?\b[^}]*\}\s*from\s*["'](?:node:)?child_process["']|\bos\.(?:system|popen)\(|["'](?:sh|bash|zsh|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)["']\s*,\s*\[[^\]]*["'](?:-c|-lc|\/[cC]|-Command)["']|(?:Bun\.spawn|Deno\.Command)\(\s*\[?\s*["'](?:sh|bash|zsh|cmd|powershell|pwsh)["']/,
     what: "a spawn through a shell (spawn an argv array with no shell)" },
 ];
 /** Strings each hazard must catch — the check's own negative tests. */
@@ -260,6 +272,8 @@ const SHELL_HAZARD_PROBES = [
   ["codex-bypass", "codex exec --yolo -"],
   ["codex-bypass", "--sandbox danger-full-access"],
   ["codex-bypass", "codex --ask-for-approval never"],
+  ["codex-bypass", "codex --ask-for-approval=never"],
+  ["codex-bypass", "codex exec -a never -"],
   ["skip-permissions", "claude --dangerously-skip-permissions"],
   ["skip-permissions", '"defaultMode": "bypassPermissions"'],
   ["skip-permissions", "--permission-mode bypassPermissions"],
@@ -268,22 +282,33 @@ const SHELL_HAZARD_PROBES = [
   ["wildcard-bash", "Bash(:*)"],
   ["wildcard-bash", '"allow": ["Bash"]'],
   ["wildcard-bash", "    Bash \\"],
+  ["wildcard-bash", "  - Bash"],
   ["wildcard-bash", "allowed-tools: Read, Bash"],
+  ["wildcard-bash", "allowed-tools: Bash(git status:*), Bash"],
   ["wildcard-bash", "--allowedTools Bash Edit"],
+  ["wildcard-bash", "--allowed-tools Bash"],
   ["bash-prefix-interpreter", '"Bash(curl:*)"'],
   ["bash-prefix-interpreter", "Bash(curl -s https://api.open-meteo.com/v1/forecast:*)"],
+  ["bash-prefix-interpreter", "Bash(/usr/bin/curl:*)"],
   ["bash-prefix-interpreter", "Bash(node:*)"],
+  ["bash-prefix-interpreter", "Bash(npm exec:*)"],
   ["shell-spawn", "      shell: true,"],
-  ["shell-spawn", '"shell": true'],
-  ["shell-spawn", 'shell: "/bin/sh",'],
-  ["shell-spawn", 'shell: process.platform === "win32",'],
+  ["shell-spawn", '{ "shell": true }'],
+  ["shell-spawn", ', shell: "/bin/sh",'],
+  ["shell-spawn", '{ stdio: "pipe", shell: process.platform === "win32" }'],
   ["shell-spawn", "subprocess.run(cmd, shell=True)"],
   ["shell-spawn", "execSync(`claude -p ${text}`)"],
   ["shell-spawn", "exec(cmd, (err, out) => {"],
   ["shell-spawn", "child_process.exec(cmd)"],
+  ["shell-spawn", "const run = promisify(exec);"],
+  ["shell-spawn", 'import { exec } from "node:child_process";'],
   ["shell-spawn", "os.system(cmd)"],
   ["shell-spawn", 'spawn("cmd", ["/c", "start", "", url])'],
   ["shell-spawn", "spawn('sh', ['-c', cmd])"],
+  ["shell-spawn", "spawn('sh', ['-lc', cmd])"],
+  ["shell-spawn", "spawn('powershell', ['-NoProfile', '-Command', cmd])"],
+  ["shell-spawn", "Bun.spawn(['sh', '-c', cmd])"],
+  ["shell-spawn", "new Deno.Command('cmd', { args: ['/c', url] })"],
 ];
 /** Strings no hazard may catch — ordinary prose and code this repo writes. */
 const SHELL_HAZARD_NON_PROBES = [
@@ -295,6 +320,16 @@ const SHELL_HAZARD_NON_PROBES = [
   "shell: false,",
   'Bash(date "+%Y-%m-%d %H:%M:%S %Z")',
   "WebFetch(domain:api.open-meteo.com)",
+  "Restart your shell: `source ~/.zshrc`",
+  "Default shell: zsh",
+  "      shell: bash",
+  "codex exec (the OpenAI CLI) was removed",
+  '"deny": ["Bash"]',
+  '"disallowedTools": ["Bash"]',
+  '"matcher": "Bash"',
+  "allowed-tools: Bash(git status:*), Read",
+  "Bash(git status:*)",
+  "execFileSync(\"git\", [\"ls-files\"])",
 ];
 const SHELL_HAZARD_EXCEPTIONS = new Map([
   // Prose that names the deleted flag in order to say it was deleted: exactly
@@ -302,9 +337,26 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
   ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
   ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": { why: "the header note that documents the same removal", lines: 1 } }],
 ]);
-// Text is scanned by construction: only known binary shapes are skipped, so an
-// extensionless Dockerfile, Procfile or CNAME is read like everything else.
-const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$/i;
+// Text is scanned by construction: only known binary shapes and lockfiles are
+// skipped, so an extensionless Dockerfile, Procfile or CNAME is read like
+// everything else.
+const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+
+/**
+ * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
+ * node_modules, .env — as repo-relative `/` paths. Untrusted text a recipe
+ * pulled onto a maintainer's machine must not decide whether the tree passes,
+ * and CI on a clean checkout has none of it. Empty when git is unavailable, in
+ * which case everything is scanned.
+ */
+function gitIgnoredFiles() {
+  try {
+    const out = execFileSync("git", ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"], { cwd: ROOT, encoding: "utf8" });
+    return new Set(out.split("\0").filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
 
 function checkShellHazards(dirs) {
   for (const [name, probe] of SHELL_HAZARD_PROBES) {
@@ -318,7 +370,9 @@ function checkShellHazards(dirs) {
   // Only the contribution directories — not their `_template` placeholders,
   // which contributionDirs() already skips — so this never depends on the
   // display filter below to hide a placeholder's hits.
-  const files = dirs.flatMap((d) => walk(d.dir, [], /./).filter((f) => !SHELL_HAZARD_BINARY.test(f)));
+  const ignored = gitIgnoredFiles();
+  const files = dirs.flatMap((d) => walk(d.dir, [], /./))
+    .filter((f) => !SHELL_HAZARD_BINARY.test(f) && !ignored.has(relOf(f)));
   const counts = scanLines(files, SHELL_HAZARDS.map(({ name, re, what }) => ({
     name,
     re,

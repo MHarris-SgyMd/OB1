@@ -30,10 +30,12 @@
  * uses an argv array with no shell, so no part of the command line is
  * interpreted — the prompt travels on stdin and the binary path from
  * CLAUDE_CLI_PATH is executed as given — so it must be a bare executable
- * path (no `~`, no `$VAR`, no flags). On Windows it must be the native
- * `claude.exe`: the bare name resolves only to `.com`/`.exe` without a shell,
- * so the npm `claude.cmd` shim is not found (ENOENT), and a `.cmd`/`.bat` the
- * variable names is refused (EINVAL). The spawn error says which.
+ * path (no `~`, no `$VAR`, no flags). On Windows the npm install provides
+ * only a `claude.cmd` shim, which cannot be run without a shell: the bare
+ * name resolves only to `.com`/`.exe` (ENOENT), and a `.cmd`/`.bat` the
+ * variable names is refused (EINVAL). Anthropic's native Windows installer
+ * provides a `claude.exe`; point the variable at that. The spawn error says
+ * which case it hit.
  *
  * API:
  *   atomizeText(text, {
@@ -240,14 +242,20 @@ async function atomizeViaOpenRouter(text, { prompt, timeoutMs, openrouterApiKey,
 function describeSpawnError(err) {
   const configured = Boolean(process.env.CLAUDE_CLI_PATH);
   const notFound = configured
-    ? "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell"
+    ? "CLAUDE_CLI_PATH names a file that does not exist — check the path; it must be a bare executable path (no ~, no $VAR, no flags), since this spawn uses no shell"
     : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
-  const win = "on Windows that must be the native claude.exe, not an npm .cmd shim (not found without a shell, and refused if named)";
+  const notRunnable = "CLAUDE_CLI_PATH is not an executable file (a directory, or a file without the exec bit)";
+  const win = "on Windows the npm install's claude.cmd shim cannot be run without a shell; use Anthropic's native Windows installer, which provides claude.exe, and point CLAUDE_CLI_PATH at it — or use the anthropic/openrouter provider";
   const hint =
     process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
     err.code === "ENOENT" ? ` — ${notFound}` :
+    err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOTDIR" ? ` — ${notRunnable}` :
     "";
-  return new Error(`claude-cli spawn error: ${err.message}${hint}`);
+  const e = new Error(`claude-cli spawn error: ${err.message}${hint}`);
+  // Spawn failures carry paths and errno text, never model output or email
+  // text, so the caller may log them whole.
+  e.safeToLog = true;
+  return e;
 }
 
 async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
@@ -310,8 +318,40 @@ async function atomizeViaClaudeCli(text, { prompt, timeoutMs }) {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/** The providers this module knows; pull-gmail.mjs refuses any other value at startup rather than per email. */
+/** The providers this module knows. */
 export const KNOWN_PROVIDERS = new Set(["anthropic", "openrouter", "claude-cli"]);
+
+/**
+ * Every configuration error a run can know before its first call, in one
+ * place: an unknown provider, a missing key for the HTTP providers, and the
+ * Claude CLI inside a Claude Code session. atomizeText calls it per call;
+ * pull-gmail.mjs calls it ONCE at startup, because its per-email catch falls
+ * back to a whole-email record and continues — a run misconfigured this way
+ * would otherwise ingest the whole corpus un-atomized with exit 0 and a stats
+ * field to show it. Throws with the remedy in the message.
+ */
+export function assertProviderReady({
+  provider = "anthropic",
+  anthropicApiKey = process.env.ANTHROPIC_API_KEY,
+  openrouterApiKey = process.env.OPENROUTER_API_KEY,
+} = {}) {
+  if (!KNOWN_PROVIDERS.has(provider)) {
+    throw new Error(`atomizeText: unknown provider '${provider}' (known: ${[...KNOWN_PROVIDERS].join(", ")})`);
+  }
+  if (provider === "anthropic" && !anthropicApiKey) {
+    throw new Error("atomizeText: provider='anthropic' requires ANTHROPIC_API_KEY (or opts.anthropicApiKey)");
+  }
+  if (provider === "openrouter" && !openrouterApiKey) {
+    throw new Error("atomizeText: provider='openrouter' requires OPENROUTER_API_KEY (or opts.openrouterApiKey)");
+  }
+  if (provider === "claude-cli" && inClaudeCodeSession()) {
+    throw new Error(
+      "atomizeText: claude-cli cannot be invoked from inside a Claude Code " +
+      "session (nested detection fails). Use provider='anthropic' or " +
+      "'openrouter', or run from a standalone terminal.",
+    );
+  }
+}
 
 /**
  * Atomize a block of text into a list of atomic strings.
@@ -332,16 +372,7 @@ export async function atomizeText(text, opts = {}) {
   if (typeof text !== "string" || text.trim().length === 0) {
     throw new Error("atomizeText: text must be a non-empty string");
   }
-  if (!KNOWN_PROVIDERS.has(provider)) {
-    throw new Error(`atomizeText: unknown provider '${provider}' (known: ${[...KNOWN_PROVIDERS].join(", ")})`);
-  }
-  if (provider === "claude-cli" && inClaudeCodeSession()) {
-    throw new Error(
-      "atomizeText: claude-cli cannot be invoked from inside a Claude Code " +
-      "session (nested detection fails). Use provider='anthropic' or " +
-      "'openrouter', or run from a standalone terminal.",
-    );
-  }
+  assertProviderReady({ provider, anthropicApiKey, openrouterApiKey });
 
   let atoms;
   if (provider === "anthropic") {

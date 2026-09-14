@@ -158,7 +158,7 @@ The pack file is the handoff. Your ingest pipeline (whatever it is — a `supaba
 | `--override-labels=LABEL1,LABEL2` | `STARRED,IMPORTANT` | Labels that bypass the engagement filter |
 | `--no-atomize` | off | Skip LLM atomization entirely |
 | `--atomize-min-words=N` | `150` | Only atomize messages >= N words |
-| `--atomize-provider=P` | `anthropic`, or `GMAIL_ATOMIZE_PROVIDER` | `anthropic` \| `openrouter` \| `claude-cli` — any other value refuses the run at startup |
+| `--atomize-provider=P` | `anthropic`, or `GMAIL_ATOMIZE_PROVIDER` | `anthropic` \| `openrouter` \| `claude-cli` — an unknown value, a missing key for the HTTP providers, or `claude-cli` inside a Claude Code session refuses the run at startup (unless `--no-atomize` or `--list-labels`) |
 | `--skip-contacts-refresh` | off | Silence the "contacts cache missing/stale" warning |
 
 ## Sensitivity routing
@@ -250,7 +250,7 @@ Writing the upsert job itself is out of scope for this recipe — the shape of a
 
 Long emails often bundle several distinct ideas (decisions, questions, commitments, context). Storing the whole message as one embedding-addressable thought hurts retrieval. The recipe's atomizer runs an LLM over any message >= `--atomize-min-words` (default 150) and splits it into a JSON array of atomic thoughts. Each atom becomes its own pack record with `memoryId = gmail:<id>#atom:<index>`. Short emails skip atomization and remain one record.
 
-**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. The `claude-cli` provider is for a machine that already has the Claude CLI signed in and no API key to spare — opt-in, standalone terminal only. It pipes the prompt via **stdin** rather than the `-p` argument, so the email body never touches a command line, and it spawns the CLI as an argv array with **no shell**. `CLAUDE_CLI_PATH`, when set, must be a bare executable path — no `~`, no `$VAR`, no flags, since nothing expands them now. On Windows it must name the native `claude.exe`: without a shell the bare name `claude` is not found through an npm `.cmd` shim, and a `.cmd` the variable points at is refused.
+**Provider selection.** The default is `anthropic` (direct Messages API). OpenRouter works as a drop-in alternative. The `claude-cli` provider is for a machine that already has the Claude CLI signed in and no API key to spare — opt-in, standalone terminal only. It pipes the prompt via **stdin** rather than the `-p` argument, so the email body never touches a command line, and it spawns the CLI as an argv array with **no shell**. `CLAUDE_CLI_PATH`, when set, must be a bare executable path — no `~`, no `$VAR`, no flags, since nothing expands them now. On Windows it must name the `claude.exe` that Anthropic's native installer provides (the npm install ships only a `.cmd` shim, which cannot be found or run without a shell) — see Troubleshooting.
 
 > [!WARNING]
 > This recipe used to ship a fourth provider, `codex`, that ran `codex exec` over the email body, and one environment variable turned that run into a sandbox-bypass one. Email bodies are attacker-supplied text; an agent with tools, fed untrusted input, with its sandbox off, is a prompt-injection → local-code-execution primitive. Upstream deleted the identical branch from [`recipes/atomizer`](../atomizer/) for that reason and missed this copy; it is deleted here too (SMD-1251). The three providers above only generate text.
@@ -309,7 +309,10 @@ Expected. The engagement filter, auto-generated noise filter, and 10-word minimu
 Usually an LLM budget issue or prompt-mangling. With `--atomize-provider=anthropic`, check `ANTHROPIC_API_KEY` is set and has credit. With `--atomize-provider=claude-cli`, make sure you're running from a standalone terminal, not nested inside a Claude Code session. Set `--no-atomize` to confirm the rest of the pipeline works without the LLM hop.
 
 **`claude-cli spawn error: … ENOENT` (or `… EINVAL` on Windows)**
-The CLI is spawned without a shell. `CLAUDE_CLI_PATH` must be a bare executable path — `~`, `$VAR` and trailing flags are not expanded. On Windows, `claude` in your terminal is usually an npm `.cmd` shim, which this spawn cannot find (`ENOENT`) or run (`EINVAL`): set `CLAUDE_CLI_PATH` to the native `claude.exe`, or use `--atomize-provider=anthropic`. The error message carries the same hint; when `CLAUDE_CLI_PATH` is not set at all it says instead that `claude` was not found on PATH.
+The CLI is spawned without a shell. `CLAUDE_CLI_PATH` must be a bare executable path — `~`, `$VAR` and trailing flags are not expanded — that exists and is executable (`EACCES` means a directory or a file without the exec bit). On Windows, `claude` in your terminal is usually the npm install's `.cmd` shim, which this spawn cannot find (`ENOENT`) or run (`EINVAL`); the npm install provides no `.exe`. Install Claude Code with Anthropic's native Windows installer (`irm https://claude.ai/install.ps1 | iex`), which provides `claude.exe`, and set `CLAUDE_CLI_PATH` to it — or use `--atomize-provider=anthropic`. The error message carries the same hint; when `CLAUDE_CLI_PATH` is not set at all it says instead that `claude` was not found on PATH.
+
+**`claude-cli exited with code N` with no detail**
+The CLI's stdout and stderr are withheld from the log by default because the CLI often echoes its prompt, which here is email text. Set `ATOMIZE_DEBUG=1` (the same switch [`recipes/atomizer`](../atomizer/) uses) to include the first few hundred characters of each while debugging — a `Not logged in` failure shows up there.
 
 **`Cache stale but --skip-contacts-refresh — using old cache`**
 The contacts cache file is older than 7 days. Regenerate it from whatever source you used in [Relationship tier](#relationship-tier), or accept the stale cache for this run.

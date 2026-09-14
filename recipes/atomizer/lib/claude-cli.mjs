@@ -1,10 +1,10 @@
 /**
  * Shared Claude CLI spawn utilities for the atomizer recipe.
  *
- * Pattern copied from common import scripts: we shell out to the `claude`
- * CLI, pipe the prompt via stdin (to dodge shell-escape hell on Windows),
- * and strip the environment variables that Claude CLI uses to detect a
- * nested session — otherwise it refuses to run.
+ * We run the `claude` CLI as an argv array with NO shell (SMD-1251), pipe the
+ * prompt via stdin so it never touches a command line, and strip the
+ * environment variables that Claude CLI uses to detect a nested session —
+ * otherwise it refuses to run.
  */
 
 import { spawn } from "node:child_process";
@@ -52,12 +52,14 @@ export function spawnClaudeCli(args, env, timeoutMs = 180_000, stdinData = null)
     const describe = (err) => {
       const configured = Boolean(process.env.CLAUDE_CLI_PATH);
       const notFound = configured
-        ? "CLAUDE_CLI_PATH must be a bare executable path (no ~, no $VAR, no flags) — this spawn uses no shell"
+        ? "CLAUDE_CLI_PATH names a file that does not exist — check the path; it must be a bare executable path (no ~, no $VAR, no flags), since this spawn uses no shell"
         : "`claude` was not found on PATH — install the Claude CLI, or set CLAUDE_CLI_PATH to its executable";
-      const win = "on Windows that must be the native claude.exe, not an npm .cmd shim (not found without a shell, and refused if named)";
+      const notRunnable = "CLAUDE_CLI_PATH is not an executable file (a directory, or a file without the exec bit)";
+      const win = "on Windows the npm install's claude.cmd shim cannot be run without a shell; use Anthropic's native Windows installer, which provides claude.exe, and point CLAUDE_CLI_PATH at it — or use an HTTP provider";
       const hint =
         process.platform === "win32" && (err.code === "ENOENT" || err.code === "EINVAL") ? ` — ${notFound}; ${win}` :
         err.code === "ENOENT" ? ` — ${notFound}` :
+        err.code === "EACCES" || err.code === "EPERM" || err.code === "ENOTDIR" ? ` — ${notRunnable}` :
         "";
       return new Error(`Claude CLI spawn error: ${err.message}${hint}`);
     };

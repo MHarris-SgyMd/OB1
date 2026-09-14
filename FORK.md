@@ -5035,8 +5035,26 @@ the npm `claude.cmd` shim is not found (`ENOENT`), and a `.cmd`/`.bat` the
 variable points at is refused (`EINVAL`, which Node **throws synchronously**
 from `spawn()` rather than emitting — the review pass caught a first version
 whose hint lived only in the `error` handler and could never fire). Both roads
-now lead to one `describeSpawnError`, keyed on `win32` and either code, and
-the README's troubleshooting has the entry. `recipes/atomizer/lib/claude-cli.mjs`
+now lead to one `describeSpawnError`, keyed on `win32` and either code, which
+also tells a user who never set the variable that `claude` is not on PATH
+rather than that their variable is malformed, hedges the set-but-missing case
+("names a file that does not exist"), covers `EACCES`/`ENOTDIR` (a directory,
+no exec bit), and — since the npm install ships **no** `.exe` — names
+Anthropic's native Windows installer as the route to a `claude.exe`; the
+README's troubleshooting has the entry, and the `ATOMIZE_DEBUG=1` switch that
+reveals a withheld `Not logged in`. `pull-gmail.mjs` itself refuses a
+misconfigured atomizer **once at startup** — an unknown provider (a stale
+`GMAIL_ATOMIZE_PROVIDER=codex`), a missing key for an HTTP provider, or the CLI
+inside a Claude Code session, through one `assertProviderReady` the atomizer
+also calls per call — rather than degrading every long email to a whole-email
+record with exit 0; `--list-labels`, the documented first step, is not gated.
+Its Windows browser opener was `cmd /c start "" <url>`, a cmd.exe spawn that
+read the OAuth URL's `&` as a command separator; it is `rundll32`'s URL handler
+now, with the `error` listener a missing opener on a headless box needs. Its
+per-email log logs a spawn failure whole (paths and errno text, marked
+`safeToLog`) and cuts everything else at 160 characters, since an HTTP
+provider's error can echo the response body and a parse failure quotes the
+model's output. `recipes/atomizer/lib/claude-cli.mjs`
 had the same `shell: true` on the same shape of spawn and gets the same fix, so
 the ticket's verify grep is clean rather than carrying an exception for the
 sibling.
@@ -5093,17 +5111,24 @@ rule on a network client or interpreter (`curl`, `wget`, `sh`, `node`,
 `python`… followed by `:*` — everything after the prefix is approved); and a
 spawn through a shell in any spelling (the `shell:` option with a non-false
 value, including the `process.platform === "win32"` workaround the Windows
-prose invites; `exec`/`execSync`, which always use one; `os.system`/`os.popen`;
-an explicit `sh -c`/`cmd /c` argv). A hit fails CI with the file, the line and
-the rule. Exceptions are per **file and pattern and counted**: the atomizer's
+prose invites; `exec`/`execSync` called, imported from `child_process` or
+wrapped in `promisify`, which always use one; `os.system`/`os.popen`; an
+explicit `sh -c`/`-lc`, `cmd /c` or `powershell -Command` argv in a `spawn`,
+`Bun.spawn` or `Deno.Command`). Files git ignores are skipped — the gmail
+recipe writes its packs and OAuth state under `recipes/gmail-smart-pull/data/`
+by default, full email bodies, and `recipes/*/data/` is now in `.gitignore` —
+so untrusted text a recipe pulled onto a maintainer's machine cannot decide
+whether the tree passes, and cannot be committed by a stray `git add -A`. A hit
+fails CI with the file, the line and the rule. Exceptions are per **file and pattern and counted**: the atomizer's
 README warning and module header are exempt from the bypass-flag pattern for
 exactly one line each, because they name it to say it was deleted, and are
 scanned for everything else — one more line naming the flag (a rebase re-adding
 a usage block beside the warning) fails, one fewer (the prose rewritten) fails
-too. Two probe lists run against the patterns on every invocation: twenty-eight
-strings the five must catch, and eight ordinary lines of this repo's own prose
-and code they must not (`a wildcard \`Bash\` allow`, a regex `.exec(`,
-`shell: false`). The first pass's version had a file-wide exception (the
+too. Two probe lists run against the patterns on every invocation: forty-one
+strings the five must catch, and eighteen ordinary lines they must not — this
+repo's own prose, a regex `.exec(`, `shell: false`, "Restart your shell:", a
+GitHub Actions `shell: bash` step, a `deny` or `disallowedTools` list and a hook
+`matcher` naming `"Bash"` (those *narrow* Bash), `Bash(git status:*)`. The first pass's version had a file-wide exception (the
 excepted module could regain a real shell spawn unnoticed), four literal
 patterns, an extension allowlist that skipped `.py`, `.example` and every
 extensionless file, `\` separators in the exception keys on Windows, a
@@ -5112,7 +5137,12 @@ extensionless file, `\` separators in the exception keys on Windows, a
 whole-file liveness test that an anchored pattern could never satisfy, and
 found the `cmd /c start` browser opener in `pull-gmail.mjs` itself — a cmd.exe
 spawn that read the OAuth URL's `&` as a command separator, now `rundll32`'s URL
-handler with no shell. Paths are normalised to `/`, the scan walks
+handler with no shell; the third pass's version had patterns that fired on
+ordinary prose ("Restart your shell:", `codex exec (the CLI)`) and on the deny
+lists and hook matchers that narrow Bash, missed the kebab `--allowed-tools`, a
+YAML `- Bash` list item, `--ask-for-approval=never`, `sh -lc`, an imported
+`exec`, and scanned the recipe's own pulled email packs. Paths are normalised
+to `/`, the scan walks
 `contributionDirs()`, and check 5 shares the line scanner. Proven each time:
 probe files with the new spellings (seven hits on the last, an extensionless
 `Dockerfile` among them), a usage block appended beside the excepted warning
@@ -5141,13 +5171,24 @@ now refuses at startup, and the variable is in the README's table — the
 extension allowlist, the 160-character log slice that cut the Windows hint in
 half (400 now; the hint carries no email text), and the not-found hint telling
 a user who never set `CLAUDE_CLI_PATH` that their variable was malformed (it
-now says `claude` is not on PATH). All fixed here, except the one both passes
-named: the duplication between the two recipes' Claude-CLI spawns (two
-`buildCleanEnv`, two `STRIP_KEYS`, two spawn wrappers, and now two
-`describeSpawnError`s, each patched twice this ticket) is SMD-1317. The gmail
-copy's error also stops putting stderr and stdout (email text) into the run's
-log by default, behind the same `ATOMIZE_DEBUG=1` switch the atomizer uses.
-Upstream status:
+now says `claude` is not on PATH). A third pass, ten more, most of them edges
+of the second's own fixes — the stop-signal shape — and each real: the browser
+opener's missing `error` listener (a headless box without `xdg-open` would have
+died before the callback server listened), the check scanning the recipe's own
+pulled email packs under `data/` (untrusted text deciding a maintainer's local
+result; not gitignored either), the three allow shapes and eight spawn/bypass
+spellings the widened patterns still missed, the patterns that fired on
+ordinary prose and on deny lists, the 400-character log slice whose premise
+("provider errors are redacted at source") was false for the HTTP providers and
+the parser, the startup guard closing one of four configuration errors and
+blocking `--list-labels`, the Windows prose naming a `claude.exe` the npm
+install never provides, and the set-but-missing hint asserting the value was
+malformed. All fixed here, except the one every pass named: the duplication
+between the two recipes' Claude-CLI spawns (two `buildCleanEnv`, two
+`STRIP_KEYS`, two spawn wrappers, two `describeSpawnError`s, each patched three
+times this ticket) is SMD-1317. The gmail copy's error also stops putting
+stderr and stdout (email text) into the run's log by default, behind the same
+`ATOMIZE_DEBUG=1` switch the atomizer uses. Upstream status:
 **contributable in principle** — these are recipe files, not the core server —
 but issue #482 reports the upstream gate failing every fork-originated PR; the
 atomizer precedent says upstream would take the deletion. **Unfiled** upstream.
@@ -5234,10 +5275,10 @@ Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
 or mode, any allow rule that grants all of `Bash` or a prefix of a network
 client or interpreter, or any spawn through a shell (the `shell:` option with a
 non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
-argv), in every non-binary file under those seven directories, with a reviewed
-exception list — per file *and* per pattern, and *counted* — for prose that
-names a flag in order to say it was removed, and probe lists the check runs
-against its own patterns on every run, positive and negative. A
+argv), in every non-binary, non-ignored file under those seven directories,
+with a reviewed exception list — per file *and* per pattern, and *counted* —
+for prose that names a flag in order to say it was removed, and probe lists the
+check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. Three sibling tickets hold the rest of the standard —
