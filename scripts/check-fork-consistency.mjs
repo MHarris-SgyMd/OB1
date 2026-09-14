@@ -14,13 +14,19 @@
  *   3. relative links in contribution READMEs resolve
  *   4. requires_primitives / requires_skills point at directories that exist
  *   5. ALTER TABLE thoughts ADD COLUMN is guarded with IF NOT EXISTS
+ *   6. shipped content never hands untrusted input a shell — no sandbox-bypass
+ *      or skip-permissions flag, alias or mode; no allow rule granting all of
+ *      Bash or a prefix of a network client or interpreter; no spawn through a
+ *      shell in any spelling — in every non-binary file under the contribution
+ *      directories, with counted per-(file, hazard) exceptions
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -143,30 +149,320 @@ function checkDeps(meta, { rel }) {
   }
 }
 
-// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+// ── Line scanning, shared by checks 5 and 6 ──────────────────────────────────
 
-function walk(dir, out = []) {
+/** Repo-relative path with `/` separators on every OS, so it can be a key. */
+const relOf = (file) => relative(ROOT, file).split(sep).join("/");
+
+function walk(dir, out = [], match = /\.(sql|md)$/) {
   for (const name of readdirSync(dir)) {
-    if (name === ".git" || name === "node_modules") continue;
+    // .claude holds this repo's agent worktrees — whole copies of the tree.
+    if (name === ".git" || name === "node_modules" || name === ".claude") continue;
     const p = join(dir, name);
     const s = statSync(p);
-    if (s.isDirectory()) walk(p, out);
-    else if (/\.(sql|md)$/.test(name)) out.push(p);
+    if (s.isDirectory()) walk(p, out, match);
+    else if (match.test(name)) out.push(p);
   }
   return out;
 }
 
-function checkSqlGuards() {
-  const re = /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/gi;
-  for (const file of walk(ROOT)) {
+/**
+ * Run every rule over every file. A rule is { name, msg } plus either `re`
+ * (tested per line, without the g flag so test() is stateless) or `fileRe`
+ * (tested against the whole text with the g flag, for shapes that span lines —
+ * a pretty-printed JSON list; the line reported is the match's first). `only`
+ * restricts a rule to files whose path matches. `suppress(rel)` keeps the rule
+ * running and its hits COUNTED but not failed. Returns hit counts keyed
+ * `${rel} ${name}`, so a caller can hold a suppressed file to an expected
+ * count — one read, one definition of "matches", for the scan and the
+ * exception audit alike.
+ */
+function scanLines(files, rules) {
+  const counts = new Map();
+  const hit = (rel, rule, line, quiet) => {
+    const key = `${rel} ${rule.name ?? rule.msg}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (!quiet) fail(`${rel}:${line}`, rule.msg);
+  };
+  for (const file of files) {
+    const rel = relOf(file);
     const text = readFileSync(file, "utf8");
     const lines = text.split("\n");
-    lines.forEach((line, i) => {
-      re.lastIndex = 0;
-      if (re.test(line)) {
-        fail(`${file.slice(ROOT.length + 1)}:${i + 1}`, "ADD COLUMN on thoughts without IF NOT EXISTS");
+    for (const rule of rules) {
+      if (rule.only && !rule.only.test(rel)) continue;
+      const quiet = rule.suppress?.(rel) ?? false;
+      if (rule.fileRe) {
+        for (const m of text.matchAll(rule.fileRe)) {
+          hit(rel, rule, text.slice(0, m.index).split("\n").length, quiet);
+        }
+      } else {
+        lines.forEach((line, i) => { if (rule.re.test(line)) hit(rel, rule, i + 1, quiet); });
       }
-    });
+    }
+  }
+  return counts;
+}
+
+// ── 5: ADD COLUMN on thoughts must be re-runnable ────────────────────────────
+
+function checkSqlGuards() {
+  scanLines(walk(ROOT), [{
+    name: "add-column-guard",
+    re: /alter\s+table\s+(?:public\.)?thoughts\s+add\s+column\s+(?!if\s+not\s+exists)/i,
+    msg: "ADD COLUMN on thoughts without IF NOT EXISTS",
+  }]);
+}
+
+// ── 6: shipped content never hands untrusted input a shell ───────────────────
+//
+// SMD-1251. Two vendored recipes did. `gmail-smart-pull` kept a `codex exec`
+// branch over Gmail message bodies that one environment variable turned into a
+// sandbox-bypass run — upstream had already deleted the identical branch from
+// `atomizer` and missed this copy — and its CLI spawns used `shell: true` with
+// the binary path from an environment variable. `life-engine`'s recommended
+// settings.json allowed `Bash(*)` beside a skip-permissions launch, defended by
+// a prompt rule addressed to the model being injected. Both were fixed on that
+// ticket; this is what keeps the next rebase from bringing them back.
+//
+// The rule this enforces, written down here because the tree is vendored from
+// upstream wholesale (FORK.md, "Vendored content"): we audit once and hold the
+// delta, and a standing check carries the audit. Content that ships under this
+// repo's name does not run an agent with its sandbox or approvals off, does not
+// recommend a wildcard, bare or interpreter-prefix shell allow, and does not
+// spawn through a shell. The patterns are MECHANISMS, not the spellings the two
+// fixed files happened to use: Codex's bypass flag and its aliases, Claude
+// Code's skip-permissions flag and mode, every allow-rule shape that grants all
+// of Bash or a prefix of a network client or interpreter, and every spawn shape
+// that involves a shell — the `shell:` option with any non-false value,
+// exec/execSync (always a shell), os.system/os.popen, and an explicit
+// `sh -c` / `cmd /c` argv. A probe list is checked against them on every run so
+// a pattern cannot rot silently.
+//
+// Exceptions are per (file, hazard) and COUNTED: a file that must name one flag
+// in order to say it was removed is exempt from that hazard for exactly the
+// number of lines it has today, and is scanned for every other hazard in full.
+// One more line naming the flag — a rebase re-adding a usage block beside the
+// warning — fails; one fewer — the prose rewritten — fails too, so the list is
+// kept honest in both directions.
+const CODE_FILES = /\.(m?js|cjs|tsx?)$/;
+const SHELL_HAZARDS = [
+  { name: "codex-bypass",
+    // The flag, its aliases, and the config key behind them (config.toml, or a
+    // `-c approval_policy=never` override on the command line).
+    re: /--dangerously-bypass-approvals-and-sandbox|--yolo\b|danger-full-access|--ask-for-approval[\s=]+never\b|(?<![\w-])-a\s+never\b|approval_policy\s*=\s*["']?never\b/,
+    what: "Codex's sandbox-bypass flag, one of its aliases, or approval_policy=never" },
+  { name: "skip-permissions",
+    re: /--dangerously-skip-permissions|bypassPermissions/,
+    what: "Claude Code's skip-permissions flag or mode" },
+  { name: "wildcard-bash",
+    // Bash(*), Bash(:*), Bash(*:*); a line that is only `Bash`, or a YAML list
+    // item `- Bash`; an `allowed-tools:` (YAML) or `--allowedTools` /
+    // `--allowed-tools` (CLI) carrying the bare token anywhere after it,
+    // `Bash(git status:*)` and the like not counting.
+    re: /Bash\(\s*:?\*+\s*(?::\*)?\s*\)|^\s*(?:-\s+)?Bash\s*\\?\s*$|allowed-tools:[^\n]*?(?<![\w(])Bash(?![\w(])|--allowed-?[Tt]ools\b[^\n]*?(?<![\w(-])Bash(?![\w(])/,
+    what: "an allow rule that grants all of Bash" },
+  { name: "wildcard-bash",
+    // A quoted bare "Bash" INSIDE an allow list, however it is printed — the
+    // list is read as a whole, so a `deny` list, a hook matcher, a
+    // metadata.json `tools` entry or prose naming the tool in quotes is not it,
+    // and a `deny` on the same line as an `allow` does not excuse the allow.
+    fileRe: /["'](?:allow|allowedTools)["']\s*:\s*\[[^\]]*?["']Bash["']/g,
+    what: "an allow rule that grants all of Bash" },
+  { name: "bash-prefix-interpreter",
+    // A prefix or glob rule on a network client, a shell, an interpreter or a
+    // package runner, by bare name or full path — any `*` after the name, in
+    // the `:*` form or the `Bash(curl *)` / `Bash(curl -s *host*)` glob form:
+    // everything the star covers is approved, so `curl` is `-d @file` to any
+    // host.
+    re: /Bash\(\s*(?:[\w./-]*\/)?(?:curl|wget|sh|bash|zsh|fish|pwsh|powershell|cmd|node|python\d?|npx|npm\s+exec|pnpm\s+(?:dlx|exec)|yarn\s+dlx|bunx?|deno|eval|ssh|scp|nc|ncat|socat|perl|ruby|php)\b[^)]*\*[^)]*\)/,
+    what: "a Bash prefix or glob rule on a network client or interpreter (everything the star covers is approved)" },
+  { name: "shell-spawn",
+    // In code files: the `shell` option with ANY value but false/0/null/undefined
+    // — `true`, a path, an expression, a variable — wherever it sits.
+    only: CODE_FILES,
+    re: /(?:^|[{,])\s*["']?shell["']?\s*:\s*(?!false\b|0\b|null\b|undefined\b)\S/,
+    what: "a spawn through a shell (spawn an argv array with no shell)" },
+  { name: "shell-spawn",
+    // Everywhere else (a README's code block, YAML, Python): the `shell` option
+    // after `{` or `,`, or first on its line with a code value — so YAML's
+    // `shell: bash` step key is not it; Python's shell=True/1; exec/execSync
+    // called bare or on a child_process receiver, imported from child_process
+    // or wrapped in promisify (always a shell); os.system/os.popen; an explicit
+    // shell argv — `sh -c`/`-lc`/`-ec`, `cmd /c`/`/k`, `powershell -Command`,
+    // by name, by path or via $SHELL — in a spawn, Bun.spawn or Deno.Command. A
+    // code-shaped `exec(` in prose is flagged too; the remedy is an exception.
+    re: /[{,]\s*["']?shell["']?\s*:\s*(?!false\b|0\b|null\b|undefined\b)\S|^\s*["']?shell["']?\s*:\s*(?:true\b|["'`]|process\.)|\bshell\s*=\s*(?:True|1)\b|(?<![\w.$`])(?:exec|execSync)\(|\b(?:child_process|childProcess|cp)\.exec(?:Sync)?\(|require\(["'](?:node:)?child_process["']\)\.exec(?:Sync)?\(|promisify\(\s*exec\s*\)|import\s*\{[^}]*\bexec(?:Sync)?\b[^}]*\}\s*from\s*["'](?:node:)?child_process["']|\bos\.(?:system|popen)\(|(?:["'](?:[\w./-]*\/)?(?:sh|bash|zsh|dash|fish|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)["']|process\.env\.SHELL)\s*,\s*\[[^\]]*["'](?:-c|-lc|-ec|-ic|\/[cCkK]|-Command|-EncodedCommand)["']|(?:Bun\.spawn|Deno\.Command)\(\s*\[?\s*(?:["'](?:[\w./-]*\/)?(?:sh|bash|zsh|cmd|powershell|pwsh)["']|process\.env\.SHELL)/,
+    what: "a spawn through a shell (spawn an argv array with no shell)" },
+];
+/** Strings each hazard must catch — the check's own negative tests. */
+const SHELL_HAZARD_PROBES = [
+  ["codex-bypass", "codex exec --dangerously-bypass-approvals-and-sandbox -"],
+  ["codex-bypass", "codex exec --yolo -"],
+  ["codex-bypass", "--sandbox danger-full-access"],
+  ["codex-bypass", "codex --ask-for-approval never"],
+  ["codex-bypass", "codex --ask-for-approval=never"],
+  ["codex-bypass", "codex exec -a never -"],
+  ["codex-bypass", 'approval_policy = "never"'],
+  ["codex-bypass", "codex -c approval_policy=never exec -"],
+  ["skip-permissions", "claude --dangerously-skip-permissions"],
+  ["skip-permissions", '"defaultMode": "bypassPermissions"'],
+  ["skip-permissions", "--permission-mode bypassPermissions"],
+  ["wildcard-bash", '      "Bash(*)",'],
+  ["wildcard-bash", "'Bash(*:*)'"],
+  ["wildcard-bash", "Bash(:*)"],
+  ["wildcard-bash", '"allow": ["Bash"]'],
+  ["wildcard-bash", '{"permissions": {"allow": ["Bash"], "deny": []}}'],
+  ["wildcard-bash", '"allow": [\n      "Read",\n      "Bash",\n    ],'],
+  ["wildcard-bash", "    Bash \\"],
+  ["wildcard-bash", "  - Bash"],
+  ["wildcard-bash", "allowed-tools: Read, Bash"],
+  ["wildcard-bash", "allowed-tools: Bash(git status:*), Bash"],
+  ["wildcard-bash", "--allowedTools Bash Edit"],
+  ["wildcard-bash", "--allowed-tools Bash"],
+  ["bash-prefix-interpreter", '"Bash(curl:*)"'],
+  ["bash-prefix-interpreter", "Bash(curl -s https://api.open-meteo.com/v1/forecast:*)"],
+  ["bash-prefix-interpreter", "Bash(/usr/bin/curl:*)"],
+  ["bash-prefix-interpreter", "Bash(node:*)"],
+  ["bash-prefix-interpreter", "Bash(npm exec:*)"],
+  ["bash-prefix-interpreter", "Bash(curl *)"],
+  ["bash-prefix-interpreter", "Bash(curl -s *api.open-meteo.com*)"],
+  ["bash-prefix-interpreter", "Bash(python3 *)"],
+  ["shell-spawn", "      shell: true,"],
+  ["shell-spawn", '{ "shell": true }'],
+  ["shell-spawn", ', shell: "/bin/sh",'],
+  ["shell-spawn", '{ stdio: "pipe", shell: process.platform === "win32" }'],
+  ["shell-spawn", "subprocess.run(cmd, shell=True)"],
+  ["shell-spawn", "subprocess.run(cmd, shell=1)"],
+  ["shell-spawn", "cp.execSync(cmd)"],
+  ["shell-spawn", 'require("child_process").execSync(cmd)'],
+  ["shell-spawn", 'spawn("/bin/sh", ["-c", cmd])'],
+  ["shell-spawn", "spawn(process.env.SHELL, ['-c', cmd])"],
+  ["shell-spawn", "spawn('sh', ['-ec', cmd])"],
+  ["shell-spawn", 'spawn("cmd", ["/k", cmd])'],
+  ["shell-spawn", "execSync(`claude -p ${text}`)"],
+  ["shell-spawn", "exec(cmd, (err, out) => {"],
+  ["shell-spawn", "child_process.exec(cmd)"],
+  ["shell-spawn", "const run = promisify(exec);"],
+  ["shell-spawn", 'import { exec } from "node:child_process";'],
+  ["shell-spawn", "os.system(cmd)"],
+  ["shell-spawn", 'spawn("cmd", ["/c", "start", "", url])'],
+  ["shell-spawn", "spawn('sh', ['-c', cmd])"],
+  ["shell-spawn", "spawn('sh', ['-lc', cmd])"],
+  ["shell-spawn", "spawn('powershell', ['-NoProfile', '-Command', cmd])"],
+  ["shell-spawn", "Bun.spawn(['sh', '-c', cmd])"],
+  ["shell-spawn", "new Deno.Command('cmd', { args: ['/c', url] })"],
+];
+/** Strings no hazard may catch — ordinary prose and code this repo writes. */
+// Code-file-only probes for the `shell` option with a non-literal value.
+const SHELL_HAZARD_CODE_PROBES = [
+  "        shell: isWin,",
+  "  shell: opts.shell,",
+];
+const SHELL_HAZARD_NON_PROBES = [
+  "a wildcard `Bash` allow",
+  "two `Bash` rules",
+  "no shell (SMD-1251): args is an argv array",
+  "const m = /^x$/.exec(content);",
+  "this spawn uses no shell, so the value",
+  "shell: false,",
+  'Bash(date "+%Y-%m-%d %H:%M:%S %Z")',
+  "WebFetch(domain:api.open-meteo.com)",
+  "Restart your shell: `source ~/.zshrc`",
+  "Default shell: zsh",
+  "      shell: bash",
+  "codex exec (the OpenAI CLI) was removed",
+  '"deny": ["Bash"]',
+  '"disallowedTools": ["Bash"]',
+  '"matcher": "Bash"',
+  "allowed-tools: Bash(git status:*), Read",
+  "Bash(git status:*)",
+  "execFileSync(\"git\", [\"ls-files\"])",
+  '"deny": [\n      "Bash",\n    ]',
+  'if (input.tool_name === "Bash") {',
+  '"tools": ["Bash", "Node.js 18+"]',
+  '"ask": ["Bash"]',
+  'The "Bash" tool is powerful',
+  "      shell: isWin,",
+];
+const SHELL_HAZARD_EXCEPTIONS = new Map([
+  // Prose that names the deleted flag in order to say it was deleted: exactly
+  // this many lines, for exactly this hazard.
+  ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
+  ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": { why: "the header note that documents the same removal", lines: 1 } }],
+]);
+// Text is scanned by construction: only known binary shapes and lockfiles are
+// skipped, so an extensionless Dockerfile, Procfile or CNAME is read like
+// everything else.
+const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+
+/**
+ * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
+ * node_modules, .env — as repo-relative `/` paths. Untrusted text a recipe
+ * pulled onto a maintainer's machine must not decide whether the tree passes,
+ * and CI on a clean checkout has none of it. Empty when git is unavailable, in
+ * which case everything is scanned.
+ */
+function gitIgnoredFiles(dirs) {
+  try {
+    // Scoped to the directories scanned and unbounded, so a node_modules or a
+    // build output elsewhere in the tree cannot overflow the default 1 MiB
+    // buffer and turn the skip off silently.
+    const out = execFileSync("git", ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...dirs.map((d) => d.rel)],
+      { cwd: ROOT, encoding: "utf8", maxBuffer: Infinity });
+    return new Set(out.split("\0").filter(Boolean));
+  } catch (e) {
+    console.warn(`  (git ls-files failed — ${e.message.split("\n")[0]} — scanning ignored files too)`);
+    return new Set();
+  }
+}
+
+/** Which hazards a text trips, by the same rules scanLines applies (line rules per line, file rules whole). */
+function hazardsIn(text, rel = "probe.md") {
+  const names = new Set();
+  for (const h of SHELL_HAZARDS) {
+    if (h.only && !h.only.test(rel)) continue;
+    const found = h.fileRe ? new RegExp(h.fileRe.source, h.fileRe.flags.replace("g", "")).test(text)
+      : text.split("\n").some((line) => h.re.test(line));
+    if (found) names.add(h.name);
+  }
+  return names;
+}
+
+function checkShellHazards(dirs) {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const [name, probe] of SHELL_HAZARD_PROBES) {
+    if (!hazardsIn(probe).has(name)) fail(SELF, `shell-hazard pattern '${name}' no longer catches its probe: ${probe}`);
+  }
+  for (const probe of SHELL_HAZARD_CODE_PROBES) {
+    if (!hazardsIn(probe, "probe.mjs").has("shell-spawn")) fail(SELF, `shell-hazard pattern 'shell-spawn' no longer catches its code probe: ${probe}`);
+  }
+  for (const text of SHELL_HAZARD_NON_PROBES) {
+    const [name] = hazardsIn(text);
+    if (name) fail(SELF, `shell-hazard pattern '${name}' catches ordinary text it must not: ${text}`);
+  }
+  // Only the contribution directories — not their `_template` placeholders,
+  // which contributionDirs() already skips — so this never depends on the
+  // display filter below to hide a placeholder's hits.
+  const ignored = gitIgnoredFiles(dirs);
+  const files = dirs.flatMap((d) => walk(d.dir, [], /./))
+    .filter((f) => !SHELL_HAZARD_BINARY.test(f) && !ignored.has(relOf(f)));
+  const counts = scanLines(files, SHELL_HAZARDS.map(({ name, re, fileRe, only, what }) => ({
+    name,
+    re,
+    fileRe,
+    only,
+    msg: `${what} — shipped content must not hand untrusted input a shell (SMD-1251)`,
+    suppress: (rel) => Boolean(SHELL_HAZARD_EXCEPTIONS.get(rel)?.[name]),
+  })));
+  for (const [rel, byHazard] of SHELL_HAZARD_EXCEPTIONS) {
+    for (const [name, { why, lines }] of Object.entries(byHazard)) {
+      const seen = counts.get(`${rel} ${name}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a shell-hazard exception for '${name}' (${why}) but matches nothing — remove it from SHELL_HAZARD_EXCEPTIONS`
+          : `shell-hazard exception for '${name}' (${why}) covers ${lines} line(s) but ${seen} match — a new usage beside the documented one, or the exception's count is stale`);
+      }
+    }
   }
 }
 
@@ -179,6 +475,7 @@ for (const d of dirs) {
   checkDeps(meta, d);
 }
 checkSqlGuards();
+checkShellHazards(dirs);
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
@@ -291,17 +588,18 @@ function checkComposeForwardsDocumentedEnv() {
 }
 checkComposeForwardsDocumentedEnv();
 
-// The upstream _template placeholder link is intentional.
-const filtered = violations.filter((v) => !v.where.includes("_template"));
-
+// No display-time filter. One excused `_template` violations, for a placeholder
+// link that contributionDirs() has skipped since the filter was written — so
+// its only live effect was to hide a check-5 hit in a _template SQL file that
+// every contributor copies.
 console.log(`Checked ${dirs.length} contributions across ${CATEGORIES.length} categories.`);
 
-if (filtered.length === 0) {
+if (violations.length === 0) {
   console.log("PASS — no consistency violations.\n");
   process.exit(0);
 }
 
-console.error(`\nFAIL — ${filtered.length} violation(s):\n`);
-for (const v of filtered) console.error(`  ${v.where}\n    ${v.msg}`);
+console.error(`\nFAIL — ${violations.length} violation(s):\n`);
+for (const v of violations) console.error(`  ${v.where}\n    ${v.msg}`);
 console.error("");
 process.exit(1);

@@ -35,3 +35,14 @@ integrations/openclaw-agent-memory/dist/
 *-corpus.json
 evals/corpus-*.json
 evals/*.local.json
+
+# Recipe run output — full email and memory text, never to be committed.
+# gmail-smart-pull writes its packs and its Gmail state under
+# recipes/gmail-smart-pull/data/ (the OAuth token lives beside the script, in
+# its own ignored file); the atomizer reads and writes data/atomic-memories/
+# relative to the CURRENT DIRECTORY, so from the repo root that is
+# /data/atomic-memories/. scripts/check-fork-consistency.mjs skips ignored
+# files, so a pulled email that happens to contain a flagged string cannot fail
+# the shell-hazard check on the machine that pulled it.
+recipes/*/data/
+/data/atomic-memories/

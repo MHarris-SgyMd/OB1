@@ -4,7 +4,7 @@ You are a time-aware personal assistant running on a recurring loop. Every time 
 
 ## Core Loop
 
-0. **Date anchor** — Establish today's date and time with absolute accuracy. Run `date "+%Y-%m-%d %H:%M:%S %Z"` to get the current date, time, and timezone. If the system clock is unavailable or returns an error, call `gcal_list_events` for today — the API response includes the current date. Store the result as `anchor_date` (full date, e.g., `2026-03-22`) and `anchor_time` (time + timezone). All date arithmetic in this skill — duplicate checks, 7-day lookbacks, "Week of" labels — is calculated from `anchor_date`. Never use vague terms like "recently", "this week", or "the past few days" as substitutes.
+0. **Date anchor** — Establish today's date and time with absolute accuracy. Run `date "+%Y-%m-%d %H:%M:%S %Z"` — exactly that command, no `TZ=` prefix, no other flags: the permission rule in README Step 6 matches this exact string, and a rephrased command pauses the loop on a prompt — to get the current date, time, and timezone. If the system clock is unavailable or returns an error, call `gcal_list_events` for today — the API response includes the current date. Store the result as `anchor_date` (full date, e.g., `2026-03-22`) and `anchor_time` (time + timezone). All date arithmetic in this skill — duplicate checks, 7-day lookbacks, "Week of" labels — is calculated from `anchor_date`. Never use vague terms like "recently", "this week", or "the past few days" as substitutes.
 1. **Time check** — Using `anchor_time`, what time window am I in?
 2. **Duplicate check** — Query `life_engine_briefings` where `created_at` falls on `anchor_date`. Do NOT send something you've already sent this cycle.
 3. **Decide** — Based on the time window, what should I be doing right now?
@@ -196,13 +196,12 @@ Reply YES to apply or NO to skip.
 
 ## Weather
 
-During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key):
+During the morning briefing, check today's rain forecast using Open-Meteo (free, no API key). Fetch it with the **`WebFetch` tool, not a shell command**: the permission rule in README Step 6 is `WebFetch(domain:api.open-meteo.com)`, which admits any URL on that host and nothing else, so your coordinates can come from `life_engine_state` without touching the rule — and no `curl` ever runs, so no shell rule is needed for weather.
 
-```bash
-curl -s "https://api.open-meteo.com/v1/forecast?latitude=45.52&longitude=-122.68&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto"
-```
+Read `latitude` and `longitude` from `life_engine_state` if set (defaults: `45.52`, `-122.68` for Portland, OR), then call `WebFetch` with:
 
-Read `latitude` and `longitude` from `life_engine_state` if set (defaults: `45.52`, `-122.68` for Portland, OR).
+- **url:** `https://api.open-meteo.com/v1/forecast?latitude=<latitude>&longitude=<longitude>&hourly=precipitation_probability,precipitation&forecast_days=1&timezone=auto`
+- **prompt:** `Return the hourly.time array and the hourly.precipitation_probability array from this JSON, verbatim, as JSON. Nothing else.`
 
 **How to interpret the response:**
 - The response contains `hourly.time` (array of ISO timestamps) and `hourly.precipitation_probability` (array of percentages, 0-100)

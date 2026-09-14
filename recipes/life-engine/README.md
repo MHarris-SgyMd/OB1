@@ -512,7 +512,8 @@ Life Engine runs autonomously via `/loop`. If Claude encounters a tool it doesn'
 | **`settings.json` allowlist** *(recommended)* | Scoped permissions that persist across sessions | Low — scoped + persistent |
 | **`--allowedTools` (CLI flag)** | Same scoping, but must be re-typed each launch | Low — scoped |
 | **`--permission-mode auto`** | A middle ground — automatic but with some guardrails | Medium |
-| **`--dangerously-skip-permissions`** | Quick testing on a dedicated, trusted machine | High — bypasses ALL checks |
+
+Life Engine reads external content on every cycle — Telegram or Discord messages, calendar events, a weather API response — and all of it is untrusted. So this guide does not offer a wildcard `Bash` allow or a skip-permissions launch, even for testing. The permission allowlist is the layer that holds when the skill's prompt-injection guard (Rule 11) does not, and a rule addressed to the model being injected cannot be the only layer between a Telegram message and your shell. That is also why the list below has exactly one `Bash` rule, and it is **exact-match**: the skill runs one shell command, the `date` anchor, and the rule is that command verbatim. The weather check does not use a shell at all — it goes through Claude Code's `WebFetch` tool, whose rule admits one domain. A `curl` prefix rule was considered and rejected: a prefix rule approves whatever follows the prefix, and `curl` takes several URLs and `-d @file` in one command — an exfiltration in one injected message. If a test run needs a tool the list below lacks, add that tool by name.
 
 ### 6.2 Option A: settings.json Allowlist (Recommended)
 
@@ -532,7 +533,8 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
       "mcp__open-brain__thought_stats",
       "mcp__open-brain__capture_thought",
       "mcp__supabase__execute_sql",
-      "Bash(*)",
+      "Bash(date \"+%Y-%m-%d %H:%M:%S %Z\")",
+      "WebFetch(domain:api.open-meteo.com)",
       "CronCreate",
       "CronDelete"
     ]
@@ -540,7 +542,7 @@ Pre-approve only the specific tools Life Engine needs, persisted in your config 
 }
 ```
 
-> **Why `Bash(*)` instead of scoped patterns?** Life Engine uses `date` (date anchor) and `curl` (weather API) — both benign, read-only commands. Scoped patterns like `Bash(date *)` or `Bash(curl -s *api.open-meteo.com*)` are fragile because the LLM may vary its exact command syntax between runs, causing silent permission blocks. `Bash(*)` eliminates this fragility while MCP tools remain individually scoped above. Rule 11 (prompt injection guard) prevents dangerous Bash execution from external triggers.
+> **Why one exact-match `Bash` rule and one `WebFetch` domain, and what breaks.** The skill runs one shell command, the `date` anchor, and the rule above is that command **verbatim**, so Claude Code approves that string and nothing else. The weather call is not a shell command: the skill fetches Open-Meteo through `WebFetch`, and `WebFetch(domain:api.open-meteo.com)` admits any URL on that host — your latitude and longitude included, so they can live in `life_engine_state` and never touch the allowlist. What can break: if the model rephrases the `date` command (a `TZ=` prefix, `/bin/date`, a different format string) the string no longer matches and the session pauses on a prompt; the skill tells the model to run it exactly as written, so tighten that wording or add the exact variant you saw as one more rule. Do not answer a prompt with a prefix rule on a network client or an interpreter (a `curl` or `node` prefix followed by `:*`): `curl` takes several URLs and `-d @file` in one command, so such a rule hands every incoming message a way to post your files somewhere — and the repo's consistency check refuses those spellings. And never a wildcard `Bash` allow — the previous version of this guide recommended one.
 
 Then launch with just the channel flag:
 
@@ -556,11 +558,12 @@ claude --channels plugin:discord@claude-plugins-official
 
 ### 6.3 Option B: --allowedTools (CLI Flag)
 
-Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions:
+Same scoping as Option A, but passed on the command line instead of persisted in config. Useful if you want different permission sets for different sessions. The `Bash` rule contains double quotes, so each rule is its own single-quoted argument:
 
 ```bash
 claude --channels plugin:telegram@claude-plugins-official \
-  --allowedTools "mcp__plugin_telegram_telegram__reply \
+  --allowedTools \
+    mcp__plugin_telegram_telegram__reply \
     mcp__plugin_telegram_telegram__react \
     mcp__plugin_telegram_telegram__edit_message \
     mcp__google-calendar__gcal_list_events \
@@ -570,8 +573,9 @@ claude --channels plugin:telegram@claude-plugins-official \
     mcp__open-brain__thought_stats \
     mcp__open-brain__capture_thought \
     mcp__supabase__execute_sql \
-    'Bash(*)' \
-    CronCreate CronDelete"
+    'Bash(date "+%Y-%m-%d %H:%M:%S %Z")' \
+    'WebFetch(domain:api.open-meteo.com)' \
+    CronCreate CronDelete
 ```
 
 ### 6.4 Option C: Auto Permission Mode
@@ -584,18 +588,7 @@ claude --channels plugin:telegram@claude-plugins-official --permission-mode auto
 
 (Swap `telegram` for `discord` if using Discord.)
 
-### 6.5 Option D: Skip Permissions (Testing Only)
-
-For initial setup and testing on a machine you fully trust:
-
-```bash
-claude --channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions
-```
-
-> [!CAUTION]
-> This means Claude can run any tool, any bash command, write any file — without asking. Use this for initial testing, then switch to Option A for daily operation.
-
-### 6.6 Test Before You Walk Away
+### 6.5 Test Before You Walk Away
 
 1. Start Claude Code with your chosen permission strategy
 2. Run `/life-engine` manually
@@ -623,7 +616,7 @@ claude --channels plugin:telegram@claude-plugins-official
 claude --channels plugin:discord@claude-plugins-official
 ```
 
-Or append your preferred permission flag from Step 6 if you didn't use `settings.json`.
+Or pass the `--allowedTools` list from Step 6 (Option B) if you didn't use `settings.json`.
 
 ### 7.2 Test the Skill Manually
 
