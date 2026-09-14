@@ -28,6 +28,7 @@
  *   … bun eval-consolidate.ts --full [--k N] [--min-sim F]                                              # + 3
  *   … bun eval-consolidate.ts --replay /tmp/consolidate-verdicts.jsonl                                  # 2 and 3 scored from a worker dump, no model
  *   … bun eval-consolidate.ts --no-judge                                                                # 1 only
+ *   … --allow-stale-dump    replay entity answers whose fingerprints no longer match the loaded text, by id (a corpus rebuilt since the extraction)
  *
  * Needs the entity answers dump (eval-entities.ts --corpus, about two hours
  * once) and an embedding provider for any document not in the vector cache.
@@ -68,6 +69,7 @@ if (!process.env.OB1_LLM_API_KEY && process.env.OB1_EVAL_KEY) process.env.OB1_LL
 const FULL = has("full");
 const REPLAY = flag("replay");
 const NO_JUDGE = has("no-judge");
+const ALLOW_STALE = has("allow-stale-dump");
 const K = Number(flag("k") ?? DEFAULT_CANDIDATES);
 const MIN_SIM = Number(flag("min-sim") ?? DEFAULT_MIN_SIMILARITY);
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:4b@1024";
@@ -114,13 +116,14 @@ const key = extractionKey(cfg.metadataModel);
 const { answers, unusable } = readEntityAnswers(answersPath);
 let replayed = 0, stale = 0, missing = 0;
 for (const a of answers) {
-  const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${a.key ?? key}, ${a.entities}::jsonb, ${a.relations}::jsonb, ${a.fingerprint ?? null}) AS r`;
+  const [{ r }] = await sql`SELECT record_thought_entities(${a.id}::uuid, ${a.key ?? key}, ${a.entities}::jsonb, ${a.relations}::jsonb, ${ALLOW_STALE ? null : (a.fingerprint ?? null)}) AS r`;
   const res = r as { ok: boolean; stale?: boolean };
   if (res.ok) replayed++; else if (res.stale) stale++; else missing++;
 }
 const [{ withEntities }] = await sql`SELECT count(DISTINCT thought_id)::int AS "withEntities" FROM thought_entities`;
 console.log(`  graph:  ${replayed} of ${answers.length} extractions replayed${stale ? `, ${stale} stale` : ""}${missing ? `, ${missing} name no loaded thought` : ""}${unusable ? `, ${unusable} unusable` : ""}; ${withEntities} of ${loaded.size} thoughts carry at least one entity\n`);
-if (stale > 0) { console.error("  the dump's fingerprints do not match this corpus's text; re-run eval-entities.ts --corpus"); process.exit(2); }
+if (stale > 0) { console.error("  the dump's fingerprints do not match this corpus's text; re-run eval-entities.ts --corpus, or pass --allow-stale-dump to replay by id anyway"); process.exit(2); }
+if (ALLOW_STALE) console.log("  --allow-stale-dump: fingerprints not checked; an extraction is taken to be of the text now loaded");
 
 // ── 1. Candidates: pairs per k and floor ─────────────────────────────────────
 
@@ -165,7 +168,7 @@ const sideOf = async (issue: string): Promise<Side | null> => {
   const rows = (await sql`SELECT id, content, created_at, metadata->>'source' AS source FROM thoughts WHERE id = ${linearThoughtId(issue)}::uuid`) as Side[];
   return rows[0] ?? null;
 };
-type DumpLine = { newer: string; older: string; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
+type DumpLine = { newer: string; older: string; similarity?: number; verdict: string; supersedes: string; confidence: number; reason: string; recorded: string | null };
 const replayLines: DumpLine[] = REPLAY ? readFileSync(REPLAY, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine) : [];
 const replayed_ = new Map(replayLines.map((l) => [`${l.older}|${l.newer}`, l]));
 
@@ -236,7 +239,9 @@ if (FULL || REPLAY) {
     for (const l of replayLines) {
       const j: Judgement = { verdict: l.verdict as Judgement["verdict"], supersedes: l.supersedes as Judgement["supersedes"], confidence: l.confidence, reason: l.reason, malformed: false };
       const v = proposalVerdict(j);
-      if (v && l.recorded === "proposed") await sql`SELECT record_supersession_proposal(${l.older}::uuid, ${l.newer}::uuid, ${v}, ${l.confidence}, ${l.reason || null}, NULL, ${JOB}, NULL)`;
+      if (v && l.recorded === "proposed") {
+        await sql`SELECT record_supersession_proposal(${l.older}::uuid, ${l.newer}::uuid, ${v}::text, ${l.confidence}::numeric, ${l.reason || null}::text, ${l.similarity ?? null}::float, ${JOB}::text, NULL::uuid)`;
+      }
     }
   }
   const lines: DumpLine[] = existsSync(DUMP) ? readFileSync(DUMP, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as DumpLine) : [];

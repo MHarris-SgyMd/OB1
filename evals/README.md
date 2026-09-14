@@ -2478,6 +2478,11 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   unmeasured.
 * `--min-confidence` filtered nothing because the judge's confidence is flat;
   the flag stays, at 0.5, for a judge whose confidence means something.
+* A stronger local judge was tried and not finished: `qwen3.8:27b` on the first
+  21 labelled pairs found the same 2 of 6 conflicts (both with the right
+  direction, at 0.95) and flagged 1 of 15 non-conflicts, at 40 s a pair — three
+  times the 7B's cost for, on that sample, better direction and no more recall.
+  Stopped there; its memory (19 GB resident) was starving the other runs.
 * The corpus file is rebuilt from Linear by `build-linear-corpus.ts` and grows;
   every number above is from the 2026-09-14 morning build of 576 issues, and a
   later build (601 by that afternoon) changes the candidate table and can make
