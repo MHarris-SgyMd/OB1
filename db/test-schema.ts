@@ -37,6 +37,7 @@ import {
   substituteMigration,
   DEFAULT_CHUNK_CONTEXT,
   resolveBackfillLimit,
+  ACCEPTED_CAVEAT_PREFIX,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2586,8 +2587,18 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   assert(/succeeded row, when set:.*caveat.*the write stands.*what the worker could not do/is.test(colComment),
     "…and the succeeded-row meaning: when set, a caveat — the write stands, and this is what the worker could not do");
   assert(/NULL on a succeeded row is a clean success/.test(colComment), "…and what NULL means on a succeeded row");
-  assert(/--retry-fallbacks returns it to the pool/.test(colComment) && /must not store any other note here on success/.test(colComment),
-    "…and the consequence for a consumer: every non-NULL note on a succeeded row is read as a caveat and returned by --retry-fallbacks");
+  assert(/Under a reembed: work_type key every reader of the pass.*preflight.*treats a succeeded row with a non-NULL last_error as a caveat/is.test(colComment)
+      && /retry-fallbacks flag returns it to the pool/.test(colComment) && /a pass under such a key must not store any other note here on success/.test(colComment),
+    "…and the consequence, scoped to where it is read: under a reembed: key every reader (reembed.ts and preflight) takes a non-NULL note on a succeeded row as a caveat, and retry-fallbacks returns it");
+  // The accepted-row caveat is named by the constant that spells it, not by a
+  // second copy of its text: the applied comment cannot follow a rewording of
+  // ACCEPTED_CAVEAT_PREFIX, so the comment must not quote it.
+  assert(/ACCEPTED_CAVEAT_PREFIX/.test(colComment) && !colComment.includes(ACCEPTED_CAVEAT_PREFIX.trim()),
+    "…and names the acceptance prefix by its constant rather than quoting a second spelling of it");
+  // [10] strips `--` to end of line before scanning the migrations, on the
+  // stated assumption that no migration puts that sequence in a string literal.
+  const src028 = readFileSync(join(MIGRATIONS, files.find((x) => x.startsWith("028"))!), "utf8").replace(/^\s*--[^\n]*$/gm, "");
+  assert(!/--/.test(src028), "028's literals name the flags without their dashes, so [10]'s comment-stripping scan still reads them whole");
 
   const fnComment = (await db.query<{ c: string | null }>(
     `SELECT obj_description('release_thought(uuid, text, text, text, text)'::regprocedure, 'pg_proc') AS c`)).rows[0]?.c ?? "";
@@ -2595,17 +2606,10 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   assert(/p_error is stored in last_error whatever p_status is/.test(fnComment), "…and says p_error is stored whatever the status");
   assert(/on succeeded, when given, a caveat.*the write stands/is.test(fnComment) && /Pass NULL for a clean success/.test(fnComment),
     "…what it means on success, and what to pass for a clean one");
-
-  // The last migration to comment release_thought must carry the p_error
-  // sentence: CREATE OR REPLACE keeps a comment, but a redefinition that
-  // re-issues 015's one-sentence COMMENT (SMD-1043 is the candidate) would
-  // silently drop it — the trap 028's header names.
-  const commentRe = /^\s*COMMENT ON FUNCTION (?:public\.)?release_thought\(/m;
-  const lastCommenter = [...files].reverse().find((x) => commentRe.test(readFileSync(join(MIGRATIONS, x), "utf8")))!;
-  assert(lastCommenter.startsWith("028"), `028 is the last migration to comment release_thought (${lastCommenter})`);
-  const colRe = /^\s*COMMENT ON COLUMN (?:public\.)?thought_work_claims\.last_error\s/m;
-  const lastColCommenter = [...files].reverse().find((x) => colRe.test(readFileSync(join(MIGRATIONS, x), "utf8")))!;
-  assert(lastColCommenter.startsWith("028"), `028 is the last migration to comment thought_work_claims.last_error (${lastColCommenter})`);
+  // Those are checks of the LIVE text after every file has applied, so a later
+  // migration that redefines release_thought and re-issues 015's one-sentence
+  // COMMENT — CREATE OR REPLACE keeps a comment, a re-issued COMMENT replaces
+  // it — fails here whichever file it is; no migration number is pinned.
 
   // The fact the comments state, exercised: a release with p_error on a
   // SUCCEEDED row stores it (the caveat), on a failed row stores it (the

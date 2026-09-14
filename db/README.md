@@ -425,7 +425,8 @@ Since migration 028 (SMD-1052) the rule is also stated where a reader of the
 table finds it: `COMMENT ON COLUMN thought_work_claims.last_error` gives both
 meanings by status, and `release_thought`'s comment says `p_error` is stored
 whatever the status and what it means on success; `test-schema` [27] asserts
-both and that 028 stays the last migration to comment either. The server still remembers a refusal for the life of its process;
+the live text of both, so a later redefinition that re-issues 015's shorter
+comment fails the suite. The server still remembers a refusal for the life of its process;
 shaping that latch is SMD-1054.
 
 **Cost.** Dominated by the provider. The claim itself is flat across the pass —

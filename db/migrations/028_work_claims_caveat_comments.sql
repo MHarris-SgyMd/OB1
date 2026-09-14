@@ -31,24 +31,35 @@
 --   put any other note there would be swept in silently.
 --
 --   015 is applied and cannot be edited (migrate.ts hashes the file). The
---   ticket's preferred ride was SMD-1043's redefinition or SMD-1042's backfill
---   (023); 023 landed without it and 1043 is open, so the two comments travel
---   alone. A docs-only migration is heavy for two statements, but the
+--   ticket hoped to ride a migration that touched this area anyway (SMD-1042's
+--   backfill, 023, or a later redefinition); 023 landed without it and no
+--   redefinition of release_thought is on the roadmap, so the two comments
+--   travel alone. A docs-only migration is heavy for two statements, but the
 --   alternative is the rule staying where a reader of the schema cannot see it.
 --
 -- WHAT
 --   * COMMENT ON COLUMN thought_work_claims.last_error — both meanings, by
---     status, and the consequence: every succeeded row with a non-NULL
---     last_error is read as a caveat.
+--     status, and the consequence under a reembed: key: every succeeded row
+--     with a non-NULL last_error is read as a caveat — by reembed.ts (status,
+--     the end-of-run counts, the retry-fallbacks flag) and by preflight's
+--     re-embed pass check, each scoped to reembed keys. A consumer under its
+--     own work_type key (extract-entities.ts) is never swept; the rule states
+--     what the column MEANS everywhere and what is READ under those keys.
 --   * COMMENT ON FUNCTION release_thought — re-issued with 015's sentence kept
 --     and one added: p_error is stored whatever p_status is, and what it means
 --     on success.
 --
 -- WHAT A SUCCESSOR REDEFINITION MUST CARRY
 --   CREATE OR REPLACE FUNCTION keeps a function's comment; a re-issued COMMENT
---   ON FUNCTION replaces it. A migration that redefines release_thought (SMD-1043
---   is the candidate) and re-issues 015's one-sentence comment would silently
---   drop the p_error sentence. Keep it, or db/test-schema.ts [27] fails.
+--   ON FUNCTION replaces it. Any migration that redefines release_thought and
+--   re-issues 015's one-sentence comment would silently drop the p_error
+--   sentence. Keep it — db/test-schema.ts [27] asserts the live text of both
+--   comments, so the drop fails the suite whichever migration causes it.
+--
+--   The flags are named without their leading dashes ("the retry-fallbacks
+--   flag", not "--retry-fallbacks"): test [10] strips `--` to end of line
+--   before scanning the migrations for Supabase-specific text, and its header
+--   holds that no migration puts that sequence inside a string literal.
 --
 -- SAFETY
 --   COMMENT ON is idempotent (it replaces the description). No DDL on data,
@@ -59,7 +70,7 @@
 -- =============================================================================
 
 COMMENT ON COLUMN thought_work_claims.last_error IS
-  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted with reembed.ts --accept-failed, prefixed "kept the vector it had; accepted by the operator:"). NULL on a succeeded row is a clean success. Every reader of a pass (reembed.ts --status, the end-of-run counts, --retry-fallbacks) treats a succeeded row with a non-NULL last_error as a caveat and --retry-fallbacks returns it to the pool, so a consumer must not store any other note here on success. Rule: SMD-1021; stated here: SMD-1052.';
+  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted with reembed.ts''s accept-failed flag, whose text begins with the prefix config.mjs spells as ACCEPTED_CAVEAT_PREFIX). NULL on a succeeded row is a clean success. Under a reembed: work_type key every reader of the pass — reembed.ts''s status output, its end-of-run counts and its retry-fallbacks flag, and preflight''s re-embed pass check — treats a succeeded row with a non-NULL last_error as a caveat, and the retry-fallbacks flag returns it to the pool; so a pass under such a key must not store any other note here on success. Rule: SMD-1021; stated here: SMD-1052.';
 
 COMMENT ON FUNCTION release_thought(uuid, text, text, text, text) IS
-  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment; reembed.ts --retry-fallbacks returns every such row to the pool). Pass NULL for a clean success.';
+  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment; under a reembed: key the retry-fallbacks flag returns every such row to the pool). Pass NULL for a clean success.';
