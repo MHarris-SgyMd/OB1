@@ -30,10 +30,11 @@
 --   such row to the pool. `db/extract-entities.ts`, the sibling over the same
 --   table, releases success with NULL — which is the only reason it does not
 --   collide: reembed.ts's readers are scoped to the key it is RUN with, and
---   `--job` accepts any key (a warning when it lacks the reembed: prefix), so a
---   consumer that noted success under its own key would be swept the day
---   someone pointed `--job` at that key (SMD-1311 would refuse that). Only
---   preflight's re-embed pass check and `--retire` are prefix-scoped.
+--   `--job` accepts any key that names no model (a warning when it lacks the
+--   reembed: prefix; a key naming another model or width is refused), so a
+--   consumer that noted success under its own bare key would be swept the day
+--   someone pointed `--job` at that key (SMD-1311 would refuse that).
+--   Preflight's re-embed pass check is scoped to the reembed: prefix instead.
 --
 --   015 is applied and cannot be edited (migrate.ts hashes the file). The
 --   ticket hoped to ride a migration that touched this area anyway (SMD-1042's
@@ -44,16 +45,18 @@
 --   the rule staying where a reader of the schema cannot see it.
 --
 -- WHAT
---   * COMMENT ON COLUMN thought_work_claims.last_error — both meanings, by
---     status; the rule as the COLUMN's, not one tool's (a consumer stores
---     nothing else here on success), with the readers named honestly: reembed.ts
---     under whichever key it is run with, preflight across every reembed: key;
---     the bound every reader puts on an acceptance (nothing has written the
---     thought since the attempt read it) and the fact that an edited caveat row
---     returns to the pool on the next run, flag or not; and the one consumer of
---     succeeded rows that does NOT read this column — 021's evidence backfill,
---     which trusts a succeeded row whatever its caveat (reembed.ts's header
---     says when that matters: a hand re-run of 021's body).
+--   * COMMENT ON COLUMN thought_work_claims.last_error — the DATA CONTRACT
+--     only: both meanings, by status; NULL on success is clean; the rule as the
+--     COLUMN's, not one tool's (readers treat any note on a succeeded row as
+--     the caveat, so a consumer stores nothing else here on success); and the
+--     one consumer of succeeded rows that does not read the column (021's
+--     evidence backfill, an applied migration that will not change). Which
+--     readers, under which keys, what bounds an acceptance and when a caveat
+--     row returns to the pool are the TOOLS' contract and change with the
+--     tools (SMD-1311 is one such change already filed), so the comment points
+--     at reembed.ts's header and db/README.md for them rather than restating
+--     them: three review passes each mis-stated a detail of reader behaviour
+--     in this literal before the fourth chose this shape.
 --   * COMMENT ON FUNCTION release_thought — re-issued with 015's sentence kept
 --     and one added: p_error is stored whatever p_status is, and what it means
 --     on success.
@@ -70,9 +73,9 @@
 --   before scanning the migrations for Supabase-specific text, and its header
 --   holds that no migration puts that sequence inside a string literal. [27]
 --   asserts it of the LIVE comment text, so a successor's re-issue is held to
---   it too. Code identifiers are kept to the two file names and one exported
---   constant; the flags are described, not spelled, so a rename does not
---   strand the applied text.
+--   it too. Code identifiers are kept to two file names, two section titles
+--   of reembed.ts's header and one exported constant; no flag is spelled, so
+--   a rename does not strand the applied text.
 --
 -- SAFETY
 --   COMMENT ON is idempotent (it replaces the description). No DDL on data,
@@ -83,7 +86,7 @@
 -- =============================================================================
 
 COMMENT ON COLUMN thought_work_claims.last_error IS
-  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted, whose text begins with the prefix config.mjs exports as ACCEPTED_CAVEAT_PREFIX). NULL on a succeeded row is a clean success. The rule is the column''s, not one tool''s: reembed.ts, under whichever key it is run with, counts and lists every succeeded row with a non-NULL last_error as a caveat and its retry-fallbacks flag returns each to the pool; preflight''s re-embed pass check reads the same across every reembed: key. So a consumer stores nothing else here on success. An acceptance is honoured only while nothing has written the thought since the attempt read it (updated_at no later than claimed_at); a caveat row whose thought was written since returns to the pool on reembed.ts''s next run under its key, flag or not. Not a reader of this column: 021''s evidence backfill, which trusts a succeeded row whatever its caveat (reembed.ts''s header says when that matters). Rule: SMD-1021 and SMD-1067; stated here: SMD-1052.';
+  'Two meanings, by status. On a failed row: why it failed (the worker''s last error, or claim_thoughts'' reason when the lease expired for the last allowed time). On a succeeded row, when set: a CAVEAT — the write stands, and this is what the worker could not do (a long thought stored with its head window''s vector because the provider refused the whole content; a failure the operator accepted, whose text begins with the prefix config.mjs exports as ACCEPTED_CAVEAT_PREFIX). NULL on a succeeded row is a clean success. The rule is the column''s, not one tool''s: the readers of a pass treat every succeeded row with a non-NULL last_error as a caveat, so a consumer stores nothing else here on success. Which readers, under which keys, what bounds an acceptance and when a caveat row returns to the pool are the tools'' contract, not the column''s: reembed.ts''s header (The head window, recorded; Saying I know) and db/README.md state them. One consumer of succeeded rows does not read this column: 021''s evidence backfill trusts a succeeded row whatever its caveat. Rule: SMD-1021 and SMD-1067; stated here: SMD-1052.';
 
 COMMENT ON FUNCTION release_thought(uuid, text, text, text, text) IS
-  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment: the readers of the key return every such row to the pool when asked). Pass NULL for a clean success.';
+  'Mark one claim succeeded or failed. Only the holder of a still-claimed row may; returns false otherwise (expired and re-leased, deleted, or never held). p_error is stored in last_error whatever p_status is: on failed, why it failed; on succeeded, when given, a caveat — the write stands, and this is what the worker could not do (see the column''s comment). Pass NULL for a clean success.';
