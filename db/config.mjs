@@ -182,21 +182,15 @@ export const KNOWN_MODEL_DIMS = {
  * for a document longer than it, or the served context where a document that
  * long went through whole. A model rebuilt past its default with a Modelfile
  * (`PARAMETER num_batch 8192`) has another name and is not here: set
- * OB1_CHUNK_TOKENS for it, or add the entry once it is measured. Hosted entries
- * are the provider's documented maximum input, not verified here: no key. A
- * WRONG entry here truncates windows silently, which is the failure the windows
- * exist to prevent, so a model that is not measured is not listed.
+ * OB1_CHUNK_TOKENS for it, or add the entry once it is measured. Hosted models
+ * are deliberately absent (first review pass): a provider's document states
+ * the MODEL's maximum input, not what the serving provider behind an
+ * OpenRouter route admits, and this fork has no key to measure with. A WRONG
+ * entry here truncates windows silently, which is the failure the windows
+ * exist to prevent, so a model that is not measured is not listed — it keeps
+ * the fallback, which is exactly what it had.
  */
 export const KNOWN_MODEL_WINDOW = {
-  // ── Hosted, from provider documentation. ────────────────────────────────────
-  "openai/text-embedding-3-small": 8191,
-  "openai/text-embedding-3-large": 8191,
-  "openai/text-embedding-ada-002": 8191,
-  "mistralai/mistral-embed-2312": 8192,
-  "qwen/qwen3-embedding-4b": 32768,
-  "qwen/qwen3-embedding-8b": 32768,
-  "baai/bge-m3": 8192,
-
   // ── Local via Ollama, at each model's default parameters. ───────────────────
   embeddinggemma: 2048,                    // prompt_eval_count 2048 on a 4K and on an 8K document
   "nomic-embed-text": 2048,                // card says 8192; served at 2048, at chance on a 4K document

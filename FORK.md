@@ -4961,12 +4961,15 @@ without windows and cannot see any of this.
 
 **The rule.** `db/config.mjs` carries `KNOWN_MODEL_WINDOW` beside
 `KNOWN_MODEL_DIMS` — the tokens each model embeds in one request, measured by
-`prompt_eval_count` for the local entries and documented for the hosted ones —
-and `resolveChunkTokens` derives two numbers at the shipped ratio (1200 of 2048):
+`prompt_eval_count`; a hosted model has no entry until it is measured, since a
+document states the model's maximum and not the serving provider's — and
+`resolveChunkTokens` derives two numbers at the shipped ratio (1200 of 2048):
 the estimated length a capture is windowed above, capped at
 `MAX_WHOLE_TOKENS = 4096` where the whole vector was measured to stop holding,
 and the window size, never above 1200. A 2048-token model gets 1200 and 1200,
-exactly what it had. `granite-embedding` gets 300 and 300. The qwen models window
+exactly what it had. `granite-embedding` gets 300 and 300, with the overlap
+scaled to 37 (the review pass found 150 against a 300-token window carried
+nothing). The qwen models window
 only past 4096, at 1200 a window: under the 4b 88.9% against the shipped 89.6%
 (three questions in 470), 94.9% against 94.9% at k=10, for 61% of the tokens and
 a quarter of the chunk rows — about five hours of a fourteen-hour import. A model

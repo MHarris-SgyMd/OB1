@@ -39,7 +39,8 @@ export const KNOWN_MODEL_DIMS: Record<string, number>;
 
 /**
  * Tokens a provider embeds in one request before cutting the rest silently.
- * Local entries measured (`prompt_eval_count`); hosted from documentation.
+ * Measured (`prompt_eval_count`) local models only; a hosted model is absent
+ * until measured, and keeps the fallback.
  */
 export const KNOWN_MODEL_WINDOW: Record<string, number>;
 /** Ollama's default batch, 2048: the window the shipped chunk limit was set under. */

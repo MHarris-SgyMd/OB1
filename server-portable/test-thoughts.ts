@@ -135,6 +135,16 @@ console.log("\n[7] Prompt templates and provider settings take their inputs lite
   assert(resolveEmbedConfig({}).chunkThreshold === qwen.chunkThreshold, "the default model is qwen3-embedding:4b, so an empty environment derives its rule");
   const granite = resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "granite-embedding" });
   assert(granite.chunkTokens === 300 && granite.chunkThreshold === 300, "a 512-token model derives 300 for both — at 1200 its windows were cut");
+  // …and its overlap with them (first review pass): 150 against a 300-token
+  // window is clamped to half of it, and the carry rule then carries nothing
+  // out of a two-paragraph window — no overlap, where the constant has 150 of 1200.
+  assert(granite.chunkOverlap === 37 && gemma.chunkOverlap === DEFAULT_OVERLAP_TOKENS && qwen.chunkOverlap === DEFAULT_OVERLAP_TOKENS,
+         "the overlap scales with a window that derived smaller (37 of 300) and stays 150 for one that did not");
+  assert(resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "granite-embedding", OB1_CHUNK_OVERLAP: "20" }).chunkOverlap === 20, "…and OB1_CHUNK_OVERLAP still wins");
+  const paras = Array.from({ length: 40 }, (_, i) => Array.from({ length: 100 }, (__, j) => `p${i}w${j}`).join(" ")).join("\n\n"); // ~130-token paragraphs
+  const total = (ws: { content: string }[]) => ws.reduce((a, w) => a + estimateTokens(w.content), 0);
+  assert(total(chunkContent(paras, { maxTokens: 300, overlapTokens: 37 })) > total(chunkContent(paras, { maxTokens: 300, overlapTokens: 150 })),
+         "at a 300-token window the scaled overlap carries text between windows and the unscaled 150 carries none");
   const unknown = resolveEmbedConfig({ OB1_EMBEDDING_MODEL: "some-model-nobody-measured" });
   assert(unknown.chunkTokens === DEFAULT_MAX_TOKENS && unknown.chunkThreshold === DEFAULT_MAX_TOKENS && unknown.chunkTokensFrom === "default" && unknown.modelWindow === undefined,
          `a model the window table does not know keeps ${DEFAULT_MAX_TOKENS} for both, and says so`);

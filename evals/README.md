@@ -2098,10 +2098,11 @@ the store three ways. That premise was checked rather than assumed: 40 random
 rows per model, re-embedded through the same endpoint singly and in batches of
 eight other sessions, sit at cosine 1.000000 to the stored vector to six
 decimals, and every stored text equals the corpus render (batch composition
-does not move these models' vectors). One exact scan per question fetches every thought in
-the history with its whole-vector similarity and its best window's (`OFFSET 0`
-fences the sort from the HNSW index, so the arms compare vectors, not plans),
-and each arm is a rule over those two numbers:
+does not move these models' vectors). One exact scan per question fetches every
+thought in the history with its whole-vector similarity and its best window's —
+nothing in it is ordered by distance or limited, so no HNSW walk can return
+short under the filter and the arms compare vectors, not plans — and each arm
+is a rule over those two numbers:
 
 | arm | rule |
 | --- | --- |
@@ -2119,7 +2120,7 @@ table (`OB1_EVAL_LME_CHUNKS`), leaving the store's vectors alone — 4096-token
 windows for the 2,615 sessions over 4096, 5,182 rows, 6,334 s under the 4b and
 1,694 s under the 0.6b — and the arms read that table instead.
 
-### Results, 2026-09-14
+### Results, 2026-09-13
 
 Strict recall_all@5 over 470 questions, any-hit in the LongMemEval section's
 tables above; k=10 in the last row. Sessions per question type as before.
@@ -2206,13 +2207,16 @@ the ceiling shows.
 `prompt_eval_count` for the local entries (the qwen models at their served
 context, verified on the 18,919-token session; `embeddinggemma`, `bge-m3`,
 `snowflake-arctic-embed2` and `nomic-embed-text` at Ollama's 2048 batch;
-`granite-embedding` at 512) and documented for the hosted ones — and
+`granite-embedding` at 512); hosted models are absent until measured — and
 `resolveChunkTokens` derives two numbers from it at the shipped ratio (1200 of
 2048): the length a capture is windowed above, capped at 4096 where the whole
 vector was measured to stop holding, and the window size, never above 1200.
 A 2048-token model gets 1200 and 1200, exactly what it had. `granite-embedding`
-gets 300 and 300, where the constant cut its 1200-token windows to 512 in
-silence. The qwen models window a capture only past 4096 estimated tokens,
+gets 300 and 300 with a 37-token overlap, where the constant cut its
+1200-token windows to 512 in silence (and, the review pass found, a 150-token
+overlap against a 300-token window carried nothing at all: the overlap now
+scales with a window that derived smaller). The qwen models window a capture
+only past 4096 estimated tokens,
 still at 1200 a window: under the 4b that is 88.9% against the shipped 89.6%
 (three questions), 94.9% against 94.9% at k=10, for 61% of the tokens embedded
 and a quarter of the chunk rows; under the 0.6b 87.4% against 87.9%. A model
@@ -2241,9 +2245,12 @@ other limits real.
   measured, and on it the whole vector may hold worse or the cap may be low.
 * The shipped 1200 was not tuned either way here: 600- or 2,000-token windows
   were not measured, only that 4096-token ones lose to it.
-* The hosted windows are the providers' documented maximums, not measured; a
-  model rebuilt with a Modelfile past its default batch has another name and
-  no entry — `OB1_CHUNK_TOKENS` is the path for it.
+* Hosted models have no entry and keep 1200 for both numbers, exactly what
+  they had: a provider's document states the model's maximum, not what the
+  serving provider behind an OpenRouter route admits, and a wrong entry
+  truncates silently. A model rebuilt with a Modelfile past its default batch
+  has another name and no entry either — `OB1_CHUNK_TOKENS` is the path for
+  both until they are measured.
 * The projected load times scale the measured 13.9 hours by tokens embedded;
   the one side load measured (4096-token windows, 6,334 s for 12.5M tokens)
   ran at 1,969 tokens/s, about the full load's overall rate, so the scaling

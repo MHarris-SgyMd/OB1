@@ -19,7 +19,11 @@
  * uses — chunkContent() from server-portable/chunk.ts for the windows, the
  * document prompt from db/config.mjs, the 4-argument upsert_thought with the
  * 021 envelope — so what is scored is the shipped store, not a re-creation of
- * it. The 30 abstention questions (ids ending `_abs`) are skipped, as the
+ * it. One deliberate exception since SMD-1305: the loader windows at chunk.ts's
+ * constant (1200 above 1200), not at the rule the server derives for the
+ * model, so that the whole vector and the 1200-token windows are both stored
+ * and every rule — no windows, the constant, the derived threshold — is
+ * readable from the one store. The 30 abstention questions (ids ending `_abs`) are skipped, as the
  * official scorer skips them, which leaves 470.
  *
  * ISOLATION. A session appears in many histories (25,112 memberships over
@@ -266,10 +270,16 @@ async function loadWindows(): Promise<void> {
     const vectors = await embedMany(round.flatMap((r) => r.windows), false);
     let k = 0;
     for (const r of round) {
-      for (let j = 0; j < r.windows.length; j++) {
-        await sql.unsafe(`INSERT INTO ${CHUNKS} (thought_id, chunk_index, embedding) VALUES ($1, $2, $3::vector) ON CONFLICT DO NOTHING`, [r.id, j, toVector(vectors[k++])]);
-        tokens += estimateTokens(r.windows[j]);
-      }
+      // A thought's windows land together or not at all: the resume reads
+      // DISTINCT thought_id, so a thought half-written by an interrupted run
+      // would otherwise count as done with windows missing (first review pass).
+      const vs = r.windows.map(() => toVector(vectors[k++]));
+      await sql.begin(async (tx) => {
+        for (let j = 0; j < vs.length; j++) {
+          await tx.unsafe(`INSERT INTO ${CHUNKS} (thought_id, chunk_index, embedding) VALUES ($1, $2, $3::vector) ON CONFLICT DO NOTHING`, [r.id, j, vs[j]]);
+        }
+      });
+      for (const w of r.windows) tokens += estimateTokens(w);
       rows += r.windows.length;
     }
     doneNow += round.length;
@@ -321,10 +331,11 @@ async function score(): Promise<void> {
   ];
   // The windows question (SMD-1305; the header explains the arms). One query
   // per question fetches every filtered thought with its whole-vector
-  // similarity and its best window's — an exact scan, OFFSET 0 the planner
-  // fence so it cannot become an HNSW walk that returns short under a
-  // filter — and each direct arm is a rule over those two numbers, ranked
-  // here. These arms measure vectors, and must not measure plans.
+  // similarity and its best window's, and each direct arm is a rule over those
+  // two numbers, ranked here. The scan is exact by its shape: nothing in it is
+  // ordered by distance or limited, so the planner has no index-ordered path
+  // to take and no HNSW walk can return short under the filter. These arms
+  // measure vectors, and must not measure plans.
   type Scored = { id: string; whole: number | null; win: number | null; est: number };
   const scoredCache = new Map<string, Scored[]>();
   const scoredFor = async (qv: string, q: Question): Promise<Scored[]> => {
@@ -333,12 +344,20 @@ async function score(): Promise<void> {
     const rows = (await sql.unsafe(
       `SELECT t.id, 1 - (t.embedding <=> $1::vector) AS whole,
               (SELECT max(1 - (c.embedding <=> $1::vector)) FROM ${CHUNKS} c WHERE c.thought_id = t.id) AS win
-       FROM thoughts t WHERE t.metadata @> $2::jsonb OFFSET 0`,
+       FROM thoughts t WHERE t.metadata @> $2::jsonb`,
       // The object, as above: Bun stringifies a ::jsonb parameter itself.
       [qv, filterFor(q)])) as { id: string; whole: number | null; win: number | null }[];
-    // The thought's estimated length, from the loader's own text; a twin's
-    // sessions share it.
-    const scored = rows.map((r) => ({ ...r, est: estimateTokens(sessions.get(idToSids.get(r.id)![0])!.text) }));
+    // The thought's estimated length, from the loader's own text. A twin's
+    // sessions share it, and under OB1_EVAL_MAX_QUESTIONS only the kept
+    // histories' sessions are in memory, so take whichever of the row's ids is
+    // (first review pass: the first id could be a pruned one).
+    const scored = rows.map((r) => {
+      const own = idToSids.get(r.id);
+      if (!own) throw new Error(`CONTROL FAILED: the history filter admitted ${r.id}, which the loader did not record.`);
+      const sid = own.find((x) => sessions.has(x));
+      if (!sid) throw new Error(`CONTROL FAILED: ${r.id} stands for no session in this run (${own.join(", ")}).`);
+      return { ...r, est: estimateTokens(sessions.get(sid)!.text) };
+    });
     scoredCache.set(q.question_id, scored);
     return scored;
   };
@@ -488,7 +507,7 @@ async function score(): Promise<void> {
     };
     const limit = Number(process.env.OB1_CHUNK_TOKENS) || DEFAULT_MAX_TOKENS;
     const rules: [string, number, number][] = [
-      [`${limit}-token windows above ${limit}${limit === DEFAULT_MAX_TOKENS ? " (shipped)" : ""}`, limit, limit],
+      [`${limit}-token windows above ${limit}${limit === DEFAULT_MAX_TOKENS ? " (the constant before SMD-1305)" : ""}`, limit, limit],
       [`${derived.tokens}-token windows above ${derived.threshold} (derived for ${spec.name})`, derived.threshold, derived.tokens],
     ];
     console.log(`\ntokens embedded, estimated as chunk.ts estimates them, over ${sessions.size.toLocaleString()} sessions:`);
