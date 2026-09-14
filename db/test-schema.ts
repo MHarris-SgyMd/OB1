@@ -2644,4 +2644,286 @@ console.log("\n[27] Migration 028: thought_work_claims.last_error and release_th
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// ── 28. Migration 029: supersession proposals — the candidate rule, the one
+// write, the review path, the queue, and staleness (SMD-1294) ────────────────
+//
+// Everything except the model call, which db/test-live.ts [16] drives through
+// the worker against a stub. The state machine here is what the ticket's
+// Verify names: a proposal's states, the accept path writing supersedes with
+// an audit row, a reject leaving thoughts untouched, and a decided pair never
+// proposed again.
+
+console.log("\n[28] Migration 029: supersession proposals — candidates, the one write, the review path, the queue, staleness (SMD-1294)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_entities`);
+  const KEY = "consolidate:stub@p1";
+  const EXTRACT = "extract:stub@p1";
+  const cols = (await db.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = 'supersession_proposals' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
+  assert(cols.join(",") === "id,older_id,newer_id,verdict,confidence,reason,similarity,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,superseding_id,pointer_written",
+    `supersession_proposals has the seventeen columns, in order (${cols.join(",")})`);
+  for (const fn of ["consolidation_candidates", "record_supersession_proposal", "review_supersession_proposal", "list_supersession_proposals", "consolidation_pool", "stale_entities"]) {
+    assert((await functionsNamed(fn)) === 1, `${fn} is defined once`);
+  }
+  const fks = (await db.query<{ conname: string; deltype: string }>(
+    `SELECT conname, confdeltype AS deltype FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'f' ORDER BY conname`)).rows;
+  assert(fks.length === 2 && fks.every((f) => f.deltype === "c"), `both thought references cascade on delete (${fks.map((f) => `${f.conname}:${f.deltype}`).join(", ")})`);
+  const src029 = readFileSync(join(MIGRATIONS, files.find((f) => f.startsWith("029"))!), "utf8").replace(/--[^\n]*/g, "");
+  assert(!/\bDELETE\s+FROM\b/i.test(src029), "029 contains no DELETE statement — rejection is an UPDATE, and the pass never writes thoughts");
+  const setsOnThoughts = [...src029.matchAll(/\bUPDATE\s+thoughts\s+SET\s+(\w+)/gi)].map((m) => m[1]);
+  assert(setsOnThoughts.length === 2 && setsOnThoughts.every((c) => c === "supersedes"),
+    `…and the only column of thoughts it ever sets is supersedes (${setsOnThoughts.join(", ")})`);
+
+  // A small corpus, dated. upsert_thought stamps now(); the candidate rule is
+  // about capture DAYS, so created_at is moved afterwards by hand (an UPDATE
+  // the audit trigger records as nothing — created_at is not diffed).
+  const seed = async (content: string, at: number, daysAgo: number, meta: Record<string, unknown> = {}) => {
+    const id = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`,
+      [content, JSON.stringify({ metadata: meta }), unit(at)])).rows[0].r.id;
+    await db.query(`UPDATE thoughts SET created_at = now() - make_interval(days => $2) WHERE id = $1`, [id, daysAgo]);
+    return id;
+  };
+  const mention = async (id: string, names: string[]) =>
+    db.query(`SELECT record_thought_entities($1::uuid, $2, $3::jsonb, '[]'::jsonb, NULL, NULL)`,
+      [id, EXTRACT, JSON.stringify(names.map((n) => ({ name: n, type: "topic", confidence: 0.9 })))]);
+  const candidates = async (id: string, k = 5, minSim = 0) =>
+    (await db.query<{ older_id: string; similarity: number; shared_entities: number }>(
+      `SELECT older_id, similarity, shared_entities FROM consolidation_candidates($1::uuid, $2, $3)`, [id, k, minSim])).rows;
+  const supersedesOf = async (id: string) => (await db.query<{ s: string | null }>(`SELECT supersedes AS s FROM thoughts WHERE id = $1`, [id])).rows[0].s;
+
+  // Ten days ago: the decision. Today: its reversal, on the same axis (cosine
+  // 1), sharing "billing". A same-day sibling, an unrelated-subject neighbour
+  // and a far one on another axis test each exclusion.
+  const decision = await seed("we bill monthly, decided", 0, 10, { source: "meeting" });
+  const reversal = await seed("we bill annually now; the monthly plan is withdrawn", 0, 0, { source: "meeting" });
+  const sameDay = await seed("billing note from the same day", 0, 0);
+  const noShare = await seed("a note about deployments, near in vector space", 0, 10);
+  const farAxis = await seed("billing mentioned in passing, far in vector space", 1, 10);
+  await mention(decision, ["billing"]);
+  await mention(reversal, ["billing", "pricing"]);
+  await mention(sameDay, ["billing"]);
+  await mention(noShare, ["deployments"]);
+  await mention(farAxis, ["billing"]);
+
+  // The pool rule, one definition: entities AND a vector AND not superseded,
+  // minus the rows under a key. A thought with entities and no vector, and a
+  // superseded thought, are out (the first review pass's gate, pinned here).
+  const pool = async (key: string | null) => (await db.query<{ id: string }>(`SELECT consolidation_pool($1) AS id`, [key])).rows.map((r) => r.id);
+  const vectorless = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, '{"metadata":{}}'::jsonb, NULL::vector) AS r`, ["billing note whose embedding failed"])).rows[0].r.id;
+  await mention(vectorless, ["billing"]);
+  const universe = await pool(null);
+  assert(universe.length === 5 && !universe.includes(vectorless), `the universe is the five thoughts with entities and a vector; the vectorless one is out (${universe.length})`);
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [sameDay, farAxis]);
+  assert(!(await pool(null)).includes(farAxis) && (await pool(null)).includes(sameDay), "a thought some thought supersedes is out of the pool; the superseding one stays");
+  await db.query(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [sameDay]);
+  assert((await pool(null)).includes(farAxis), "…and re-enters it when the pointer is cleared");
+  await db.query(`SELECT enqueue_thoughts($1, $2::uuid[])`, [KEY, [decision]]);
+  const pooled = await pool(KEY);
+  assert(pooled.length === 4 && !pooled.includes(decision), `under a key, a thought with a claim row is not pooled again (${pooled.length})`);
+  await db.query(`DELETE FROM thought_work_claims WHERE work_type = $1`, [KEY]);
+  await db.query(`DELETE FROM thoughts WHERE id = $1`, [vectorless]);
+
+  const c1 = await candidates(reversal);
+  assert(c1.length === 2 && c1[0].older_id === decision && Math.abs(Number(c1[0].similarity) - 1) < 1e-6 && c1[1].older_id === farAxis,
+    `the reversal's candidates are the older thoughts sharing an entity, nearest first: the decision (cosine 1) then the far one (${c1.map((c) => `${c.older_id === decision ? "decision" : c.older_id === farAxis ? "far" : "?"}@${Number(c.similarity).toFixed(2)}`).join(", ")})`);
+  assert(!c1.some((c) => c.older_id === sameDay), "…a thought captured the same day is not a candidate");
+  assert(!c1.some((c) => c.older_id === noShare), "…nor one sharing no entity, however near");
+  assert(Number(c1[0].shared_entities) === 1, "…and the count of shared entities rides along");
+  assert((await candidates(reversal, 5, 0.5)).length === 1, "a similarity floor drops the far one");
+  assert((await candidates(reversal, 1)).length === 1 && (await candidates(reversal, 1))[0].older_id === decision, "k bounds the list, nearest kept");
+  assert((await candidates(decision)).length === 0, "the OLDER thought has no candidates: a pair is reached from its newer side only");
+  assert(!(await candidates(sameDay)).some((c) => c.older_id === reversal) && (await candidates(sameDay)).some((c) => c.older_id === decision),
+    "the same-day sibling reaches the decision but not the reversal captured on its own day");
+
+  // The one write. A second judge of the pair records nothing.
+  const propose = async (older: string, newer: string, verdict: string, conf = 0.9, reason = "monthly versus annual") =>
+    (await db.query<{ id: string | null }>(
+      `SELECT record_supersession_proposal($1::uuid, $2::uuid, $3, $4, $5, 0.99, $6, NULL) AS id`,
+      [older, newer, verdict, conf, reason, KEY])).rows[0].id;
+  const pid = await propose(decision, reversal, "newer_supersedes_older");
+  assert(typeof pid === "string", "a conflict is recorded as a pending proposal");
+  assert((await propose(decision, reversal, "older_supersedes_newer", 0.2)) === null, "…and the pair recorded again returns NULL, the first verdict standing");
+  let badVerdict = "";
+  try { await propose(decision, reversal, "agree"); } catch (e) { badVerdict = (e as Error).message; }
+  assert(/p_verdict must be/.test(badVerdict), "a verdict outside the three is refused, not stored");
+  const clampOld = await seed("clamp: earlier", 6, 3); const clampNew = await seed("clamp: later", 6, 0);
+  const clamped = await propose(clampOld, clampNew, "conflict_undirected", 1.7);
+  assert(Number((await db.query<{ c: string }>(`SELECT confidence AS c FROM supersession_proposals WHERE id = $1`, [clamped])).rows[0].c) === 1, "a confidence over 1 is clamped to 1, not refused");
+  await db.query(`DELETE FROM supersession_proposals WHERE id = $1`, [clamped]);
+  const row = (await db.query<{ status: string; confidence: string; judge_key: string; similarity: number }>(
+    `SELECT status, confidence, judge_key, similarity FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
+  assert(row.status === "pending" && Number(row.confidence) === 0.9 && row.judge_key === KEY && Math.abs(Number(row.similarity) - 0.99) < 1e-5,
+    `the row is pending, carries confidence, the judge key and the cosine (${JSON.stringify(row)})`);
+  assert((await candidates(reversal)).every((c) => c.older_id !== decision), "a proposed pair is not a candidate again, in any state");
+
+  // The review path. accept writes supersedes on the NEWER thought — the
+  // verdict's direction — through the audit trigger with the reviewer as actor.
+  const review = async (id: string, decision: string, extra: { note?: string; direction?: string; actor?: unknown; force?: boolean } = {}) =>
+    (await db.query<{ r: Record<string, unknown> }>(
+      `SELECT review_supersession_proposal($1::uuid, $2, $3, $4, $5::jsonb, $6::boolean) AS r`,
+      [id, decision, extra.note ?? null, extra.direction ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor), extra.force ?? false])).rows[0].r;
+  const auditBefore = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
+  const acc = await review(pid, "accept", { note: "confirmed in the June minutes", actor: { name: "reviewer", source: "test" } });
+  assert(acc.ok === true && acc.status === "accepted" && acc.superseding_id === reversal && acc.superseded_id === decision && acc.written === true,
+    `accept answers with the pair it wrote (${JSON.stringify(acc)})`);
+  assert((await supersedesOf(reversal)) === decision, "…and the reversal now supersedes the decision");
+  const accRow = (await db.query<{ status: string; superseding_id: string; review_note: string; reviewed_at: string | null }>(
+    `SELECT status, superseding_id, review_note, reviewed_at FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
+  assert(accRow.status === "accepted" && accRow.superseding_id === reversal && accRow.review_note === "confirmed in the June minutes" && accRow.reviewed_at !== null,
+    "…the row is accepted, names the thought it wrote, and keeps the note");
+  const audit = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY id DESC LIMIT 1`, [reversal])).rows[0];
+  const auditAfter = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
+  const supDiff = (audit?.diff as { supersedes?: { before?: unknown; after?: unknown } } | undefined)?.supersedes;
+  assert(auditAfter === auditBefore + 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
+    `the write is one audit row with the reviewer as actor and the supersedes diff (${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
+  const again = await review(pid, "accept");
+  assert(again.ok === false && again.error === "ALREADY_ACCEPTED", "accepting an accepted proposal is refused, not re-written");
+  assert((await candidates(reversal)).length === 1 && (await candidates(reversal))[0].older_id === farAxis, "a thought already superseded is not a candidate on either side");
+
+  // reject of an ACCEPTED proposal undoes its write while it still stands.
+  const rej = await review(pid, "reject", { note: "the June minutes were misread" });
+  assert(rej.ok === true && rej.status === "rejected" && rej.cleared === true, `rejecting an accepted proposal clears the pointer it set (${JSON.stringify(rej)})`);
+  assert((await supersedesOf(reversal)) === null, "…and thoughts.supersedes is NULL again");
+  assert((await db.query<{ s: string | null }>(`SELECT superseding_id AS s FROM supersession_proposals WHERE id = $1`, [pid])).rows[0].s === null, "…with superseding_id cleared");
+  assert((await candidates(reversal)).every((c) => c.older_id !== decision), "a rejected pair is never a candidate again");
+  // A pointer a later edit moved elsewhere is not this proposal's to clear
+  // either: accept (written), move the pointer by hand, reject → untouched.
+  const moved = await review(pid, "accept");
+  assert(moved.ok === true && moved.written === true, "(re-accepted, the pointer written again)");
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [reversal, farAxis]);
+  const rejMoved = await review(pid, "reject");
+  assert(rejMoved.ok === true && rejMoved.cleared === false && (await supersedesOf(reversal)) === farAxis,
+    "rejecting after a later edit repointed the thought clears nothing: the pointer is no longer this proposal's");
+  await db.query(`UPDATE thoughts SET supersedes = NULL WHERE id = $1`, [reversal]);
+  const rejAgain = await review(pid, "reject");
+  assert(rejAgain.ok === true && rejAgain.cleared === false, "rejecting a rejected proposal is idempotent and clears nothing");
+  // ...and a reviewer may change their mind: a rejected proposal can be accepted.
+  const reacc = await review(pid, "accept", { direction: "older" });
+  assert(reacc.ok === true && reacc.superseding_id === decision && (await supersedesOf(decision)) === reversal,
+    "a rejected proposal can be accepted, and --direction overrides the verdict's direction");
+  await review(pid, "reject");
+  assert((await supersedesOf(decision)) === null, "…and rejecting that undoes the overridden write too");
+
+  // An undirected verdict needs the reviewer to say which is current.
+  const undirected = await propose(farAxis, reversal, "conflict_undirected", 0.6, "both name billing terms; neither says it replaces the other");
+  const needDir = await review(undirected!, "accept");
+  assert(needDir.ok === false && needDir.error === "DIRECTION_REQUIRED", "accepting an undirected verdict without --direction is refused");
+  const directed = await review(undirected!, "accept", { direction: "newer" });
+  assert(directed.ok === true && (await supersedesOf(reversal)) === farAxis, "…and with a direction it writes on the thought named");
+
+  // The column holds one predecessor: a second acceptance pointing the same
+  // thought elsewhere is refused with the current pointer named.
+  const third = await propose(decision, reversal, "newer_supersedes_older");
+  assert(third === null, "(the decision/reversal pair still has its row)");
+  const clash = await review(pid, "accept");
+  assert(clash.ok === false && clash.error === "ALREADY_SUPERSEDES" && clash.current === farAxis,
+    `a pointer at a third thought is refused, naming it (${JSON.stringify(clash)})`);
+  await review(undirected!, "reject");
+
+  // A loop is refused: A supersedes B, so B may not be made to supersede A.
+  const loopOlder = await seed("loop: the first version", 2, 20);
+  const loopNewer = await seed("loop: the second version", 2, 5);
+  await mention(loopOlder, ["loops"]); await mention(loopNewer, ["loops"]);
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [loopOlder, loopNewer]);
+  const loopPid = await propose(loopOlder, loopNewer, "newer_supersedes_older");
+  const loop = await review(loopPid!, "accept");
+  assert(loop.ok === false && loop.error === "WOULD_CYCLE", `a pointer that would close a loop is refused (${loop.error})`);
+  assert((await supersedesOf(loopNewer)) === null, "…and nothing was written");
+  // A pointer the acceptance finds already there — set at capture through the
+  // envelope — is not the acceptance's write, and a rejection leaves it
+  // (review pass 1). accept answers written:false and records pointer_written
+  // false; reject clears nothing and says so.
+  const capOld = await seed("capture-set: the earlier note", 5, 9);
+  const capNew = await seed("capture-set: the later note, pointing at the earlier at capture", 5, 0);
+  await mention(capOld, ["capture"]); await mention(capNew, ["capture"]);
+  await db.query(`UPDATE thoughts SET supersedes = $2 WHERE id = $1`, [capNew, capOld]);
+  const capPid = await propose(capOld, capNew, "newer_supersedes_older");
+  const capAcc = await review(capPid!, "accept");
+  assert(capAcc.ok === true && capAcc.written === false, `accepting a proposal whose pointer is already there writes nothing and says so (${JSON.stringify(capAcc)})`);
+  assert((await db.query<{ w: boolean }>(`SELECT pointer_written AS w FROM supersession_proposals WHERE id = $1`, [capPid])).rows[0].w === false, "…and the row records that it wrote nothing");
+  const capRej = await review(capPid!, "reject");
+  assert(capRej.ok === true && capRej.cleared === false && (await supersedesOf(capNew)) === capOld, "rejecting it clears nothing: the capture-time pointer was not this proposal's to clear");
+  const chk = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'supersession_proposals'::regclass AND contype = 'c'`)).rows[0].c;
+  assert(chk === 9, `the table carries nine CHECK constraints, the state machine's among them (${chk})`);
+
+  // The verdict is about the texts as judged. Edit the newer thought after
+  // the proposal: the queue says so, accept refuses EDITED_SINCE, --force
+  // accepts (review pass 3). The fingerprints were taken at judging.
+  const edOld = await seed("edited: the first plan", 7, 8); const edNew = await seed("edited: the second plan, replacing the first", 7, 0);
+  await mention(edOld, ["plans"]); await mention(edNew, ["plans"]);
+  const edPid = await propose(edOld, edNew, "newer_supersedes_older");
+  const fps = (await db.query<{ o: string | null; n: string | null }>(`SELECT older_fingerprint AS o, newer_fingerprint AS n FROM supersession_proposals WHERE id = $1`, [edPid])).rows[0];
+  assert(fps.o === (await fpOf("edited: the first plan")) && fps.n === (await fpOf("edited: the second plan, replacing the first")), "a proposal records both texts' fingerprints as judged");
+  const [beforeEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [edPid])).rows;
+  assert(beforeEdit.older_edited === false && beforeEdit.newer_edited === false, "…and the queue says neither has changed");
+  await db.query(`SELECT update_thought($1::uuid, $2, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`, [edNew, "edited: the second plan, withdrawn; the first stands"]);
+  const [afterEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [edPid])).rows;
+  assert(afterEdit.older_edited === false && afterEdit.newer_edited === true, "after an edit through update_thought the queue flags the newer thought as edited since judged");
+  const edRefused = await review(edPid!, "accept");
+  assert(edRefused.ok === false && edRefused.error === "EDITED_SINCE" && edRefused.newer_edited === true && edRefused.older_edited === false, `accepting a pair whose text moved is refused, naming which side (${JSON.stringify(edRefused)})`);
+  assert((await supersedesOf(edNew)) === null, "…and nothing was written");
+  const edForced = await review(edPid!, "accept", { force: true });
+  assert(edForced.ok === true && (await supersedesOf(edNew)) === edOld, "…and p_force accepts it, the reviewer having read both texts as they are now");
+  await review(edPid!, "reject");
+  // The older side, a whitespace-only edit, and force on an unedited pair.
+  await db.query(`UPDATE thoughts SET content = $2 WHERE id = $1`, [edOld, "edited:   the first   plan"]);
+  const [wsEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals(NULL, 50) WHERE id = $1`, [edPid])).rows;
+  assert(wsEdit.older_edited === false, "a whitespace-only edit normalises to the same fingerprint (016's rule) and is not flagged");
+  await db.query(`UPDATE thoughts SET content = $2 WHERE id = $1`, [edOld, "edited: the first plan, now with a caveat"]);
+  const [oldEdit] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals(NULL, 50) WHERE id = $1`, [edPid])).rows;
+  assert(oldEdit.older_edited === true && oldEdit.newer_edited === true, "an edit to the older side is flagged on that side");
+  const bothRefused = await review(edPid!, "accept");
+  assert(bothRefused.ok === false && bothRefused.error === "EDITED_SINCE" && bothRefused.older_edited === true, "…and refused naming it");
+  const plainForce = await review(pid, "accept", { force: true });
+  assert(plainForce.ok === true && plainForce.written === true, "p_force on an unedited pair is a plain accept");
+  await review(pid, "reject");
+  // The fingerprint recorded is the caller's — the text the judge was sent —
+  // so an edit that landed during the judge call already reads as edited.
+  const raceOld = await seed("race: the text the judge read", 8, 6); const raceNew = await seed("race: the later text", 8, 0);
+  await mention(raceOld, ["race"]); await mention(raceNew, ["race"]);
+  const racePid = (await db.query<{ id: string }>(
+    `SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, NULL, 0.9, $3, NULL, $4, $5) AS id`,
+    [raceOld, raceNew, KEY, await fpOf("race: what the judge actually read, since edited"), await fpOf("race: the later text")])).rows[0].id;
+  const [raceRow] = (await db.query<{ older_edited: boolean; newer_edited: boolean }>(`SELECT older_edited, newer_edited FROM list_supersession_proposals('pending', 50) WHERE id = $1`, [racePid])).rows;
+  assert(raceRow.older_edited === true && raceRow.newer_edited === false, "a proposal recorded with the judged text's fingerprint reads as edited when the row moved during the call");
+  await review(racePid, "reject");
+
+  const missing = await review("00000000-0000-4000-8000-000000000000", "accept");
+  assert(missing.ok === false && missing.error === "NOT_FOUND", "an unknown proposal id is NOT_FOUND");
+  let badDecision = "";
+  try { await review(loopPid!, "maybe"); } catch (e) { badDecision = (e as Error).message; }
+  assert(/must be accept or reject/.test(badDecision), "a decision outside accept/reject is refused");
+
+  // The queue: most confident first, one status or all, both thoughts inline.
+  const list = async (status: string | null, limit = 20) =>
+    (await db.query<Record<string, unknown>>(`SELECT * FROM list_supersession_proposals($1, $2)`, [status, limit])).rows;
+  const pendingList = await list("pending");
+  assert(pendingList.length === 1 && pendingList[0].id === loopPid, `one proposal is pending — the loop one (${pendingList.length})`);
+  const all = await list(null);
+  assert(all.length === 6 && all.every((r, i) => i === 0 || Number(all[i - 1].confidence) >= Number(r.confidence)),
+    `NULL lists every state, most confident first (${all.map((r) => `${r.status}@${r.confidence}`).join(", ")})`);
+  const shown = all.find((r) => r.id === pid)!;
+  assert(shown.older_id === decision && shown.newer_id === reversal && /bill monthly/.test(String(shown.older_content)) && /annually/.test(String(shown.newer_content)) && shown.status === "rejected",
+    "each row carries both thoughts' content and capture time beside the verdict");
+  assert((await list(null, 1)).length === 1 && (await list("accepted")).length === 0, "limit and status filter apply");
+
+  // Staleness: an entity whose newest mention is 100 days old is stale at 90, not at 200.
+  const quiet = await seed("the archive migration, long finished", 3, 100);
+  await mention(quiet, ["archive migration"]);
+  const stale90 = (await db.query<{ name: string; thoughts: number }>(`SELECT name, thoughts FROM stale_entities(interval '90 days', 20)`)).rows;
+  assert(stale90.length === 1 && stale90[0].name === "archive migration" && Number(stale90[0].thoughts) === 1,
+    `stale_entities at 90 days names the one quiet subject (${stale90.map((r) => r.name).join(", ")})`);
+  assert((await db.query(`SELECT * FROM stale_entities(interval '200 days', 20)`)).rows.length === 0, "…and none at 200");
+
+  // A deleted thought takes its proposals with it; the other thought stands.
+  await db.query(`SELECT delete_thought($1::uuid, NULL::jsonb)`, [loopOlder]);
+  assert((await db.query(`SELECT 1 FROM supersession_proposals WHERE id = $1`, [loopPid])).rows.length === 0, "deleting a thought cascades to its proposals");
+  assert((await db.query(`SELECT 1 FROM thoughts WHERE id = $1`, [loopNewer])).rows.length === 1, "…and the other thought of the pair stands");
+
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_entities`);
+}
+
 report();

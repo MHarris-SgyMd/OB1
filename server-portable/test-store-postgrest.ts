@@ -466,5 +466,23 @@ console.log("\n[9] Provenance rides the envelope and reads back over PostgREST t
   assert(/does not exist/.test(bad), `a derived_from naming no thought is refused over PostgREST too (${bad.slice(0, 60)})`);
 }
 
+console.log("\n[10] listSupersessionProposals's rpc shape over PostgREST (migration 029, SMD-1294)");
+{
+  const { id: older } = await store.captureThought({ content: "postgrest queue: monthly", payload: { metadata: {} }, embedding: vec(7) });
+  const { id: newer } = await store.captureThought({ content: "postgrest queue: annually", payload: { metadata: {} }, embedding: vec(7) });
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${older}`;
+  const [{ id: pid }] = await admin`
+    SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'conflict_undirected', 0.6, 'neither says', 0.9, 'consolidate:stub@p1', NULL) AS id`;
+  // The named-argument rpc, with a NULL limit taking the function's default.
+  const pending = await store.listSupersessionProposals({});
+  assert(pending.length === 1 && pending[0].id === pid && pending[0].verdict === "conflict_undirected" && pending[0].confidence === 0.6,
+         `the rpc returns the pending proposal, mapped (${pending.length}: ${pending[0]?.verdict})`);
+  assert(pending[0].older.id === older && pending[0].newer.id === newer && /monthly/.test(pending[0].older.content), "…with both thoughts inline");
+  assert((await store.listSupersessionProposals({ status: null, limit: 5 })).length === 1, "p_status NULL and an explicit limit bind");
+  assert((await store.listSupersessionProposals({ status: "rejected" })).length === 0, "…and a status with no rows is an empty list, not an error");
+  await admin.close();
+}
+
 await store.close();
 report();

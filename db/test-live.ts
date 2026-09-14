@@ -29,7 +29,7 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2045,6 +2045,234 @@ console.log("\n[15] search_thoughts_hybrid admits relative to the top match on r
   const floored = await sql`SELECT content FROM search_thoughts_hybrid(${unit(0)}::vector, ${"a plain question with no identifiers"}, 0.5, 10, ${{}}::jsonb)`;
   assert(floored.length === 0, `an explicit 0.5 floor still excludes every sub-floor row (${floored.length})`);
   await sql`DELETE FROM thoughts`;
+}
+
+// ── 16. db/consolidate.ts — the third consumer, end to end ───────────────────
+//
+// A stub judge answers from the two thoughts it is shown, so the proposals
+// are known exactly; one pair draws prose to exercise the failed path. The
+// worker authenticates with a minted key, so proposals carry a stable agent
+// id and an acceptance is audited under the key's name. Then what SMD-1294's
+// Verify asks: the states, the accept path writing supersedes with an audit
+// row, a reject leaving thoughts untouched, a second run not re-proposing a
+// rejected pair, and the cost line.
+
+console.log("\n[16] db/consolidate.ts: proposals through the claims, against a stub judge (migration 029, SMD-1294)");
+{
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_entities`;
+  const KEY = "consolidate:stub-judge@p2";
+  const EXTRACT = "extract:stub@p1";
+  let calls = 0;
+  let hemlockIsProse = true;
+  const seen: { a: string; b: string }[] = [];
+  const judge = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
+      calls++;
+      const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
+      const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
+      seen.push({ a, b });
+      await Bun.sleep(5);
+      if (hemlockIsProse && /hemlock/.test(a + b)) return Response.json({ choices: [{ message: { content: "I'd rather not say." } }] });
+      let answer: Record<string, unknown>;
+      if (/monthly/.test(a) && /annually/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.92, reason: "monthly billing against annual" };
+      else if (/blue/.test(a) && /green/.test(b)) answer = { verdict: "conflict", supersedes: "unknown", confidence: 0.7, reason: "two brand colours, neither says which stands" };
+      else if (/lowconf/.test(a) && /lowconf/.test(b)) answer = { verdict: "conflict", supersedes: "B", confidence: 0.3, reason: "guessing" };
+      else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "agree", supersedes: "unknown", confidence: 0.8, reason: "both describe the deploy" };
+      else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
+      return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
+    },
+  });
+
+  const seed = async (content: string, axis: number, daysAgo: number, names: string[] = []) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" } }}::jsonb, ${unit(axis)}::vector) AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    if (names.length) {
+      await sql`SELECT record_thought_entities(${id}::uuid, ${EXTRACT}, ${names.map((n) => ({ name: n, type: "topic", confidence: 0.9 }))}::jsonb, '[]'::jsonb, NULL, NULL)`;
+    }
+    return id;
+  };
+  const decision = await seed("We bill monthly, decided in March.", 0, 10, ["billing"]);
+  const reversal = await seed("We bill annually now; the monthly plan is withdrawn.", 0, 0, ["billing", "pricing"]);
+  const blue = await seed("The brand colour is blue.", 1, 7, ["palette"]);
+  const green = await seed("The brand colour is green.", 1, 0, ["palette"]);
+  await seed("The deploy runs from main.", 2, 5, ["deploy"]);
+  await seed("The deploy runs from main, gated on the tests.", 2, 0, ["deploy"]);
+  await seed("The hemlock note, the first.", 3, 3, ["hemlock"]);
+  const hemlockNewer = await seed("The hemlock note, the second.", 3, 0, ["hemlock"]);
+  await seed("lowconf: the first reading", 4, 4, ["readings"]);
+  await seed("lowconf: the second reading", 4, 0, ["readings"]);
+  const noEntities = await seed("A thought nothing has extracted yet.", 5, 0);
+  await seed("The archive migration, long finished.", 6, 30, ["archive"]);
+  // Entities but no vector: extracted, embedding failed at capture. Out of the
+  // pool until reembed.ts fills the vector (review pass 1's gate, pinned here).
+  const vectorless = ((await sql`SELECT upsert_thought(${"A billing note whose embedding failed."}, ${{ metadata: {} }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  await sql`SELECT record_thought_entities(${vectorless}::uuid, ${EXTRACT}, ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+
+  const rawKey = "b".repeat(64);
+  const { hashKey } = await import("../server-portable/auth.ts");
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DATABASE_URL: URL_,
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${judge.port}/v1`,
+    OB1_METADATA_MODEL: "stub-judge",
+    OB1_WORKER_KEY: rawKey,
+    MCP_ACCESS_KEYS: `consolidator:write:${hashKey(rawKey)}`,
+  };
+  const dump = `/tmp/ob1-consolidate-test-${process.pid}.jsonl`;
+  const consolidate = (...extra: string[]): Promise<{ code: number; out: string }> =>
+    runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: env as Record<string, string>, cwd: HERE });
+  const claimCounts = async () =>
+    Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} GROUP BY status`)
+      .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
+  const proposals = async () => (await sql`
+    SELECT id, older_id, newer_id, verdict, confidence, status, judge_key, canonical_agent_id, superseding_id
+    FROM supersession_proposals ORDER BY confidence DESC`) as
+    { id: string; older_id: string; newer_id: string; verdict: string; confidence: string; status: string; judge_key: string; canonical_agent_id: string | null; superseding_id: string | null }[];
+  const supersedesOf = async (id: string) => (await sql`SELECT supersedes FROM thoughts WHERE id = ${id}::uuid`)[0].supersedes as string | null;
+
+  const dry = await consolidate("--dry-run");
+  assert(dry.code === 0 && /Nothing was written/.test(dry.out) && /add 11 thoughts to the pool/.test(dry.out),
+         `--dry-run counts the eleven thoughts with entities and a vector — not the one without entities, nor the one without a vector — and writes nothing (exit ${dry.code}: ${dry.out.split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300)})`);
+  assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0 && (await proposals()).length === 0, "…no claim row, no proposal");
+  assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'consolidator'`)[0].c === 0, "…and it did not register the worker's agent either");
+  const tooLong = await consolidate("--batch", "4", "--k", "5", "--timeout", "120");
+  assert(tooLong.code === 2 && /exceed the --ttl/.test(tooLong.out), "a batch whose k calls could outlive its lease is refused");
+  const badList = await consolidate("--list", "maybe");
+  assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
+
+  // The first run. Five pairs are judged, one of them (the hemlock pair) drawing prose.
+  const first = await consolidate("--workers", "2", "--dump", dump);
+  assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
+         `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
+  assert(/5 pair\(s\) judged — 0\.50 per thought, 500 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
+         `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
+  assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
+         `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);
+  assert(/calls per thousand thoughts/.test(first.out) && /model time per pair/.test(first.out), "…and the cost line: calls per thousand thoughts and model time per pair");
+  const callsAfterFirst = calls;
+  assert(seen.every((p) => !/nothing has extracted/.test(p.a + p.b) && !/embedding failed/.test(p.a + p.b)), "neither the thought without entities nor the one without a vector was shown to the judge");
+  assert(seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)) && !seen.some((p) => /annually/.test(p.a)),
+         "each pair is shown older as A and newer as B");
+  const [agent] = await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'consolidator'`;
+  assert(agent?.id != null, "the worker resolved itself to a stable agent id under its key's name");
+  const p1 = await proposals();
+  assert(p1.length === 2 && p1.every((p) => p.status === "pending" && p.judge_key === KEY && p.canonical_agent_id === agent.id),
+         `two pending proposals, each carrying the judge key and the agent id (${JSON.stringify(p1.map((p) => [p.verdict, p.confidence, p.judge_key])) })`);
+  const directed = p1.find((p) => p.verdict === "newer_supersedes_older")!;
+  const undirected = p1.find((p) => p.verdict === "conflict_undirected")!;
+  assert(directed?.older_id === decision && directed.newer_id === reversal && Number(directed.confidence) === 0.92, "the billing pair is proposed newer-supersedes-older at the judge's confidence");
+  assert(undirected?.older_id === blue && undirected.newer_id === green, "the colour pair is proposed without a direction");
+  const c1 = await claimCounts();
+  assert(c1.succeeded === 10 && c1.failed === 1, `claims: 10 succeeded, 1 failed (${JSON.stringify(c1)})`);
+  const [{ err }] = await sql`SELECT last_error AS err FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${hemlockNewer}::uuid`;
+  assert(/1 of 1 pair\(s\) not judged/.test(err) && /not JSON/.test(err), `the failed row says which pair and why (${err})`);
+  const lines = readFileSync(dump, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { verdict: string; recorded: string | null; proposal: string | null; key: string });
+  assert(lines.length === 4 && lines.every((l) => l.key === KEY), `the dump holds every parseable verdict, four, under the key — the malformed answer is not a verdict (${lines.length})`);
+  assert(lines.filter((l) => l.recorded === "proposed").length === 2 && lines.filter((l) => l.recorded === "under-confidence").length === 1 && lines.filter((l) => l.verdict === "agree").length === 1,
+         "…two proposed, one under confidence, one agree");
+  assert((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c === 0, "the pass wrote nothing to thoughts.supersedes — it proposes");
+
+  // --status, then a second run over an unchanged corpus.
+  const status = await consolidate("--status");
+  assert(status.code === 0 && /11 thoughts with entities — 10 judged, 1 failed/.test(status.out) && /queue: 2 pending \(1 without a direction\), 0 accepted, 0 rejected/.test(status.out),
+         `--status reports the pass and the queue (${status.out.split("\n").filter((l) => /status:|queue:/.test(l)).join(" | ").trim()})`);
+  const second = await consolidate();
+  assert(second.code === 1 && /0 thought\(s\) judged, 0 failed/.test(second.out) && calls === callsAfterFirst, "a second run has nothing to judge, makes no call, and still exits 1 for the failed row");
+
+  // --list prints both thoughts, the IDs, and the decision each row takes.
+  const list = await consolidate("--list");
+  assert(list.code === 0 && /2 pending proposal\(s\)/.test(list.out) && /the NEWER thought supersedes the older/.test(list.out) && /conflict, direction not stated/.test(list.out),
+         "--list names both verdicts");
+  assert(list.out.includes(`ID: ${reversal}`) && list.out.includes(`ID: ${decision}`) && list.out.includes(`--accept ${directed.id}`) && list.out.includes(`--accept ${undirected.id} --direction <newer|older>`),
+         "…with the thought ids and the accept command, asking for a direction where the judge gave none");
+
+  // The review path, through the worker's flags, audited under the key's name.
+  const needDir = await consolidate("--accept", undirected.id);
+  assert(needDir.code === 1 && /pass --direction newer or --direction older/.test(needDir.out), "accepting the undirected proposal without a direction is refused with the fix");
+  assert((await supersedesOf(green)) === null, "…and nothing was written");
+  const accUndirected = await consolidate("--accept", undirected.id, "--direction", "newer");
+  assert(accUndirected.code === 0 && new RegExp(`accepted ${undirected.id}: ${green} now supersedes ${blue}`).test(accUndirected.out), "…with a direction it is accepted");
+  assert((await supersedesOf(green)) === blue, "…and green supersedes blue");
+  const accDirected = await consolidate("--accept", directed.id, "--note", "confirmed in the June minutes");
+  assert(accDirected.code === 0 && (await supersedesOf(reversal)) === decision, "the directed proposal is accepted as the judge directed it");
+  const audits = await sql`
+    SELECT actor_name, canonical_agent_id, author_session_id, diff FROM thought_audit
+    WHERE action = 'update' AND thought_id IN (${green}::uuid, ${reversal}::uuid) ORDER BY id`;
+  assert(audits.length === 2 && audits.every((a: { actor_name: string; canonical_agent_id: string; author_session_id: string }) => a.actor_name === "consolidator" && a.canonical_agent_id === agent.id && a.author_session_id === KEY),
+         `each acceptance is one audit row under the worker's key name, agent id and pass key (${JSON.stringify(audits.map((a: { actor_name: string }) => a.actor_name))})`);
+  assert(audits.every((a: { diff: { supersedes?: { after?: string } } }) => a.diff.supersedes?.after !== undefined), "…whose diff is the supersedes pointer");
+  const again = await consolidate("--accept", directed.id);
+  assert(again.code === 1 && /already accepted/.test(again.out), "accepting twice is refused");
+  const rej = await consolidate("--reject", directed.id, "--note", "misread");
+  assert(rej.code === 0 && /the supersedes pointer this proposal had set is cleared/.test(rej.out) && (await supersedesOf(reversal)) === null,
+         "rejecting an accepted proposal clears the pointer it set");
+  const p2 = await proposals();
+  assert(p2.find((p) => p.id === directed.id)?.status === "rejected" && p2.find((p) => p.id === undirected.id)?.status === "accepted" && p2.find((p) => p.id === undirected.id)?.superseding_id === green,
+         "the rows say rejected and accepted, the accepted one naming the thought it wrote");
+  // The staleness guard through the CLI: edit the older thought after the
+  // verdict, and the queue marks it, accept refuses with the fix, --force
+  // without --accept is refused, --accept --force writes, and a reject
+  // clears (review pass 4 pinned what pass 3 promised).
+  await sql`SELECT update_thought(${decision}::uuid, ${"We bill monthly, decided in March (minutes attached)."}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const listEdited = await consolidate("--list", "all");
+  assert(/older \[[0-9-]+\] EDITED SINCE JUDGED/.test(listEdited.out) && listEdited.out.includes(`--accept ${directed.id} --force`) === false,
+         `--list marks the edited side (the directed pair is rejected, so no accept line for it) (${listEdited.out.split("\n").find((l) => /EDITED SINCE/.test(l))?.trim()})`);
+  const staleAccept = await consolidate("--accept", directed.id);
+  assert(staleAccept.code === 1 && /older thought has been edited since the pair was judged/.test(staleAccept.out) && /pass --force/.test(staleAccept.out) && (await supersedesOf(reversal)) === null,
+         "accepting a pair whose text moved is refused, naming the side and the flag, and writes nothing");
+  const forceAlone = await consolidate("--reject", directed.id, "--force");
+  assert(forceAlone.code === 2 && /--force goes with --accept/.test(forceAlone.out), "--force without --accept is refused");
+  const forced = await consolidate("--accept", directed.id, "--force");
+  assert(forced.code === 0 && (await supersedesOf(reversal)) === decision, "--accept --force writes the pointer");
+  const unforced = await consolidate("--reject", directed.id);
+  assert(unforced.code === 0 && (await supersedesOf(reversal)) === null, "…and the reject clears it again");
+
+  const statusAfter = await consolidate("--status");
+  assert(/queue: 0 pending \(0 without a direction\), 1 accepted, 1 rejected/.test(statusAfter.out), "--status counts the decisions");
+
+  // --retry-failed re-judges the failed thought's pairs.
+  hemlockIsProse = false;
+  const retried = await consolidate("--retry-failed");
+  assert(retried.code === 0 && /1 thought\(s\) judged, 0 failed/.test(retried.out) && /1 pair\(s\) judged/.test(retried.out), `--retry-failed judges the one failed thought and exits 0 (exit ${retried.code})`);
+
+  // Start over (the claim rows cleared by hand, 015's rule): the rejected pair
+  // and the accepted pair are never judged again — the candidate rule, not
+  // the claim table, remembers — and the rest are.
+  await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY}`;
+  seen.length = 0;
+  const over = await consolidate();
+  // Nine, not eleven: blue, which green now supersedes, and the decision,
+  // whose edit through update_thought above replaced its text with no vector
+  // (the tool's re-embed is the server's job) — both out by the pool rule.
+  assert(over.code === 0 && /9 thought\(s\) judged/.test(over.out), `with the claim rows cleared every pooled thought is judged again — all but the superseded one and the one whose edit left it vectorless (exit ${over.code}: ${over.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
+  assert(!seen.some((p) => /monthly/.test(p.a) && /annually/.test(p.b)), "…but the rejected pair is not shown to the judge again");
+  assert(!seen.some((p) => /blue/.test(p.a) || /green/.test(p.b)), "…nor the accepted pair, whose thoughts are now superseded and superseding");
+  assert(seen.some((p) => /deploy/.test(p.a)), "…while an undecided pair is");
+  assert((await proposals()).length === 2, "…and no proposal was added: the pairs that would conflict are decided");
+
+  // The pool rule: a thought extracted after the run is judged by the next one.
+  await sql`SELECT record_thought_entities(${noEntities}::uuid, ${EXTRACT}, ${[{ name: "billing", type: "topic", confidence: 0.9 }]}::jsonb, '[]'::jsonb, NULL, NULL)`;
+  const late = await consolidate();
+  assert(late.code === 0 && /pool: 1 thought\(s\) added/.test(late.out) && /1 thought\(s\) judged/.test(late.out), "a thought extracted since the last run is pooled and judged by the next");
+
+  // Staleness: reported, not acted on.
+  const stale = await consolidate("--stale", "20");
+  assert(stale.code === 0 && /1 entity nothing has mentioned in 20 days/.test(stale.out) && /archive/.test(stale.out), `--stale names the quiet subject (${stale.out.split("\n").find((l) => /stale:/.test(l))?.trim()})`);
+  assert(/no entity has gone 60 days/.test((await consolidate("--stale", "60")).out), "…and none at a wider window");
+
+  // The worker never wrote thought_audit itself: the three rows under its name
+  // are the two acceptances and the rejection's clearing.
+  const [{ n: actorRows }] = await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'consolidator'`;
+  assert(Number(actorRows) === 5, `the worker's audit rows are exactly the reviews: three accepts and two cleared rejects (${actorRows})`);
+
+  judge.stop(true);
+  try { unlinkSync(dump); } catch { /* already gone */ }
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_entities`;
 }
 
 await sql.close();
