@@ -18,12 +18,14 @@
  * The answer this harness records: decomposition is declined, and it corrects the
  * ticket's premise. Best strict recall_all@5 is +1.7 (multi-session) and flat
  * temporal; RRF fusion regresses temporal. The premise was that one blended vector
- * ranks each event mid-pool — but the single blended pool ALREADY covers the whole
- * set (that IS the oracle, 99.2% / 95.3%), and ~85% of golds already sit at rank
- * <=2 individually. On the fired questions, decomposition's union covers the SAME
- * golds as the blended pool (a crude heuristic split even LOSES temporal coverage),
- * so decomposition adds no coverage; an LLM split cleanly lifts each event's gold
- * up its OWN sub-pool (rank-0 share 39%->61%), but that does not move strict either.
+ * ranks each event mid-pool — but coverage is NOT the bottleneck: the single
+ * blended pool at the baseline depth (30) already covers the whole set (that IS the
+ * oracle, 99.2% / 95.3%), decomposition's union only reaches the same (fired
+ * coverage 100% / 96.2%), and ~83% of the fired questions' golds already sit at
+ * rank <=2 in the blended pool individually. At equal per-query depth the union
+ * edges out one query, but no further than a deeper query already goes. An LLM
+ * split cleanly lifts each event's gold up its OWN sub-pool (rank-0 share
+ * 39%->61%), yet that does not move strict either.
  * The miss is SET ASSEMBLY: fitting 2-3 mutually-competing golds plus their
  * distractors into five slots. Decomposition removes gold-vs-gold competition (each
  * gold in its own pool) but the merge re-introduces gold-vs-distractor competition
@@ -200,16 +202,18 @@ async function llmSplitUncached(question: string): Promise<string[] | null> {
   } catch { return null; }
   if (!r.ok) return null;
   const txt = ((await r.json()) as any).choices?.[0]?.message?.content ?? "";
-  // Prefer an array that starts with a quoted string, so a stray bracket in prose
-  // ("Here [are] the items: [\"a\",\"b\"]") does not get greedily swallowed into an
-  // unparseable span; fall back to the loose match for other well-formed shapes.
-  const m = txt.match(/\[\s*"[\s\S]*"\s*\]/) ?? txt.match(/\[[\s\S]*\]/);
-  if (!m) return null;
-  try {
-    const arr = JSON.parse(m[0]) as unknown[];
-    const subs = [...new Set(arr.filter((x): x is string => typeof x === "string").map((s) => s.trim()).filter(Boolean))];
-    return subs.length ? subs.slice(0, MAX_SUBQ) : [question]; // a valid empty parse = atomic
-  } catch { return null; }
+  // Try an array that starts with a quoted string first, so a stray bracket in
+  // prose ("Here [are] the items: [\"a\",\"b\"]") is not greedily swallowed into an
+  // unparseable span; if that match fails to parse, fall back to the loose match.
+  for (const re of [/\[\s*"[\s\S]*"\s*\]/, /\[[\s\S]*\]/]) {
+    const m = txt.match(re); if (!m) continue;
+    try {
+      const arr = JSON.parse(m[0]) as unknown[];
+      const subs = [...new Set(arr.filter((x): x is string => typeof x === "string").map((s) => s.trim()).filter(Boolean))];
+      return subs.length ? subs.slice(0, MAX_SUBQ) : [question]; // a valid empty parse = atomic
+    } catch { /* try the next matcher */ }
+  }
+  return null;
 }
 
 // ── Retrieval + fusion ───────────────────────────────────────────────────────
@@ -277,7 +281,7 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
   // something: union vs the one blended pool over the SAME question set. On atomic
   // questions the union IS the blended pool (basePools), so overall coverage is
   // definitionally ~oracle; this pair is the non-definitional comparison.
-  const coverFiredU: Agg = {}; const coverFiredB: Agg = {};
+  const coverFiredU: Agg = {}; const coverFiredB: Agg = {}; const coverFiredB30: Agg = {};
   const probe: Record<string, Record<string, number>> = {}; // slice -> best sub-pool gold-rank histogram
   const probeBlend: Record<string, Record<string, number>> = {}; // slice -> blended-pool gold-rank histogram
   const dump: any[] = [];
@@ -321,12 +325,15 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
       // Same-depth control: the blended pool is truncated to SUBK, the depth each
       // sub-pool is retrieved at, so the comparison is not confounded by the
       // baseline pool's greater POOL (30) depth.
-      const blend = new Set<string>();
-      for (const c of basePools[i].slice(0, SUBK)) for (const sid of (idToSids.get(c.id) ?? []).filter((s) => hay.has(s))) blend.add(sid);
-      coverFiredU[q.question_type] ??= [0, 0]; coverFiredB[q.question_type] ??= [0, 0];
-      coverFiredU[q.question_type][1]++; coverFiredB[q.question_type][1]++;
+      const sessionsIn = (pool: Ranked) => { const s = new Set<string>();
+        for (const c of pool) for (const sid of (idToSids.get(c.id) ?? []).filter((x) => hay.has(x))) s.add(sid); return s; };
+      const blend = sessionsIn(basePools[i].slice(0, SUBK)); // same depth as the sub-pools
+      const blend30 = sessionsIn(basePools[i]);              // one query at full POOL depth
+      coverFiredU[q.question_type] ??= [0, 0]; coverFiredB[q.question_type] ??= [0, 0]; coverFiredB30[q.question_type] ??= [0, 0];
+      coverFiredU[q.question_type][1]++; coverFiredB[q.question_type][1]++; coverFiredB30[q.question_type][1]++;
       if (covered(present)) coverFiredU[q.question_type][0]++;
       if (covered(blend)) coverFiredB[q.question_type][0]++;
+      if (covered(blend30)) coverFiredB30[q.question_type][0]++;
     }
     // guard: an atomic question takes the baseline path — it reuses basePools[i]
     // (the same pool the baseline arm scores) and fuse() returns a single pool
@@ -363,8 +370,9 @@ async function runDecomp(name: string, decompose: (q: string) => Promise<string[
   }
   report(`${name} strict@5`, strict);
   report(`${name} union-coverage (all q)`, cover);
-  report(`${name} coverage, fired q: union`, coverFiredU);
-  report(`${name} coverage, fired q: blended`, coverFiredB);
+  report(`${name} cover fired: union`, coverFiredU);
+  report(`${name} cover fired: blended@subk`, coverFiredB);
+  report(`${name} cover fired: blended@pool`, coverFiredB30);
   const firePct = pct(fired, questions.length);
   console.log(`  fire ${firePct} (${fired}/${questions.length} decomposed >1); mean sub-qs when fired ${(subqFiredTotal / (fired || 1)).toFixed(2)}; ` +
     `atomic path reuses baseline pool ${invariantOk}/${invariantN}`);

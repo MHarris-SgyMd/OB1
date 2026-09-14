@@ -1026,17 +1026,16 @@ fusion here, and both arms land on the same tally under it.)
 
 **It corrects the ticket's premise, and it is not enough.** The premise was that
 one blended vector ranks each event mid-pool. But **coverage is not the
-bottleneck**: a single blended query at the baseline depth (30) already covers the
-whole set — that is the oracle (99.2% / 95.3%) — and decomposition only reaches
-the same, its union covering 100% / 96.2% of the fired questions' golds. At *equal*
-per-query depth (`subk` 20) the multi-query union does edge out one query (blended
-98.0% / 92.3% on the same fired questions), so several vectors retrieve marginally
-more than one for the same budget — but no more than one *deeper* query already
-gets, and the crude heuristic's bare "Y"-fragment sub-queries do worse than that
-(86.4% union). What an LLM split *does* change is per-event **rank** — each event's
+bottleneck**. On the fired questions the decomposed union covers **100% / 96.2%**
+of the golds — and one blended query at the baseline depth (30) reaches exactly the
+same **100% / 96.2%** on those same questions. At *equal* per-query depth (`subk`
+20) the union does edge out one query (blended 98.0% / 92.3%), so several vectors
+retrieve marginally more than one for the same budget — but no further than one
+*deeper* query already goes; the crude heuristic even trails a deeper single query
+on temporal (86.4% union vs 90.9%). What an LLM split *does* change is per-event **rank** — each event's
 gold, given its own sub-pool, rises (best rank of each gold within any single
-sub-pool vs its rank in the blended pool, both truncated to `subk` 20 for a
-same-depth comparison; fired questions):
+sub-pool — natively `subk` 20 deep — vs its rank in the blended pool truncated to
+`subk` 20 for a same-depth comparison; fired questions):
 
 | gold rank (fired questions) | rank 0 | 1–2 | 3–4 | 5–9 | 10+ | absent |
 | --- | --- | --- | --- | --- | --- | --- |

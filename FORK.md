@@ -5760,14 +5760,13 @@ fusion here.)
 
 **It corrects the ticket's premise, and it is not enough.** The premise was that
 one blended vector ranks each event mid-pool — but **coverage is not the
-bottleneck**: a single blended query at the baseline depth (30) already covers the
-whole set (that is exactly the oracle, 99.2% / 95.3%), and decomposition only
-reaches the same, its union covering 100% / 96.2% of the fired questions' golds. At
-*equal* per-query depth (`subk` 20) the multi-query union does edge out one query
-(blended 98.0% / 92.3% on the same questions) — several vectors retrieve marginally
-more than one for the same budget, but no more than one *deeper* query already
-gets. And ~83% of the fired questions' golds already sit at rank ≤ 2 in the blended
-pool individually. What an LLM split changes is per-event **rank** — the share of
+bottleneck**. On the fired questions the decomposed union covers 100% / 96.2% of
+the golds, and one blended query at the baseline depth (30) reaches exactly the
+same 100% / 96.2% on those questions. At *equal* per-query depth (`subk` 20) the
+union does edge out one query (blended 98.0% / 92.3%) — several vectors retrieve
+marginally more than one for the same budget, but no further than one *deeper*
+query already goes. And ~83% of the fired questions' golds already sit at rank ≤ 2
+in the blended pool individually. What an LLM split changes is per-event **rank** — the share of
 golds at rank 0 of their best sub-pool rises from **39% to 61%** (multi-session)
 and 38% to 61% (temporal), with the deep tail shrinking. Yet strict@5 gains at most
 +1.7 points and is flat-to-negative on temporal; RRF *regresses* temporal, because
