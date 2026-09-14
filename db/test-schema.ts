@@ -38,6 +38,9 @@ import {
   DEFAULT_CHUNK_CONTEXT,
   resolveBackfillLimit,
   ACCEPTED_CAVEAT_PREFIX,
+  CLAIM_EVIDENCE_ROWS_SQL,
+  REEMBED_KEY_MODEL_SQL_RE,
+  REEMBED_OWN_KEY_SQL_RE,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2924,6 +2927,21 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_entities`);
+}
+
+console.log("\n[29] Migration 030's substituted literals are pinned — 021's grammar, the caveat prefix, the own-key spelling, the evidence rows (SMD-1193)");
+{
+  // 030 is hashed as a template: what it DOES on a brain where it is still
+  // pending, and what every --reapply does, comes from these config.mjs values
+  // at run time, with no drift signal from the ledger. Changing one is a data
+  // migration and gets a new file; this pins the spellings applied brains ran.
+  const file021 = readFileSync(join(MIGRATIONS, "021_embedding_model_per_row.sql"), "utf8");
+  assert(file021.includes(`'${REEMBED_KEY_MODEL_SQL_RE}'`), "REEMBED_KEY_MODEL_SQL_RE is 021's inline regex, byte for byte — 021 decides what is evidence");
+  assert(REEMBED_OWN_KEY_SQL_RE === "^reembed:.+@(0|[1-9][0-9]*)$", "the own-key regex is the canonical spelling poolModelFor compares");
+  assert(ACCEPTED_CAVEAT_PREFIX === "kept the vector it had; accepted by the operator: ", "the caveat prefix is the spelling accepted rows carry");
+  const substituted030 = subst(readFileSync(join(MIGRATIONS, "030_label_from_claims_excludes_accepted.sql"), "utf8"));
+  // Twice in the statements, once more where the header names the template.
+  assert(substituted030.split(CLAIM_EVIDENCE_ROWS_SQL).length >= 3 && !/\{\{/.test(substituted030), "030's substituted text carries the shared evidence rows in both statements and no unresolved template");
 }
 
 report();

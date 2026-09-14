@@ -101,7 +101,10 @@ const has = (name: string) => args.includes(`--${name}`);
       continue;
     }
     if (name !== null && TAKES_NONE.has(name)) continue;
-    console.error(`unknown argument: ${a}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
+    // Echo the shape, not the value: `--url=postgres://user:PASSWORD@host/db`
+    // or a bare URL would otherwise put a password in the log.
+    const shown = name !== null ? (name.includes("=") ? `--${name.split("=")[0]}=… (a value joined with "="; give it as --${name.split("=")[0]} <value>)` : a) : /:\/\//.test(a) ? "<a URL>" : a;
+    console.error(`unknown argument: ${shown}${name === null ? " (a value where no flag takes one)" : ""}\n${USAGE}`);
     process.exit(2);
   }
 }
@@ -384,12 +387,19 @@ async function reportSeeds(m: Migration): Promise<void> {
 // once rather than freezing every reader behind 001's ACCESS EXCLUSIVE for ever
 // — the banner says to stop the writers first. The seeds check runs after the
 // commit for every file that seeds, as on a first apply.
-if (reapply) {
+// 021's evidence backfill runs whenever 021 runs: under --reapply, and on a
+// plain run where 021 is pending — a brain built by hand through 021 and later
+// adopted by "just run them", or a ledger hole. The gate below reads the rows
+// it would label from that 030 would then leave, in both cases; the other
+// judgements are the re-run's own. The one filename in this loop, because the
+// hazard is that file's block and no header line could carry it (021 is hashed).
+const runs021 = reapply || migrations.some((m) => m.name.startsWith("021_") && !applied.has(m.name));
+if (runs021) {
   // Judged whole, before anything runs, and the same under --dry-run — which
   // says "would refuse" where the run says "refusing", so a green dry run is
   // never followed by a red run. Every refusal is reported, not the first.
   const refusals: { code: number; text: string }[] = [];
-  const drifted = migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha);
+  const drifted = reapply ? migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha) : [];
   if (drifted.length > 0) {
     refusals.push({
       code: 1,
@@ -398,26 +408,64 @@ if (reapply) {
         "  Migrations are append-only. If the edit was intentional and the database already reflects it, update schema_migrations.sha256 by hand, then re-run.",
     });
   }
-  const floor = migrations.find((m) => tooOldFor(m));
+  const floor = reapply ? migrations.find((m) => tooOldFor(m)) : undefined;
   if (floor) refusals.push({ code: 1, text: `${floor.name} would fail on the pgvector floor.` + floorMessage(floor, true) });
   // The catalog, read by relation (to_regclass) rather than by name in
   // information_schema, which sees a `thoughts` in any schema the role can
   // read; and the eight-argument signature names the vector type, which
   // to_regprocedure cannot parse before pgvector is installed — asked only
-  // where the type resolves.
-  const [{ has_config, has_claims, has_label, has_edit, width }] = (await sql`
-    SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
-           to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
-           EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
-           CASE WHEN to_regtype('vector') IS NULL THEN false
-                ELSE EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
-                               AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') END AS has_edit,
-           (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped) AS width`) as
-    { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null }[];
+  // where the type resolves. Every read here is guarded: a role without
+  // SELECT on the claim table, or a row the query cannot evaluate, is a
+  // refusal that names the error, not a stack trace with the connection open.
+  let probe: { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null };
+  let hazards: { id: string; work_type: string }[] = [];
+  let record: Record<string, string> = {};
+  try {
+    [probe] = (await sql`
+      SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
+             to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
+             EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
+             CASE WHEN to_regtype('vector') IS NULL THEN false
+                  ELSE EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
+                                 AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') END AS has_edit,
+             (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped) AS width`) as
+      { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null }[];
+    if (probe.has_config && reapply) {
+      const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model')`) as { key: string; value: string }[];
+      record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    }
+    if (probe.has_claims) {
+      // The rows 021's block, run as written, would label from an acceptance and
+      // 030 would then leave: the difference of the two rules, not a case
+      // encoded by hand. 021 labels an unlabelled thought with a vector from a
+      // row at its latest finished_at when `updated_at <= finished_at` — one
+      // row of a tie, unnamed, so every accepted row at that time counts here.
+      // 030 takes the label back only for an own-key acceptance over a thought
+      // not written since the row's enqueue. Whatever 021 labels that 030 does
+      // not revert is refused. The rows are config.mjs's, as 030 reads them;
+      // the latest time per thought is this reader's own window over them.
+      hazards = (await sql.unsafe(
+        "SELECT DISTINCT t.id::text AS id, e.work_type FROM thoughts t JOIN (" +
+          `SELECT r.*, max(r.finished_at) OVER (PARTITION BY r.thought_id) AS latest FROM (${CLAIM_EVIDENCE_ROWS_SQL}) r` +
+          ") e ON e.thought_id = t.id " +
+          "WHERE e.finished_at = e.latest AND e.accepted AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
+          (probe.has_label ? " AND t.embedding_model IS NULL" : "") +
+          " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" +
+          " ORDER BY 2, 1"
+      )) as { id: string; work_type: string }[];
+    }
+  } catch (err) {
+    console.error(`  ✗  ${reapply ? "--reapply" : "021_embedding_model_per_row.sql"}  could not be judged: ${(err as Error).message}`);
+    for (const line of explainFailure(err, null, reapply)) console.error(line);
+    console.error("  The checks before the run read pg_attribute, pg_proc, ob1_config and thought_work_claims; this role could not. Nothing was written.");
+    await sql.close();
+    process.exit(1);
+  }
+  const { has_config, has_label, has_edit, width } = probe;
   // The column is the width's authority (ob1_config's copy can be edited by
   // hand); 006 refuses a shell whose width differs from it — inside the
   // transaction, after a dry run had said green. Judged here, both modes.
-  if (width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
+  if (reapply && width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
     refusals.push({
       code: 2,
       text:
@@ -425,59 +473,44 @@ if (reapply) {
         `  the transaction. Set OB1_EMBEDDING_DIM=${width}; changing the width is a re-embed of every row, not a re-run.`,
     });
   }
-  if (has_config) {
-    const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model', 'chunk_context')`) as { key: string; value: string }[];
-    const record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    const shell: Record<string, string> = { embedding_model: SUBSTITUTIONS.EMBEDDING_MODEL, chunk_context: SUBSTITUTIONS.CHUNK_CONTEXT };
-    const differ = Object.entries(shell).filter(([k, v]) => k in record && record[k] !== v);
-    if (differ.length) {
-      refusals.push({
-        code: 2,
-        text:
-          `${differ.map(([k, v]) => `ob1_config records ${k} = ${record[k]} and this shell would re-record it as ${v}`).join("; ")} —\n` +
-          "  006 and 013 write their INSERT … ON CONFLICT DO UPDATE again on a re-run. Run from a shell configured as the brain is\n" +
-          "  (OB1_EMBEDDING_MODEL, OB1_CHUNK_CONTEXT), or change the record on purpose: the embedding model is reembed.ts\n" +
-          "  --switch-model's to record; chunk_context is preflight's to compare.",
-      });
-    }
+  // The record 006 would write again from this shell. The model only: the
+  // width is the column's (above), and 013's chunk_context IS "what was
+  // configured when the schema was last migrated" — a flag the operator may
+  // flip between runs by 013's own header, so re-recording it is the update,
+  // not a change to refuse.
+  if (reapply && has_config && "embedding_model" in record && record.embedding_model !== SUBSTITUTIONS.EMBEDDING_MODEL) {
+    refusals.push({
+      code: 2,
+      text:
+        `ob1_config records embedding_model = ${record.embedding_model} and this shell would re-record it as ${SUBSTITUTIONS.EMBEDDING_MODEL} —\n` +
+        "  006 writes its INSERT … ON CONFLICT DO UPDATE again on a re-run, and every reader of the record would follow the shell.\n" +
+        "  Run from a shell configured as the brain is (OB1_EMBEDDING_MODEL), or change the record on purpose with\n" +
+        "  reembed.ts --switch-model, which moves the corpus with it.",
+    });
   }
-  if (has_claims) {
-    // The rows 021's block, run as written, would label from an acceptance and
-    // 030 would then leave: the difference of the two rules, not a case
-    // encoded by hand. 021 labels an unlabelled thought with a vector from a
-    // row at its latest finished_at when `updated_at <= finished_at` — one
-    // row of a tie, unnamed, so every accepted row at that time counts here.
-    // 030 takes the label back only for an own-key acceptance over a thought
-    // not written since the row's enqueue. Whatever 021 labels that 030 does
-    // not revert is refused. The rows are config.mjs's, as 030 reads them.
-    const hazards = (await sql.unsafe(
-      `SELECT DISTINCT t.id::text AS id, e.work_type FROM thoughts t JOIN (${CLAIM_EVIDENCE_ROWS_SQL}) e ON e.thought_id = t.id ` +
-        "WHERE e.finished_at = e.latest AND e.accepted AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
-        (has_label ? " AND t.embedding_model IS NULL" : "") +
-        " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" +
-        " ORDER BY 2, 1"
-    )) as { id: string; work_type: string }[];
+  {
     if (hazards.length) {
       const keys = [...new Set(hazards.map((h) => h.work_type))];
       const shown = hazards.slice(0, 50);
+      const again = reapply ? "--reapply" : "the migrator";
       // The way back depends on the schema: reembed.ts runs only against 021's
       // whole (the column and the eight-argument update_thought), so on an
       // older schema — where such a row can only have been written by hand,
       // since --accept-failed refuses it too — the remedy is the statement
       // --retry-fallbacks would run, or the tool loops the operator between
-      // two refusals.
+      // two refusals. One statement per key, every row of it.
       const wayBack = has_label && has_edit
         ? "  Return them to their pool first — bun reembed.ts --url … --job <key> --retry-fallbacks, which spends the acceptance — or retire\n" +
-          "  the key if it is superseded (--retire <key>), then run --reapply again."
+          `  the key if it is superseded (--retire <key>), then run ${again} again.`
         : "  This schema predates 021, so reembed.ts refuses to run against it and cannot return them; --accept-failed refuses it too, so\n" +
-          "  these rows were written by hand. Return each as --retry-fallbacks would, then run --reapply again:\n" +
-          // requeue()'s statement in reembed.ts, per row: the caveat gone, the
+          `  these rows were written by hand. Return them as --retry-fallbacks would, then run ${again} again:\n` +
+          // requeue()'s statement in reembed.ts, per key: the caveat gone, the
           // attempts reset, the lease cleared; claimed_at stays, as there.
-          shown.map((h) => `    UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = '${h.work_type}' AND thought_id = '${h.id}';`).join("\n");
+          keys.map((k) => `    UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = '${k.replace(/'/g, "''")}' AND thought_id IN (${hazards.filter((h) => h.work_type === k).map((h) => `'${h.id}'`).join(", ")});`).join("\n");
       refusals.push({
         code: 2,
         text:
-          `021's evidence backfill, re-run as written, would label ${hazards.length} unlabelled thought(s) from an acceptance that\n` +
+          `021's evidence backfill, ${reapply ? "re-run" : "run"} as written, would label ${hazards.length} unlabelled thought(s) from an acceptance that\n` +
           `  migration 030 would not take back — under a suffixed key, or written since the row was enqueued (${keys.join(", ")}):\n` +
           shown.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
           (hazards.length > shown.length ? `\n    … and ${hazards.length - shown.length} more` : "") +
@@ -486,14 +519,16 @@ if (reapply) {
     }
   }
   const recorded = migrations.filter(reapplies).length;
-  console.log(
-    `  ${dryRun ? "would re-apply" : "re-applying"} every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a 10 s lock timeout —\n` +
-      "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
-      "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
-      "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
-  );
+  if (reapply) {
+    console.log(
+      `  ${dryRun ? "would re-apply" : "re-applying"} every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a 10 s lock timeout —\n` +
+        "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
+        "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
+        "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
+    );
+  }
   if (refusals.length) {
-    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} --reapply: ${r.text}`);
+    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} ${reapply ? "--reapply" : "to apply 021"}: ${r.text}`);
     console.error(`\n  Nothing was written.`);
     await sql.close();
     process.exit(Math.max(...refusals.map((r) => r.code)));

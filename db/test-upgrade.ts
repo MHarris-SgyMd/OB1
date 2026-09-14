@@ -435,14 +435,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
            /cd db && bun migrate\.ts --url … --reapply\s*$/m.test(status.out) && !/re-run the body/.test(status.out),
          `reembed.ts --status on the baselined brain names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
 
+  // 021 pending too, from here on: a ledger hole on the very file whose block
+  // the gate is about, so a plain run reaches it.
+  await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const ledgerBefore = await ledger();
 
   // --dry-run says what a re-run is, and writes nothing.
   const dry = await migrate("--reapply", "--dry-run");
   assert(dry.code === 0 && /would re-apply every migration/.test(dry.out) && !/^\s+re-applying every migration/m.test(dry.out) &&
-           /021_embedding_model_per_row\.sql\s+would re-apply/.test(dry.out) && /030_label_from_claims_excludes_accepted\.sql\s+would apply/.test(dry.out) &&
-           new RegExp(`would apply 1, would re-apply ${MIGRATIONS.length - 1}, skipped 0`).test(dry.out),
-         `--reapply --dry-run says it would re-apply every recorded migration and apply the pending one (exit ${dry.code})`);
+           /021_embedding_model_per_row\.sql\s+would apply/.test(dry.out) && /022_capture_replaces_chunks\.sql\s+would re-apply/.test(dry.out) && /030_label_from_claims_excludes_accepted\.sql\s+would apply/.test(dry.out) &&
+           new RegExp(`would apply 2, would re-apply ${MIGRATIONS.length - 2}, skipped 0`).test(dry.out),
+         `--reapply --dry-run says it would re-apply every recorded migration and apply the pending ones (exit ${dry.code})`);
   assert((await column()) === 0, "…and writes nothing");
 
   // Refused before BEGIN, nothing written. A shell configured differently from
@@ -472,13 +475,22 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const writtenSince = (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES ('unlabelled; written during the attempt that was refused and accepted', '{}'::jsonb, ${vec}::vector, now() - interval '30 minutes') RETURNING id`)[0].id as string;
   await enqueue(KEY, [writtenSince]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', enqueued_at = now() - interval '2 hours', claimed_at = now() - interval '1 hour', finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${writtenSince}::uuid`;
+  // The same rows refuse a PLAIN run where 021 is pending (its ledger row went
+  // above) — a brain built by hand through 021 and adopted by "just run them",
+  // or a ledger hole: the block would run as written there too.
+  const plainHazard = await migrate();
+  assert(plainHazard.code === 2 && /refusing to apply 021: 021's evidence backfill, run as written, would label 2 unlabelled thought\(s\)/.test(plainHazard.out) &&
+           new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(plainHazard.out) && !/re-applying every migration/.test(plainHazard.out),
+         `a plain run with 021 pending is refused on the same rows (exit ${plainHazard.code})`);
+  assert((await column()) === 0 && Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c) === 0, "…and nothing was written");
   const hazard = await migrate("--reapply");
   assert(hazard.code === 2 && /refusing --reapply: 021's evidence backfill, re-run as written, would label 2 unlabelled thought\(s\) from an acceptance that\n\s+migration 030 would not take back — under a suffixed key, or written since the row was enqueued \(reembed:stub-embed@8, reembed:stub-embed@8:ctx\)/.test(hazard.out) &&
            new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(hazard.out) && new RegExp(`    ${writtenSince}  reembed:stub-embed@8`).test(hazard.out) &&
            // This schema predates 021, so the way back is not a reembed.ts command it would refuse but the statement --retry-fallbacks runs.
            /This schema predates 021, so reembed\.ts refuses to run against it/.test(hazard.out) &&
-           // requeue()'s statement, as reembed.ts spells it: the attempts reset too, claimed_at kept.
-           new RegExp(`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id = '${suffixedHazard}';`).test(hazard.out) &&
+           // requeue()'s statement, as reembed.ts spells it, one per key with every row of it: the attempts reset too, claimed_at kept.
+           new RegExp(`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id IN \\('${suffixedHazard}'\\);`).test(hazard.out) &&
+           new RegExp(`WHERE work_type = 'reembed:stub-embed@8' AND thought_id IN \\('${writtenSince}'\\);`).test(hazard.out) &&
            !/--retry-fallbacks, which spends/.test(hazard.out),
          `the two acceptances 021 would label and 030 would leave refuse the re-run, naming the rows and a way back this schema allows (exit ${hazard.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
@@ -510,11 +522,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const ledgerHole = await ledger();
   const run = await migrate("--reapply");
   assert(run.code === 0, `--reapply exits 0 (${run.code})${run.code === 0 ? "" : `:\n${run.out}`}`);
-  assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 2} recorded, 2 pending\\), in order, in one transaction with a 10 s lock timeout`).test(run.out) &&
+  assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 3} recorded, 3 pending\\), in order, in one transaction with a 10 s lock timeout`).test(run.out) &&
            /Stop the server and any re-embed or extraction worker first/.test(run.out) &&
-           /021_embedding_model_per_row\.sql\s+re-applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied/.test(run.out) &&
-           new RegExp(`applied 2, re-applied ${MIGRATIONS.length - 2}, skipped 0`).test(run.out) && !/already applied/.test(run.out),
-         "…says what it ran: every file in order, the pending ones (the hole, and 030) applied in their place, none skipped, and the operator's precondition");
+           /021_embedding_model_per_row\.sql\s+applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied/.test(run.out) &&
+           new RegExp(`applied 3, re-applied ${MIGRATIONS.length - 3}, skipped 0`).test(run.out) && !/already applied/.test(run.out),
+         "…says what it ran: every file in order, the pending ones (021, the hole at 022, and 030) applied in their place, none skipped, and the operator's precondition");
   const models = Object.fromEntries(
     ((await sql`SELECT id, embedding_model AS m FROM thoughts`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m])
   );
@@ -531,8 +543,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(Number(auditAfter) === Number(auditBefore), "…and writes no audit row");
   assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
   const ledgerAfter = JSON.parse(await ledger()) as { name: string; sha256: string; a: string }[];
-  assert(JSON.stringify(ledgerAfter.filter((r) => !r.name.startsWith("022") && !r.name.startsWith("030"))) === JSON.stringify((JSON.parse(ledgerHole) as { name: string }[])) &&
-           ledgerAfter.some((r) => r.name.startsWith("022")) && ledgerAfter.some((r) => r.name.startsWith("030")),
+  assert(JSON.stringify(ledgerAfter.filter((r) => !/^(021|022|030)/.test(r.name))) === JSON.stringify((JSON.parse(ledgerHole) as { name: string }[])) &&
+           ["021", "022", "030"].every((n) => ledgerAfter.some((r) => r.name.startsWith(n))),
          "the recorded rows are not touched — every row, sha and applied_at as before — and the pending files are recorded");
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument
@@ -549,7 +561,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const value = await migrate("--reapply", "021");
   assert(value.code === 2 && /unknown argument: 021 \(a value where no flag takes one\)/.test(value.out), `--reapply takes no value; one beside it is refused, not dropped (exit ${value.code})`);
   const typo = await migrate("--reapply=021");
-  assert(typo.code === 2 && /unknown argument: --reapply=021/.test(typo.out), `a flag the runner does not have is refused, not a silent plain run (exit ${typo.code})`);
+  assert(typo.code === 2 && /unknown argument: --reapply=… \(a value joined with "="; give it as --reapply <value>\)/.test(typo.out), `a flag the runner does not have is refused, not a silent plain run (exit ${typo.code})`);
+  const joined = await migrate("--url=postgres://u:s3cret@h/d");
+  assert(joined.code === 2 && /unknown argument: --url=…/.test(joined.out) && !/s3cret/.test(joined.out), `a value joined with "=" is refused without echoing it — a URL carries a password (exit ${joined.code})`);
   const both = await migrate("--reapply", "--baseline");
   assert(both.code === 2 && /One or the other/.test(both.out), `--reapply beside --baseline is refused (exit ${both.code})`);
   await sql`UPDATE schema_migrations SET sha256 = 'edited-after-apply' WHERE name LIKE '024%'`;

@@ -94,18 +94,23 @@ judges the pgvector floor as the run does.
 **Refused before anything runs, and `--dry-run` says "would refuse" for the
 same:** a recorded file that changed since it was applied; the pgvector floor; a
 shell whose `OB1_EMBEDDING_DIM` differs from the column's width (006 would
-refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` or
-`OB1_CHUNK_CONTEXT` differs from what `ob1_config` records (006 and 013 would
-re-record it — run from a shell configured as the brain is, or change the record
-on purpose with `reembed.ts --switch-model`); and an
-accepted claim row 021's backfill would label an unlabelled thought from and 030
-would not take back — under a *suffixed* key (`reembed:<model>@<dim>:ctx`), or
-over a thought written since the row was enqueued — return it with `reembed.ts
---job <key> --retry-fallbacks`, or `--retire` the key, first; on a schema older
-than 021, where `reembed.ts` refuses to run, the refusal prints the statement
-`--retry-fallbacks` would run for each row. A *plain* run on that brain, where
-030 is pending, fails at 030 with what is missing and this command, rather than
-a bare "does not exist".
+refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` differs
+from what `ob1_config` records (006 would re-record it — run from a shell
+configured as the brain is, or change the record on purpose with `reembed.ts
+--switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
+own definition is the update); and an accepted claim row 021's backfill would
+label an unlabelled thought from and 030 would not take back — under a
+*suffixed* key (`reembed:<model>@<dim>:ctx`), or over a thought written since
+the row was enqueued — return it with `reembed.ts --job <key>
+--retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
+where `reembed.ts` refuses to run, the refusal prints the statement
+`--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
+a **plain** run too whenever 021 is pending — a brain built by hand through 021
+and adopted by "just run them", or a ledger hole — since the block runs as
+written there as well. A plain run on the baselined brain, where 030 is pending,
+fails at 030 with what is missing and this command, rather than a bare "does
+not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
+remedies name it where the ledger records the migration they find absent.
 
 **Stop the server and any re-embed or extraction worker first.** 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
@@ -1116,7 +1121,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 640 properties (at migration 030), including:
+asserts 644 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

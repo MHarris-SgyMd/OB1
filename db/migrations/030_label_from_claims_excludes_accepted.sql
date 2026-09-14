@@ -83,7 +83,10 @@
 --   stands over an unlabelled thought (or an own-key acceptance over a thought
 --   written since its enqueue, which 021 labels — its bound is the release —
 --   and statement 1 leaves), naming it and the way back. A label the operator
---   wrote by a raw UPDATE is the operator's. And a label 021's block wrote
+--   wrote by a raw UPDATE is the operator's — with the trigger ON, since then
+--   updated_at moved past the bound; written under a hand-held trigger, as a
+--   test models a hand label, it is indistinguishable from 021's block's and
+--   statement 1 takes it back. And a label 021's block wrote
 --   that a metadata-only edit has since moved `updated_at` past the enqueue:
 --   update_thought keeps the label when no content arrives, so the edit is
 --   not evidence about the vector — but nothing here tells it from a

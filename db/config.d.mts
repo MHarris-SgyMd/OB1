@@ -192,10 +192,10 @@ export function summariseCorpusByModel(
 export const ACCEPTED_CAVEAT_PREFIX: string;
 /** Per embedding_model, the rows with a vector whose thought has a standing accepted row under $1, the model's own key exactly; $2 is ACCEPTED_CAVEAT_PREFIX. Needs 015. */
 export const ACCEPTED_BY_MODEL_SQL: string;
-/** 021's claim-key grammar as Postgres regexes: the model up to the last "@", and the width after it. */
+/** 021's claim-key grammar as a Postgres regex (the model up to the last "@"), and the model's OWN key — the canonical spelling, no suffix. */
 export const REEMBED_KEY_MODEL_SQL_RE: string;
-export const REEMBED_KEY_DIM_SQL_RE: string;
-/** Every succeeded claim row under a key naming a model, with model, own_key, accepted, its timestamps and the thought's latest finished_at — what 030 and migrate.ts --reapply's gate read. Needs 015. */
+export const REEMBED_OWN_KEY_SQL_RE: string;
+/** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 and migrate.ts's gate read. Substituted into 030: changing it is a data migration. Needs 015. */
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */

@@ -5959,6 +5959,36 @@ comments); `--url` twice ran against the first (refused). Not taken: one
 `scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
 not need, and folding them is a change to that tool.
 
+**Review, sixth pass (high), at the user's call, triaged.** The accepted-row
+gate ran only under `--reapply`, so a *plain* run applying a pending 021 over a
+live corpus — a brain built by hand through 021 and adopted by README §4's
+"just run them", or a ledger hole — ran the block as written and 030 could not
+take those labels back: the gate runs whenever 021 will, and the plain run says
+"refusing to apply 021" ([7] deletes 021's ledger row and reads it). The own
+key was recomposed with a cast of the width to bigint, so a hand-written width
+past bigint raised out of 030 and the gate — a regex now, the canonical
+spelling (`(0|[1-9][0-9]*)`, no suffix), never a cast. The `latest` window
+column in the shared rows made the subquery a barrier the planner could not
+push the rare `accepted AND own_key` through, so 030's first statement
+evaluated the regexes over every succeeded row (55× at 100k rows, measured):
+the column is the gate's own, wrapped around the shared text. Preflight's
+`edit signature`, `vector models` and `atomic capture` remedies still said
+"apply 021" and "apply 022" where the ledger records them — a loop on the
+baselined brain, which now names `--reapply` as 014's and 023's do. The
+argument scanner echoed `--url=postgres://user:PASSWORD@…` into the log
+(the shape, not the value, now). `chunk_context` was refused as a differing
+record while 013 says the flag may be flipped and the record is "what was
+configured when the schema was last migrated" — re-recording it is the update,
+so only the model is compared. The pre-`BEGIN` reads had no try/catch (a
+refusal naming the error now, not a stack trace with the connection open); the
+pre-021 way back capped its statements at fifty with no marker (one statement
+per key, every row); the constants substituted into 030 — the grammar, the
+prefix, the rows — change what a pending 030 does with no drift signal, so
+`test-schema` pins the literals and the constants say so; 030's header names
+the trigger-off hand label it cannot tell from 021's. Left as tidy-ups: the
+banner on stdout before refusals on stderr, the duplicated requeue spelling,
+the plain loop's dead dry-run branches.
+
 **Review, fifth pass (high), at the user's call, triaged.** Three of its
 findings were consequences of the fourth's canonical-width change, and they
 were right: the SQL grammar had become narrower than 021's hashed `[0-9]+`, so
@@ -6077,8 +6107,9 @@ flag, a flag the runner does not have, `--baseline` beside it, a drifted
 recorded file; and that the re-applied schema has a fresh apply's columns and
 functions; that `--dry-run` from a differing shell says "would refuse"; and
 that a plain run on the baselined brain, 030 pending, fails at 030 naming what
-is missing and `--reapply`, and that a shell whose width differs from the
-column is refused before `BEGIN`, dry run included. [8] applies 030 onto a
+is missing and `--reapply`; that a shell whose width differs from the column
+is refused before `BEGIN`, dry run included; and that a plain run with 021
+pending is refused on the same accepted rows. [8] applies 030 onto a
 populated 029 holding twelve labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
@@ -6092,8 +6123,9 @@ earlier pass),
 a mislabel with an earlier pass (taken back and relabelled at it, in the one
 block), a plain row (labelled), a label with no claim row (not read) — no
 `updated_at` moved, no audit row, the trigger enabled, and a second apply a
-no-op. `test-preflight` pins the 023 and 014 wordings. `test-upgrade` 99/99,
-`test-preflight` 174/174, `test-schema` 640/640, `test-live` 419/419, `tsc`
+no-op. `test-preflight` pins the 023 and 014 wordings; `test-schema` [29] pins
+the literals 030 is substituted with. `test-upgrade` 102/102,
+`test-preflight` 174/174, `test-schema` 644/644, `test-live` 419/419, `tsc`
 clean, fork checker PASS (on the tree with SMD-1304's and SMD-1294's changes
 merged in). Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's

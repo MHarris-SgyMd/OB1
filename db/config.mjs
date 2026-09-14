@@ -827,14 +827,21 @@ export function reembedKey(model, dim) {
  * narrower grammar would let 021 label from a row it never saw (the fourth
  * review pass tightened this to a canonical width and the fifth found exactly
  * that hole). "The model's own key" is the canonical spelling, as poolModelFor
- * has it: CLAIM_EVIDENCE_ROWS_SQL recomposes `reembed:<model>@<dim>` from the
- * captures and compares, so `reembed:m@08` names a model on both sides and is
- * nobody's own key on both. 030 takes the first as a template value
- * ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another; migrate.ts's
- * --reapply gate reads the constants (SMD-1193).
+ * has it — a width without a leading zero and no suffix — as a regex, never a
+ * cast of the width (a hand-written width past bigint raised out of 030 and
+ * the gate; the sixth review pass), so `reembed:m@08` names a model on both
+ * sides and is nobody's own key on both. 030 takes the first as a template
+ * value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another; migrate.ts's
+ * gate reads the constants (SMD-1193).
+ *
+ * These, and ACCEPTED_CAVEAT_PREFIX, are substituted into migration 030 —
+ * whose file the migrator hashes as a TEMPLATE. Changing any of them changes
+ * what 030 does on every brain where it is still pending, and what every
+ * --reapply does, with no drift signal: that is a data migration, and gets a
+ * new file. db/test-schema.ts pins the literals.
  */
 export const REEMBED_KEY_MODEL_SQL_RE = "^reembed:(.+)@[0-9]+(?::[^@]*)?$";
-export const REEMBED_KEY_DIM_SQL_RE = "^reembed:.+@([0-9]+)(?::[^@]*)?$";
+export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@(0|[1-9][0-9]*)$";
 
 /**
  * @param {string} key
@@ -959,22 +966,23 @@ export const ACCEPTED_BY_MODEL_SQL =
  * The claim rows an evidence backfill reads (SMD-1193): every succeeded row
  * under a key naming a model, with the model, whether the key is the model's
  * OWN (no suffix), whether the row is the operator's acceptance, its three
- * timestamps, and `latest` — the greatest finished_at among the thought's such
- * rows, so a reader can take EVERY row at the latest time rather than one of a
- * tie (two releases in one transaction share now(); 021 picks one of them and
- * says nothing about which). Spelled once: migration 030 takes it as the
- * template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's --reapply gate reads
- * the constant, so the rows the gate refuses and the rows 030 corrects are
- * decided by one text. The caveat prefix is inlined as a literal, so it may
- * hold no quote — asserted below.
+ * timestamps. No window column: the gate wants the greatest finished_at per
+ * thought (021 picks one row of a tie and says nothing about which, so every
+ * accepted row at that time counts), and it wraps this text to get it — a
+ * window function inside the shared subquery made it a barrier the planner
+ * could not push `accepted AND own_key` through, so 030's first statement
+ * evaluated the regexes over every succeeded row (55× slower at 100k rows,
+ * measured in the sixth review pass). Spelled once: migration 030 takes it as
+ * the template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's gate reads the
+ * constant, so the rows the gate refuses and the rows 030 corrects are decided
+ * by one text. The caveat prefix is inlined as a literal, so it may hold no
+ * quote — asserted below.
  */
 export const CLAIM_EVIDENCE_ROWS_SQL =
   "SELECT c.thought_id, c.work_type, c.enqueued_at, c.claimed_at, c.finished_at, " +
   `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +
-  // The model's own key is the canonical spelling — poolModelFor's test, recomposed.
-  `c.work_type = 'reembed:' || substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') || '@' || (substring(c.work_type FROM '${REEMBED_KEY_DIM_SQL_RE}'))::bigint AS own_key, ` +
-  `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted, ` +
-  "max(c.finished_at) OVER (PARTITION BY c.thought_id) AS latest " +
+  `c.work_type ~ '${REEMBED_OWN_KEY_SQL_RE}' AS own_key, ` +
+  `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted ` +
   `FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL AND c.work_type ~ '${REEMBED_KEY_MODEL_SQL_RE}'`;
 if (ACCEPTED_CAVEAT_PREFIX.includes("'")) throw new Error("ACCEPTED_CAVEAT_PREFIX is inlined into SQL as a literal and may not contain a quote");
 
