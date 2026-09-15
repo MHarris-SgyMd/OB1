@@ -25,7 +25,7 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 ## What It Does
 
-A complete meal planning system with recipes, weekly meal plans, and auto-generated shopping lists. Includes a separate shared MCP server so your partner can view plans and check off grocery items without accessing your full Open Brain.
+A complete meal planning system with recipes, weekly meal plans, and auto-generated shopping lists. Includes a separate shared MCP server so your partner can view plans — and, with a write-scoped key, check off grocery items — without accessing your full Open Brain.
 
 **Tables:**
 - `recipes` — Your recipe collection with JSONB ingredients and instructions
@@ -212,7 +212,7 @@ Your spouse/partner follows the [Remote MCP Connection](../../primitives/remote-
 | Connector name | `Meal Planning (Shared)` |
 | URL | The shared server's MCP Connection URL |
 
-They can view meal plans and check off grocery items. They cannot create recipes, modify meal plans, or access other parts of your Open Brain.
+They can view meal plans and recipes; with a write-scoped key they can also check off grocery items. They cannot create recipes, modify meal plans, or access other parts of your Open Brain.
 
 ### 4. Test the Shared Server
 
@@ -247,7 +247,7 @@ Your agent can now:
 - Store and search your recipe collection
 - Plan weekly meals with a mix of recipes and custom entries
 - Auto-generate shopping lists by aggregating recipe ingredients
-- Let your spouse view plans and check off grocery items without full system access
+- Let your spouse view plans (and, with a write-scoped key, check off grocery items) without full system access
 
 The shared server demonstrates a key Open Brain principle: your data, your rules. You control exactly what someone else can see and do.
 

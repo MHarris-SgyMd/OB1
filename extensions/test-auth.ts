@@ -106,11 +106,11 @@ type Via = "x-access-key" | "x-brain-key" | "bearer" | "query";
 const RPC = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
-async function call(s: Server, key: string | null, body: unknown, via: Via = "x-access-key", also: Partial<Record<Via, string>> = {}): Promise<{ status: number; json: any }> {
+async function call(s: Server, key: string | null, body: unknown, via: Via = "x-access-key", also: Partial<Record<Via, string>> = {}, accept = true): Promise<{ status: number; json: any }> {
   const handler = served[SERVERS.indexOf(s)];
   // createClient runs per request, so the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
-  const headers: Record<string, string> = { ...RPC };
+  const headers: Record<string, string> = accept ? { ...RPC } : { "Content-Type": RPC["Content-Type"] };
   const query: string[] = [];
   const present = (form: Via, value: string) => {
     if (form === "query") query.push(`key=${encodeURIComponent(value)}`);
@@ -190,11 +190,23 @@ console.log("\n[where the key may travel]");
     "a wrong x-brain-key beside a right x-access-key does not shadow it");
   assert((await call(s, "wrong-one", LIST, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
     "three wrong forms are three refusals, not one acceptance");
+  // Claude Desktop's connectors send no Accept header; the servers patch one in
+  // by replacing c.req.raw before the key is read from it.
+  assert(toolsOf(await call(s, READ_KEY, LIST, "query", {}, false)).join() === [...s.reads].sort().join(),
+    "a request without an Accept header (the patched c.req.raw) still authenticates from ?key=");
+  assert((await call(s, "not-a-key", LIST, "x-access-key", {}, false)).status === 401,
+    "…and is still refused with a wrong key");
   const health = await served[0](new Request("http://extension.test/", { method: "GET" }));
   assert(health.status === 200 && (await health.json()).status === "ok", "the unauthenticated GET health check still answers");
 }
 
 // ── Drift guards ─────────────────────────────────────────────────────────────
+
+/** Stored functions a tool may call and still be a read; any other `.rpc(` is a write. */
+const RPC_READS = ["crm_search_contacts_fts"];
+/** Whether a tool body (or its handler) writes: a table verb, or an RPC not known to read. */
+const writes = (reach: string) => /\.(insert|update|upsert|delete)\(/.test(reach)
+  || [...reach.matchAll(/\.rpc\(\s*"([^"]+)"/g)].some((m) => !RPC_READS.includes(m[1]));
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -208,13 +220,13 @@ for (const s of SERVERS) {
     const body = text.slice(text.indexOf(`"${w}"`), text.indexOf("\n  );", text.indexOf(`"${w}"`)));
     const handler = body.match(/handle\w+/)?.[0];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
-    assert(/\.(insert|update|upsert|delete)\(/.test(reach), `…${w} does write (its body or handler inserts, updates, upserts or deletes)`);
+    assert(writes(reach), `…${w} does write (its body or handler inserts, updates, upserts, deletes, or calls an RPC not listed as a read)`);
   }
   for (const r of s.reads) {
     const body = text.slice(text.indexOf(`"${r}"`), text.indexOf("\n  );", text.indexOf(`"${r}"`)));
     const handler = body.match(/handle\w+/)?.[0];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
-    assert(!/\.(insert|update|upsert|delete)\(/.test(reach), `…${r} does not write`);
+    assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
   }
   assert(text.includes('from "../_shared/auth.ts"') && text.includes("authenticateRequest(c.req.raw,"),
     "…the key is read and resolved through _shared/auth.ts, every presented form tried");

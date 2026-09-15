@@ -53,33 +53,35 @@ Example: `supabase functions new household-knowledge-mcp`
 🟩 **Mac/Linux:**
 
 ```bash
-curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/index.ts
+curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
 ```
 
 ```bash
-curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/deno.json
+curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
 ```
 
 The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it:
 
+> Two extensions deploy this way today: **Family Calendar** and **Job Hunt**. The other four import this repository's SQL shim (`compat/supabase-sql`, which runs on Bun) and are run from a checkout of this repository rather than deployed as Edge Functions — see `FORK.md`, fix 13.
+
 ```bash
 mkdir -p supabase/functions/_shared
-curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/extensions/_shared/auth.ts
+curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
 🟦 **Windows (PowerShell):**
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
 ```
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
 ```
 
 ```powershell
 New-Item -ItemType Directory -Force supabase\functions\_shared | Out-Null
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
 ```
 
 > Replace `FUNCTION_NAME` and `DOWNLOAD_PATH` with the values from the extension's deployment table.
@@ -90,10 +92,10 @@ The extensions authenticate the way the core Open Brain server does: a key is **
 
 > **Already have keys from a previous extension?** Reuse them — skip to Step 4. All functions in the project share the same secrets.
 
-Mint one from this repository's checkout (it prints the key once, and the line to store):
+Mint one from a checkout of this repository — not your Supabase project folder — with Bun installed (it prints the key once, and the line to store):
 
 ```bash
-cd server-portable && bun keygen.ts --name laptop --scope write
+(cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name laptop --scope write)
 ```
 
 Or by hand — generate a key, then hash it:
@@ -151,13 +153,13 @@ When the extension code is updated in the repo, pull the latest version and rede
 🟩 **Mac/Linux:**
 
 ```bash
-curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/index.ts
+curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
 ```
 
 🟦 **Windows (PowerShell):**
 
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
 ```
 
 Then deploy:

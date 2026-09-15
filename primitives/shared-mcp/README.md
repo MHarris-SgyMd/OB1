@@ -66,7 +66,7 @@ Table: recipes
 
 Table: shopping_list_items
   - Operations: SELECT, INSERT, UPDATE
-  - Why: Spouse can view, add, and check off items
+  - Why: Spouse can view items and, with a write-scoped key, add and check them off
 
 Table: thoughts (NOT SHARED)
 Table: contacts (NOT SHARED)
@@ -240,7 +240,8 @@ Set the shared server's secrets in Supabase (separate from your main server's se
 # Mint a separate, named key for the shared server — read-scoped unless this
 # member should add or check off items (Step 3 of the Deploy an Edge Function
 # primitive shows the by-hand form). The HASH is stored; the key goes in the URL.
-cd server-portable && bun keygen.ts --name spouse --scope read
+# Run from a checkout of this repository, in a subshell so the cwd stays here:
+(cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
 
 # Set secrets
 supabase secrets set MCP_HOUSEHOLD_ACCESS_KEYS=spouse:read:paste-the-hash-here

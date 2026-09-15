@@ -716,22 +716,33 @@ function checkCoreFunctions() {
 // compare guards its lengths first), a call or an index on it, `typeof`, or a
 // literal on the other side — nullish or empty (`if (KEY === undefined)` is a
 // presence check) or a string (`if (KEY === "your-key-here")` is a placeholder
-// check, a different smell). Outside the rule, and said so: `.includes`,
-// `Object.is`, `switch`, and a compare through a class field. Exceptions are
+// check, a different smell). A name re-declared between its binding and a
+// compare — a loop variable, a parameter, a destructure, a catch clause — is
+// another variable, and that compare is not flagged; `key`, `token` and
+// `secret` are common names, and a whole-file rule that did not say so would
+// fail an ordinary loop. Outside the rule, and said so: `.includes`,
+// `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
+// an object property, a helper that returns the key, several declarators on
+// one statement, a read through `Deno.env.toObject()` into a variable — each a
+// spelling the review passes named and this rule does not chase. Exceptions are
 // per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
 // integrations that carry the same compare are listed with the ticket that
 // holds their fix, for exactly the lines each has today — one fixed drops out
 // as stale, one added fails.
-const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\b/i;
+const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
-const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'](${IDENT})["']\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'](${IDENT})["']\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
 /** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
 const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
 /** What on the far side of a compare makes it a presence or placeholder check, not a compare of the credential. */
 const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|"[^"\n]*"|'[^'\n]*'|` + "`[^`\n]*`" + `)`;
 /** What may wrap an inline read on the left of a compare: `!`, `)`, `?? ""`, `|| ""`, `.trim()`. */
 const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
+/** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare. */
+const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*[.(\[?]))`;
+/** Where `N` is declared again — a loop variable, a parameter, a destructure, a catch clause — so a later use is another variable. */
+const redeclared = (N) => new RegExp(String.raw`\b(?:const|let|var)\s+(?:\[[^\]\n]*\b)?${N}\b|\bcatch\s*\(\s*${N}\b|\bfunction\b[^(\n]*\([^)\n]*\b${N}\b[^)\n]*\)|\(([^()\n]*)\)\s*(?::[^=\n]*)?=>|(?<![\w$.])${N}\s*=>`, "g");
 const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
 
 /**
@@ -759,15 +770,27 @@ function credentialComparesIn(text) {
   const flag = (re, keep = () => true) => {
     for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
   };
+  /** Positions of `N` where it is declared again; an arrow's parameter list counts only if it names N. */
+  const shadowsOf = (N) => [...text.matchAll(redeclared(N))]
+    .filter((m) => m[1] === undefined || new RegExp(String.raw`(?<![\w$.])${N}\b`).test(m[1]))
+    .map((m) => m.index + m[0].search(new RegExp(String.raw`(?<![\w$.])${N}\b`)));
+  /** True when N is declared again between its binding and position `at` — that use is another variable. */
+  const shadowed = (N, at) => {
+    const binding = text.search(new RegExp(String.raw`(?<![\w$.])${N}\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])`));
+    const [lo, hi] = binding < at ? [binding, at] : [at, binding];
+    return shadowsOf(N).some((r) => r > lo && r < hi && r !== binding);
+  };
   const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
   flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
   flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
   for (const name of names) {
     const N = name.replace(/\$/g, "\\$");
-    // The credential on the right: `key !== expected` — not `expected.length`, `expected(`, `expected[`, `expected?.`.
-    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${N}\b(?!\s*[.(\[?])`, "g"));
+    const own = (m) => !shadowed(N, m.index);
+    // The credential on the right: `key !== expected`, `!== expected.trim()`, `!== String(expected)`, `!== (expected ?? "")`
+    // — not `expected.length`, `expected(`, `expected[`, `expected?.x`.
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${bound(N)}`, "g"), own);
     // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
-    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${N}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
+    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), own);
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -800,6 +823,17 @@ const CREDENTIAL_COMPARE_PROBES = [
   'if (key !== (Deno.env.get("MCP_ACCESS_KEY") ?? "")) {',
   'if (Deno.env.get("MCP_ACCESS_KEY")! !== key) {',
   'if (Deno.env.get("MCP_ACCESS_KEY")!.trim() === key) ok();',
+  // What the second review pass found slipping past: wrappers on the bound
+  // name, template quotes, import.meta.env, a suffixed name, a compare that
+  // precedes a shadow rather than following one.
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key.trim() !== expected.trim()) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected?.trim()) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== String(expected)) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif ((key ?? "") !== (expected ?? "")) {',
+  'const expected = Deno.env.get(`MCP_ACCESS_KEY`);\nif (key !== expected) {',
+  'if (import.meta.env.VITE_API_KEY === presented) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY_V2");\nif (key !== expected) {',
+  'const token = process.env.API_TOKEN;\nif (presented === token) ok();\nfor (const token of list) use(token);',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -823,6 +857,11 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nif (key === "your-service-role-key") throw new Error("placeholder");',
   'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
   'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
+  // A name declared again between its binding and the compare is another variable.
+  'const token = process.env.GITHUB_TOKEN;\nfor (const token of tokens) if (token === close) break;',
+  'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nObject.entries(o).forEach(([key, v]) => { if (key === id) use(v); });',
+  'const key = process.env.API_KEY;\nconst hit = list.some((key) => key === wanted);',
+  'const secret = process.env.WEBHOOK_SECRET;\ntry { go(); } catch (secret) { if (secret === null) retry(); }',
 ];
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry

@@ -75,30 +75,6 @@ jobs:
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions and credential compares
         run: bun scripts/check-fork-consistency.mjs
 
-  extensions-auth:
-    name: Extensions auth
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.0"
-
-      # Pinned to the extensions' deno.json — the test fails if one drifts — so
-      # the seven servers run here on the libraries they deploy with.
-      - name: Install pinned test dependencies
-        working-directory: extensions
-        run: bun install --frozen-lockfile
-
-      # The seven vendored extension servers, imported as deployed under a
-      # stand-in for Deno's two globals: scoped keys reach them — a wrong or
-      # revoked key is refused, a read-scoped key never sees a tool that writes.
-      # No database.
-      - name: Scoped access keys reach the extensions
-        working-directory: extensions
-        run: bun test-auth.ts
-
   deno-check:
     name: Edge Function typecheck
     runs-on: ubuntu-latest
@@ -173,6 +149,22 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ""
           WRANGLER_SEND_METRICS: "false"
+
+      # The seven vendored extension servers are consumers of this server's
+      # auth module (extensions/_shared/auth.ts, a byte copy). Their test runs
+      # in THIS job because main's ruleset requires it: a separate job would
+      # not gate a merge. Pinned to the extensions' deno.json — the test fails
+      # if one drifts — so the servers run on the libraries they deploy with.
+      - name: Install the extensions' pinned test dependencies
+        working-directory: extensions
+        run: bun install --frozen-lockfile
+
+      # Imported as deployed under a stand-in for Deno's two globals: a wrong or
+      # revoked key is refused, a read-scoped key never sees a tool that writes,
+      # the copy is byte for byte auth.ts. No database.
+      - name: Scoped access keys reach the extensions
+        working-directory: extensions
+        run: bun test-auth.ts
 
   db-schema:
     name: Schema migrations
