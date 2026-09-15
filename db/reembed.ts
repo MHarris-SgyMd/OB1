@@ -294,10 +294,18 @@
  * read against the label, and 021's evidence backfill trusts every succeeded
  * row under a key naming a model — it predates acceptance and, applied, is
  * never edited — so a brain that accepted rows before 021 would have them
- * labelled at a model whose pass never wrote their vector. A hand re-run of
- * 021's body (the remedy for a --baseline'd brain, below) on a brain with
- * accepted rows whose thought is unlabelled would do the same, and that remedy
- * says so: --retry-fallbacks them first, or retire the key.
+ * labelled at a model whose pass never wrote their vector. A re-run of 021's
+ * body — the remedy for a --baseline'd brain whose schema is older, below —
+ * does the same to an accepted row whose thought is unlabelled, and a paste of
+ * the file alone did, for anyone who followed the remedy this tool printed
+ * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
+ * re-runs every recorded migration in one transaction — and migration 030
+ * carries the corrected rule, reached after 021 in the same run and applied
+ * once to every brain at upgrade: a label whose only evidence is an acceptance
+ * under the model's own key goes back to unknown, and the evidence rule labels
+ * with accepted rows excluded, so the latest succeeded row BEFORE an
+ * acceptance decides. Any successor that labels from claim rows carries the
+ * same exclusion; 030 is its spelling.
  *
  * What acceptance means to the two readers of the row, and its bound. The
  * data rule above returns a succeeded row whose thought is not at the target —
@@ -366,6 +374,8 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
   ACCEPTED_BY_MODEL_SQL,
+  REAPPLY_COMMAND,
+  REQUEUE_SET_SQL,
   ACCEPTED_CAVEAT_PREFIX,
   CORPUS_BY_MODEL_SQL,
   EMBEDDING_DIM,
@@ -654,8 +664,13 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older: re-run the body of db/migrations/021_embedding_model_per_row.sql\n  (the migrator will skip it as applied), substituting {{EMBEDDING_DIM}} — after returning any accepted rows (--status lists\n  them) with --retry-fallbacks, or retiring their key: the backfill in that body trusts a succeeded row whatever its caveat."
+      ? `schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction — 021's backfill as written, then 030, which returns a label\n  whose only evidence is an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's\n  model). Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
+/**
+ * What a run would refuse on, in the order a run judges them — the job, the
+ * lease, the schema — spelled once for --status, --dry-run and the run.
+ */
+const refusalForRun: string | null = refusalJob ?? refusalTtl ?? refusal021;
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
@@ -783,7 +798,7 @@ async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<n
   const [{ n }] = await tx`
     WITH retried AS (
       UPDATE thought_work_claims
-         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL
+         SET ${tx.unsafe(REQUEUE_SET_SQL)}
        WHERE work_type = ${JOB} AND (${where}) RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
   return Number(n);
@@ -1227,6 +1242,11 @@ if (STATUS_ONLY || DRY_RUN) {
   printCounts(c, STATUS_ONLY ? "status" : "before");
   const corpus = await printCorpusByModel();
   if (STATUS_ONLY) printPreflightNote(c, corpus, judgedAsPreflight(false));
+  // What a run would refuse on, said here too: --status is the mode the
+  // operator reads first, and the 021 remedy is the migrator's (SMD-1193). The
+  // same three a run judges; not beside --dry-run, whose "would: refuse" line
+  // below is the same text.
+  if (STATUS_ONLY && !DRY_RUN && refusalForRun) console.error(`\n  a run would refuse:${refusalForRun}`);
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
@@ -1241,9 +1261,8 @@ if (STATUS_ONLY || DRY_RUN) {
   if (c.fellBack > 0) await printFallbacks(c.fellBack);
   await printDuplicateGroups();
   if (DRY_RUN) {
-    const refusal = refusalJob ?? refusalTtl ?? refusal021;
-    if (refusal) {
-      console.error(`\n  would: refuse.${refusal}`);
+    if (refusalForRun) {
+      console.error(`\n  would: refuse.${refusalForRun}`);
       await sql.close();
       process.exit(2);
     }
@@ -1283,13 +1302,10 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
-{
-  const refusal = refusalJob ?? refusalTtl ?? refusal021;
-  if (refusal) {
-    console.error(`\n ${refusal}`);
-    await sql.close();
-    process.exit(2);
-  }
+if (refusalForRun) {
+  console.error(`\n ${refusalForRun}`);
+  await sql.close();
+  process.exit(2);
 }
 
 // The provider first, so a wrong URL or a wrong width fails before any row is

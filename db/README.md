@@ -64,6 +64,66 @@ database sitting at 009 it would mark 010 applied too, and the agent registry
 would never be created. For one migration, insert the one `schema_migrations`
 row; `--dry-run` prints the `sha256` to use beside each name.
 
+### 5. Re-applying what the ledger already records
+
+A database adopted with `--baseline` can say 030 in its ledger while its
+functions are the guide's: a plain run skips every recorded file, and
+`reembed.ts` and preflight refuse or warn on the body they find and name this:
+
+```bash
+bun migrate.ts --url ... --reapply
+```
+
+`--reapply` re-runs **every migration** — recorded or pending — in order, in
+**one transaction** with a 10 s lock timeout; recorded rows stay as they are,
+pending ones are recorded in the same transaction. Every file rather than a
+range from the one a symptom names: a later migration may redefine what an
+earlier one created (022 and 025 redefine 021's `upsert_thought`; 020 drops a
+form 014 recreates), and a file's body may reference what only an earlier file
+installs (025's `upsert_thought` reads a column 021 adds, resolved when the
+function first *runs*, not when it is created) — so a start point is safe only
+when everything before it is really present, which nothing can check cheaply.
+Pending files in the same ordered transaction, because a ledger hole (a row
+deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
+*after* the re-run, over the later definitions it had just restored. Every file
+is idempotent, so the run restores the latest definition of everything. One
+transaction, so a failure part-way — a lock not granted within 10 s included —
+rolls back and the schema is as it was. `--dry-run` says what would re-run and
+judges the pgvector floor as the run does.
+
+**Refused before anything runs, and `--dry-run` says "would refuse" for the
+same:** a recorded file that changed since it was applied; the pgvector floor; a
+shell whose `OB1_EMBEDDING_DIM` differs from the column's width (006 would
+refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` differs
+from what `ob1_config` records (006 would re-record it — run from a shell
+configured as the brain is, or change the record on purpose with `reembed.ts
+--switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
+own definition is the update); and an accepted claim row 021's backfill would
+label an unlabelled thought from and 030 would not take back — under a
+*suffixed* key (`reembed:<model>@<dim>:ctx`), or over a thought written since
+the row was enqueued — return it with `reembed.ts --job <key>
+--retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
+where `reembed.ts` refuses to run, the refusal prints the statement
+`--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
+a **plain** run too whenever 021 is pending — a brain built by hand through 021
+and adopted by "just run them", or a ledger hole — since the block runs as
+written there as well; and where 030 is recorded and so will not run after 021,
+every acceptance 021 would read is refused, since nothing would take the label
+back. `--baseline` runs no SQL and is never refused on this. The checks read the
+catalog and the claim table under a 10 s lock timeout of their own. A plain run on the baselined brain, where 030 is pending,
+fails at 030 with what is missing and this command, rather than a bare "does
+not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
+remedies name it where the ledger records the migration they find absent.
+
+**Stop the server and any re-embed or extraction worker first.** 001 and 003
+take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
+`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
+its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
+when no row is waiting); 025 re-validates its constraints over the table. 021's
+evidence backfill runs as written, and 030, reached after it in the same
+transaction, returns a label whose only evidence is an operator's acceptance to
+unknown and labels with accepted rows excluded (SMD-1193).
+
 ## Expected outcome
 
 `bun test-schema.ts` prints `505 assertions: 505 passed, 0 failed` and `PASS`.
@@ -102,7 +162,7 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54).
+029 change 54, 030 change 56).
 
 ## What changed relative to the guide
 
@@ -364,8 +424,10 @@ worker fingerprints a legacy row still raises that violation, which lands as a
 failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
-adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
-the file's body rather than to apply a migration the migrator will skip.
+adopted with `--baseline` — ledger says 021, body says 013 — is told to
+`migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
+above; 030, reached after 021 in the same run, takes back what 021's backfill
+read from an accepted row).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;
@@ -1062,7 +1124,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 562 properties (at migration 028), including:
+asserts 644 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
