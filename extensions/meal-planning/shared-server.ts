@@ -33,10 +33,11 @@ import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 const app = new Hono();
 
 app.post("/mcp", async (c) => {
-  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts is
-  // server-portable/auth.ts, held identical by test-auth.ts). MCP_HOUSEHOLD_ACCESS_KEYS holds name:scope:sha256 entries; the older single
-  // MCP_HOUSEHOLD_ACCESS_KEY still works, compared by digest. A read-scoped key is never
-  // given the tools that write, so it cannot see them, let alone call them.
+  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
+  // is server-portable/auth.ts, held identical by test-auth.ts). MCP_HOUSEHOLD_ACCESS_KEYS
+  // holds name:scope:sha256 entries; the older single MCP_HOUSEHOLD_ACCESS_KEY still
+  // works, compared by digest. A read-scoped key is never given the tools that
+  // write, so it cannot see them, let alone call them.
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
     MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),

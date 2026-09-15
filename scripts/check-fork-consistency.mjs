@@ -865,7 +865,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = c.req.query("key");\nif (!key) return c.json({ error: "Unauthorized" }, 401);',
   'supabase secrets set MCP_ACCESS_KEY=your-generated-key-here',
   'MCP_ACCESS_KEYS=laptop:write:<sha256 of the key>',
-  'const principal = authenticate(presentedKey(c.req.raw), { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") });',
+  'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") });',
   'const token = process.env.TELEGRAM_BOT_TOKEN;\nif (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");',
   'const expected = process.env.EXPECTED_DIM;\nif (_embedDimCache !== expected) {',
   'seven files compared the key with `!==` and are consumers of auth.ts now',

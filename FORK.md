@@ -7812,6 +7812,14 @@ with two probes — none of the scanned roots hold a Go file today). History,
 read as a whole: the implementation commit's claims each fix corrected are
 corrected within the same eight messages.
 
+**Boyscout.** What the passes cut for space, in the files this change
+touched, no behaviour changed: the seven servers' auth comment is rewrapped
+(two passes had edited its first line and left one at 130 columns); the
+checker's non-probe for the servers' own call spells the call they make today
+(`authenticateRequest(c.req.raw, …)`, not the first pass's
+`authenticate(presentedKey(…))`); `extensions/package.json` drops
+`@types/bun`, which nothing in the directory type-checks against, and says so.
+
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand
 neither deploy nor run — CI's `deno check` covers `server/index.ts` and the two
