@@ -2177,8 +2177,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("upsert_thought").startsWith("025") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
-         `032 is the last definer of update_thought (it carries 021's body and adds the provenance envelope), 025 of upsert_thought (its 3-argument body carries 022's chunk rule and 021's label) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
+         `032 is the last definer of update_thought (it carries 021's body and adds the provenance envelope), 033 of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, and takes the fingerprint lock) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // current one, and a 7-argument call is ambiguous. The last definer (032)
@@ -2306,7 +2306,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
          "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("upsert_thought").startsWith("025"), `025 is the last definer of upsert_thought (it carries 022's body and adds the provenance envelope) (${lastDefinerOf("upsert_thought")})`);
+  assert(lastDefinerOf("upsert_thought").startsWith("033"), `033 is the last definer of upsert_thought (it carries 025's body — 022's rule and the envelope — and takes the fingerprint lock) (${lastDefinerOf("upsert_thought")})`);
 
   // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
   // defect with it — which is what preflight's `atomic capture` reads the
@@ -3058,8 +3058,8 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // a migration went away.
   assert(owned.size >= 37 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
     `the owned set is read from the migrations: ${owned.size} functions (37 at 032, never fewer), names only — no word from a header comment quoting a statement`);
-  assert(owned.get("upsert_thought") === "025_thought_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
-    "…and the last definers preflight's remedies name: upsert_thought 025, trace_provenance 026, release_thought 015");
+  assert(owned.get("upsert_thought") === "033_upsert_thought_fingerprint_lock.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
+    "…and the last definers preflight's remedies name: upsert_thought 033, trace_provenance 026, release_thought 015");
   const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
   assert(ownedCols.get("embedding_model") === "021_embedding_model_per_row.sql" && ownedCols.get("derived_from") === "025_thought_provenance.sql" && ownedCols.get("supersedes") === "025_thought_provenance.sql" && ownedCols.size >= 3,
     `the thoughts columns whose comments a migration writes are read the same way (${ownedCols.size}): embedding_model 021, derived_from and supersedes 025`);
@@ -3074,8 +3074,9 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   };
   const shipped = await bodies();
   assert(TWO in shipped && THREE in shipped, `the two capture forms are among the ${Object.keys(shipped).length} owned bodies`);
-  assert(UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && UPSERT_THREE_ARG_SHIPPED_RE.test(await srcOf(THREE)) && /ob1:vector-replaces-chunks/.test(await srcOf(THREE)),
-    "preflight's recognisers hold for the shipped bodies: 005's guard in the 2-argument form, 025's envelope and 022's sentinel in the 3-argument form");
+  assert(UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && UPSERT_THREE_ARG_SHIPPED_RE.test(await srcOf(THREE)) && /ob1:vector-replaces-chunks/.test(await srcOf(THREE))
+      && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)),
+    "preflight's recognisers hold for the shipped bodies: 005's guard in the 2-argument form, 025's envelope and 022's sentinel in the 3-argument form, 033's sentinel in both");
   assert(RELEASE_SHIPPED_RE.test(await srcOf("release_thought(uuid,text,text,text,text)")) && RELEASE_SHIPPED_RE.test(await srcOf("release_claims_for_worker(text,text)")) && THOUGHT_STATS_SHIPPED_RE.test(await srcOf("thought_stats_summary()")),
     "…and for 015's two release bodies (the lease cleared) and 024's thought_stats_summary (topics guarded by type)");
 
@@ -3103,14 +3104,24 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(changed.length === 1 && changed[0] === TWO, `the earlier body over the 2-argument form raised nothing and changed exactly one owned body (${changed.join(", ")})`);
   assert(!UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)), "…which preflight's recogniser tells from 005's");
   assert(await scalarAccepted(), "…and a double-encoded payload is emptied silently again — the defect 005 removed, back without an error");
+  // 025 over 033: 022's sentinel and 025's envelope stay, 033's sentinel goes
+  // — an unlocked body preflight tells by that alone.
+  await reapply("025");
+  const three025 = await srcOf(THREE);
+  assert(/ob1:vector-replaces-chunks/.test(three025) && UPSERT_THREE_ARG_SHIPPED_RE.test(three025) && !/ob1:capture-takes-fingerprint-lock/.test(three025),
+    "025 re-applied over 033 keeps 022's sentinel and 025's envelope and drops 033's sentinel — the one clause that says the body takes the lock");
   // 022 over 025: the sentinel stays, the envelope goes — why 025's body is
   // recognised by more than the sentinel.
   await reapply("022");
   const three022 = await srcOf(THREE);
   assert(/ob1:vector-replaces-chunks/.test(three022) && !UPSERT_THREE_ARG_SHIPPED_RE.test(three022), "022 re-applied over 025 keeps 022's sentinel and drops 025's envelope, which the second recogniser sees");
-  // The way back is the migrations in order — what --reapply runs.
+  // 005 re-applied: both forms from before 022, and the 2-argument one 005's
+  // — the guard, no lock. The way back is the migrations in order — what
+  // --reapply runs — and 033 is the last definer of both forms, so one file
+  // is the remedy for either.
   await reapply("005");
-  assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)), "005 re-applied puts a pre-022 3-argument body back too (its file defines both forms), so the remedy for the 2-argument form has to say 'then 025 again'");
+  assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)) && UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && !/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)),
+    "005 re-applied puts a pre-022 3-argument body back too (its file defines both forms) and a 2-argument body with the guard and no lock");
   await restoreShipped("upsert_thought", "trace_provenance");
   assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "…and the last definers re-applied put every owned body back, byte for byte");
   await db.exec(`DELETE FROM thoughts`);
@@ -3240,9 +3251,11 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   r = await edit(c, { supersedes: null }, { since: "2000-01-01T00:00:00Z" });
   assert(r.ok === false && r.error === "STALE_READ" && (await rowOf(c)).s === b, "if_unchanged_since guards a provenance edit as it guards every edit");
 
-  // The one rule: validate_derived_from answers as upsert_thought's inline
-  // copy does — same canonical form, same three messages — until SMD-1043
-  // hands the inline copy over.
+  // The one rule: validate_derived_from answers as the capture path does —
+  // same canonical form, same three messages. One copy since 033 (the
+  // 3-argument upsert_thought calls it; [33] asserts the inline copy is
+  // gone), so this is the capture routing through it rather than two copies
+  // agreeing.
   const vdf = async (v: string | null) => (await db.query<{ r: unknown }>(`SELECT validate_derived_from($1::jsonb) AS r`, [v])).rows[0].r;
   assert((await vdf(null)) === null && (await vdf("null")) === null && (await vdf("[]")) === null, "validate_derived_from: SQL NULL, JSON null and [] are NULL");
   assert(JSON.stringify(await vdf(JSON.stringify([c.toUpperCase(), a, c]))) === JSON.stringify([a, c].sort()), "…a list comes back lowercased, de-duplicated, sorted");
@@ -3250,7 +3263,7 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   const vdfRaise = async (v: unknown) => { try { await vdf(JSON.stringify(v)); return ""; } catch (e) { return (e as Error).message; } };
   const tail = (m: string) => m.replace(/^[^:]*: /, "");
   for (const bad of [["nope"], [GHOST], "x", [1]]) {
-    assert(tail(await capRaise(bad)) === tail(await vdfRaise(bad)) && (await vdfRaise(bad)) !== "", `…and refuses ${JSON.stringify(bad)} with the message upsert_thought's inline copy gives (${tail(await vdfRaise(bad)).slice(0, 50)}…)`);
+    assert(tail(await capRaise(bad)) === tail(await vdfRaise(bad)) && (await vdfRaise(bad)) !== "", `…and refuses ${JSON.stringify(bad)} with the message the capture path gives (${tail(await vdfRaise(bad)).slice(0, 50)}…)`);
   }
 
   // The review path writes through it: the acceptance's audit row is an
@@ -3311,9 +3324,107 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM ob1_test_editor32`);
   await db.exec(`DROP ROLE ob1_test_editor32`);
-  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(restoring upsert_thought re-ran 025 whole; [25]'s note applies)");
+  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(restoring upsert_thought re-ran its last definer; [25]'s note applies if that is ever 025 again)");
   await restoreShipped("trace_provenance");
   await db.exec(`DELETE FROM supersession_proposals`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 33. Migration 033 — the capture takes the fingerprint lock ───────────────
+//
+// Both inserting upsert_thought overloads take 018's advisory lock before
+// they read or write the row the text lands on; the 3-argument form takes
+// 029/032's supersession lock first when the envelope names a pointer, hashes
+// through 016 and validates derived_from through 032. The concurrency itself
+// — a capture and an edit of one text serialised, the two races 022 named
+// closed — is db/test-live.ts [6e], which PGlite's single session cannot run.
+// This section is the bodies, the behaviour that must not have moved, the
+// one addition (the 2-argument form attributes), the residue the header
+// states, and the trap.
+
+console.log("\n[33] Migration 033: both capture forms take the fingerprint lock, spelled as 018 spells it, and carry everything before them (SMD-1043)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const TWO = "upsert_thought(text, jsonb)";
+  const THREE = "upsert_thought(text, jsonb, vector)";
+  const FOUR = "upsert_thought(text, jsonb, vector, jsonb)";
+  const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
+  const LOCK = "PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));";
+  const two = await srcOf(TWO), three = await srcOf(THREE), four = await srcOf(FOUR), edit = await srcOf(UPDATE_THOUGHT_SIGNATURE);
+
+  // The shape: three overloads, 033 the last definer, the lock spelled once.
+  assert((await functionsNamed("upsert_thought")) === 3 && lastDefinerOf("upsert_thought").startsWith("033"), `three upsert_thought overloads, 033 the last definer (${lastDefinerOf("upsert_thought")})`);
+  assert(two.includes(LOCK) && three.includes(LOCK) && edit.includes(LOCK), "the 2- and 3-argument bodies and update_thought spell the fingerprint lock identically — the same key is the same lock");
+  assert(/ob1:capture-takes-fingerprint-lock/.test(two) && /ob1:capture-takes-fingerprint-lock/.test(three), "…and both capture bodies carry the ob1:capture-takes-fingerprint-lock sentinel preflight reads");
+  assert(!/ob1:capture-takes-fingerprint-lock/.test(four) && !/pg_advisory_xact_lock/.test(four) && /elem->>'context'/.test(four), "the 4-argument form is 013's, untouched: it delegates to the 3-argument body and takes its lock there");
+  // Order in the 3-argument body: supersession lock, fingerprint lock, the
+  // label read, the INSERT — by position in the source.
+  const at = (re: RegExp, src = three) => { const m = re.exec(src); return m ? m.index : -1; };
+  const iSup = at(/hashtext\('ob1:supersession-review'\)/), iFp = at(/hashtextextended\(v_fingerprint, 0\)/), iRead = at(/content_fingerprint = v_fingerprint FOR NO KEY UPDATE/), iIns = at(/INSERT INTO thoughts/);
+  assert(iSup > 0 && iSup < iFp && iFp < iRead && iRead < iIns, `the 3-argument body acquires supersession lock, then fingerprint lock, then reads the row, then inserts (${iSup} < ${iFp} < ${iRead} < ${iIns})`);
+  assert(at(/hashtextextended\(v_fingerprint, 0\)/, two) < at(/INSERT INTO thoughts/, two), "…and the 2-argument body locks before it inserts");
+  // One owner per rule: 016's hash, 032's derived_from — no inline copy left.
+  assert(/content_fingerprint_of\(p_content\)/.test(two) && /content_fingerprint_of\(p_content\)/.test(three) && !/regexp_replace/.test(two) && !/regexp_replace/.test(three),
+    "both bodies hash through content_fingerprint_of — the last two inline copies of 003's rule are gone");
+  assert(/validate_derived_from\(p_payload->'derived_from'\)/.test(three) && !/jsonb_array_elements\(v_derived\)/.test(three), "the 3-argument body validates derived_from through validate_derived_from — 025's inline copy is gone");
+  // What a successor must carry, read out of pg_proc by name.
+  for (const [re, what] of [
+    [/jsonb_typeof\(p_payload\) <> 'object'/, "005's guard"], [/set_config\('ob1\.actor'/, "008's actor"], [/p_payload->>'embedding_model'/, "021's label"], [/ELSE EXCLUDED\.embedding_model END/, "021's ON CONFLICT label clause"],
+    [/v_existed := FOUND/, "022's FOUND"], [/DELETE FROM thought_chunks WHERE thought_id = v_id/, "022's chunk DELETE"], [/ob1:vector-replaces-chunks/, "022's sentinel"],
+    [/supersedes must be a thought UUID string/, "025's supersedes shape check"], [/COALESCE\(thoughts\.supersedes,\s+EXCLUDED\.supersedes\)/, "025's add-if-empty"],
+  ] as [RegExp, string][]) assert(re.test(three), `…the 3-argument body carrying ${what}`);
+  assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(two) && /set_config\('ob1\.actor'/.test(two), "…the 2-argument body carrying 005's guard and, since 033, 008's actor");
+
+  // Behaviour that must not have moved: [6], [7], [11], [22], [23], [25]
+  // passed over this body above; here the pieces closest to the change.
+  const cap = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
+    (await db.query<{ r: { id: string; fingerprint: string } }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r;
+  const a = await cap("a locked capture", { metadata: { k: 1 }, embedding_model: "model-a" }, unit(0));
+  assert(a.fingerprint === (await fpOf("a locked capture")), "the fingerprint returned is content_fingerprint_of's");
+  const again = await cap("A   locked capture", { metadata: { j: 2 } }, null);
+  assert(again.id === a.id && (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts`)).rows[0].c === 1, "a re-capture merges as before");
+  const two2 = (await db.query<{ r: { id: string } }>(`SELECT upsert_thought('a two-argument capture 33', '{"metadata":{},"actor":{"name":"fallback-caller","source":"postgrest"}}'::jsonb) AS r`)).rows[0].r.id;
+  const audit2 = (await db.query<{ actor_name: string | null }>(`SELECT actor_name FROM thought_audit WHERE thought_id = $1 AND action = 'capture'`, [two2])).rows[0];
+  assert(audit2?.actor_name === "fallback-caller", `a capture through the 2-argument form is attributed — the envelope's actor reaches the audit trigger (${audit2?.actor_name})`);
+  // The locks are transaction-scoped: nothing is held once the call returns
+  // (every call above ran as its own transaction).
+  const held = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c;
+  assert(held === 0, `no advisory lock outlives the call (${held} held)`);
+  // A capture naming supersedes and derived_from still validates and writes
+  // them, and the refusals are validate_derived_from's.
+  const b = await cap("the newer locked capture", { metadata: {}, supersedes: a.id, derived_from: [a.id] }, unit(1));
+  const rowB = (await db.query<{ s: string; d: unknown }>(`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = $1`, [b.id])).rows[0];
+  assert(rowB.s === a.id && JSON.stringify(rowB.d) === JSON.stringify([a.id]), "a capture naming provenance writes it under the two locks");
+  let raised = "";
+  try { await cap("bad provenance 33", { metadata: {}, derived_from: ["nope"] }, unit(2)); } catch (e) { raised = (e as Error).message; }
+  assert(/derived_from must contain only thought UUID strings/.test(raised) && !/^upsert_thought:/.test(raised.replace(/^error: /, "")), `a bad derived_from is refused with validate_derived_from's message (${raised.slice(0, 60)})`);
+  try { await cap("bad supersedes 33", { metadata: {}, supersedes: "nope" }, unit(2)); } catch (e) { raised = (e as Error).message; }
+  assert(/upsert_thought: supersedes must be a thought UUID string/.test(raised), "…and a bad supersedes with 025's own message, prefix kept");
+
+  // The residue the header states (SMD-1453): a re-capture filling a NULL
+  // pointer is ordered against the walk, not walked. R with no pointer, X
+  // superseding R, then R's text captured naming X: R → X → R is written.
+  const r = await cap("residue: the earlier note", { metadata: {} }, unit(3));
+  const x = await cap("residue: the later note", { metadata: {}, supersedes: r.id }, unit(4));
+  await cap("residue: the earlier note", { metadata: {}, supersedes: x.id }, unit(3));
+  const loop = (await db.query<{ rs: string; xs: string }>(`SELECT (SELECT supersedes FROM thoughts WHERE id = $1) AS rs, (SELECT supersedes FROM thoughts WHERE id = $2) AS xs`, [r.id, x.id])).rows[0];
+  assert(loop.rs === x.id && loop.xs === r.id, "a re-capture fills a NULL pointer without walking the chain — the two-row loop the header states and SMD-1453 holds");
+  const walk = await db.query<{ cycle: boolean }>(`SELECT cycle FROM trace_provenance($1::uuid)`, [r.id]);
+  assert(walk.rows.length >= 1, "…and trace_provenance still answers over it, cycle-guarded");
+  const seen = (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb) AS r`, [x.id, JSON.stringify({ supersedes: r.id })])).rows[0].r;
+  assert(seen.ok === false && seen.error === "WOULD_CYCLE", `…and update_thought's walk, asked to write what x already holds, sees the loop the capture wrote (${seen.error})`);
+  assert((await db.query<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb) AS r`, [r.id])).rows[0].r.ok === true, "…which the envelope (032) undoes");
+
+  // The trap: 025 re-applied by hand puts an unlocked 3-argument body back
+  // (its file defines that form; the 2-argument one keeps 033's); 005 puts
+  // both back unlocked. 033 re-applied restores both.
+  await reapply("025");
+  assert(!/ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)), "025 re-applied over 033 puts an unlocked 3-argument body back and leaves the 2-argument one locked");
+  await reapply("005");
+  assert(!/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && !/set_config\('ob1\.actor'/.test(await srcOf(TWO)), "005 re-applied puts 005's 2-argument body back: no lock, no actor");
+  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(025 re-applied also put its trace_provenance back; restored with the rest)");
+  await restoreShipped("upsert_thought", "trace_provenance");
+  assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "033 re-applied: both bodies locked again, three overloads");
   await db.exec(`DELETE FROM thoughts`);
 }
 

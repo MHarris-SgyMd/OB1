@@ -77,9 +77,11 @@ as well, since a `CREATE OR REPLACE` from outside the migrations — an earlier
 migration by hand, the getting-started guide pasted again, a vendored schema
 or recipe (SMD-1250) — replaces one with no error: a 3-argument body from
 before 022 leaves a re-capture's stale windows behind, one from before 025
-drops `derived_from` and `supersedes` silently, and a 2-argument body from
-before 005 empties a double-encoded payload silently; each is a warning
-naming the migration that owns the body. `provenance` reads
+drops `derived_from` and `supersedes` silently, one from before 033 takes no
+fingerprint lock (a capture racing an edit of the same text raises the unique
+violation 018 removed for edits), and a 2-argument body from before 005
+empties a double-encoded payload silently — or, from before 033, takes no
+lock either; each is a warning naming 033, the last definer of both forms. `provenance` reads
 `trace_provenance`'s body the same way and warns, naming 026, when the
 bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
 body is not 024's; and `work claims` fails when `release_thought`'s or

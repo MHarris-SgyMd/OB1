@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-one numbered changes on top of the pin. Seven fix defects found in an
+Sixty-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–61 are the numbered `###` sections** further down, which is
+sections. Changes **18–62 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -2334,9 +2334,10 @@ waiting on the *advisory* lock in `pg_locks` rather than on a transaction id,
 and gets ok with `duplicate_of` once the first commits. The same lock turns
 009's documented race for a genuine edit — two rows edited into the same new
 text at once — into `DUPLICATE_CONTENT` instead of a constraint error. It
-covers edits only: `upsert_thought` writes fingerprints without it, so a
-capture of text X committing while an edit to X is in flight still ends in the
-edit raising the unique violation, exactly as before this change. One lock per
+covered edits only until change 62: `upsert_thought` wrote fingerprints without
+it, so a capture of text X committing while an edit to X was in flight still
+ended in the edit raising the unique violation, exactly as before this change
+(migration 033 takes the same lock in both capture forms). One lock per
 edit; deadlock would need a transaction that calls `update_thought` twice with
 different texts while another does the reverse, which no caller does.
 
@@ -3816,7 +3817,7 @@ pass's measurement, 1 ms with this lock). Two shapes the row lock cannot cover
 this text — find no row to lock, and remove nothing: the other writer's windows
 stay, as under 021, at another model the SMD-1175 state for that race only;
 SMD-1043's advisory lock on the fingerprint, which `update_thought` already
-takes, makes the read find the row and closes both. The label vouches exactly
+takes, makes the read find the row and closes both (done in change 62). The label vouches exactly
 when the
 row's vector was labelled with a model and the arriving vector is labelled with
 the same one: the windows were written in the same call as the vector before,
@@ -3974,7 +3975,7 @@ a re-capture blocked behind an open `enqueue_thoughts` for its whole duration
 needs the privilege before Postgres looks for rows, and made two races the lock
 cannot cover destructive — a `FOUND` flag after the read bounds it to a
 re-capture, so those races remove nothing, as under 021, until SMD-1043's lock
-closes them; the read itself runs only when a vector arrives. The remedy for a
+closes them (change 62); the read itself runs only when a vector arrives. The remedy for a
 missing 2-argument form re-applied 005, which redefines the 3-argument body too
 — it says "then 022", and the missing form is a warning, since this server
 never calls it. The GRANT remedy quotes the role; the privilege check's ok text
@@ -3999,7 +4000,7 @@ join as a parameter — more to read than it saves.
 them from live ones; a `--job` pass is the remedy, and a brain upgraded through
 021 that has not run a pass should run one before re-saving long notes from a
 chunkless server. SMD-1043's advisory lock in both inserting overloads
-redefines this body next and carries the locked read with its `FOUND`, the
+(change 62, migration 033) redefines this body and carries the locked read with its `FOUND`, the
 block and the sentinel forward, as 022's header lists; its fingerprint lock
 also closes the two races above. `server/index.ts` is
 unchanged: the migration fixes its path. The 4-argument form's body has no
@@ -4263,8 +4264,8 @@ UPDATE`.
 
 **Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
 INSERT omits, and its sibling that NULLs a stale key (tickets, above). SMD-1043's advisory lock in both inserting
-`upsert_thought` overloads — 023 redefines no function, and a capture racing an edit outside the
-backfill's transaction still ends as 018's header says. Deleting the extra twin
+`upsert_thought` overloads (done in change 62) — 023 redefines no function, and a capture racing an edit outside the
+backfill's transaction still ended as 018's header says until then. Deleting the extra twin
 stays the operator's call (`delete_thought`; the pairs list names them). 018's
 file is applied and hashed, so its disclaimers deferring to SMD-1042 stay as
 written; `db/README.md` is what moves. The function carries no sentinel — it is
@@ -6639,7 +6640,7 @@ of `pg_proc` by name, as [19] and [22] do). Three things the redefinition adds:
   null, JSON null and `[]` are NULL; otherwise an array whose every element is
   a UUID string naming an existing thought, returned lowercased, de-duplicated
   and sorted, or one of 025's three exceptions. `upsert_thought` keeps its
-  inline copy until its next redefinition (SMD-1043) takes this one — the
+  inline copy until its next redefinition (SMD-1043, change 62) takes this one — the
   shape 016's `content_fingerprint_of` took, with 018 the first caller — and
   [32] holds the two equal meanwhile, input by input, message by message.
 - **The `supersedes` checks.** Shape by regex (an exception, as capture);
@@ -6754,7 +6755,7 @@ it still saying eight; CI runs that suite). Green: `test-schema`
 
 **Not done, and why.** `upsert_thought` still carries its inline copy of the
 derived_from rule — switching it is a redefinition of the other function, which
-SMD-1043 owns; whichever of the two lands second carries the first's body. No
+SMD-1043 owns (change 61 does); whichever of the two lands second carries the first's body. No
 `derived_from` input on the MCP tool (above). The three audit reads in the test
 suites that ordered by the audit table's uuid key now order by `created_at` —
 one of them, [28]'s, was a latent flake this section's twin assertion exposed.
@@ -7108,6 +7109,144 @@ strip is exercised. `test-upgrade` 133/133,
 in), `test-live` 419/419, `tsc` clean, fork checker PASS. Upstream status: **not
 applicable** — the migrator and `reembed.ts` are the fork's (changes 11 and
 29).
+
+### 62. A capture takes the fingerprint lock too — migration 033 redefines both inserting `upsert_thought` forms, so writers of one text are serialised whichever function they come through (SMD-1043)
+
+Change 33 serialised `update_thought` calls that would take a fingerprint key on
+an advisory lock, so two edits into the same text get `DUPLICATE_CONTENT`
+instead of racing to the unique index — and scoped the claim honestly: the lock
+covered edits only. `upsert_thought` wrote fingerprints without it, so a capture
+of text X committing while an edit to X sat between its lookup and its UPDATE
+still raised `duplicate key value violates unique constraint
+"idx_thoughts_fingerprint"` — at the MCP boundary as `update_thought failed:
+…`, in `reembed.ts` as a failed claim whose remedy was `--retry-failed`. Six
+disclaimers said so (018's header and COMMENT, `db/README.md`, `reembed.ts`
+twice, change 33), and SMD-1022's second review pass ticketed the fix rather
+than fold in a redefinition of two capture overloads. Change 40 then named two
+more shapes its row lock could not cover — two first captures of one text
+racing, and an edit moving another row onto a text as it is captured — where
+the capture's label read found no row and left a re-capture's windows as they
+were; change 60 a third, a re-capture filling a NULL `supersedes` pointer
+without the supersession lock. Four symptoms, one fact: the capture path took
+no lock a concurrent writer of the same text also takes.
+
+**Migration 033.** Both inserting overloads — the 2-argument body from 005, the
+3-argument body from 025; 013's 4-argument form delegates to the latter and is
+not redefined — take `pg_advisory_xact_lock(hashtextextended(v_fingerprint,
+0))` before anything reads or writes the row the text lands on: before 022's
+`FOR NO KEY UPDATE` label read in the 3-argument form, before the INSERT in
+both. Spelled exactly as 018 spells it, so the same key is the same lock —
+`test-schema` [33] holds the three bodies to one string rather than a
+`lock_fingerprint(text)` helper, which the ticket floated and which would have
+meant redefining `update_thought` a third time to call it. Three more things
+ride the redefinition, each a rule that already had one owner elsewhere:
+
+- **The supersession lock, first.** When the envelope names `supersedes`, the
+  3-argument form takes 029's `hashtext('ob1:supersession-review')` before the
+  fingerprint lock, so a re-capture filling a NULL pointer is ordered against
+  `update_thought`'s cycle walk and the review path's write (change 60's
+  carry-forward).
+- **One copy of each rule.** `derived_from` is validated through 032's
+  `validate_derived_from` — 025's inline copy is gone, and the refusals lose
+  their `upsert_thought:` prefix — and both forms hash through 016's
+  `content_fingerprint_of`, the last two inline copies of 003's rule.
+- **The 2-argument form attributes.** It reads `p_payload.actor` into
+  `ob1.actor` as the 3-argument form has since 008. It never did — 008
+  redefined only the 3-argument body — so a capture through PostgREST's
+  two-step fallback, the one caller of this form, wrote an unattributed audit
+  row. The one thing here that is not a lock; `test-upgrade` [12] shows the
+  NULL actor at 032 and the name at 033.
+
+**Lock order.** Every writer of `thoughts` now acquires in one order —
+supersession lock, fingerprint lock, row — or a suffix of it. A capture naming
+`supersedes`: supersession → fingerprint → the row the text lands on. A capture
+without: fingerprint → row. `update_thought`: supersession (when named) → the
+edited row → fingerprint (when the row does not already own the key). The edit
+takes its row before the fingerprint lock and the capture the other way round,
+and the two cannot cross: the row a capture waits for under the lock for X is
+the row that *owns* X, and an edit of that row into X skips the lock (018's
+rule — the unique index says nobody else can hold it), while an edit of it into
+any other text takes the lock for that text. An edit of another row into X
+waits on the lock the capture holds and, once the capture commits, finds its
+row and answers `DUPLICATE_CONTENT`. The capture's row lock is `FOR NO KEY
+UPDATE` (022), so the foreign keys' `KEY SHARE` never enters the cycle change 60
+found for `FOR UPDATE`. 023's `LOCK TABLE … IN EXCLUSIVE MODE` is a table lock,
+ordered against every INSERT and row lock and not against an advisory lock,
+and the backfill takes none, so the two cannot deadlock either. READ COMMITTED
+throughout, as 018 and 023 already require: the waiter's read runs after the
+holder's commit and sees its row, which is exactly where 022 said the lock was
+needed for its rule to apply.
+
+**Closed, and not.** Closed: a capture racing an edit to the same text (the edit
+is told, not refused); two first captures of one text (the second finds the
+first's row and 022's rule decides its windows); an edit moving a row onto a
+text as it is captured (likewise); a capture filling a NULL pointer while an
+edit walks the chain (ordered now). Not closed, and stated in the header: a
+re-capture filling a NULL `supersedes` pointer is not *walked* for a loop — R
+with no pointer, X superseding R, then R's text captured naming X, one after
+another with no race, writes R → X → R. 025's "add if empty" never walked; the
+lock orders the fill against the walk, it does not add one. `trace_provenance`
+is cycle-guarded, so the cost is two rows both labelled superseded; [33] writes
+the loop and shows `update_thought`'s walk seeing it, and **SMD-1453** holds
+whether the fill should walk, refuse, or go — change 60's envelope makes "go"
+possible. Also unchanged on purpose: 022's "unknown vouches for nothing" for a
+caller sending a vector and no label (SMD-1245's question), and the 2-argument
+form's silence on `derived_from` / `supersedes`.
+
+**The sentinel, and the preflight.** Both bodies carry
+`ob1:capture-takes-fingerprint-lock` (014's convention). `atomic capture` reads
+it over a direct connection beside 022's sentinel and 025's clause, so the
+warning now grades a stale 3-argument body four ways — before 022, before 025,
+before 033, or missing — and a stale 2-argument body two ways — before 005 (no
+guard) or before 033 (005's guard, no lock) — and the remedy is one file in
+every case, since 033 is the last definer of both forms; the "apply 005, then
+025 again" two-step is gone. `test-preflight` walks 021, 022, 025, 003 and 005
+re-applied by hand over 033 and asserts each warning's text and its one remedy.
+
+**Where the disclaimers went.** 018's file is applied and hashed by the ledger,
+so its header and COMMENT stay as written and 033 re-issues the COMMENT on
+`update_thought` without the clause; `db/README.md`'s 018 row and re-embed
+paragraph, `reembed.ts`'s header and its `processRow` comment now say what is
+true (a load that inserted the text around `upsert_thought` can still raise
+the violation; a capture cannot), and change 33 above carries a note.
+
+**Cost.** One advisory lock acquire per capture — a shared-memory hash entry, no
+I/O. Measured at the shipped width (1,024 dimensions), 2,000 operations per
+line, four arms in alternating order — 032, 033, 032, 033 — each on a fresh
+schema, so the table and the HNSW index grow the same way inside every arm (a
+first version ran the rounds on one growing table, and every later round was
+slower whatever the body: the index, not the lock). The first arm was the cold
+container and is discarded (5.2 ms for a 2-argument capture that costs 0.4–0.8
+ms warm). Warm, per operation: fresh 2-argument capture 0.80 ms at 032, 0.39
+and 0.68 ms at 033; fresh 3-argument capture with a vector 5.8 ms at 032, 5.0
+and 5.7 ms at 033 (the HNSW insert is the cost); re-capture without a vector
+2.3–2.7 ms at 032, 2.0–3.0 ms at 033; re-capture with a vector at the same
+label 2.2–2.6 ms at 032, 2.2–3.4 ms at 033. Inside the run-to-run spread on
+every line, on either side of it.
+
+**Verified.** `test-schema` [33] (785): three overloads, the lock spelled once
+across both capture bodies and `update_thought`, the acquisition order read by
+position in the source (supersession, fingerprint, the label read, the INSERT),
+no inline copy of either rule left, every earlier piece by name, a 2-argument
+capture attributed, no advisory lock held after a call, the residue loop
+written and seen by the walk, and the trap — 025 re-applied puts an unlocked
+3-argument body back, 005 both, 033 restores both; [22], [23], [31] follow the
+last definer. `test-live` [6e] (473): a 2-argument capture of X held open
+while an edit of another row into X waits on the *advisory* lock in `pg_locks`
+and is told `DUPLICATE_CONTENT` when the capture commits, one row holding X; a
+first 4-argument capture with a window held open while a chunkless re-capture
+waits on the same lock, the window kept at the same label and gone at another;
+a capture naming `supersedes` waiting on the supersession lock while one
+naming none is not. `test-upgrade` [12] (131): 033 onto a populated 032 — no
+column, signature, row, window or audit row moves, the 3-argument form's
+hardened ACL is kept across `CREATE OR REPLACE`, a same-model re-capture keeps
+its window and pointer, the 2-argument form resolves and attributes, a re-run
+is a no-op. `test-preflight` (192), both store suites, `test-e2e-sql`,
+`test-update-delete`, `test-audit`, `tsc`, the consistency checker.
+
+Upstream status: **not applicable** — upstream's `upsert_thought` (the
+getting-started guide's, and the fingerprint recipe's) has no fingerprint lock
+in either function, and upstream has no `update_thought` that takes one.
 
 ## Detached from the fork network
 

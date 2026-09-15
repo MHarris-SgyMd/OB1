@@ -1261,7 +1261,10 @@ export const coreColumnCommentStatement = (col) =>
  * 022's sentinel rather than adding one. Each regex is the one clause that
  * migration added and no earlier body has: 005 refuses a non-object payload;
  * 025 writes the provenance envelope. test-schema [31] holds each against the
- * body it names and against the body before it.
+ * body it names and against the body before it. 033 — the last definer of
+ * both forms — declares itself with a sentinel of its own,
+ * `ob1:capture-takes-fingerprint-lock`, read inline as 022's is; the two
+ * regexes still tell which earlier body an unlocked one is.
  */
 export const UPSERT_TWO_ARG_SHIPPED_RE = /jsonb_typeof\(p_payload\)\s*<>\s*'object'/;
 export const UPSERT_THREE_ARG_SHIPPED_RE = /p_payload\s*->\s*'derived_from'/;

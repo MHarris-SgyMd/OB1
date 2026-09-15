@@ -652,52 +652,62 @@ if (configFailed) {
         const FOUR = "upsert_thought(text,jsonb,vector,jsonb)";
         const others = forms.filter((f) => f !== three && f !== two && f.sig !== FOUR).map((f) => f.sig);
         const andOthers = others.length ? `; ${others.length} other upsert_thought overload(s) (${others.join(", ")}), which no migration defines and the servers never call` : "";
-        // The 3-arg body's semantics are declared by a sentinel in the body
-        // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
-        // windows stay while the label vouches for them and go otherwise. 025
-        // kept that sentinel and added the provenance envelope, so 025's body
-        // is told from 022's by the clause 022's lacks; and 005's 2-argument
-        // body, from before the convention, by the guard 005 added.
-        // db/config.mjs holds both recognisers and test-schema [31] pins them
-        // to the bodies they name. Any CREATE OR REPLACE from outside the
-        // migrations — an earlier migration by hand, the getting-started guide
-        // pasted again, a vendored schema or recipe (SMD-1250) — replaces a
-        // body with no error when the signature matches; this is where the
-        // operator learns which body is there, and which migration owns it.
-        const THREE_LAST = "025_thought_provenance.sql";
-        // 005 is the 2-argument form's last definer and redefines the
-        // 3-argument form too, with a body from before 008, 021, 022 and 025 —
-        // so the remedy for a stale 2-argument body is 005 and then 025.
-        const FIVE_THEN_LAST = `Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`;
+        // The bodies' semantics are declared by sentinels in the bodies
+        // themselves (the 014 convention): `ob1:vector-replaces-chunks` (022)
+        // — the windows stay while the label vouches for them and go
+        // otherwise — and `ob1:capture-takes-fingerprint-lock` (033, in BOTH
+        // forms) — a capture takes the advisory lock update_thought takes, so
+        // a capture and an edit of one text are serialised. 025 kept 022's
+        // sentinel and added the provenance envelope, so 025's body is told
+        // from 022's by the clause 022's lacks; and 005's 2-argument body,
+        // from before the convention, by the guard 005 added. db/config.mjs
+        // holds those two recognisers and test-schema [31] pins them to the
+        // bodies they name. Any CREATE OR REPLACE from outside the migrations
+        // — an earlier migration by hand, the getting-started guide pasted
+        // again, a vendored schema or recipe (SMD-1250) — replaces a body with
+        // no error when the signature matches; this is where the operator
+        // learns which body is there, and which migration owns it. 033 is the
+        // last definer of BOTH forms, so one file is the remedy for every
+        // stale state.
+        const LAST = "033_upsert_thought_fingerprint_lock.sql";
+        const LOCKED = /ob1:capture-takes-fingerprint-lock/;
+        const applyLast = (why: string) => ledgerRemedy("033", `Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
+        // Two stale states: from before 005 (no guard) and from before 033
+        // (005's guard, no lock).
         const twoStale = two !== undefined && !UPSERT_TWO_ARG_SHIPPED_RE.test(two.src);
+        const twoUnlocked = two !== undefined && !twoStale && !LOCKED.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : "";
-        const remedyThree = (alone: string) => (twoStale ? ledgerRemedy("005", FIVE_THEN_LAST) : ledgerRemedy("025", alone));
+        const TWO_UNLOCKED_WHY = "it is from before migration 033 (005 re-applied by hand puts it back): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation";
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 033's either — ${TWO_UNLOCKED_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : ""}${andOthers}`,
-              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 033's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025 and 033 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
           add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do${andOthers}`,
-              ledgerRemedy("005", FIVE_THEN_LAST));
+              applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has${andTwo}${andOthers}`,
-              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 033 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell${andTwo}${andOthers}`,
-              remedyThree(`Apply db/migrations/${THREE_LAST}.`));
-        } else if (twoStale) {
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (!LOCKED.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 025's, but the 2-argument body is not 005's — ${TWO_STALE_WHY}${andOthers}`,
-              ledgerRemedy("005", FIVE_THEN_LAST));
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 (025 re-applied by hand puts it back): it takes no fingerprint lock, so a capture racing an edit of the same text raises the unique violation 018 removed for edits, and a re-capture racing a first capture leaves windows nothing vouches for${andTwo}${andOthers}`,
+              applyLast("."));
+        } else if (twoStale || twoUnlocked) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 033's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 033's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
+              applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 033's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, and the fingerprint lock, so a capture and an edit of one text are serialised; the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // A fact of its own, with its own remedy: every writer that replaces a
