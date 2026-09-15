@@ -16,13 +16,35 @@
 --   supersedes           UUID    — optional pointer to a prior thought this one
 --                                  replaces (e.g., an updated digest).
 --
--- Helper functions:
---   trace_provenance(p_thought_id UUID, p_max_depth INT)
---     Walks derived_from upward and returns a flat rowset of ancestors with
---     their depth, cycle flag, and sensitivity tier. Caller can build a tree.
---
---   find_derivatives(p_thought_id UUID, p_limit INT)
---     Reverse lookup — returns rows whose derived_from contains p_thought_id.
+-- Helper functions (this fork, SMD-1250): upstream's file defined
+--   trace_provenance(p_thought_id UUID, p_max_depth INT, p_node_cap INT) and
+--   find_derivatives(p_thought_id UUID, p_limit INT) here, under the same
+--   argument lists migrations 025 and 026 give them. On a brain built by
+--   db/migrate.ts the two CREATE OR REPLACEs fail — "cannot change return
+--   type of existing function", upstream's RETURNS TABLE differs — and in the
+--   SQL editor the whole paste rolls back; after the DROP FUNCTIONs the
+--   README's rollback ran, they would install upstream's per-path recursive
+--   walk over 026's bounded one (the timeout SMD-1288 removed), and the
+--   migrator's re-run would then fail on the same return type. Sections 5 and
+--   6 are removed; the two functions the README's examples call are 025's and
+--   026's — the same argument lists, so the calls run, but the fork's columns
+--   (no derivation_layer, sensitivity_tier or restricted flag), SECURITY
+--   INVOKER and ungranted, with no redaction by tier: 025's header,
+--   departures 1 and 2. Section 2's CHECK on derived_from is removed as well:
+--   025's thoughts_derived_from_is_array is the same expression, and a second
+--   copy under another name is two constraints to fire on every write.
+--   Section 3's indexes on derived_from and supersedes are removed as well:
+--   idx_thoughts_derived_from and idx_thoughts_supersedes are 025's, under
+--   those names, and IF NOT EXISTS would only have made the claim quietly.
+--   Section 4's comments on derived_from and supersedes — the one thing this
+--   file did do silently on a migrated brain, statement by statement — are
+--   removed: 025 writes those comments as a data contract, and check 7 fails
+--   the build on a COMMENT ON either column. Section 4's comments on derived_from and
+--   supersedes are removed too — 025 writes those columns' comments, and a
+--   COMMENT ON here would overwrite them as silently. The metadata-merge
+--   helpers in sections 7 and 8 have no counterpart in the migrations and stay.
+--   scripts/check-fork-consistency.mjs check 7 fails the build if the two
+--   return.
 --
 -- Safe to run multiple times (ADD COLUMN IF NOT EXISTS / CREATE OR REPLACE).
 -- See README.md for rollback instructions.
@@ -65,11 +87,8 @@ ALTER TABLE public.thoughts
 -- before writing) and, at read time, by the ::uuid casts inside
 -- trace_provenance / find_derivatives, which surface any non-UUID element as
 -- a 22P02 error. See schemas/provenance-chains/README.md for details.
-ALTER TABLE public.thoughts
-  DROP CONSTRAINT IF EXISTS thoughts_derived_from_is_array_check;
-ALTER TABLE public.thoughts
-  ADD CONSTRAINT thoughts_derived_from_is_array_check
-  CHECK (derived_from IS NULL OR jsonb_typeof(derived_from) = 'array');
+-- (This fork: the array CHECK is migration 025's thoughts_derived_from_is_array,
+--  the same expression; upstream's copy of it is not added again.)
 
 -- Drop the legacy element-level check if it exists from an older install —
 -- PostgreSQL rejects its subquery predicate and the migration would fail.
@@ -80,234 +99,22 @@ ALTER TABLE public.thoughts
 -- 3. INDEXES
 -- ============================================================
 
--- GIN index for "find_derivatives" containment queries (derived_from @> '["<uuid>"]')
-CREATE INDEX IF NOT EXISTS idx_thoughts_derived_from
-  ON public.thoughts USING gin (derived_from);
+-- (This fork: the GIN index on derived_from and the partial index on
+--  supersedes are migration 025's, idx_thoughts_derived_from and
+--  idx_thoughts_supersedes; not created here.)
 
 -- Btree on layer for "give me all derived artifacts" browse queries
 CREATE INDEX IF NOT EXISTS idx_thoughts_derivation_layer
   ON public.thoughts (derivation_layer);
 
--- Partial index on supersedes — most rows are NULL, only track the active ones
-CREATE INDEX IF NOT EXISTS idx_thoughts_supersedes
-  ON public.thoughts (supersedes)
-  WHERE supersedes IS NOT NULL;
-
 -- ============================================================
 -- 4. COLUMN COMMENTS (discoverable via \d+ thoughts)
 -- ============================================================
 
-COMMENT ON COLUMN public.thoughts.derived_from IS
-  'JSONB array of parent thought IDs (UUID strings). NULL for primary thoughts. Use @> for containment lookup.';
 COMMENT ON COLUMN public.thoughts.derivation_method IS
   'How this thought was derived. Currently: ''synthesis'' or NULL. Extend the check constraint to add methods.';
 COMMENT ON COLUMN public.thoughts.derivation_layer IS
   '''primary'' (atomic capture) or ''derived'' (regenerable artifact). Defaults to ''primary''.';
-COMMENT ON COLUMN public.thoughts.supersedes IS
-  'UUID of the prior thought this one replaces, e.g., a regenerated digest. NULL when nothing is superseded.';
-
--- ============================================================
--- 5. HELPER: trace_provenance
---    Walks derived_from upward (toward ancestors) and returns a flat rowset
---    of each visited thought with its depth. Cycles terminate at the first
---    re-visit and are flagged. Restricted ancestors return with content=NULL
---    and a flag so callers can redact downstream.
---
---    Canonical-schema compatibility note: the canonical OB1 public.thoughts
---    table only defines id, content, embedding, metadata, created_at,
---    updated_at (plus content_fingerprint in 2.6). The `sensitivity_tier`,
---    `source_type`, and `type` values that this function exposes are read
---    from `metadata->>'…'` rather than top-level columns, so the migration
---    installs cleanly on a stock setup without requiring you to ADD COLUMN
---    for those fields. If you have already promoted them to real columns
---    on a fork, change the metadata reads below to direct column reads.
--- ============================================================
-
-CREATE OR REPLACE FUNCTION public.trace_provenance(
-  p_thought_id UUID,
-  p_max_depth INT DEFAULT 3,
-  p_node_cap INT DEFAULT 250
-)
-RETURNS TABLE (
-  thought_id UUID,
-  depth INT,
-  parent_id UUID,
-  content TEXT,
-  type TEXT,
-  source_type TEXT,
-  derivation_method TEXT,
-  derivation_layer TEXT,
-  sensitivity_tier TEXT,
-  created_at TIMESTAMPTZ,
-  cycle BOOLEAN,
-  restricted BOOLEAN
-)
-LANGUAGE plpgsql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_max_depth INT := GREATEST(1, LEAST(COALESCE(p_max_depth, 3), 10));
-  v_node_cap INT := GREATEST(1, LEAST(COALESCE(p_node_cap, 250), 2000));
-BEGIN
-  IF p_thought_id IS NULL THEN
-    RETURN;
-  END IF;
-
-  RETURN QUERY
-  WITH RECURSIVE walk AS (
-    -- Seed: the root thought at depth 0.
-    -- type / source_type / sensitivity_tier are read from metadata because
-    -- the canonical public.thoughts table does not define them as columns.
-    SELECT
-      t.id                                 AS thought_id,
-      0                                    AS depth,
-      NULL::uuid                           AS parent_id,
-      t.content,
-      (t.metadata->>'type')                AS type,
-      (t.metadata->>'source_type')         AS source_type,
-      t.derivation_method,
-      t.derivation_layer,
-      (t.metadata->>'sensitivity_tier')    AS sensitivity_tier,
-      t.created_at,
-      t.derived_from,
-      ARRAY[t.id]                          AS visited,
-      false                                AS cycle
-    FROM public.thoughts t
-    WHERE t.id = p_thought_id
-
-    UNION ALL
-
-    -- Step: for each walked row, emit one row per parent id. Stop at depth,
-    -- cycles, and the node cap (LIMIT on the outer query below).
-    SELECT
-      parent.id,
-      w.depth + 1,
-      w.thought_id,
-      parent.content,
-      (parent.metadata->>'type')             AS type,
-      (parent.metadata->>'source_type')      AS source_type,
-      parent.derivation_method,
-      parent.derivation_layer,
-      (parent.metadata->>'sensitivity_tier') AS sensitivity_tier,
-      parent.created_at,
-      parent.derived_from,
-      w.visited || parent.id,
-      parent.id = ANY(w.visited)
-    FROM walk w
-    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(w.derived_from, '[]'::jsonb)) AS p(parent_id_text)
-    JOIN public.thoughts parent ON parent.id = p.parent_id_text::uuid
-    WHERE w.depth < v_max_depth
-      AND NOT w.cycle
-  )
-  SELECT
-    walk.thought_id,
-    walk.depth,
-    walk.parent_id,
-    CASE WHEN walk.sensitivity_tier = 'restricted' THEN NULL ELSE walk.content END AS content,
-    walk.type,
-    walk.source_type,
-    walk.derivation_method,
-    walk.derivation_layer,
-    walk.sensitivity_tier,
-    walk.created_at,
-    walk.cycle,
-    (walk.sensitivity_tier = 'restricted') AS restricted
-  FROM walk
-  ORDER BY depth ASC, thought_id ASC
-  LIMIT v_node_cap;
-END;
-$$;
-
--- Service-role-only. The canonical OB1 access pattern is: clients call the
--- edge function, which authenticates via its access key and uses the
--- service_role to reach PostgREST. Granting EXECUTE to `authenticated` here
--- would let any signed-in Supabase user invoke this RPC directly via
--- PostgREST and bypass the edge-function access key entirely. Keep it
--- service_role only so the edge function is the sole caller.
-REVOKE EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT)
-  TO service_role;
-
--- ============================================================
--- 6. HELPER: find_derivatives
---    Single-level reverse lookup — "what thoughts were derived from this one?"
---    Uses the GIN index on derived_from via the @> containment operator.
---
---    Restricted rows are ALWAYS hidden from this RPC. The prior signature
---    accepted a client-supplied `exclude_restricted` flag; that was unsafe
---    because a caller could pass false and unmask restricted rows. Restricted
---    filtering is now hardcoded inside the function. A separate admin-only
---    path is out of scope for this schema — add it in a companion recipe
---    gated on service_role if you need to include restricted rows.
--- ============================================================
-
--- Drop any prior 3-arg signature (p_exclude_restricted) before (re)creating
--- the current 2-arg version. CREATE OR REPLACE FUNCTION cannot change a
--- parameter list in-place, so the old signature must be removed first for
--- this migration to be re-runnable.
-DROP FUNCTION IF EXISTS public.find_derivatives(UUID, INT, BOOLEAN);
-
-CREATE OR REPLACE FUNCTION public.find_derivatives(
-  p_thought_id UUID,
-  p_limit INT DEFAULT 100
-)
-RETURNS TABLE (
-  id UUID,
-  content TEXT,
-  type TEXT,
-  source_type TEXT,
-  derivation_method TEXT,
-  derivation_layer TEXT,
-  sensitivity_tier TEXT,
-  created_at TIMESTAMPTZ
-)
-LANGUAGE plpgsql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_limit INT := GREATEST(1, LEAST(COALESCE(p_limit, 100), 500));
-  v_needle JSONB;
-BEGIN
-  IF p_thought_id IS NULL THEN
-    RETURN;
-  END IF;
-
-  -- Build a JSONB array containing the UUID as a JSON string, so the GIN
-  -- containment operator can use idx_thoughts_derived_from.
-  v_needle := jsonb_build_array(p_thought_id::text);
-
-  -- type / source_type / sensitivity_tier come from metadata so the migration
-  -- works on the canonical public.thoughts schema (which does not define them
-  -- as top-level columns). If you have promoted them to real columns on a
-  -- fork, swap the metadata reads below for direct column reads.
-  RETURN QUERY
-  SELECT
-    t.id,
-    t.content,
-    (t.metadata->>'type')                AS type,
-    (t.metadata->>'source_type')         AS source_type,
-    t.derivation_method,
-    t.derivation_layer,
-    (t.metadata->>'sensitivity_tier')    AS sensitivity_tier,
-    t.created_at
-  FROM public.thoughts t
-  WHERE t.derived_from @> v_needle
-    AND (t.metadata->>'sensitivity_tier') IS DISTINCT FROM 'restricted'
-  ORDER BY t.created_at DESC
-  LIMIT v_limit;
-END;
-$$;
-
--- Service-role-only (same reasoning as trace_provenance above).
-REVOKE EXECUTE ON FUNCTION public.find_derivatives(UUID, INT) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.find_derivatives(UUID, INT) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.find_derivatives(UUID, INT)
-  TO service_role;
 
 -- ============================================================
 -- 7. HELPER: merge_thought_provenance_metadata

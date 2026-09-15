@@ -19,6 +19,8 @@ This schema extension adds six new columns to the `thoughts` table (`type`, `sen
 - **`get_thought_connections`** -- Finds thoughts that share metadata topics or people with a given thought.
 - **`backfill_thought_types(p_allowed_types TEXT[])`** -- Populates the new top-level `type` column from `metadata->>'type'`. The default allowlist covers the canonical eight values (`idea`, `task`, `person_note`, `reference`, `decision`, `lesson`, `meeting`, `journal`). Pass a custom array to accept additional values, or pass `NULL` to backfill whatever `metadata->>'type'` contains.
 
+> **This fork (SMD-1250):** upstream's `schema.sql` ended with a section that redefined `upsert_thought(text, jsonb)` so these columns were mirrored on every write. On a brain built by `db/migrate.ts` that statement replaces the body migration 005 installed, silently, so it is removed here: the columns are filled by `backfill_thought_types()` and the `UPDATE` in the script, and a capture does not update them. Two more things on a migrated brain: the script's backfill moves `updated_at` on every row with a `type` or `source` in its metadata, which on this fork gates the accepted-vector caveat and the edited-since rules — run it between re-embed passes; and on plain Postgres its `GRANT`s to Supabase's roles fail (`role "authenticated" does not exist`) — create `authenticated`, `service_role` and `anon` as `NOLOGIN` roles first, or delete those lines. `scripts/check-fork-consistency.mjs` check 7 keeps the upsert out.
+
 ## Prerequisites
 
 - Working Open Brain setup (see the getting-started guide in `docs/01-getting-started.md`)

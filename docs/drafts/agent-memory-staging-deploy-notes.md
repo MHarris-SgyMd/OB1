@@ -28,7 +28,7 @@ This pass should verify:
 ## Guide Deltas To Watch
 
 - Whether the base OB1 guide should gain a CLI migration path alongside SQL Editor copy/paste.
-- Draft CLI base schema added in [agent-memory-staging-base.sql](agent-memory-staging-base.sql) for this staging pass.
+- Draft CLI base schema added upstream as `agent-memory-staging-base.sql` for this staging pass; removed in this fork, where it re-created `upsert_thought`, `match_thoughts` and `update_updated_at` over the bodies `db/migrations/` install (SMD-1250) — `db/migrate.ts` is the CLI path.
 - Whether Agent Memory setup should ship as Supabase migrations or remain recipe SQL first.
 - `SUPABASE_SERVICE_ROLE_KEY` was available automatically in the deployed Edge Function; only `OPENROUTER_API_KEY` and `MCP_ACCESS_KEY` needed to be set manually for this staging pass.
 - Whether fresh Supabase projects need `pgcrypto` explicitly enabled for `sha256`.

@@ -1147,7 +1147,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 667 properties (at migration 031), including:
+asserts 683 properties (at migration 031), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1311,6 +1311,16 @@ asserts 667 properties (at migration 031), including:
   second call writes nothing; `p_limit` bounds a batch and the third returns
   0 with the blocked rows still there; one function; 023 re-applied re-runs
   the call and moves nothing
+- **a vendored schema applied to a migrated brain replaces no function a
+  migration owns** (SMD-1250): the owned set is read from the migration files
+  as `scripts/check-fork-consistency.mjs` check 7 reads it, and the three last
+  definers preflight's remedies spell are pinned; `schemas/enhanced-thoughts/schema.sql`
+  applied whole leaves every owned body and overload byte for byte while its
+  own columns and functions arrive; then what upstream's file did — 003's
+  2-argument body over 005's raises nothing, changes one body, and a
+  double-encoded payload is emptied silently again; 022 over 025 keeps 022's
+  sentinel and drops 025's envelope, which preflight's recogniser sees; the
+  last definers re-applied put every body back
 
 One thing this suite deliberately does NOT assert: that a context survives a
 capture, an edit and a payload that omits it. Writing chunk rows through the

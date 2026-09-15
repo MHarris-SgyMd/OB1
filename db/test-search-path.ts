@@ -165,6 +165,11 @@ try {
            "…with both the role-scoped and database-wide remedies");
     assert(/beside any hnsw\.\* bounds, it does not replace them/.test(r.out),
            "…and the note that the fix coexists with the hnsw walk bounds");
+    // The two capture forms are matched by a signature built from pg_type's
+    // names; regprocedure's text would spell `ext.vector` here and call the
+    // present 3-argument form missing (SMD-1250, second review pass).
+    assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 025's/.test(r.out),
+           "…while atomic capture still finds both upsert_thought forms with pgvector off the path");
   }
 
   console.log("\n[5] A role that cannot see the schema is told to GRANT, not to set the path");

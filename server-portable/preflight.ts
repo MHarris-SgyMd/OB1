@@ -94,7 +94,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "search signatures", "edit signature", "filtered search",
+  "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger",
 ];
@@ -114,7 +114,7 @@ const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
  * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
-const REAPPLY = `The ledger records that migration but the schema installed is older (adopted with --baseline?): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
+const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -579,14 +579,26 @@ if (configFailed) {
               `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
-        // One schema-qualified read of every form, arity and body; no name or
-        // type resolved through the session's search_path (to_regprocedure
+        // One schema-qualified read of every form, signature and body; no name
+        // or type resolved through the session's search_path (to_regprocedure
         // returns NULL where `vector` is out of the path on PG16, and raises
         // on PG15 — into the catch below, taking every later check with it).
+        // The signature is built from pg_type's names, not regprocedure's
+        // text: that text schema-qualifies `vector` when pgvector is off the
+        // path (the shape the `vector extension` check above fails), and a
+        // pick by it would then have called a present form missing (second
+        // review pass, SMD-1250).
         const forms = (await sql`
-          SELECT p.pronargs::int AS n, p.prosrc AS src FROM pg_proc p
+          SELECT p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n)
+                                                 FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n)
+                                                 JOIN pg_type t ON t.oid = a.o), '') || ')' AS sig,
+                 p.prosrc AS src
+          FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
+          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { sig: string; src: string }[];
+        const { UPSERT_TWO_ARG_SHIPPED_RE, UPSERT_THREE_ARG_SHIPPED_RE, RELEASE_SHIPPED_RE, THOUGHT_STATS_SHIPPED_RE } = await import("../db/config.mjs");
+        /** A function's signature from pg_type's names — the same text on every search_path (see `forms` below). */
+        const SIG_SQL = `p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n) FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n) JOIN pg_type t ON t.oid = a.o), '') || ')'`;
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
         // Which of the migrations that have a ledger-aware remedy the ledger
@@ -622,30 +634,64 @@ if (configFailed) {
             : ledgerRead || Number(applied[0].c) === 0
               ? apply
               : `${apply} — or, if the ledger already records ${migration} (this role cannot read schema_migrations): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
-        const three = forms.find((f) => f.n === 3);
-        const two = forms.find((f) => f.n === 2);
+        // By signature, not arity: a vendored bootstrap's upsert_thought(text,
+        // vector, jsonb) is a third 3-argument form, and reading whichever the
+        // catalog returned first judged a healthy brain by the wrong body
+        // (first review pass; SMD-1245's arity-alone finding).
+        const three = forms.find((f) => f.sig === "upsert_thought(text,jsonb,vector)");
+        const two = forms.find((f) => f.sig === "upsert_thought(text,jsonb)");
+        // 007/013's 4-argument form — the windowed capture the servers call —
+        // is the third form the migrations define; anything else is a
+        // vendored file's, and is named.
+        const FOUR = "upsert_thought(text,jsonb,vector,jsonb)";
+        const others = forms.filter((f) => f !== three && f !== two && f.sig !== FOUR).map((f) => f.sig);
+        const andOthers = others.length ? `; ${others.length} other upsert_thought overload(s) (${others.join(", ")}), which no migration defines and the servers never call` : "";
         // The 3-arg body's semantics are declared by a sentinel in the body
         // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
-        // windows stay while the label vouches for them and go otherwise. 021
-        // re-applied by hand puts 021's body back — CREATE OR REPLACE, no
-        // error — and a chunkless re-capture at another model then leaves the
-        // previous vector's windows under the new one, found by search and
-        // named by nothing.
+        // windows stay while the label vouches for them and go otherwise. 025
+        // kept that sentinel and added the provenance envelope, so 025's body
+        // is told from 022's by the clause 022's lacks; and 005's 2-argument
+        // body, from before the convention, by the guard 005 added.
+        // db/config.mjs holds both recognisers and test-schema [31] pins them
+        // to the bodies they name. Any CREATE OR REPLACE from outside the
+        // migrations — an earlier migration by hand, the getting-started guide
+        // pasted again, a vendored schema or recipe (SMD-1250) — replaces a
+        // body with no error when the signature matches; this is where the
+        // operator learns which body is there, and which migration owns it.
+        const THREE_LAST = "025_thought_provenance.sql";
+        // 005 is the 2-argument form's last definer and redefines the
+        // 3-argument form too, with a body from before 008, 021, 022 and 025 —
+        // so the remedy for a stale 2-argument body is 005 and then 025.
+        const FIVE_THEN_LAST = `Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`;
+        // The 2-argument body is judged on its own and said beside whichever
+        // 3-argument state fires, so a brain with both replaced hears it once
+        // rather than on the run after the first remedy (first review pass).
+        const twoStale = two !== undefined && !UPSERT_TWO_ARG_SHIPPED_RE.test(two.src);
+        const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : "";
+        const remedyThree = (alone: string) => (twoStale ? ledgerRemedy("005", FIVE_THEN_LAST) : ledgerRemedy("025", alone));
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
-              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs)."));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : ""}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
-          // name and the two-step fallback do. A warning, and the remedy says
-          // "then 022": 005 redefines the 3-argument form too, with its body.
-          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do`,
-              "Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then 022 again — 005 redefines the 3-argument form as well, with a body from before 008, 021 and 022.");
+          // name and the two-step fallback do. A warning.
+          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do${andOthers}`,
+              ledgerRemedy("005", FIVE_THEN_LAST));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
-              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql."));
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has${andTwo}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
+        } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell${andTwo}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST}.`));
+        } else if (twoStale) {
+          add("atomic capture", "warn",
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 025's, but the 2-argument body is not 005's — ${TWO_STALE_WHY}${andOthers}`,
+              ledgerRemedy("005", FIVE_THEN_LAST));
         } else {
-          add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them");
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's${andOthers}`);
         }
 
         // A fact of its own, with its own remedy: every writer that replaces a
@@ -844,13 +890,22 @@ if (configFailed) {
          * it belongs.)
          */
         const stats = await sql`
-          SELECT count(*)::int AS c FROM pg_proc p
+          SELECT p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'thought_stats_summary' AND n.nspname = 'public'`;
-        if (Number(stats[0].c) >= 1) add("stats summary", "ok", "thought_stats_summary present");
-        else add("stats summary", "fail",
+        // And whose body (SMD-1250): 024 took this function from the
+        // edge-function-cost-optimization recipe and hardened it — topics and
+        // people unnested only when they are arrays, null elements dropped. The
+        // recipe's migration, pasted onto a migrated brain, puts the recipe's
+        // body back under the same signature with no error, and thought_stats
+        // then raises on the first thought whose topics hold a null element.
+        if (stats.length === 0) add("stats summary", "fail",
                  "thought_stats_summary is missing, but thought_stats calls it on the SQL path — every thought_stats call would fail",
-                 "Apply db/migrations/024_thought_stats_summary.sql.");
+                 ledgerRemedy("024", "Apply db/migrations/024_thought_stats_summary.sql."));
+        else if (!stats.some((s: { src: string }) => THOUGHT_STATS_SHIPPED_RE.test(String(s.src)))) add("stats summary", "warn",
+                 "thought_stats_summary present, but its body is not 024's — it does not guard the topics array by type, so a thought whose topics hold a null element or are not an array makes every thought_stats call raise (field name must not be null) — a CREATE OR REPLACE from outside the migrations put another there (the edge-function-cost-optimization recipe's migration, which 024 took this function from)",
+                 ledgerRemedy("024", "Apply db/migrations/024_thought_stats_summary.sql."));
+        else add("stats summary", "ok", "thought_stats_summary present, 024's body");
 
         /**
          * Migration 025's provenance functions (SMD-1253). trace_provenance and
@@ -869,17 +924,72 @@ if (configFailed) {
         const prov = await sql`
           SELECT
             count(*) FILTER (WHERE p.proname = 'trace_provenance')::int AS t,
-            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f
+            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f,
+            bool_or(p.proname = 'trace_provenance' AND p.prosrc LIKE '%ob1:provenance-walk-bounded%') AS bounded
           FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname IN ('trace_provenance', 'find_derivatives') AND n.nspname = 'public'`;
         // Per function, not a combined count: a double-overload of one plus the
         // other absent must still fail, as the sibling signature checks do
-        // (review pass 1, SMD-1253).
-        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) add("provenance", "ok", "trace_provenance and find_derivatives present");
-        else add("provenance", "fail",
+        // (review pass 1, SMD-1253). And whose body: 026 redefined
+        // trace_provenance as a walk-global BFS under the sentinel
+        // `ob1:provenance-walk-bounded` (SMD-1288); 025 re-applied by hand puts
+        // 025's per-path walk back with no error. Upstream's provenance-chains
+        // body, under the same signature, does NOT install over it — its
+        // RETURNS TABLE differs, so CREATE OR REPLACE fails on the return type
+        // — but does after the DROP its own rollback runs, and the migrator's
+        // re-run then fails on the same return type until both functions are
+        // dropped again (SMD-1250, fourth review pass, which ran it).
+        const DROP_FIRST = " If the body there returns other columns than 026's (upstream's provenance-chains, installed after a DROP), the re-run fails with 'cannot change return type': run DROP FUNCTION trace_provenance(uuid, int, int), find_derivatives(uuid, int); first.";
+        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) {
+          if (prov[0].bounded) add("provenance", "ok", "trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded");
+          else add("provenance", "warn",
+                   "trace_provenance and find_derivatives present, but trace_provenance's body is not 026's — the bounded walk's sentinel is absent — so a CREATE OR REPLACE from outside the migrations put another there (025 re-applied by hand, or upstream's provenance-chains body after a DROP): a dense derivation graph expands multiplicatively again and a trace can run to the statement timeout (SMD-1288)",
+                   ledgerRemedy("026", "Apply db/migrations/026_trace_provenance_bounded.sql.") + DROP_FIRST);
+        } else add("provenance", "fail",
                  "migration 025's provenance functions are missing, but capture_thought accepts derived_from/supersedes (silently dropped by the pre-025 upsert_thought) and search labels superseded hits",
-                 "Apply db/migrations/025_thought_provenance.sql.");
+                 ledgerRemedy("025", "Apply db/migrations/025_thought_provenance.sql."));
+
+        /**
+         * Migration 015's claim functions, and 031's (SMD-1250, fourth review
+         * pass). Upstream's thought-work-claims schema defines release_thought
+         * and release_claims_for_worker under 015's exact signatures, so a
+         * paste replaces both bodies with no error, and the three workers
+         * then break at the first release: upstream's release leaves the lease
+         * set, which 015's CHECK refuses, and its release_claims_for_worker
+         * DELETEs the worker's rows instead of returning them to the pool.
+         * 015's bodies are recognised by the one clause both share and
+         * upstream's lack — the lease cleared (db/config.mjs holds it;
+         * test-schema [31] pins it). Any overload of these names no migration
+         * defines is a vendored install too — upstream's claim_thoughts takes
+         * an id list where 015's takes a pool — and is named. Nothing to read
+         * before 015: a skip, as the re-embed pass check says it.
+         */
+        const KNOWN_CLAIM_SIGS = new Set(["claim_thoughts(text,text,int4,int4,int4)", "release_thought(uuid,text,text,text,text)", "release_claims_for_worker(text,text)", "renew_claims(text,text,int4)"]);
+        const wc = (await sql.unsafe(`
+          SELECT ${SIG_SQL} AS sig, p.prosrc AS src FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname IN ('claim_thoughts', 'release_thought', 'release_claims_for_worker', 'renew_claims') AND n.nspname = 'public'`)) as { sig: string; src: string }[];
+        const release = wc.find((f) => f.sig === "release_thought(uuid,text,text,text,text)");
+        const forWorker = wc.find((f) => f.sig === "release_claims_for_worker(text,text)");
+        // Spelled as pg_type spells them (_uuid, int4) — a spelling DROP FUNCTION accepts.
+        const strays = wc.filter((f) => !KNOWN_CLAIM_SIGS.has(f.sig)).map((f) => f.sig);
+        const andStrays = strays.length ? `; ${strays.length} overload(s) no migration defines: ${strays.join(", ")} — a vendored schema's (upstream's thought-work-claims takes an id list where 015's claim_thoughts takes a pool)` : "";
+        if (wc.length === 0) {
+          add("work claims", "skip", "not checked — the claim functions do not exist (migration 015 not applied)");
+        } else if (!release || !forWorker) {
+          add("work claims", "fail", `015's release_thought or release_claims_for_worker is missing under 015's signature; the three workers call both${andStrays}`,
+              ledgerRemedy("015", "Apply db/migrations/015_thought_work_claims.sql, then 028 (its comment on release_thought) and 031 (renew_claims) again."));
+        } else if (!RELEASE_SHIPPED_RE.test(release.src) || !RELEASE_SHIPPED_RE.test(forWorker.src)) {
+          add("work claims", "fail",
+              `release_thought's or release_claims_for_worker's body is not 015's — it does not clear the lease as 015's CHECK requires — so a CREATE OR REPLACE from outside the migrations put another there (upstream's thought-work-claims schema shares both signatures): every worker release fails the constraint, and a clean shutdown deletes the worker's rows instead of returning them to the pool${andStrays}`,
+              ledgerRemedy("015", "Apply db/migrations/015_thought_work_claims.sql, then 028 again — the same paste overwrites 028's comment on release_thought."));
+        } else if (strays.length) {
+          add("work claims", "warn", `claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies${andStrays}`,
+              strays.map((s) => `DROP FUNCTION ${s};`).join(" "));
+        } else {
+          add("work claims", "ok", "claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies");
+        }
 
         /**
          * Migration 014: the metadata filter is applied inside the HNSW scan,

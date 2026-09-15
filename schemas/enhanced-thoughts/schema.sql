@@ -1,6 +1,22 @@
 -- Enhanced Thoughts Columns and Utility RPCs
 -- Adds structured columns and utility functions to the Open Brain thoughts table.
 -- Safe to run multiple times (fully idempotent).
+--
+-- This fork (SMD-1250): upstream's file ended with a section 6 that redefined
+-- public.upsert_thought(p_content TEXT, p_payload JSONB) so these columns were
+-- mirrored on write. On a brain built by db/migrate.ts that statement replaced
+-- the body migration 005 installed — no error, the signature matches — and a
+-- double-encoded payload was emptied silently again. The section is removed
+-- here: the columns below are filled by backfill_thought_types() and the
+-- UPDATE in section 5, and a capture does not update them. Two things to know
+-- before running the rest on a migrated brain: section 5 moves updated_at on
+-- every row with a type or source in its metadata (001's trigger), and on
+-- this fork updated_at gates the accepted-vector caveat and the edited-since
+-- rules (FORK.md changes 39 and 40) — run it between re-embed passes, not
+-- during one; and the GRANTs to Supabase's roles fail on plain Postgres
+-- (role "authenticated" does not exist) — create authenticated, service_role
+-- and anon as NOLOGIN roles first, or delete those lines.
+-- scripts/check-fork-consistency.mjs check 7 fails the build if it returns.
 
 -- ============================================================
 -- 1. NEW COLUMNS
@@ -12,8 +28,9 @@ ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS importance SMALLINT DEFAULT 3;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS quality_score NUMERIC(5,2) DEFAULT 50;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS source_type TEXT;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS enriched BOOLEAN DEFAULT false;
--- status / status_updated_at are written by the upsert_thought RPC below.
--- They are also defined by schemas/workflow-status/migration.sql; both files
+-- status / status_updated_at were written by upstream's upsert_thought
+-- (removed here, see above). They are also defined by
+-- schemas/workflow-status/migration.sql; both files
 -- use ADD COLUMN IF NOT EXISTS so applying either (or both) is safe.
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status TEXT DEFAULT NULL;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ DEFAULT now();
@@ -350,96 +367,6 @@ SELECT backfill_thought_types();
 -- Backfill source_type from metadata
 UPDATE thoughts SET source_type = metadata->>'source'
 WHERE source_type IS NULL AND metadata->>'source' IS NOT NULL;
-
--- ============================================================
--- 6. ENHANCED UPSERT RPC
---    Keeps structured dashboard columns in sync when callers use
---    the base upsert_thought RPC with metadata payloads.
--- ============================================================
-
-CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')
-RETURNS JSONB AS $$
-DECLARE
-  v_fingerprint TEXT;
-  v_result JSONB;
-  v_id UUID;
-  v_metadata JSONB;
-  v_type TEXT;
-  v_source_type TEXT;
-  v_importance SMALLINT;
-  v_quality_score NUMERIC(5,2);
-  v_sensitivity_tier TEXT;
-  v_status TEXT;
-BEGIN
-  v_metadata := COALESCE(p_payload->'metadata', '{}'::jsonb);
-  v_type := COALESCE(NULLIF(v_metadata->>'type', ''), 'observation');
-  v_source_type := COALESCE(NULLIF(v_metadata->>'source_type', ''), NULLIF(v_metadata->>'source', ''), 'unknown');
-  v_importance := CASE
-    WHEN COALESCE(v_metadata->>'importance', '') ~ '^[0-9]+(\.[0-9]+)?$'
-      THEN LEAST(100, GREATEST(0, ROUND((v_metadata->>'importance')::numeric)))::smallint
-    ELSE 50
-  END;
-  v_quality_score := CASE
-    WHEN COALESCE(v_metadata->>'quality_score', '') ~ '^[0-9]+(\.[0-9]+)?$'
-      THEN LEAST(100, GREATEST(0, (v_metadata->>'quality_score')::numeric))
-    ELSE 70
-  END;
-  v_sensitivity_tier := COALESCE(NULLIF(v_metadata->>'sensitivity_tier', ''), 'standard');
-  v_status := COALESCE(NULLIF(p_payload->>'status', ''), NULLIF(v_metadata->>'status', ''));
-  IF v_status IS NULL AND v_type IN ('task', 'idea') THEN
-    v_status := 'new';
-  END IF;
-
-  v_fingerprint := encode(sha256(convert_to(
-    lower(trim(regexp_replace(p_content, '\s+', ' ', 'g'))),
-    'UTF8'
-  )), 'hex');
-
-  INSERT INTO public.thoughts (
-    content,
-    content_fingerprint,
-    metadata,
-    type,
-    source_type,
-    importance,
-    quality_score,
-    sensitivity_tier,
-    status,
-    status_updated_at
-  )
-  VALUES (
-    p_content,
-    v_fingerprint,
-    v_metadata,
-    v_type,
-    v_source_type,
-    v_importance,
-    v_quality_score,
-    v_sensitivity_tier,
-    v_status,
-    CASE WHEN v_status IS NULL THEN NULL ELSE now() END
-  )
-  ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL DO UPDATE
-  SET updated_at = now(),
-      metadata = public.thoughts.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
-      type = COALESCE(EXCLUDED.type, public.thoughts.type),
-      source_type = COALESCE(EXCLUDED.source_type, public.thoughts.source_type),
-      importance = COALESCE(EXCLUDED.importance, public.thoughts.importance),
-      quality_score = COALESCE(EXCLUDED.quality_score, public.thoughts.quality_score),
-      sensitivity_tier = COALESCE(EXCLUDED.sensitivity_tier, public.thoughts.sensitivity_tier),
-      status = COALESCE(EXCLUDED.status, public.thoughts.status),
-      status_updated_at = CASE
-        WHEN EXCLUDED.status IS DISTINCT FROM public.thoughts.status THEN now()
-        ELSE public.thoughts.status_updated_at
-      END
-  RETURNING id INTO v_id;
-
-  v_result := jsonb_build_object('id', v_id, 'fingerprint', v_fingerprint);
-  RETURN v_result;
-END;
-$$ LANGUAGE plpgsql;
-
-GRANT EXECUTE ON FUNCTION public.upsert_thought(TEXT, JSONB) TO service_role;
 
 -- Reload PostgREST schema cache
 NOTIFY pgrst, 'reload schema';

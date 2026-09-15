@@ -41,6 +41,14 @@ import {
   CLAIM_EVIDENCE_ROWS_SQL,
   REEMBED_KEY_MODEL_SQL_RE,
   REEMBED_OWN_KEY_SQL_RE,
+  RELEASE_SHIPPED_RE,
+  THOUGHT_STATS_SHIPPED_RE,
+  UPSERT_THREE_ARG_SHIPPED_RE,
+  UPSERT_TWO_ARG_SHIPPED_RE,
+  coreColumnCommentStatement,
+  coreFunctionStatement,
+  ownedColumnCommentsIn,
+  ownedFunctionsIn,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3021,6 +3029,77 @@ console.log("\n[30] Migration 031: renew_claims moves every lease the worker hol
   assert(/renew_claims/.test(colComment) && /missed heartbeat/.test(colComment), "ttl_expires_at's comment names the heartbeat and what the lease now means");
   const fnComment = (await db.query<{ c: string | null }>(`SELECT obj_description('renew_claims(text, text, int)'::regprocedure, 'pg_proc') AS c`)).rows[0].c ?? "";
   assert(/never backward/.test(fnComment) && !/--/.test(fnComment) && !/--/.test(colComment), "renew_claims's comment states the rule, and neither literal spells a flag with its dashes");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 31. A vendored schema on a migrated brain ────────────────────────────────
+
+console.log("\n[31] A vendored schema applied to a migrated brain replaces no function a migration owns — and what upstream's did (SMD-1250)");
+{
+  // The owned set, read from the files as scripts/check-fork-consistency.mjs
+  // check 7 reads it. Three names preflight's remedies spell as the last
+  // definer are pinned here: when one moves, so must the remedy.
+  const owned = ownedFunctionsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
+  // 36 at migration 031; the set can only grow, so a smaller one means the
+  // reader lost definitions (a comment or body it failed to strip), not that
+  // a migration went away.
+  assert(owned.size >= 36 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
+    `the owned set is read from the migrations: ${owned.size} functions (36 at 031, never fewer), names only — no word from a header comment quoting a statement`);
+  assert(owned.get("upsert_thought") === "025_thought_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
+    "…and the last definers preflight's remedies name: upsert_thought 025, trace_provenance 026, release_thought 015");
+  const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
+  assert(ownedCols.get("embedding_model") === "021_embedding_model_per_row.sql" && ownedCols.get("derived_from") === "025_thought_provenance.sql" && ownedCols.get("supersedes") === "025_thought_provenance.sql" && ownedCols.size >= 3,
+    `the thoughts columns whose comments a migration writes are read the same way (${ownedCols.size}): embedding_model 021, derived_from and supersedes 025`);
+  const bodies = async (): Promise<Record<string, string>> => Object.fromEntries((await db.query<{ sig: string; h: string }>(
+    `SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS h FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public' AND p.proname = ANY($1::text[]) ORDER BY 1`, [[...owned.keys()]])).rows.map((r) => [r.sig, r.h]));
+  const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
+  const TWO = "upsert_thought(text,jsonb)";
+  const THREE = "upsert_thought(text,jsonb,vector)";
+  const scalarAccepted = async (): Promise<boolean> => {
+    try { await db.query(`SELECT upsert_thought('scalar payload 31', '"{\\"metadata\\":{\\"k\\":1}}"'::jsonb)`); return true; } catch { return false; }
+  };
+  const shipped = await bodies();
+  assert(TWO in shipped && THREE in shipped, `the two capture forms are among the ${Object.keys(shipped).length} owned bodies`);
+  assert(UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && UPSERT_THREE_ARG_SHIPPED_RE.test(await srcOf(THREE)) && /ob1:vector-replaces-chunks/.test(await srcOf(THREE)),
+    "preflight's recognisers hold for the shipped bodies: 005's guard in the 2-argument form, 025's envelope and 022's sentinel in the 3-argument form");
+  assert(RELEASE_SHIPPED_RE.test(await srcOf("release_thought(uuid,text,text,text,text)")) && RELEASE_SHIPPED_RE.test(await srcOf("release_claims_for_worker(text,text)")) && THOUGHT_STATS_SHIPPED_RE.test(await srcOf("thought_stats_summary()")),
+    "…and for 015's two release bodies (the lease cleared) and 024's thought_stats_summary (topics guarded by type)");
+
+  // The vendored file as fixed — its section 6 gone — applied whole. The
+  // Supabase roles its GRANTs name do not exist in PGlite.
+  const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
+  assert(![...owned.keys()].some((fn) => coreFunctionStatement(fn).test(vendored)) && ![...ownedCols.keys()].some((col) => coreColumnCommentStatement(col).test(vendored)),
+    "schemas/enhanced-thoughts/schema.sql names no owned function or column comment in a statement, by check 7's own rules");
+  for (const role of ["authenticated", "service_role", "anon"]) {
+    await db.exec(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
+  }
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(vendored);
+  assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "applied to a migrated brain, it leaves every owned function's body and overload set exactly as the migrations left them");
+  const cols = (await db.query<{ c: string }>(`SELECT column_name AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name IN ('importance', 'quality_score', 'source_type')`)).rows.length;
+  assert(cols === 3 && (await functionsNamed("search_thoughts_text")) === 1, "…while its own columns and functions arrive");
+  assert(!(await scalarAccepted()), "…and a double-encoded payload is still refused: 005's body is the one that runs");
+
+  // What upstream's section 6 did — and the fingerprint recipe's Step 2, and
+  // the guide pasted again: a body from before 005 over 005's. 003's is that
+  // body, byte for byte in what matters.
+  await reapply("003");
+  const clobbered = await bodies();
+  const changed = Object.keys(shipped).filter((sig) => shipped[sig] !== clobbered[sig]);
+  assert(changed.length === 1 && changed[0] === TWO, `the earlier body over the 2-argument form raised nothing and changed exactly one owned body (${changed.join(", ")})`);
+  assert(!UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)), "…which preflight's recogniser tells from 005's");
+  assert(await scalarAccepted(), "…and a double-encoded payload is emptied silently again — the defect 005 removed, back without an error");
+  // 022 over 025: the sentinel stays, the envelope goes — why 025's body is
+  // recognised by more than the sentinel.
+  await reapply("022");
+  const three022 = await srcOf(THREE);
+  assert(/ob1:vector-replaces-chunks/.test(three022) && !UPSERT_THREE_ARG_SHIPPED_RE.test(three022), "022 re-applied over 025 keeps 022's sentinel and drops 025's envelope, which the second recogniser sees");
+  // The way back is the migrations in order — what --reapply runs.
+  await reapply("005");
+  assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)), "005 re-applied puts a pre-022 3-argument body back too (its file defines both forms), so the remedy for the 2-argument form has to say 'then 025 again'");
+  await restoreShipped("upsert_thought", "trace_provenance");
+  assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "…and the last definers re-applied put every owned body back, byte for byte");
   await db.exec(`DELETE FROM thoughts`);
 }
 
