@@ -998,8 +998,27 @@ else {
              /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
              `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
 
+      // Grant the audit INSERT by hand so the base capture set is satisfied — the
+      // extraction conditional is the remaining lever.
+      await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
+      const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(baseOk.out),
+             `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
+
+      // Enable entity extraction: 016's trigger now upserts a work claim as the
+      // caller on every capture, so the capture path needs thought_work_claims
+      // INSERT/UPDATE — which this role (SELECT-everywhere, no worker DML) lacks.
+      // Preflight refuses it, naming them with the trigger as the reason.
+      await claims.unsafe("INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', 'extract:test') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value");
+      const extractOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(extractOn.code === 1 &&
+             /INSERT, UPDATE on thought_work_claims/.test(writeLine(extractOn.out)) &&
+             /016's enqueue trigger/.test(writeLine(extractOn.out)) &&
+             /GRANT INSERT, UPDATE ON thought_work_claims TO ob1_pf_capture;/.test(extractOn.out),
+             `with entity extraction enabled, a role lacking the work-claim writes is refused, the trigger named (exit ${extractOn.code})`);
+
       // The executable spelling: migrate.ts --grant issues the whole documented
-      // set — the read, worker and extraction groups too, quoted role — so the
+      // set — the server, worker and extraction groups too, quoted role — so the
       // role holds everything the writers need and preflight is ok.
       const grant = await migrate(["--grant", "ob1_pf_capture", "--url", LIVE]);
       assert(grant.code === 0 &&
@@ -1007,8 +1026,8 @@ else {
              /GRANT SELECT, INSERT, UPDATE, DELETE ON thought_work_claims TO "ob1_pf_capture";/.test(grant.out),
              `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").slice(-1)[0]})`);
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out),
-             `…and granted, the role starts (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
+             `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
 
       // The real proof: a windowed capture and an edit with content run through
       // the role. The 4-argument upsert_thought DELETEs then INSERTs
@@ -1028,6 +1047,11 @@ else {
         assert(r.chunks === 2, `a windowed capture through the role writes chunk rows (${r.chunks})`);
         const [{ audited }] = (await asRole`SELECT count(*)::int AS audited FROM thought_audit WHERE thought_id = ${r.id}`) as { audited: number }[];
         assert(audited >= 1, "…and 008's trigger writes an audit row as the role");
+        // Extraction is enabled, so the thoughts INSERT also fired 016's enqueue
+        // trigger, which upserted a work claim as the role — the write the
+        // conditional check just proved it needs.
+        const [{ queued }] = (await asRole`SELECT count(*)::int AS queued FROM thought_work_claims WHERE thought_id = ${r.id} AND work_type = 'extract:test'`) as { queued: number }[];
+        assert(queued === 1, "…and 016's enqueue trigger upserts a work claim as the role, extraction being on");
         const edit = (await asRole`SELECT update_thought(${r.id}::uuid, 'the capture, edited with content'::text, NULL::jsonb, ${vecOf(4)}::vector, ${windows}::jsonb, NULL::timestamptz, NULL::jsonb, ${EMBEDDING_MODEL}::text) AS r`) as { r: { ok?: boolean } }[];
         assert(edit.length === 1 && edit[0].r?.ok !== false, "an edit with content through the role succeeds — chunks replaced as the role");
       } finally {
@@ -1035,6 +1059,7 @@ else {
       }
     } finally {
       await dropCaptureRole();
+      await claims.unsafe("DELETE FROM ob1_config WHERE key = 'entity_extraction_key'").catch(() => {});
     }
   }
 

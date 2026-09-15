@@ -191,8 +191,9 @@ role](#grants-for-a-capturing-role) below.
 
 ## Grants for a capturing role
 
-Every function this fork adds is `SECURITY INVOKER` (migrations 010, 012 and 015
-say so), so the writes they make run as the connecting role — and since migration
+Every function this fork adds is `SECURITY INVOKER` — the policy migrations 010,
+012 and 015 state, and the default the capture writers in 005/007/008/022/025
+rely on — so the writes they make run as the connecting role, and since migration
 007 they reach past `thoughts`. A role granted `SELECT, INSERT, UPDATE, DELETE ON
 thoughts` and nothing else, as the getting-started guide's grant step gives, can
 capture nothing on a self-hosted brain: its first windowed capture fails on
@@ -240,6 +241,15 @@ locked-down deployment can grant a subset by hand. A role that only ever runs th
 server needs the **capture** and **server** groups; add **worker** for the role
 your bulk passes connect as, and **extraction** on top of that for entity
 extraction.
+
+**One cross-cutting exception.** Once entity extraction is enabled (a run of
+`extract-entities.ts` sets `ob1_config.entity_extraction_key`), 016's trigger
+fires on every capture and content-edit and upserts a `thought_work_claims` row
+**as the calling role** — so the *server* role then needs `INSERT, UPDATE` on
+`thought_work_claims` too, even though it runs no worker. Preflight's `write
+privileges` check reads that key and enforces exactly this when it is set, so the
+gap surfaces at start-up rather than on the first capture. The simplest answer is
+to grant the server role the **worker** group as well on an extraction brain.
 
 ## Chunk context, and why it is off
 

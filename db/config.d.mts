@@ -269,6 +269,8 @@ export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "ext
 export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction")[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
+/** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
+export const EXTRACTION_TRIGGER_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups?: readonly string[]): string[];
 /** GRANT statements giving `role` the privileges the given groups need; `present` skips absent tables; the role is quoted. */

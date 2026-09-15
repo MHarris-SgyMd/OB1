@@ -6610,7 +6610,8 @@ inability to `readFileSync` a >2 GB corpus is filed as a follow-up.
 
 ### 60. A capturing role's grants are documented and checked for the whole capture path, not `thoughts` alone — one list, a widened preflight check, and `migrate.ts --grant` (SMD-1226)
 
-Every function this fork adds is `SECURITY INVOKER` (010, 012 and 015 say so), so
+Every function this fork adds is `SECURITY INVOKER` (the policy 010, 012 and 015
+state, and the default the capture writers in 005/007/008/022/025 rely on), so
 the writes they make run as the connecting role — and since 007 they reach past
 `thoughts`: a windowed capture INSERTs `thought_chunks` (and since 022 DELETEs
 them on a re-capture the label does not vouch for), an edit with content replaces
@@ -6635,7 +6636,14 @@ it, so none can drift from the others:
   naming each missing privilege in `ROLE_GRANTS` order with its GRANT (quoted
   role, schema-qualified `has_table_privilege`, gated on table presence so a
   brain before 007/008 is a skip not a raise). It stays a refusal: a role that
-  cannot INSERT `thought_audit` fails every capture. The `server` group
+  cannot INSERT `thought_audit` fails every capture. One conditional addition:
+  when entity extraction is enabled (`ob1_config.entity_extraction_key` set), 016's
+  trigger upserts a `thought_work_claims` row as the caller on every capture, so
+  the check reads that key and folds `thought_work_claims` INSERT/UPDATE into the
+  refusal set exactly then — a server role that never runs a worker still fails
+  its captures on an extraction brain without them, and the check now catches
+  that at start-up instead of blessing it (found by the second review pass). The
+  `server` group
   (`ob1_config` read, and the agent tables — `resolve_agent` is SECURITY INVOKER
   and *upserts* them, so they get the writes, not just `SELECT`, which the
   ticket's own list had wrong) is documented and granted but not enforced:
