@@ -709,7 +709,9 @@ function checkCoreFunctions() {
 // `const KEY = String(process.env.KEY ?? "").trim()`, `expected ??= …`, `const {
 // API_TOKEN } = process.env`, `const { API_TOKEN: expected } = process.env`,
 // Python's `os.environ`), the read spelled `Deno.env.get`, `process.env`,
-// `Bun.env`, Hono's `c.env`, a bare `env(…)`/`env.X`, or `os.environ` — in every
+// `Bun.env`, Hono's `c.env` and `env(c)` (the `hono/adapter` form, the one a
+// server on Workers or Deno reaches for), a bare `env(…)`/`env.X`, or
+// `os.environ` — in every
 // non-binary, non-ignored file under the seven category directories and docs/,
 // prose included, since a README's code block is what the next extension is
 // copied from. Not a compare of the credential: `.length` (a timing-safe
@@ -726,7 +728,10 @@ function checkCoreFunctions() {
 // counted exception; a miss is silent. Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
 // an object property, a helper that returns the key, several declarators on
-// one statement, a read through `Deno.env.toObject()` into a variable — each a
+// one statement, a read through `Deno.env.toObject()` into a variable, a read
+// by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
+// (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
+// and braces or `=>` inside a string, comment or regex literal — each a
 // spelling the review passes named and this rule does not chase. Exceptions are
 // per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
 // integrations that carry the same compare are listed with the ticket that
@@ -735,7 +740,7 @@ function checkCoreFunctions() {
 const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
-const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*${IDENT}\s*\)\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
 /** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
 const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
 /** What on the far side of a compare makes it a presence or placeholder check, not a compare of the credential. */
@@ -760,7 +765,7 @@ function credentialComparesIn(text) {
     if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
   }
   // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
-  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env)\b/g)) {
+  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\))(?![\w$])/g)) {
     for (const part of m[1].split(",")) {
       const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
       if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
@@ -840,6 +845,9 @@ const CREDENTIAL_COMPARE_PROBES = [
   'const expected = Deno.env.get("MCP_ACCESS_KEY");\nreturn key === expected ? ok() : deny();',
   'const expected = Deno.env.get("MCP_ACCESS_KEY");\nconst status = key !== expected ? 401 : 200;',
   'const expected =\n  Deno.env.get("MCP_ACCESS_KEY");\nif (k !== expected) deny();',
+  // The fifth pass: Hono's adapter form.
+  'import { env } from "hono/adapter";\nif (provided !== env(c).MCP_ACCESS_KEY) deny();',
+  'const { MCP_ACCESS_KEY } = env(c);\nif (provided !== MCP_ACCESS_KEY) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [

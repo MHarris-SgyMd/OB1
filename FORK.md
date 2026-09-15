@@ -7582,7 +7582,7 @@ Outside the rule, and the header
 says so: `.includes`, `Object.is`, `switch`, `.localeCompare`, a compare
 through a class field or an object property, a helper that returns the key,
 several declarators on one statement, a read through `Deno.env.toObject()`
-into a variable. Forty-three probes the rule must catch — every line of a
+into a variable. Forty-five probes the rule must catch — every line of a
 probe that carries a compare, so a two-route probe is two catches — and
 twenty-one it must not run on every invocation, through the same function
 the scan uses. Its first run found the
@@ -7623,7 +7623,7 @@ deploy by it: `family-calendar` and `job-hunt`, still on supabase-js. The
 other four import the SQL shim, which imports `bun`, while still reading
 `Deno.env`: as they stand they neither bundle as an Edge Function nor run
 under Bun, which is fix 13's consequence and now SMD-1480's ticket; the
-primitive's list, its Step 2 and the five READMEs' deployment tables say so
+primitive's list, its Step 2 and the four READMEs' five deployment tables say so
 rather than leaving a reader to discover it at `supabase functions deploy`.
 The module is a `_shared/` copy the recipe downloads, not an import across the
 tree the bundle cannot follow, so those two stay deployable.
@@ -7701,7 +7701,7 @@ position, the nearest preceding one governing, a shadow governing only while
 its block was open by a brace walk — with six probes for the misses, and the
 probe check asks that every compare line be caught rather than any (the
 fourth pass then removed the shadow rule altogether — below). The deploy
-primitive contradicted itself and five READMEs: its list and their tables
+primitive contradicted itself and four READMEs: its list and their five tables
 still sent a reader to deploy servers that import `bun`, and "run from a
 checkout" described nothing that works — SMD-1480 filed; callouts above each
 table and in the primitive's list. Its update section refetched `index.ts`
@@ -7750,6 +7750,38 @@ string, comment or regex literal. Verified sound by the pass: the twelve
 URLs, the fourteen renumbered places, the counts, the copy's identity, the
 seven servers' diffs, `RPC_READS`, and that a missing registration fails two
 assertions rather than aborting the run.
+
+**Review, fifth pass** (triaged; ten findings, one defect — at the merge
+boundary — nine gaps and nits, and none of the fourth pass's fixes among
+them: the stop signal). Main had moved again — SMD-1043 landed as change 63
+— so this section is 64 after a second merge, the number spelled in the same
+fourteen places. Check 8 did not read Hono's `env(c)` adapter form, the
+canonical environment read for a Hono server on Workers or Deno — the stack
+these servers use; it does, with two probes, and the header's "outside the
+rule" list gained the three spellings the pass named (a read by a non-literal
+name, a parenthesised bound name, a shell test) beside the string-literal
+braces. The by-hand PowerShell recipe minted a 256-bit secret with
+`Get-Random`, which Microsoft documents as not cryptographically secure; it
+uses `RandomNumberGenerator` now, still on 5.1. `auth.ts`'s docblock — the
+extensions' contract text now, in two copies — still said `capture_thought`
+was the only tool that writes, three changes after `update_thought` and
+`delete_thought` joined it, and `keygen.ts` said the same to every reader of
+a read-scoped key; both name the set. The shared-server primitive's
+troubleshooting still told a user to match the URL key against the secret,
+which holds its hash. Two assertions asked only for a count where the sorted
+list was already in hand; the drift guards recognise `server.registerTool(`,
+the SDK's current name and the template's, so an eighth extension can join
+the table. Recorded, not changed: where the whole-file rule will bite first on
+a rebase — `recipes/entity-wiki/generate-wiki.mjs` and
+`recipes/typed-edge-classifier/classify-edges.mjs` bind `key` from a
+credential read and use it a dozen times each, the five
+`integrations/*/_shared/helpers.ts` bind `apiKey`; an appended
+`if (row.key === key)` fails CI in each, a `for (const key of keys) if (key
+=== "id")` does not. Verified sound by the pass: the misses probed (`==`,
+`!(a !== b)`, a template literal, Python's `getenv` with a default, `as
+string`); all seventeen exceptions matching exactly the intended compare
+line; the 24/45 split by every write verb; "Portable server" among the nine
+required contexts; the lockfile version; the Step 3 hash matching Node's.
 
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand

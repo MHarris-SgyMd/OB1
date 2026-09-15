@@ -36,8 +36,9 @@ console.log(`    ${key}\n`);
 console.log(`  Add this line to MCP_ACCESS_KEYS (the hash, never the key):\n`);
 console.log(`    ${name}:${scope}:${hashKey(key)}\n`);
 if (scope === "read") {
-  console.log(`  Read-only: capture_thought is not registered for this key, so it does`);
-  console.log(`  not appear in tools/list. Safe for a URL-embedded connector.\n`);
+  console.log(`  Read-only: the tools that write (capture_thought, update_thought,`);
+  console.log(`  delete_thought; an extension's add/update tools) are not registered for`);
+  console.log(`  this key, so they do not appear in tools/list. Safe for a URL-embedded connector.\n`);
 } else {
   console.log(`  Write scope: this key can capture and modify thoughts. Prefer --scope read`);
   console.log(`  for anything that only needs to search, and for URL-embedded connectors.\n`);

@@ -111,7 +111,9 @@ echo "hash: $(printf %s "$KEY" | shasum -a 256 | cut -d' ' -f1)"   # sha256sum o
 🟦 **Windows (PowerShell):**
 
 ```powershell
-$key = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$key = ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
 $hash = ([System.Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString('x2') }) -join ''
 "key:  $key"; "hash: $hash"
 ```

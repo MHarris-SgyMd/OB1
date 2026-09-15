@@ -528,7 +528,7 @@ For Supabase: Create a custom JWT with limited claims, or use connection pooling
 
 4. Verify the connector URL is correct:
 
-   - Check that the `?key=` value matches the `MCP_HOUSEHOLD_ACCESS_KEY` secret exactly
+   - Check that the `?key=` value is the **key** whose hash sits in the `MCP_HOUSEHOLD_ACCESS_KEYS` secret (the URL carries the key, the secret its hash), and that the line's scope is what you expect
    - Try removing and re-adding the connector in Settings → Connectors
    - Verify the Edge Function is deployed: `supabase functions list`
 

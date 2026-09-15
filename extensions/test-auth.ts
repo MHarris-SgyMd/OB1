@@ -163,7 +163,7 @@ for (const s of SERVERS) {
   // Independent revocation: the write key removed from the config, the read key kept.
   env(s, `chatgpt:read:${hashKey(READ_KEY)}`);
   assert((await call(s, WRITE_KEY, LIST)).status === 401, "the removed key stops working");
-  assert(toolsOf(await call(s, READ_KEY, LIST)).length === s.reads.length, "…and the other keeps working");
+  assert(toolsOf(await call(s, READ_KEY, LIST)).join() === [...s.reads].sort().join(), "…and the other keeps working");
 
   // The legacy single key: still accepted, with write scope, compared by digest now.
   env(s, undefined, LEGACY_KEY);
@@ -186,7 +186,7 @@ console.log("\n[where the key may travel]");
   // stale header a client keeps sending, does not shadow the key the client means.
   assert(toolsOf(await call(s, READ_KEY, LIST, "query", { bearer: "eyJ.a.gateway-jwt" })).join() === [...s.reads].sort().join(),
     "a gateway's bearer token beside a right ?key= does not shadow it");
-  assert(toolsOf(await call(s, WRITE_KEY, LIST, "x-access-key", { "x-brain-key": "stale" })).length === s.reads.length + s.writes.length,
+  assert(toolsOf(await call(s, WRITE_KEY, LIST, "x-access-key", { "x-brain-key": "stale" })).join() === [...s.reads, ...s.writes].sort().join(),
     "a wrong x-brain-key beside a right x-access-key does not shadow it");
   assert((await call(s, "wrong-one", LIST, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
     "three wrong forms are three refusals, not one acceptance");
@@ -207,18 +207,20 @@ const RPC_READS = ["crm_search_contacts_fts"];
 /** Whether a tool body (or its handler) writes: a table verb, or an RPC not named by a literal in RPC_READS (a variable name is a write). */
 const writes = (reach: string) => /\.(insert|update|upsert|delete)\(/.test(reach)
   || [...reach.matchAll(/\.rpc\(\s*(?:(["'`])([^"'`]+)\1)?/g)].some((m) => !m[2] || !RPC_READS.includes(m[2]));
-/** A tool's registration block, from `server.tool(` naming it to its closing `);` — not the first place its name is quoted. */
+/** A tool's registration block, from `server.tool(` (or `registerTool(`) naming it to its closing `);` — not the first place its name is quoted. */
 const blockOf = (text: string, name: string) => {
-  const at = text.indexOf(`server.tool(\n    "${name}"`);
-  assert(at >= 0, `…${name} is registered as server.tool(\\n    "${name}"`);
+  const at = Math.max(text.indexOf(`server.tool(\n    "${name}"`), text.indexOf(`server.registerTool(\n    "${name}"`));
+  assert(at >= 0, `…${name} is registered as server.tool(\\n    "${name}") or registerTool`);
   return text.slice(at, text.indexOf("\n  );", at));
 };
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
   const text = readFileSync(join(HERE, s.file), "utf8");
-  const registered = [...text.matchAll(/server\.tool\(\n\s+"([a-z_]+)"/g)].map((m) => m[1]).sort();
-  const gated = [...text.matchAll(/if \(canWrite\(principal\)\) server\.tool\(\n\s+"([a-z_]+)"/g)].map((m) => m[1]).sort();
+  // `server.tool(` today; `server.registerTool(`, the SDK's current name and the
+  // template's, when an eighth extension arrives.
+  const registered = [...text.matchAll(/server\.(?:tool|registerTool)\(\n\s+"([a-z_]+)"/g)].map((m) => m[1]).sort();
+  const gated = [...text.matchAll(/if \(canWrite\(principal\)\) server\.(?:tool|registerTool)\(\n\s+"([a-z_]+)"/g)].map((m) => m[1]).sort();
   assert(registered.join() === [...s.reads, ...s.writes].sort().join(),
     `${s.file}: every registered tool is classified above (${registered.length})`);
   assert(gated.join() === [...s.writes].sort().join(), `…and exactly the writes are gated (${gated.length})`);
