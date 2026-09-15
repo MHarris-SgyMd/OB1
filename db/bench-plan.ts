@@ -13,6 +13,15 @@
  * the filtered branches, and at 64 dimensions; this explains the unfiltered
  * one at the shipped width, where the answer turns out to be different.
  *
+ * One note on the filtered `exact` rows: since SMD-1018 the shared rewrite
+ * (test-support's extractBody) splices the routing collection into the exact
+ * branch as ONE materialized CTE, where it had spliced a scalar subquery per
+ * `v_ids` reference — two InitPlans, two GIN collections per call. The exact
+ * rows this bench prints therefore read one collection fewer than the lines
+ * 019's header publishes ("5.4–6.5 ms for 936 matching rows at 100,000"),
+ * and the difference is the harness's, not the function's: the function
+ * always ran the collection once.
+ *
  * ── What is measured ─────────────────────────────────────────────────────────
  *
  * Per scale, the unfiltered branch's own statement — read from the catalog and
@@ -60,7 +69,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -265,15 +274,22 @@ for (const n of SCALES) {
   // itself would route on, so a scale where 1% is 1,100 rows does not explain
   // a branch the function never takes for that filter (second review pass).
   // Under 014's settings now, under 019's after it is applied.
-  const V_EXACT = 1000; // 014's GREATEST(v_fetch * 4, 1000) at the default count
   const [{ m50, m1 }] = await sql.unsafe(`SELECT count(*) FILTER (WHERE metadata @> '{"tiers": ["t50"]}')::int AS m50, count(*) FILTER (WHERE metadata @> '{"tiers": ["t1"]}')::int AS m1 FROM thoughts`);
-  const filteredCases: { branch: Branch; filter: string; matches: number }[] = [
-    { branch: "route", filter: '{"tiers": ["t50"]}', matches: Number(m50) },
-    { branch: "route", filter: '{"tiers": ["none"]}', matches: 0 },
-    ...(Number(m1) <= V_EXACT ? [{ branch: "exact" as Branch, filter: '{"tiers": ["t1"]}', matches: Number(m1) }] : []),
-    ...(Number(m50) > V_EXACT ? [{ branch: "walk" as Branch, filter: '{"tiers": ["t50"]}', matches: Number(m50) }] : []),
-  ];
+  // The threshold is the deployed function's at the default count, evaluated
+  // by the server (test-support's routingAt) — read per ARM, since the arms
+  // hold different bodies and a redefinition that moves the floor (SMD-1464)
+  // must route the deployed arm by its own (third review pass of SMD-1018).
+  const casesFor = async (): Promise<{ branch: Branch; filter: string; matches: number }[]> => {
+    const { vExact } = await routingAt(sql, 10);
+    return [
+      { branch: "route", filter: '{"tiers": ["t50"]}', matches: Number(m50) },
+      { branch: "route", filter: '{"tiers": ["none"]}', matches: 0 },
+      ...(Number(m1) <= vExact ? [{ branch: "exact" as Branch, filter: '{"tiers": ["t1"]}', matches: Number(m1) }] : []),
+      ...(Number(m50) > vExact ? [{ branch: "walk" as Branch, filter: '{"tiers": ["t50"]}', matches: Number(m50) }] : []),
+    ];
+  };
   const runFiltered = async (arm: FilteredCell["arm"]) => {
+    const filteredCases = await casesFor();
     process.stdout.write(`  filtered, ${arm.padEnd(12)}`);
     // The statements change only when the function does — once, between the
     // arms — so each branch is read from the catalog once per arm.
