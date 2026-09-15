@@ -487,7 +487,7 @@ if (configFailed) {
          * eighth, the model beside the vector, by dropping the seventh — and
          * the store sends all nine by name on every edit. Probed as the store
          * calls it, with an id no row has: update_thought answers {ok:false,
-         * error:'NOT_FOUND'} from its FOR UPDATE read and writes nothing, so
+         * error:'NOT_FOUND'} from its row-lock read and writes nothing, so
          * the probe is free. PGRST202 is a form from before 032 (or no
          * function). Then seven named arguments, which only two forms — 018's
          * or 021's re-applied by hand beside 032's — make ambiguous, and that
@@ -513,7 +513,9 @@ if (configFailed) {
             } else if (/could not choose|PGRST203|not unique/i.test(sevenErr.message)) {
               add("edit signature", "fail",
                   "update_thought has more than one form — an earlier migration re-applied by hand beside 032's — and PostgREST cannot choose between them for a call with fewer than nine arguments, so every caller by name from before this change fails",
-                  `Drop the earlier form, as 032 does, against the project's direct connection — whichever the catalog shows: ${SUPERSEDED_SIGNATURES.filter((s) => s.startsWith("update_thought")).map((s) => `DROP FUNCTION ${s};`).join(" ")}`);
+                  // IF EXISTS: this path cannot read the catalog, so both older
+                  // forms are named and the absent one must not error when pasted.
+                  `Drop the earlier form, as 032 does, against the project's direct connection — whichever the catalog shows: ${SUPERSEDED_SIGNATURES.filter((s) => s.startsWith("update_thought")).map((s) => `DROP FUNCTION IF EXISTS ${s};`).join(" ")}`);
             } else {
               add("edit signature", "skip", `could not probe update_thought over PostgREST (${sevenErr.message}); ${CATALOG_HINT}`);
             }

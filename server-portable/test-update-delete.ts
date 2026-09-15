@@ -299,7 +299,9 @@ console.log("\n[9] `supersedes` through the tool: set, clear, a loop and a ghost
   assert(/would close a loop/.test(msg) && /point the newer thought at the older/.test(msg), `pointing the older at the newer is refused as a loop, with the fix (${msg.slice(0, 60)})`);
   try { await writer.call("update_thought", { id: newer, supersedes: "00000000-0000-4000-8000-000000000000" }); } catch (e) { msg = (e as Error).message; }
   assert(/no thought with the id given as supersedes/.test(msg), `a pointer at no thought is refused by name (${msg.slice(0, 60)})`);
-  assert((await pointer(newer)) === older && (await pointer(older)) === null, "…and neither refusal wrote anything");
+  try { await writer.call("update_thought", { id: newer, supersedes: "null" }); } catch (e) { msg = (e as Error).message; }
+  assert(/must be a thought id/.test(msg) && /not "null"/.test(msg), `a value that is not an id — the word "null" included — is refused at the tool, not raised by the function (${msg.slice(0, 60)})`);
+  assert((await pointer(newer)) === older && (await pointer(older)) === null, "…and no refusal wrote anything");
 
   // null clears; omitting the key leaves.
   const meta = await writer.call("update_thought", { id: newer, metadata_patch: { reviewed: true } });

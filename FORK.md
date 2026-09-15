@@ -4620,7 +4620,7 @@ sentinel) — reads `derived_from`/`supersedes` from the payload envelope and
 `supersedes`' existence is the self-FK's. Both ride the envelope like the actor
 (008) and the model (021), so capture sets them and both stores stay in sync; a
 bare re-capture adds provenance but never clears it (that is `update_thought`'s, a
-follow-up). Capture is the only write path this change gives provenance —
+follow-up — landed as change 59, migration 032). Capture is the only write path this change gives provenance —
 `capture_thought` grows optional `derived_from`/`supersedes` inputs.
 
 **Read-back both ways.** `trace_provenance(id)` walks UP the `derived_from` chain
@@ -6703,9 +6703,23 @@ SMD-1323's verify names, and the one 021 re-applied by hand puts a brain in —
 and a form from before 032 fails naming 032. The MCP `update_thought` tool
 takes `supersedes`: an id sets, `null` clears, omitted leaves, and a
 supersedes-only edit is no longer "would do nothing"; the two refusals are
-explained in the tool's words. `derived_from` is not offered on the tool — an
-edit to a synthesis's source list is a store-level operation with no client
+explained in the tool's words, and a value that is not an id is refused at the
+tool before the database sees it. `derived_from` is not offered on the tool —
+an edit to a synthesis's source list is a store-level operation with no client
 asking for it yet; the stores take it.
+
+**Every checkout that runs against the brain upgrades together** (the second
+review pass). A pre-032 checkout's preflight refuses a 032 database with a
+message naming 021 (it looks for the 8-argument form and finds none), its
+`reembed.ts` refuses the same way and sends the operator to `--reapply` — and a
+pre-032 `migrate.ts --reapply` re-runs 001–031, where 021 re-creates the
+8-argument form *beside* 032's: the two-form state above, every call with eight
+arguments or fewer `function is not unique`, until a 032 checkout re-applies.
+The compose stack is in lockstep; a hand-run server, a second workstation or a
+Supabase brain migrated from one laptop and served from another is not.
+`server-portable/README.md` §4 says so. The migrator cannot see the hazard
+today — it reads the directory, never a ledger row with no file — and refusing
+`--reapply` when the ledger names a file the checkout lacks is SMD-1451.
 
 **Verify.** `test-schema` [32]: one function of nine parameters, neither older
 form beside it, 032 the last definer of the three names it touches, every
@@ -6735,7 +6749,7 @@ resolving, the envelope clearing a capture-time pointer, a re-run a no-op —
 and [7]'s `--reapply` assertion follows the arity (the first review pass found
 it still saying eight; CI runs that suite). Green: `test-schema`
 749/749, `test-preflight` 191/191, `test-upgrade` 119/119,
-`test-live` 455/455, `test-store-sql`, `test-store-postgrest`,
+`test-live` 457/457, `test-store-sql`, `test-store-postgrest`,
 `test-update-delete`, `test-e2e-sql`, `tsc`, the consistency checker.
 
 **Not done, and why.** `upsert_thought` still carries its inline copy of the

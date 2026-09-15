@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, type ThoughtStore } from "./store.ts";
+import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
 import { authenticate, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
@@ -1044,6 +1044,13 @@ function buildServer(principal: Principal): McpServer {
       try {
         if (content === undefined && metadata_patch === undefined && supersedes === undefined) {
           return toolError("Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.");
+        }
+        // The shape here, in the tool's words, as the two named refusals are;
+        // the function would raise on it, and a raised message reads as a
+        // failure rather than a refusal. The string "null" is not a clear —
+        // clearing is JSON null, and a client that sends the word meant an id.
+        if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) {
+          return toolError(`Refused: \`supersedes\` must be a thought id (the ID: line of a search result) or null to clear it, not "${supersedes.slice(0, 40)}".`);
         }
 
         // Only re-embed when the text actually changed. A metadata-only edit

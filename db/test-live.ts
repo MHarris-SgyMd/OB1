@@ -541,13 +541,20 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   type R = { ok: boolean; error?: string; duplicate_of?: string };
   const fpT = (await sql`SELECT content_fingerprint_of(${T}) AS f`)[0].f as string;
 
-  /** A's stance, then its pointer write once `go` resolves; the transaction is held until `done` resolves. */
-  const standAsA = (conn: SQL, go: Promise<void>, done: Promise<void>, out: { wrote?: boolean; error?: string }) =>
+  /**
+   * A's stance — `out.holding` set once every lock is held, so B is started
+   * only then ([6b]'s rule: wait for the other side's observable state, not a
+   * sleep; B reaching the fingerprint lock first would leave nothing to wait
+   * on) — then its pointer write once `go` resolves; the transaction is held
+   * until `done` resolves.
+   */
+  const standAsA = (conn: SQL, go: Promise<void>, done: Promise<void>, out: { holding?: boolean; wrote?: boolean; error?: string }) =>
     conn.begin(async (tx: SQL) => {
       await tx`SET LOCAL statement_timeout = '8s'`;
       await tx`SELECT pg_advisory_xact_lock(hashtext('ob1:supersession-review'))`;
       await tx`SELECT 1 FROM thoughts WHERE id = ${qId}::uuid FOR NO KEY UPDATE`;
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${fpT}, 0))`;
+      out.holding = true;
       await go;
       await tx`UPDATE thoughts SET supersedes = ${zId}::uuid WHERE id = ${qId}::uuid`;
       out.wrote = true;
@@ -564,8 +571,10 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
     const connB = new SQL({ url: URL_, max: 1 });
     let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
     let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
-    const a: { wrote?: boolean; error?: string } = {};
+    const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
     const aDone = standAsA(connA, goP, doneP, a);
+    await waitFor(() => a.holding === true || a.error !== undefined);
+    assert(a.holding === true, `A holds the supersession lock, Q's row and the fingerprint lock for T (${a.error ?? "holding"})`);
     let bPid = -1; let bError = "";
     const bDone = connB.begin(async (tx: SQL) => {
       await tx`SET LOCAL statement_timeout = '8s'`;
@@ -592,8 +601,10 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
     const connB = new SQL({ url: URL_, max: 1 });
     let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
     let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
-    const a: { wrote?: boolean; error?: string } = {};
+    const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
     const aDone = standAsA(connA, goP, doneP, a);
+    await waitFor(() => a.holding === true || a.error !== undefined);
+    assert(a.holding === true, `A holds its three locks again (${a.error ?? "holding"})`);
     let bPid = -1; let bError = "";
     const bDone = connB.begin(async (tx: SQL) => {
       await tx`SET LOCAL statement_timeout = '8s'`;

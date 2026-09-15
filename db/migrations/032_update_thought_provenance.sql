@@ -54,7 +54,7 @@
 --      of the superseding row under it.
 --
 -- The rules of a provenance edit
---   * It is an edit. The row is locked FOR UPDATE as every edit's is,
+--   * It is an edit. The row is locked as every edit's is (see the lock rule),
 --     if_unchanged_since is a predicate on the write, updated_at moves (a
 --     client's stale if_unchanged_since is refused; 021's evidence rule stops
 --     vouching for the row's vector), and the audit row carries the diff with
@@ -616,7 +616,7 @@ BEGIN
   -- call is human-paced; one lock for all of them costs nothing that shows.
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
   -- The superseding row, locked; its current pointer decides. update_thought
-  -- strengthens this to FOR UPDATE inside the same transaction.
+  -- takes the same lock on it again inside this transaction — held already.
   SELECT supersedes INTO v_current FROM thoughts WHERE id = v_sup FOR NO KEY UPDATE;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'id', p_id, 'thought_id', v_sup);
