@@ -6636,14 +6636,17 @@ it, so none can drift from the others:
   naming each missing privilege in `ROLE_GRANTS` order with its GRANT (quoted
   role, schema-qualified `has_table_privilege`, gated on table presence so a
   brain before 007/008 is a skip not a raise). It stays a refusal: a role that
-  cannot INSERT `thought_audit` fails every capture. One conditional addition:
-  when entity extraction is enabled (`ob1_config.entity_extraction_key` set), 016's
-  trigger upserts a `thought_work_claims` row as the caller on every capture, so
-  the check reads that key and folds `thought_work_claims` INSERT/UPDATE into the
-  refusal set exactly then — a server role that never runs a worker still fails
-  its captures on an extraction brain without them, and the check now catches
-  that at start-up instead of blessing it (found by the second review pass). The
-  `server` group
+  cannot INSERT `thought_audit` fails every capture. One conditional addition
+  (found by the second and third review passes): 016 adds a trigger on `thoughts`
+  that runs as the caller on every capture and content-edit — it reads
+  `ob1_config` always, and upserts a `thought_work_claims` row while
+  `entity_extraction_key` is set. So the check reads `pg_trigger`: when the
+  trigger is present it folds `ob1_config` SELECT into the refusal set (a role
+  without it fails every capture in the trigger, even with extraction off), and
+  when the key is set it adds `thought_work_claims` INSERT/UPDATE too. A server
+  role that never runs a worker is thus refused at start-up on an extraction
+  brain instead of being blessed and then failing every capture. The `server`
+  group
   (`ob1_config` read, and the agent tables — `resolve_agent` is SECURITY INVOKER
   and *upserts* them, so they get the writes, not just `SELECT`, which the
   ticket's own list had wrong) is documented and granted but not enforced:

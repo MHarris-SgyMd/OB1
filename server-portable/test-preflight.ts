@@ -1002,8 +1002,22 @@ else {
       // extraction conditional is the remaining lever.
       await claims.unsafe("GRANT INSERT ON thought_audit TO ob1_pf_capture");
       const baseOk = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(baseOk.out),
+      assert(baseOk.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(baseOk.out) && !/thought_work_claims/.test(writeLine(baseOk.out)),
              `with the audit INSERT granted and extraction off, the base capture set is ok and says nothing of thought_work_claims (exit ${baseOk.code})`);
+
+      // 016's trigger reads ob1_config as the caller on EVERY capture (before it
+      // checks the key), so with the trigger present — the schema is fully
+      // migrated — SELECT on ob1_config is a hard capture-path requirement even
+      // with extraction off. Revoke it and preflight refuses, naming the trigger;
+      // then restore it (the role's SELECT-on-all otherwise held it).
+      await claims.unsafe("REVOKE SELECT ON ob1_config FROM ob1_pf_capture");
+      const noConfig = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(noConfig.code === 1 &&
+             /SELECT on ob1_config/.test(writeLine(noConfig.out)) &&
+             /016's enqueue trigger/.test(writeLine(noConfig.out)) &&
+             /GRANT SELECT ON ob1_config TO ob1_pf_capture;/.test(noConfig.out),
+             `with 016's trigger present, a role lacking SELECT on ob1_config is refused, the trigger named (exit ${noConfig.code})`);
+      await claims.unsafe("GRANT SELECT ON ob1_config TO ob1_pf_capture");
 
       // Enable entity extraction: 016's trigger now upserts a work claim as the
       // caller on every capture, so the capture path needs thought_work_claims

@@ -242,14 +242,19 @@ server needs the **capture** and **server** groups; add **worker** for the role
 your bulk passes connect as, and **extraction** on top of that for entity
 extraction.
 
-**One cross-cutting exception.** Once entity extraction is enabled (a run of
-`extract-entities.ts` sets `ob1_config.entity_extraction_key`), 016's trigger
-fires on every capture and content-edit and upserts a `thought_work_claims` row
-**as the calling role** — so the *server* role then needs `INSERT, UPDATE` on
+**One cross-cutting exception (016's enqueue trigger).** Migration 016 adds a
+trigger on `thoughts` that fires on every capture and content-edit and runs as
+the calling role. It **reads `ob1_config`** first, always — so on any brain at
+016 or later, `SELECT` on `ob1_config` (the `server` group) is a *hard*
+capture-path requirement, not a soft extra: a role without it fails every capture
+in the trigger. And once entity extraction is enabled (`extract-entities.ts` sets
+`ob1_config.entity_extraction_key`), the trigger also **upserts a
+`thought_work_claims` row** — so the server role then needs `INSERT, UPDATE` on
 `thought_work_claims` too, even though it runs no worker. Preflight's `write
-privileges` check reads that key and enforces exactly this when it is set, so the
-gap surfaces at start-up rather than on the first capture. The simplest answer is
-to grant the server role the **worker** group as well on an extraction brain.
+privileges` check detects the trigger (and reads the key) and enforces exactly
+these when they apply, so the gap surfaces at start-up rather than on the first
+capture. The simplest answer is to grant the server role the **worker** group as
+well on an extraction brain.
 
 ## Chunk context, and why it is off
 

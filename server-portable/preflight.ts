@@ -708,23 +708,45 @@ if (configFailed) {
         // here would land in the catch below and take every later check with it,
         // so a table absent before its migration is skipped, not failed.
         const { CAPTURE_WRITES, EXTRACTION_TRIGGER_WRITES } = await import("../db/config.mjs");
-        // When entity extraction is enabled (`ob1_config.entity_extraction_key`
-        // set), 016's trigger fires on every capture and content-edit and, as the
-        // calling role, upserts a `thought_work_claims` row — so INSERT/UPDATE
-        // there join the capture path even for a role that never runs a worker.
-        // Read the key defensively: only when ob1_config exists and this role can
-        // SELECT it (the trigger reads it the same way — a role that cannot is
-        // separately broken on an extraction brain, reported as a warn below), so
-        // this never raises. current_user and the key ride one row.
-        const [{ role, ident, configPresent, canReadConfig, ek }] = (await sql`
+        // 016's enqueue trigger fires AFTER INSERT OR UPDATE OF content on
+        // thoughts and runs as the calling role. It reads ob1_config on EVERY
+        // capture — unconditionally, before it even looks at the key — and, while
+        // entity_extraction_key is set, upserts a thought_work_claims row. So the
+        // trigger's mere presence makes SELECT on ob1_config a hard capture-path
+        // requirement, and a set key adds thought_work_claims INSERT/UPDATE. The
+        // trigger is read via pg_trigger (tgrelid = to_regclass, so an absent
+        // thoughts matches nothing rather than raising); the key inside CASE
+        // guards, so has_table_privilege — which raises for a relation it cannot
+        // see — is reached only when the trigger, hence 006's ob1_config, exists.
+        const [{ role, ident, triggerPresent, canReadConfig }] = (await sql`
           SELECT current_user::text AS role, quote_ident(current_user::text) AS ident,
-                 to_regclass('public.ob1_config') IS NOT NULL AS "configPresent",
-                 (to_regclass('public.ob1_config') IS NOT NULL AND has_table_privilege('public.ob1_config', 'SELECT')) AS "canReadConfig",
-                 CASE WHEN to_regclass('public.ob1_config') IS NOT NULL AND has_table_privilege('public.ob1_config', 'SELECT')
-                      THEN (SELECT value FROM ob1_config WHERE key = 'entity_extraction_key') END AS ek`) as
-          { role: string; ident: string; configPresent: boolean; canReadConfig: boolean; ek: string | null }[];
-        const extracting = typeof ek === "string" && ek !== "";
-        const required = extracting ? [...CAPTURE_WRITES, ...EXTRACTION_TRIGGER_WRITES] : CAPTURE_WRITES;
+                 t.present AS "triggerPresent",
+                 CASE WHEN t.present THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"
+            FROM (SELECT EXISTS (
+                    SELECT 1 FROM pg_trigger
+                     WHERE tgrelid = to_regclass('public.thoughts')
+                       AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS present) t`) as
+          { role: string; ident: string; triggerPresent: boolean; canReadConfig: boolean }[];
+        // Read the key in its own statement, run only when the role can SELECT
+        // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
+        // above would become an InitPlan Postgres evaluates regardless of any
+        // CASE guard, raising `permission denied` for a role without that SELECT
+        // and taking every later check down with it. When the trigger is present
+        // but the role cannot read the key, extraction is treated as off — but
+        // ob1_config SELECT is still required below (the trigger reads it), so the
+        // role is refused for that, not blessed.
+        let ek: string | null = null;
+        if (canReadConfig) {
+          const [row] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string | null }[];
+          ek = row?.value ?? null;
+        }
+        const extracting = triggerPresent && canReadConfig && typeof ek === "string" && ek !== "";
+        // What the 016 trigger adds to the capture path when it is present: its
+        // own ob1_config read always, the work-claim upsert while extraction is on.
+        const conditional = triggerPresent
+          ? [{ table: "ob1_config", privilege: "SELECT", since: "016" }, ...(extracting ? EXTRACTION_TRIGGER_WRITES : [])]
+          : [];
+        const required = [...CAPTURE_WRITES, ...conditional];
         const reqTables = required.map((w) => w.table);
         const reqPrivs = required.map((w) => w.privilege);
         const privRows = (await sql`
@@ -744,9 +766,8 @@ if (configFailed) {
         } else {
           // Present tables only, in `required` order (SELECT, INSERT, …), so a
           // GRANT reads the way the guide writes one and names only what is
-          // missing — never what the role already holds. A table can repeat
-          // across CAPTURE_WRITES and the extraction writes; the Map keys by
-          // table, so its privileges land in one entry (de-duplicated).
+          // missing — never what the role already holds. Keyed by table, so a
+          // table's privileges land in one entry (de-duplicated).
           const missingByTable = new Map<string, string[]>();
           const heldByTable = new Map<string, string[]>();
           for (const w of required) {
@@ -757,8 +778,9 @@ if (configFailed) {
             target.set(w.table, into);
           }
           const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
-          const why = extracting && missingByTable.has("thought_work_claims")
-            ? " — a windowed capture, an edit with content, 008's audit trigger, or (entity extraction is enabled) 016's enqueue trigger, which upserts a work claim as the caller on every capture, would fail"
+          const triggerMiss = triggerPresent && (missingByTable.has("ob1_config") || missingByTable.has("thought_work_claims"));
+          const why = triggerMiss
+            ? " — a windowed capture, an edit with content, 008's audit trigger, or 016's enqueue trigger — which as the caller reads ob1_config on every capture, and upserts a work claim while entity extraction is enabled — would fail"
             : " — so a windowed capture, an edit with content, or 008's audit trigger would fail";
           if (missingByTable.size) {
             const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
@@ -766,14 +788,11 @@ if (configFailed) {
             add("write privileges", "fail",
                 `this connection's role (${role}) is missing privileges the capture path's writers need, run as their caller: ${phrase}${why}`,
                 grants);
-          } else if (configPresent && !canReadConfig) {
-            add("write privileges", "warn",
-                `${role} holds the capture path's base privileges, but cannot SELECT ob1_config, so whether entity extraction is enabled — which adds thought_work_claims INSERT/UPDATE to every capture through 016's trigger — could not be checked; the trigger reads ob1_config as the caller too`,
-                `GRANT SELECT ON ob1_config TO ${ident};  GRANT INSERT, UPDATE ON thought_work_claims TO ${ident};  (if entity extraction is enabled)`);
           } else {
             const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
+            const note = extracting ? " — entity extraction is enabled, so the enqueue trigger's work-claim writes are included" : "";
             add("write privileges", "ok",
-                `${role} holds the capture path's privileges — ${held}${extracting ? ", and thought_work_claims (entity extraction is enabled)" : ""}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the config, agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
+                `${role} holds the capture path's privileges — ${held}${note}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
           }
         }
 
