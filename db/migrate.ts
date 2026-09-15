@@ -41,13 +41,12 @@
  * 021's evidence backfill — the one statement in the set that writes DATA from
  * a rule over other data, hashed and applied as written before SMD-1067 made an
  * operator's ACCEPTANCE of a failure a succeeded claim row — runs here with the
- * acceptances out of its sight, on a plain run or a re-run: a copy of the claim
+ * acceptances out of its sight, on a plain run or a re-run: a view of the claim
  * table without them shadows the real one for that file alone, so the block
  * labels from the latest row that is not an acceptance, or not at all. See
- * applyShadowed (SMD-1421). Every transaction the migrator
- * opens — the re-run's, each file's on a plain run, the checks' reads before a
- * re-run — sets the same lock_timeout, LOCK_TIMEOUT_S, so a held lock fails the
- * run rather than freezing it and every reader behind it.
+ * applyShadowed (SMD-1421). The session sets one lock_timeout, LOCK_TIMEOUT_S
+ * (config.mjs), for everything the migrator does, so a held lock fails the run
+ * rather than freezing it and every reader behind it.
  */
 
 import { SQL } from "bun";
@@ -57,7 +56,9 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   ACCEPTED_CLAIM_SQL,
+  LOCK_TIMEOUT_S,
   alignVectorSearchPath,
+  duplicateMigrationNumber,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
@@ -133,16 +134,6 @@ if (reapply && baseline) {
   process.exit(2);
 }
 
-/**
- * The lock timeout, in seconds, of every transaction the migrator opens and of
- * the checks' reads before a re-run — one number, quoted by every message that
- * names it. Ten seconds: long enough for a live server's statements to finish,
- * short enough that an idle transaction holding thoughts fails the run rather
- * than freezing it and every reader behind 001's ACCESS EXCLUSIVE. It
- * overrides a role's or provider's default for the migrator's transactions, as
- * SET LOCAL does; 023's call sets its own for its transaction.
- */
-const LOCK_TIMEOUT_S = 10;
 
 type Migration = {
   name: string;
@@ -183,13 +174,12 @@ function loadMigrations(): Migration[] {
     .sort(); // 001_, 002_, … lexical order is the intended order
   // The number is the file's identity — the order, and how prose names a file
   // — so two files may not share one: a second 021_*.sql sorting first would
-  // run before the one it collides with (two branches each adding "the next
-  // number" is how it happens; the fork has renumbered twice).
-  for (let i = 1; i < names.length; i++) {
-    if (names[i].slice(0, 3) === names[i - 1].slice(0, 3)) {
-      console.error(`two migrations share the number ${names[i].slice(0, 3)}: ${names[i - 1]}, ${names[i]}. Renumber one.`);
-      process.exit(2);
-    }
+  // run before the one it collides with. The rule is config.mjs's, shared with
+  // the fork checker, which refuses the collision where it is made.
+  const shared = duplicateMigrationNumber(names);
+  if (shared) {
+    console.error(`two migrations share the number ${shared[0].slice(0, 3)}: ${shared[0]}, ${shared[1]}. Renumber one.`);
+    process.exit(2);
   }
   return names.map((name) => {
       const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
@@ -240,6 +230,11 @@ console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
 console.log(`  023 backfill:  ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
 
 const sql = new SQL({ url, max: 1 });
+// One lock_timeout for the session — every transaction the migrator opens, the
+// checks' reads before a re-run, the ledger reads below: a held lock fails the
+// run rather than freezing it and every reader behind it. 023's call sets its
+// own, locally, for its transaction.
+await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
 
 await sql`
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -334,9 +329,8 @@ let floorBlocked: Migration | null = null;
  * (insufficient_privilege) on an hnsw.* setting is a non-superuser in a session
  * that has not loaded pgvector — 014 loads it first, so this is reachable only
  * from a hand-run statement, but say what it means. 55P03 (lock_not_available)
- * is a lock_timeout — LOCK_TIMEOUT_S, set on every transaction the migrator
- * opens and on the checks' reads before a re-run (023's call sets its own for
- * its transaction). 40P01 (deadlock_detected) is the server choosing a victim
+ * is a lock_timeout — LOCK_TIMEOUT_S, the session's (023's call sets its own
+ * for its transaction). 40P01 (deadlock_detected) is the server choosing a victim
  * between two sessions taking the same tables in opposite orders — the
  * re-run's locks and a worker's start, which the banner says to stop first;
  * the victim may be the worker instead, and then this run goes on. What
@@ -367,10 +361,10 @@ function explainFailure(err: unknown, m: Migration | null, mode: "plain" | "reap
   } else if (sqlstate === "55P03") {
     lines.push(
       mode === "reapply"
-        ? `  A lock was not granted within the re-run's ${LOCK_TIMEOUT_S} s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.`
+        ? `  A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first.`
         : mode === "checks"
-          ? `  A lock was not granted within the ${LOCK_TIMEOUT_S} s the checks before the run set for their reads: a session holds an exclusive lock on ob1_config — an idle transaction that altered it. End it first.`
-          : `  A lock was not granted within the ${LOCK_TIMEOUT_S} s lock_timeout the run sets for every file (023's call sets its own for its transaction): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first.`
+          ? `  A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout, on the checks' reads before it: a session holds an exclusive lock on ob1_config — an idle transaction that altered it. End it first.`
+          : `  A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout (023's call sets its own for its transaction): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first.`
     );
   }
   if (hint) lines.push(`  ${hint}`);
@@ -436,32 +430,38 @@ async function reportSeeds(m: Migration): Promise<void> {
  * and hashed, and cannot know which labels 021's block wrote a moment ago.
  *
  * The fix is at the block's INPUT, not its output. Before 021 runs, a TEMP
- * table named thought_work_claims is created from the real one without the
- * accepted rows (ACCEPTED_CLAIM_SQL, the predicate 030's evidence rows carry).
- * An unqualified name resolves in pg_temp before any schema on the
- * search_path, and 021's block is a DO block, resolved when it runs — so it
- * reads the copy, and labels from the latest row that is NOT an acceptance,
- * or not at all: 030's rule, by 021's own text, with no second spelling and
- * nothing wrong ever written. The copy is dropped right after the file, in the
- * same transaction (ON COMMIT DROP as well), so 022 onward — 029's function,
- * 030's block — read the real table again. pg_temp is searched first for
+ * VIEW named thought_work_claims is created over the real table without the
+ * accepted rows (ACCEPTED_CLAIM_SQL, the predicate 030's evidence rows carry)
+ * — a view, not a copy: one catalog row, no rows materialised, and the block
+ * reads the claim rows as they stand when it runs, through the filter, so no
+ * window opens between a copy and the block (the seventh review pass measured
+ * the copy at ~15 MB per 200k rows and found the window). An unqualified name
+ * resolves in pg_temp before any schema on the search_path, and 021's block is
+ * a DO block, resolved when it runs — so it reads the view, and labels from
+ * the latest row that is NOT an acceptance, or not at all: 030's rule, by
+ * 021's own text, with no second spelling and nothing wrong ever written. The
+ * view is dropped right after the file, in the same transaction (a failure
+ * rolls it back with everything else), so 022 onward — 029's function, 030's
+ * block — read the real table again. pg_temp is searched first for
  * relations exactly when the path does NOT list it: listed, it is searched
  * where listed, and listed first it is also where CREATE puts things,
  * functions included — 021's update_thought landed there and vanished with the
  * transaction when the fifth review pass tried naming it first — so a role's
- * path that lists it has it removed for the transaction, and otherwise the
- * path is left alone; that the name resolves to the copy is checked before the
- * file runs, and the file is refused if not. Creation targets are then
- * unaffected: 021's column and functions go where they went. The copy takes
- * ACCESS SHARE on the claim table, as 021's
- * block did, and nothing on thoughts before 021's own ADD COLUMN — no lock the
- * file alone never took, and no order a worker's enqueue inverts. Needs TEMP on
- * the database (023's backfill call does too), judged before any SQL runs.
- * Where the claim table is missing, the file runs bare and fails on it as it
- * always did; where a temp table of that name already exists on the connection
- * — a pooled connection handed over with one — the file is refused, since the
- * block would read it. The copy carries the four columns the block reads. The
- * tie 030 breaks by key is 021's unnamed pick here, and a label from before
+ * path that lists it has it removed for the transaction (a quoted name may
+ * hold a comma, so the split minds quotes), and otherwise the path is left
+ * alone; that the name resolves to the view is checked before the file runs,
+ * and the file is refused if not. Creation targets are then unaffected: 021's
+ * column and functions go where they went. The view takes ACCESS SHARE on the
+ * claim table when the block reads it, as 021's block did, and nothing on
+ * thoughts before 021's own ADD COLUMN — no lock the file alone never took,
+ * and no order a worker's enqueue inverts. Needs TEMP on the database (023's
+ * backfill call does too), judged before any SQL runs. Where the claim table
+ * is missing, the file runs bare and fails on it as it always did; where a
+ * temp relation of that name already exists on the connection — a pooled
+ * connection handed over with one — the file is refused, since the block
+ * would read it (asked of pg_temp by name, whatever the search_path). The view
+ * projects the four columns the block reads. The tie 030 breaks by key is
+ * 021's unnamed pick here, and a label from before
  * 021 that 030's first statement would take back — a paste of the body over an
  * acceptance — waits for 030's own run, which on a hole at 021 alone is the
  * re-run.
@@ -473,7 +473,7 @@ async function reportSeeds(m: Migration): Promise<void> {
  * it before the file's own (the sixth review pass found a count(*) taking
  * ACCESS SHARE ahead of the ALTER's ACCESS EXCLUSIVE, the upgrade the first pass
  * had removed) — since the label is not an edit and nothing else records the
- * write; null for any other file.
+ * write. Returns the line to print beside the file, null for any other file.
  * Four review passes bracketed 021's OUTPUT instead — a snapshot of the
  * unlabelled ids, a set-back under a held trigger, 030's rule run after — and
  * each pass found a seam in the bracket; the fifth proposed the shadow and
@@ -482,68 +482,72 @@ async function reportSeeds(m: Migration): Promise<void> {
  * back that spent the acceptance (SMD-1193) — 030's header, hashed, still
  * describes the gate.
  */
-/** What 021's backfill wrote with the acceptances out of its sight — null where the server does not count (track_counts off). */
-type Shadow = { labelled: number | null };
 /** A search_path entry naming the temp schema, quoted or not. */
 const PG_TEMP_ENTRY = /^"?pg_temp"?$/i;
 
-async function applyShadowed(tx: SQL, m: Migration): Promise<Shadow | null> {
+/** search_path's entries: split on the commas outside double quotes, since a quoted schema name may hold one. */
+function searchPathEntries(path: string): string[] {
+  const out: string[] = [];
+  let entry = "";
+  let quoted = false;
+  for (const ch of path) {
+    if (ch === '"') quoted = !quoted;
+    if (ch === "," && !quoted) {
+      out.push(entry.trim());
+      entry = "";
+    } else entry += ch;
+  }
+  if (entry.trim()) out.push(entry.trim());
+  return out;
+}
+
+async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   if (m.name !== FILE_021) {
     await tx.unsafe(m.sql);
     return null;
   }
   // Catalog reads only: no lock on thoughts before the file's own ADD COLUMN.
-  const [{ nsp, path, counted }] = (await tx`
+  const [{ nsp, stale, path, counted }] = (await tx`
     SELECT (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass('thought_work_claims')) AS nsp,
+           to_regclass('pg_temp.thought_work_claims') IS NOT NULL AS stale,
            current_setting('search_path') AS path,
-           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; path: string; counted: boolean }[];
+           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; stale: boolean; path: string; counted: boolean }[];
+  if (stale) {
+    // Not ours: nothing here creates one before this point, and a pooled
+    // connection handed over with one is not a state to read the block from.
+    throw new Error("a temp relation named thought_work_claims already exists on this connection; 021's backfill would read it in place of the claim table. Drop it and run again");
+  }
   if (nsp === null) {
     await tx.unsafe(m.sql);
     return null;
-  }
-  if (/^pg_temp/.test(nsp)) {
-    // Not ours: nothing here creates one before this point, and a pooled
-    // connection handed over with one is not a state to read the block from.
-    throw new Error(`a temp table named thought_work_claims already exists on this connection (schema ${nsp}); 021's backfill would read it in place of the claim table. Drop it and run again`);
   }
   // The rows 021's one UPDATE of thoughts touches, from the transaction's own
   // statistics: O(1), visible before commit, and no read of thoughts.
   const updated = async () => Number(((await tx`SELECT n_tup_upd AS n FROM pg_stat_xact_user_tables WHERE relid = to_regclass('thoughts')`) as { n: number }[])[0]?.n ?? 0);
   const before = await updated();
-  // The four columns the block reads (021:214-217), from the source named by
-  // its schema — once the copy exists, an unqualified name is the copy.
+  // The four columns the block reads (021:214-217), over the source named by
+  // its schema — once the view exists, an unqualified name is the view.
   await tx.unsafe(
-    `CREATE TEMP TABLE thought_work_claims ON COMMIT DROP AS SELECT c.thought_id, c.work_type, c.status, c.finished_at FROM ${quoteIdent(nsp)}.thought_work_claims c WHERE NOT ${ACCEPTED_CLAIM_SQL}`
+    `CREATE TEMP VIEW thought_work_claims AS SELECT c.thought_id, c.work_type, c.status, c.finished_at FROM ${quoteIdent(nsp)}.thought_work_claims c WHERE NOT ${ACCEPTED_CLAIM_SQL}`
   );
-  await tx.unsafe("ANALYZE pg_temp.thought_work_claims");
   // pg_temp first for relations exactly when unlisted: a path that lists it
   // has it removed for the transaction (never added first — see above).
-  const entries = path.split(",").map((e) => e.trim());
+  const entries = searchPathEntries(path);
   const listsTemp = entries.some((e) => PG_TEMP_ENTRY.test(e));
   if (listsTemp) await tx`SELECT set_config('search_path', ${entries.filter((e) => !PG_TEMP_ENTRY.test(e)).join(", ")}, true)`;
   const [{ shadowed }] = (await tx`SELECT to_regclass('thought_work_claims') = 'pg_temp.thought_work_claims'::regclass AS shadowed`) as { shadowed: boolean }[];
   if (!shadowed) {
-    throw new Error(`the copy of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);
+    throw new Error(`the view of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);
   }
   await tx.unsafe(m.sql);
-  await tx.unsafe("DROP TABLE pg_temp.thought_work_claims");
+  await tx.unsafe("DROP VIEW pg_temp.thought_work_claims");
   if (listsTemp) await tx`SELECT set_config('search_path', ${path}, true)`;
-  return { labelled: counted ? (await updated()) - before : null };
-}
-
-/**
- * Beside 021's line, whenever the shadow ran — at zero too, since a silent 021
- * is also what a claim table not found, or an older migrator, prints: what its
- * backfill wrote with the acceptances out of its sight. The label is not an
- * edit, and nothing else records the write.
- */
-function reportShadow(s: Shadow | null): void {
-  if (s === null) return;
-  console.log(
-    s.labelled === null
-      ? "  ·  021's evidence backfill ran with the operator's acceptances out of its sight; what it labelled is not counted (track_counts is off)"
-      : `  ·  021's evidence backfill labelled ${s.labelled} thought(s) from the claim rows, the operator's acceptances out of its sight`
-  );
+  // At zero too: a silent 021 is also what a claim table not found, or an
+  // older migrator, prints. The label is not an edit, and nothing else
+  // records the write.
+  return counted
+    ? `  ·  021's evidence backfill labelled ${(await updated()) - before} thought(s) from the claim rows, the operator's acceptances out of its sight`
+    : "  ·  021's evidence backfill ran with the operator's acceptances out of its sight; what it labelled is not counted (track_counts is off)";
 }
 
 // ── Judged before any SQL runs ──────────────────────────────────────────────
@@ -554,7 +558,7 @@ function reportShadow(s: Shadow | null): void {
 // too, and orders after 021, so a fresh upgrade meets the need here first).
 // Then the re-run's own judgements, below.
 const refusals: { code: number; text: string }[] = [];
-const shadows021 = !baseline && migrations.some((m) => m.name === FILE_021) && (reapply || !applied.has(FILE_021));
+const shadows021 = !baseline && (reapply || !applied.has(FILE_021));
 if (shadows021) {
   const [{ temp }] = (await sql`SELECT has_database_privilege(current_database(), 'TEMP') AS temp`) as { temp: boolean }[];
   if (!temp) {
@@ -562,7 +566,7 @@ if (shadows021) {
     refusals.push({
       code: 2,
       text:
-        `this role may not create a temp table, and 021's evidence backfill needs one — a copy of the claim table without the operator's acceptances,\n` +
+        `this role may not create a temp relation, and 021's evidence backfill needs one — a view of the claim table without the operator's acceptances,\n` +
         `  for that file to read — as 023's backfill call does. GRANT TEMPORARY ON DATABASE ${quoteIdent(db)} TO ${quoteIdent(role)}; then run again.`,
     });
   }
@@ -580,7 +584,7 @@ if (shadows021) {
 // the two things 006 would do inside the transaction from a shell configured
 // differently from the brain — refuse the column's width, or re-record
 // ob1_config's model (its INSERT … ON CONFLICT DO UPDATE, run again).
-// A lock_timeout (LOCK_TIMEOUT_S) from the first statement, so an idle session holding a
+// The session's lock_timeout (LOCK_TIMEOUT_S) bounds every wait, so an idle session holding a
 // lock on thoughts fails the re-run at once rather than freezing every reader
 // behind 001's ACCESS EXCLUSIVE for ever — the banner says to stop the writers
 // first. The seeds check runs after the commit for every file that seeds, as on
@@ -606,9 +610,7 @@ if (reapply) {
   let record: Record<string, string> = {};
   try {
     // The read of ob1_config takes ACCESS SHARE; behind a session holding
-    // ACCESS EXCLUSIVE on it, it would wait for ever, before the transaction's
-    // own lock_timeout exists. The same timeout here, then reset.
-    await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
+    // ACCESS EXCLUSIVE on it, it waits — the session's lock_timeout bounds it.
     [probe] = (await sql`
       SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
              (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped) AS width`) as
@@ -617,7 +619,6 @@ if (reapply) {
       const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model')`) as { key: string; value: string }[];
       record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     }
-    await sql.unsafe("RESET lock_timeout");
   } catch (err) {
     console.error(`  ✗  --reapply  could not be judged: ${(err as Error).message}`);
     for (const line of explainFailure(err, null, "checks")) console.error(line);
@@ -684,14 +685,15 @@ if (reapply) {
 if (reapply && !dryRun) {
   // An object, not a `let`: an assignment inside the callback is invisible to
   // the type checker's flow analysis, which would narrow a `let` to null.
-  const progress: { current: Migration | null; shadow: Shadow | null } = { current: null, shadow: null };
+  const progress: { current: Migration | null } = { current: null };
+  /** What a file said beside its line, by name — 021's, with the acceptances out of its sight. */
+  const notes = new Map<string, string>();
   try {
     await sql.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
       for (const m of migrations) {
         progress.current = m;
-        const shadow = await applyShadowed(tx, m);
-        if (shadow !== null) progress.shadow = shadow;
+        const note = await applyShadowed(tx, m);
+        if (note !== null) notes.set(m.name, note);
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
@@ -708,7 +710,7 @@ if (reapply && !dryRun) {
   for (const m of migrations) {
     const again = applied.has(m.name);
     console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
-    if (m.name === FILE_021) reportShadow(progress.shadow);
+    if (notes.has(m.name)) console.log(notes.get(m.name));
     if (again) reapplied++;
     else ran++;
   }
@@ -767,18 +769,15 @@ for (const m of reapply && !dryRun ? [] : migrations) {
   }
 
   // Each migration runs in its own transaction: a failure leaves earlier ones
-  // applied and recorded, so a rerun resumes rather than starting over. The
-  // same lock_timeout as the re-run's, so a held lock fails the file rather
-  // than freezing the run and every reader behind it.
+  // applied and recorded, so a rerun resumes rather than starting over.
   try {
-    const shadow = await sql.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
-      const s = await applyShadowed(tx, m);
+    const note = await sql.begin(async (tx: SQL) => {
+      const n = await applyShadowed(tx, m);
       await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
-      return s;
+      return n;
     });
     console.log(`  ✓  ${m.name}  applied`);
-    reportShadow(shadow);
+    if (note !== null) console.log(note);
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);

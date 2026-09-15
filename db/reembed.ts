@@ -300,7 +300,7 @@
  * the file alone did, for anyone who followed the remedy this tool printed
  * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
  * re-runs every recorded migration in one transaction, and runs 021's block
- * with the acceptances out of its sight: a copy of the claim table without
+ * with the acceptances out of its sight: a view of the claim table without
  * them shadows the real one for that file, so the block labels from the
  * latest row that is not an acceptance, or not at all (SMD-1421) — and
  * migration 030 carries the corrected rule, applied once to every brain at

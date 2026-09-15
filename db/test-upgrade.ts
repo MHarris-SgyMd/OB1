@@ -23,7 +23,7 @@ import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -44,6 +44,9 @@ function migratorEnv(): Record<string, string> {
     if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
   return env;
 }
+
+/** The migrator's lock message, as its one constant spells the timeout — the three modes share the opening. */
+const LOCK_RE = new RegExp(`A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout`);
 
 /** A script's exit for an assertion label, with its output when it failed. */
 const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code === 0 ? "" : `:\n${x.out}`}`;
@@ -510,7 +513,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const blockedChecks = await migrate("--reapply");
   await excl.unsafe("ROLLBACK");
   await excl.close();
-  assert(blockedChecks.code === 1 && /--reapply\s+could not be judged: .*lock timeout/.test(blockedChecks.out) && /within the 10 s the checks before the run set/.test(blockedChecks.out) && !/re-applying every migration/.test(blockedChecks.out),
+  assert(blockedChecks.code === 1 && /--reapply\s+could not be judged: .*lock timeout/.test(blockedChecks.out) && LOCK_RE.test(blockedChecks.out) && /on the checks' reads before it/.test(blockedChecks.out) && !/re-applying every migration/.test(blockedChecks.out),
          `an exclusive lock on ob1_config fails the checks before the run within their own timeout (exit ${blockedChecks.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // A session holding a lock on thoughts — an idle transaction, a server left
@@ -522,7 +525,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const locked = await migrate("--reapply");
   await holder.unsafe("ROLLBACK");
   await holder.close();
-  assert(locked.code === 1 && /001_core_schema\.sql\s+FAILED: .*lock timeout/.test(locked.out) && /A lock was not granted within the re-run's 10 s lock_timeout/.test(locked.out) &&
+  assert(locked.code === 1 && /001_core_schema\.sql\s+FAILED: .*lock timeout/.test(locked.out) && LOCK_RE.test(locked.out) &&
            /it rolled back, nothing was re-applied or applied, and the schema is as it was/.test(locked.out) && !/re-applied\b(?! or)/.test(locked.out.replace(/nothing was re-applied or applied/, "")),
          `a held lock fails the re-run within the lock timeout, at the first file (exit ${locked.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and the one transaction rolled back: no column, the ledger as before");
@@ -539,7 +542,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const ledgerHole = await ledger();
   const run = await migrate("--reapply");
   assert(run.code === 0, `--reapply exits 0 (${run.code})${run.code === 0 ? "" : `:\n${run.out}`}`);
-  assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 3} recorded, 3 pending\\), in order, in one transaction with a 10 s lock timeout`).test(run.out) &&
+  assert(new RegExp(`re-applying every migration \\(${MIGRATIONS.length - 3} recorded, 3 pending\\), in order, in one transaction with a ${LOCK_TIMEOUT_S} s lock timeout`).test(run.out) &&
            /Stop the server and any re-embed or extraction worker first/.test(run.out) &&
            /021_embedding_model_per_row\.sql\s+applied/.test(run.out) && /022_capture_replaces_chunks\.sql\s+applied/.test(run.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied/.test(run.out) &&
            new RegExp(`applied 3, re-applied ${MIGRATIONS.length - 3}, skipped 0`).test(run.out) && !/already applied/.test(run.out),
@@ -550,10 +553,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(models[earlierThenAccepted] === "earlier-model", `with the acceptance excluded the latest row before it decides: the earlier pass that did write the vector (${models[earlierThenAccepted]})`);
   assert(models[noEvidence] === null, "a thought no pass touched stays NULL");
   assert(models[suffixedHazard] === null && models[writtenSince] === null, "the acceptance under a suffixed key and the own-key acceptance over a thought written since its enqueue — both rows 021's block as written labels from and 030 leaves — end NULL: the block never saw them");
-  const standing = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE status = 'succeeded' AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`)[0].c);
+  // By the one predicate the shadow excludes rows with, so the count and the exclusion cannot drift apart.
+  const standing = async () => Number(((await sql.unsafe(`SELECT count(*)::int AS c FROM thought_work_claims c WHERE c.status = 'succeeded' AND ${ACCEPTED_CLAIM_SQL}`)) as { c: number }[])[0].c);
   assert((await standing()) === 4, "…and every acceptance stands, spent by nobody");
-  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(run.out) && !/030 decided/.test(run.out),
-         "…and the run says, beside 021's line, what the block wrote with the acceptances out of its sight: the plain row's thought and the earlier pass's, and nothing beside 030");
+  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(run.out) &&
+           /030_label_from_claims_excludes_accepted\.sql\s+applied\n\s*applied 3, re-applied/.test(run.out),
+         "…and the run says, beside 021's line, what the block wrote with the acceptances out of its sight: the plain row's thought and the earlier pass's — and nothing beside 030, whose line the summary follows");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );
@@ -593,7 +598,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const blockedPlain = await migrate();
   await heldPlain.unsafe("ROLLBACK");
   await heldPlain.close();
-  assert(blockedPlain.code === 1 && /021_embedding_model_per_row\.sql\s+FAILED: .*lock timeout/.test(blockedPlain.out) && /within the 10 s lock_timeout the run sets for every file/.test(blockedPlain.out),
+  assert(blockedPlain.code === 1 && /021_embedding_model_per_row\.sql\s+FAILED: .*lock timeout/.test(blockedPlain.out) && LOCK_RE.test(blockedPlain.out),
          `a held lock on thoughts fails a plain run's 021 within the run's 10 s (exit ${blockedPlain.code})`);
   assert((await recorded021()) === 0 && (await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${lateSuffixed}::uuid`)[0].m === null,
          "…and 021 is not recorded, nothing labelled");
@@ -810,21 +815,33 @@ console.log("\n[9] 021 with the acceptances out of its sight on a plain run — 
   // A role without TEMP on the database: refused before anything runs, dry run
   // included, naming the GRANT — where the copy would otherwise fail at 021
   // after the files before it had committed.
+  // The role is the cluster's, not the schema's: a leftover from an
+  // interrupted run is removed first, and whatever happens the grant to PUBLIC
+  // comes back and the role goes.
   const [{ db }] = (await b.sql`SELECT current_database() AS db`) as { db: string }[];
-  await b.sql.unsafe("CREATE ROLE ob1_notemp LOGIN PASSWORD 'notemp'");
-  await b.sql.unsafe(`REVOKE TEMP ON DATABASE "${db}" FROM PUBLIC`);
-  await b.sql.unsafe(`GRANT CONNECT ON DATABASE "${db}" TO ob1_notemp`);
-  await b.sql.unsafe("GRANT USAGE, CREATE ON SCHEMA public TO ob1_notemp");
-  await b.sql.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_notemp");
-  const noTempUrl = URL_.replace(/\/\/[^@]*@/, "//ob1_notemp:notemp@");
-  const noTemp = await runScript(["bun", join(HERE, "migrate.ts"), "--url", noTempUrl, "--reapply", "--dry-run"], { env: { ...env, DATABASE_URL: noTempUrl }, cwd: HERE });
-  assert(noTemp.code === 2 && /would refuse --reapply: this role may not create a temp table, and 021's evidence backfill needs one/.test(noTemp.out) &&
-           new RegExp(`GRANT TEMPORARY ON DATABASE "${db}" TO "ob1_notemp"; then run again`).test(noTemp.out) && !/would re-apply every migration/.test(noTemp.out),
-         `a role without TEMP is refused before anything runs, with the GRANT, and the dry run says so too (exit ${noTemp.code})`);
-  await b.sql.unsafe(`GRANT TEMP ON DATABASE "${db}" TO PUBLIC`);
-  await b.sql.unsafe("DROP OWNED BY ob1_notemp");
-  await b.sql.unsafe("DROP ROLE ob1_notemp");
-  await b.sql.close();
+  const dropRole = async () => {
+    await b.sql.unsafe("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_notemp') THEN EXECUTE 'DROP OWNED BY ob1_notemp'; EXECUTE 'DROP ROLE ob1_notemp'; END IF; END $$");
+  };
+  await dropRole();
+  const noTempUrl = new URL(URL_);
+  noTempUrl.username = "ob1_notemp";
+  noTempUrl.password = "notemp";
+  assert(noTempUrl.href !== URL_, "the fixture's URL names the role without TEMP");
+  try {
+    await b.sql.unsafe("CREATE ROLE ob1_notemp LOGIN PASSWORD 'notemp'");
+    await b.sql.unsafe(`REVOKE TEMP ON DATABASE "${db}" FROM PUBLIC`);
+    await b.sql.unsafe(`GRANT CONNECT ON DATABASE "${db}" TO ob1_notemp`);
+    await b.sql.unsafe("GRANT USAGE, CREATE ON SCHEMA public TO ob1_notemp");
+    await b.sql.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_notemp");
+    const noTemp = await runScript(["bun", join(HERE, "migrate.ts"), "--url", noTempUrl.href, "--reapply", "--dry-run"], { env: { ...env, DATABASE_URL: noTempUrl.href }, cwd: HERE });
+    assert(noTemp.code === 2 && /would refuse --reapply: this role may not create a temp relation, and 021's evidence backfill needs one/.test(noTemp.out) &&
+             new RegExp(`GRANT TEMPORARY ON DATABASE "${db}" TO "ob1_notemp"; then run again`).test(noTemp.out) && !/would re-apply every migration/.test(noTemp.out),
+           `a role without TEMP is refused before anything runs, with the GRANT, and the dry run says so too (exit ${noTemp.code})`);
+  } finally {
+    await b.sql.unsafe(`GRANT TEMP ON DATABASE "${db}" TO PUBLIC`);
+    await dropRole();
+    await b.sql.close();
+  }
 }
 
 report();

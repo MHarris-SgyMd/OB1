@@ -115,16 +115,17 @@ succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
 that key's model. 030 takes such a label back where it can tell it from the
 server's own and labels with accepted rows excluded, but 030 cannot know which
 labels 021's block wrote a moment ago; the migrator need not know either.
-Before 021 runs it creates a temp table named `thought_work_claims` from the
-real one without the accepted rows, and since an unqualified name resolves in
-`pg_temp` before any schema on the search path, 021's block reads the copy and
-labels from the latest row that is not an acceptance, or not at all — 030's
-rule by 021's own text, nothing wrong ever written, the acceptance standing
-and no claim row touched. The copy is dropped right after the file, in the
-same transaction, so 022 onward read the real table; a search path that lists
+Before 021 runs it creates a temp *view* named `thought_work_claims` over the
+real table without the accepted rows — no copy, so the block reads the rows as
+they stand when it runs — and since an unqualified name resolves in `pg_temp`
+before any schema on the search path, 021's block reads the view and labels
+from the latest row that is not an acceptance, or not at all — 030's rule by
+021's own text, nothing wrong ever written, the acceptance standing and no
+claim row touched. The view is dropped right after the file, in the same
+transaction, so 022 onward read the real table; a search path that lists
 `pg_temp` — which is searched first for tables exactly when it is *not* listed
-— has it removed for the transaction, and that the name resolves to the copy
-is checked before the file runs; a temp table of that name already on the
+— has it removed for the transaction, and that the name resolves to the view
+is checked before the file runs; a temp relation of that name already on the
 connection refuses the file. The run says beside 021's line how many thoughts
 the block labelled — zero included, read from the transaction's own statistics
 (not counted where `track_counts` is off). A label 021's block wrote from an acceptance on an earlier
@@ -142,10 +143,9 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed. `--baseline` runs no
 SQL and shadows nothing.
 
-**Stop the server and any re-embed or extraction worker first.** Every
-transaction the migrator opens — the re-run's, and each file's on a plain run —
-sets the same 10 s lock timeout, so a held lock fails the run rather than
-freezing it and every reader behind it. 001 and 003
+**Stop the server and any re-embed or extraction worker first.** The
+migrator's session sets a 10 s lock timeout for everything it does, so a held
+lock fails the run rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing

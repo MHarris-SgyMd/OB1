@@ -6171,7 +6171,7 @@ merged in). Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
 
-### 57. 021's evidence backfill runs with the operator's acceptances out of its sight — a copy of the claim table shadows the real one for that file, and no gate refuses the run (SMD-1421)
+### 57. 021's evidence backfill runs with the operator's acceptances out of its sight — a view of the claim table shadows the real one for that file, and no gate refuses the run (SMD-1421)
 
 `db/migrate.ts`, `db/config.mjs`, `db/config.d.mts`, `db/reembed.ts`,
 `db/test-upgrade.ts`, `db/README.md` and `scripts/check-fork-consistency.mjs`
@@ -6194,19 +6194,21 @@ the one fact 030, hashed and applied, cannot — the labels *before* 021's repla
 
 **What this does.** One helper, `applyShadowed`, runs every file, and runs
 021 with the operator's acceptances out of its sight. Before the file, a temp
-table named `thought_work_claims` is created from the real one without the
+*view* named `thought_work_claims` is created over the real table without the
 accepted rows — `ACCEPTED_CLAIM_SQL`, the predicate 030's evidence rows carry,
-spelled once. An unqualified name resolves in `pg_temp` before any schema on
-the search path, and 021's block is a `DO` block, resolved when it runs, so it
-reads the copy and labels from the latest row that is *not* an acceptance, or
-not at all: 030's rule, by 021's own text, with no second spelling and nothing
-wrong ever written. The copy is dropped right after the file in the same
+spelled once; a view, not a copy, so nothing is materialised and the block
+reads the claim rows as they stand when it runs. An unqualified name resolves
+in `pg_temp` before any schema on the search path, and 021's block is a `DO`
+block, resolved when it runs, so it reads the view and labels from the latest
+row that is *not* an acceptance, or not at all: 030's rule, by 021's own text,
+with no second spelling and nothing wrong ever written. The view is dropped
+right after the file in the same
 transaction, so 022 onward read the real table. `pg_temp` is searched first
 for relations exactly when the path does *not* list it — listed first, it is
 also where `CREATE` puts things, functions included — so a role's path that
 lists it has it removed for the transaction, the path is otherwise left alone,
 and that the name resolves to the copy is checked before the file runs.
-Creation targets are then unaffected. The copy takes ACCESS SHARE on the claim table, as 021's
+Creation targets are then unaffected. The view takes ACCESS SHARE on the claim table, as 021's
 block did, and nothing on `thoughts` before 021's own ADD COLUMN: no lock the
 file alone never took. The run says beside 021's line how many thoughts the
 block labelled — zero included, read from the transaction's own statistics
@@ -6404,6 +6406,37 @@ Two README lines and this section's heading still described the bracket. [9]
 plants a suffixed-key acceptance and rebuilds the brain for the both-pending
 run, so the column is truly absent there.
 
+**Review, seventh pass (high), at the user's call, triaged.** The
+stale-temp-relation refusal keyed off the schema the *unqualified* name
+resolved to, so a role path listing `pg_temp` last skipped it and the CREATE
+died bare; it asks `pg_temp` by name. The copy was a materialised CTAS of
+every non-accepted claim row — ~15 MB per 200k rows, written and scanned
+under 001's exclusive lock on the re-run — with a snapshot window between the
+copy and the block through which a worker's release, committed between, was
+evidence bare 021 read and the copy lacked; a temp *view* over the real table
+shadows identically, materialises nothing, and the block reads the rows as
+they stand. [9]'s role fixture had no guard against a leftover and no
+`finally`, so an interrupted run left the cluster's `PUBLIC` without TEMP and
+every later run dying on "role already exists"; guarded both ways, the URL
+built with `new URL()` and asserted to differ. `LOCK_TIMEOUT_S` was applied
+by three mechanisms — a SET/RESET bracket around the checks and a `SET LOCAL`
+in each of two `begin`s — while the ledger reads and the TEMP probe ran with
+none; one session `SET` after the connection opens, the constant moved to
+`config.mjs` so `test-upgrade` derives its three lock regexes from it, and
+the three lock messages share one opening. The search-path strip split on
+bare commas, mis-rewriting a quoted name holding one; a quote-aware split.
+`standing()` hand-spelled the acceptance predicate the same diff had made one
+constant; it uses `ACCEPTED_CLAIM_SQL`. A `!/030 decided/` clause guarded
+against a printer the fifth pass deleted; the assertion is positive — 030's
+line is followed by the summary. The 021 case leaked into the loops through a
+tri-state and a `.some()` the load guard had made vacuous; the helper returns
+the line to print and the loops print what a file returned. The
+duplicate-number rule was spelled twice, in the runner and the checker;
+`config.mjs` exports `duplicateMigrationNumber`, and both call it. **Declined:**
+an environment override of the lock timeout so the suite's three 10 s waits
+run in 3 s — a production knob for the migrator bought with test time, where
+the three waits exercise three real lock paths.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6437,8 +6470,9 @@ that a role without TEMP is refused before anything runs, dry run included,
 with the GRANT. The hazard refusals went with the gate; the rest of [7] and
 all of [8] are unchanged. Not exercised: the loader's two refusals (a set
 without 021, two files sharing a number), the checker's duplicate-number rule,
-the 40P01 line, the shadow refusal (the copy always shadows on the test role's
-path) and the stale-temp-table refusal. `test-upgrade` 120/120,
+the 40P01 line, the shadow refusal (the view always shadows on the test role's
+path), the stale-temp-relation refusal, the search-path strip and its quoted
+comma. `test-upgrade` 121/121,
 `test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
 clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).

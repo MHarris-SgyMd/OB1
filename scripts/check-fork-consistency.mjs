@@ -219,15 +219,13 @@ function checkSqlGuards() {
 // and two branches each adding "the next number" is how two files come to
 // share one (the fork has renumbered twice; SMD-1421). migrate.ts refuses such
 // a set at run time, which is every operator's run and every compose start;
-// this is the same rule where the collision is created, on every push.
+// this is the same rule — config.mjs's duplicateMigrationNumber, one spelling
+// — where the collision is created, on every push.
 
-function checkMigrationNumbers() {
-  const names = readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort();
-  for (let i = 1; i < names.length; i++) {
-    if (names[i].slice(0, 3) === names[i - 1].slice(0, 3)) {
-      fail(`db/migrations/${names[i]}`, `shares migration number ${names[i].slice(0, 3)} with ${names[i - 1]}; the number is the file's identity and its order — renumber one`);
-    }
-  }
+async function checkMigrationNumbers() {
+  const { duplicateMigrationNumber } = await import("../db/config.mjs");
+  const shared = duplicateMigrationNumber(readdirSync(join(ROOT, "db", "migrations")));
+  if (shared) fail(`db/migrations/${shared[1]}`, `shares migration number ${shared[1].slice(0, 3)} with ${shared[0]}; the number is the file's identity and its order — renumber one`);
 }
 
 // ── 6: shipped content never hands untrusted input a shell ───────────────────
@@ -492,7 +490,7 @@ for (const d of dirs) {
   checkDeps(meta, d);
 }
 checkSqlGuards();
-checkMigrationNumbers();
+await checkMigrationNumbers();
 checkShellHazards(dirs);
 
 /**

@@ -832,7 +832,7 @@ export function reembedKey(model, dim) {
  * the migrator; the sixth review pass), so `reembed:m@08` names a model on
  * both sides and is nobody's own key on both. 030 takes the first as a
  * template value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another;
- * migrate.ts shadows the claim table for 021's backfill with a copy that
+ * migrate.ts shadows the claim table for 021's backfill with a view that
  * carries no row ACCEPTED_CLAIM_SQL names (SMD-1193, SMD-1421).
  *
  * These, and ACCEPTED_CAVEAT_PREFIX, are substituted into migration 030 —
@@ -973,7 +973,7 @@ export const ACCEPTED_BY_MODEL_SQL =
  * slower at 100k rows, measured in the sixth review pass); a reader that wants
  * "latest" wraps this text. Spelled once: migration 030 takes it as the
  * template value {{CLAIM_EVIDENCE_ROWS}}; migrate.ts reads ACCEPTED_CLAIM_SQL
- * above, the one predicate these rows carry, for the copy of the claim table
+ * above, the one predicate these rows carry, for the view of the claim table
  * it shadows 021's backfill with, so what 030 excludes and what 021 never
  * sees are decided by one text. The caveat prefix is inlined as a literal, so
  * it may hold no quote — asserted below.
@@ -994,13 +994,45 @@ export const ACCEPTED_BY_MODEL_SQL =
  */
 export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
 
+/**
+ * The lock timeout, in seconds, migrate.ts sets for its session — every
+ * transaction it opens, the checks' reads before a re-run, the ledger reads —
+ * and quotes in every message of its own that names it; db/test-upgrade.ts
+ * derives its expectations from it. Ten seconds: long enough for a live
+ * server's statements to finish, short enough that an idle transaction holding
+ * thoughts fails the run rather than freezing it and every reader behind 001's
+ * ACCESS EXCLUSIVE. A session setting overrides a role's or provider's default
+ * for the migrator alone; 023's call sets its own, locally, for its
+ * transaction. db/README.md spells the number in prose.
+ */
+export const LOCK_TIMEOUT_S = 10;
+
+/**
+ * Two migration files sharing a number — the first such pair in a sorted
+ * listing, or null. The number is a file's identity and its order, and two
+ * branches each adding "the next number" is how two files come to share one
+ * (the fork has renumbered twice; SMD-1421). One rule, read by migrate.ts at
+ * load — every operator's run and every compose start — and by
+ * scripts/check-fork-consistency.mjs on every push, where the collision is
+ * made. Files not of the form NNN_*.sql are not judged.
+ * @param {string[]} names
+ * @returns {[string, string] | null}
+ */
+export function duplicateMigrationNumber(names) {
+  const sorted = names.filter((n) => /^\d{3}_.*\.sql$/.test(n)).sort();
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].slice(0, 3) === sorted[i - 1].slice(0, 3)) return [sorted[i - 1], sorted[i]];
+  }
+  return null;
+}
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
 
 /**
  * Whether claim row `c` is the operator's acceptance of a failure — the caveat
  * prefix on last_error (starts_with(NULL, …) is NULL, and NOT NULL is not
  * true, so the IS NOT NULL is load-bearing). Spelled once for the evidence
- * rows below and for the copy of the claim table migrate.ts shadows 021's
+ * rows below and for the view of the claim table migrate.ts shadows 021's
  * backfill with (SMD-1421). Inlined into 030 through the rows: changing it is
  * a data migration.
  */
