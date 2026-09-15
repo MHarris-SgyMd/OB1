@@ -3614,7 +3614,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   // capture; `existed` in the return.
   assert(/ob1:re-capture-writes-no-provenance/.test(three) && /ob1:capture-takes-fingerprint-lock/.test(three) && /ob1:vector-replaces-chunks/.test(three), "the 3-argument body carries 035's sentinel beside 022's and 033's");
   assert(!/supersession-review/.test(three), "…and takes no supersession lock — hashtext('ob1:supersession-review') is gone from the body");
-  const onConflict = three.slice(three.indexOf("DO UPDATE"), three.indexOf("RETURNING id INTO v_id"));
+  const onConflict = three.slice(three.indexOf("DO UPDATE"), three.indexOf("RETURNING id, supersedes INTO v_id, v_supersedes_now"));
   assert(onConflict.length > 0 && !/supersedes\s*=/.test(onConflict) && !/derived_from\s*=/.test(onConflict) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three), "…its ON CONFLICT clause sets neither derived_from nor supersedes — 025's add-if-empty is gone");
   assert(/INSERT INTO thoughts \(content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes\)/.test(three) && /v_supersedes::uuid/.test(three) && /validate_derived_from\(p_payload->'derived_from'\)/.test(three), "…while the INSERT still writes both from the envelope, validated");
   assert(!/IF p_embedding IS NOT NULL THEN\s+SELECT embedding_model/.test(three) && /FOR NO KEY UPDATE;\s+v_existed := FOUND;/.test(three) && /'existed', v_existed, 'supersedes', v_supersedes_now\)/.test(three) && /RETURNING id, supersedes INTO v_id, v_supersedes_now/.test(three),

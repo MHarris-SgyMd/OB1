@@ -81,7 +81,7 @@
 --      this file is the last definer of BOTH inserting forms and preflight's
 --      `atomic capture` has one remedy for every stale state, as 033 had. It
 --      takes no vector and reads no provenance (033's header says so); it
---      returns no `existed` — the two-step fallback is its one
+--      returns neither `existed` nor `supersedes` — the two-step fallback is its one
 --      caller and attaches the vector afterwards either way.
 --   Otherwise the 3-argument body is 033's, verbatim: 005's guard, 008's
 --   actor, 016's content_fingerprint_of, 021's label in the INSERT and its ON
@@ -195,7 +195,8 @@
 --     the COMMENTs.
 --   * Privileges: SECURITY INVOKER as before; the 3-argument form still needs
 --     DELETE on thought_chunks (022). No GRANT.
---   * The return gains a key; nothing that reads the return breaks on an
+--   * The return gains two keys, `existed` and `supersedes`; nothing that
+--     reads the return breaks on an
 --     extra key (both stores read `id`; 013's form appends `chunks`).
 --   * 032's COMMENT on review_supersession_proposal said "a capture's
 --     add-if-empty through upsert_thought aside"; 032's file is applied and
@@ -220,13 +221,17 @@
 --
 -- Callers
 --   Nothing changes its call. server-portable/store.ts's CaptureResult gains
---   `existed`, both stores read it, and the capture tool's reply names
---   update_thought when provenance was sent and the text was already there.
---   preflight's `atomic capture` names this file as the last definer of both
---   capture forms and reads the new sentinel beside the two before it;
---   test-schema [35], test-live [6e] (arm 3: a capture naming supersedes is
---   NOT held by the supersession lock now) and [13], and test-upgrade [13]
---   hold the behaviour; db/README.md and FORK.md change 66 say what is true.
+--   `existed` and `supersedes`, both stores read both, and the capture tool's
+--   reply says what stands when provenance was sent and the text was already
+--   there — naming update_thought only where an edit would record or replace
+--   a pointer. preflight's `atomic capture` names this file as the last
+--   definer of both capture forms and reads the new sentinel beside the two
+--   before it; test-schema [35], test-live [6e] (arm 3: a capture naming
+--   supersedes is NOT held by the supersession lock now) and [13],
+--   test-upgrade [13], test-e2e-sql [7] (the reply's shapes through the
+--   server), test-store-sql [6] and test-store-postgrest [1] (the two keys
+--   through each store) hold the behaviour; db/README.md and FORK.md change
+--   66 say what is true.
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 025 (the columns), 032
@@ -237,8 +242,9 @@
 --   Three upsert_thought overloads and one update_thought as before. A
 --   re-capture naming supersedes or derived_from leaves the row's provenance
 --   as it was and returns existed = true; a first capture writes it and
---   returns existed = false; no capture takes the supersession lock; R → X →
---   R cannot be written through upsert_thought.
+--   returns existed = false; both return supersedes, the row's pointer after
+--   the write; no capture takes the supersession lock; R → X → R cannot be
+--   written through upsert_thought.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------

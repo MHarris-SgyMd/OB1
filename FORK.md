@@ -7962,10 +7962,11 @@ under the fingerprint lock, on the partial unique index the INSERT's
 arbitration reads anyway. 013's 4-argument form returns `v_result ||
 {"chunks": n}`, so the key passes through to both servers, and the
 `capture_thought` tool's reply names `update_thought`'s `supersedes` when the
-caller sent one and the text existed — already supersedes what was named,
-currently supersedes another (an edit would replace it), was named as its own
-predecessor, or holds no pointer and the call records it — and says the tools
-cannot set `derived_from` on an existing thought when that was sent. The 2-argument body is carried verbatim from
+caller sent one and the text existed — it already supersedes what was named,
+currently supersedes another (`update_thought` would replace it), was named as
+its own predecessor, or holds no pointer and `update_thought`'s `supersedes`
+records it; the edit is named only where it would record or replace — and says
+the tools cannot set `derived_from` on an existing thought when that was sent. The 2-argument body is carried verbatim from
 033 so 035 is the last definer of both inserting forms and preflight keeps one
 remedy; `update_thought` is not redefined — 033 stays its last definer, with
 the order 033 gave it. 032's `COMMENT ON review_supersession_proposal` said "a
@@ -7989,8 +7990,8 @@ writer — supersession, fingerprint, row — stands; the capture path takes the
 suffix fingerprint → row, and `test-live` [6f]'s four writers on two texts
 finish as before.
 
-**A first review pass, triaged: no code defect, ten wording fixes, one
-behaviour stated.** Three reviewers, one each on the SQL, the callers and
+**A first review pass, triaged: no schema defect; ten fixes — six of wording,
+three of messages, one of tests — and one behaviour stated.** Three reviewers, one each on the SQL, the callers and
 tests, and the prose. The SQL reviewer ran eight workers of captures, edits and
 review decisions over a seeded brain with and without deletes: no loop of any
 length, no deadlock without deletes, and with them only SMD-1462's
@@ -8031,14 +8032,32 @@ inputs alone, so when the existing thought already held a pointer the reply
 advised recording it again, replacing it without saying so, or — for a
 thought named as its own predecessor — an edit `update_thought` refuses. The
 3-argument form now returns the row's `supersedes` after the write beside
-`existed`, and the reply says what stands; `test-e2e-sql` [7] drives the five
-shapes through the server. Stated as well: `existed` is "a row held this
+`existed`, and the reply says what stands; `test-e2e-sql` [7] drives the four
+`supersedes` shapes and `derived_from` alone through the server. Stated as well: `existed` is "a row held this
 fingerprint when the locked read ran", so a writer that bypasses the
 fingerprint lock can make the merge report false (the class 018, 023 and 033
 already exclude); change 63's two remaining present tenses about the capture's
 supersession lock carry a note, and 033's successor list is superseded by
 035's; preflight's pre-022 cause no longer names a vendored overload SMD-1250
 removed, and its pending-files string lost a dead term.
+
+**A third pass, at the user's call: the stop signal, and two things pass 2 left
+behind.** Three reviewers — pass 2's own change, the merge audited against both
+parents and the merged tree run end to end, the prose since pass 1. The top
+findings were pass 2's: its `RETURNING id, supersedes` moved the anchor
+`test-schema` [35] sliced the `ON CONFLICT` clause by, so the "sets neither
+column" assertion had been reading to the end of the body and passing because
+nothing there matched — the anchor follows the new text; and the reply compared
+the caller's `supersedes` to Postgres's lower-case ids as sent, so an upper-case
+self-pointer slipped past to an edit `update_thought` refuses — the reply now
+compares and prints the lower case, and [7] sends one. The merge lost nothing
+of either side (the one dropped brace had already been restored); every CI step
+with a local equivalent passed on the merged tree, deploy stack included. The
+rest is wording: the reply names `update_thought` only where an edit would
+record or replace, not in all four shapes; the header's callers, safety and
+outcome say `supersedes` rides beside `existed`; `db/README.md`'s change list
+had skipped 034, a gap inherited from change 65; the first pass's "no code
+defect" over-stated — one reply condition was code.
 
 **Closed, and not.** Closed: the capture path cannot write a supersession
 loop by any sequence — a loop now needs a writer outside the two functions
@@ -8086,7 +8105,8 @@ under the fingerprint lock.
 `upsert_thought` and 033 of `update_thought`; the 3-argument body read from
 `pg_proc` — 035's sentinel beside the two before it, no supersession lock, an
 `ON CONFLICT` clause that sets neither column while the INSERT lists both, the
-row read unconditional, `existed` returned, 022's DELETE condition kept; a
+row read unconditional, `existed` and the row's `supersedes` returned, 022's
+DELETE condition kept; a
 first capture writes provenance with `existed: false`; a re-capture naming
 other provenance leaves the row's, one over a row with none fills nothing, a
 vectorless one and one through the 4-argument form say `existed: true`;
@@ -8103,7 +8123,8 @@ out-of-bounds on a windowed capture through that form, at 033 as at 035.
 `test-live` [6e] arm 3 (482): a capture naming `supersedes` completes while
 another connection holds the supersession lock, its pointer written on its
 fresh row — where at 033 it waited; [13]: a re-capture naming provenance over
-a row with none fills nothing and says `existed`, the envelope records it, and
+a row with none fills nothing and says `existed` with the pointer that stands,
+the envelope records it, and
 `existed` rides beside `chunks` through the 4-argument form.
 `test-upgrade` [13] (162): 035 onto a populated 033 whose re-capture had
 just written the loop — no column, signature, row, audit row or ACL moves, the

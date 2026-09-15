@@ -197,7 +197,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-035 change 66).
+034 change 65, 035 change 66).
 
 ## What changed relative to the guide
 
@@ -1204,7 +1204,7 @@ container.
 - **A re-capture writes no provenance** (migration 035). [13] captures a
   chain through `upsert_thought` and re-captures one text naming different
   provenance: the existing values stay, a row with none stays with none, and
-  the return says `existed`. `test-upgrade.ts` [13] applies 035 onto a
+  the return says `existed` and the pointer that stands. `test-upgrade.ts` [13] applies 035 onto a
   populated 033 whose re-capture had just filled a pointer: the pointer stays
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
