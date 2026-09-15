@@ -1262,7 +1262,7 @@ export const coreColumnCommentStatement = (col) =>
  * migration added and no earlier body has: 005 refuses a non-object payload;
  * 025 writes the provenance envelope. test-schema [31] holds each against the
  * body it names and against the body before it. 033 declares itself with a
- * sentinel of its own, `ob1:capture-takes-fingerprint-lock`, and 034 — the
+ * sentinel of its own, `ob1:capture-takes-fingerprint-lock`, and 035 — the
  * last definer of both forms — with `ob1:re-capture-writes-no-provenance` in
  * the 3-argument body; both read inline as 022's is. The two regexes still
  * tell which earlier body an unlocked one is.

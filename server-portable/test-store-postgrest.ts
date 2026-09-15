@@ -56,7 +56,7 @@ console.log("[1] captureThought without chunks — the 3-arg RPC, unchanged");
     embeddingModel: "unit-test-model",
   });
   assert(/^[0-9a-f-]{36}$/.test(id), `returns a uuid (${id.slice(0, 8)}…)`);
-  // 034: the RPC's jsonb return carries `existed`, and the store passes it on.
+  // 035: the RPC's jsonb return carries `existed`, and the store passes it on.
   const again = await store.captureThought({ content: "a short thought that needs no chunking", payload: { metadata: {} }, embedding: vec(0), embeddingModel: "unit-test-model" });
   assert(again.id === id && again.existed === true, "a re-capture over PostgREST reports existed: true — the key rides the RPC's return");
 

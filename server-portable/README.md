@@ -79,11 +79,11 @@ or recipe (SMD-1250) — replaces one with no error: a 3-argument body from
 before 022 leaves a re-capture's stale windows behind, one from before 025
 drops `derived_from` and `supersedes` silently, one from before 033 takes no
 fingerprint lock (a capture racing an edit of the same text raises the unique
-violation 018 removed for edits), one from before 034 fills a NULL `supersedes`
+violation 018 removed for edits), one from before 035 fills a NULL `supersedes`
 on a re-capture without walking for a loop and holds the supersession lock
 through every capture that names one, and a 2-argument body from before 005
 empties a double-encoded payload silently — or, from before 033, takes no
-lock either; each is a warning naming 034, the last definer of both forms. `provenance` reads
+lock either; each is a warning naming 035, the last definer of both forms. `provenance` reads
 `trace_provenance`'s body the same way and warns, naming 026, when the
 bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
 body is not 024's; and `work claims` fails when `release_thought`'s or

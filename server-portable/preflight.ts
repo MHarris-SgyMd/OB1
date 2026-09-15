@@ -658,7 +658,7 @@ if (configFailed) {
         // otherwise — `ob1:capture-takes-fingerprint-lock` (033, in BOTH
         // forms) — a capture takes the advisory lock update_thought takes, so
         // a capture and an edit of one text are serialised — and
-        // `ob1:re-capture-writes-no-provenance` (034, the 3-argument form) —
+        // `ob1:re-capture-writes-no-provenance` (035, the 3-argument form) —
         // a re-capture leaves an existing thought's provenance as it is, so
         // no capture can close a supersession loop and none takes the
         // supersession lock. 025 kept 022's sentinel and added the provenance
@@ -670,13 +670,13 @@ if (configFailed) {
         // the getting-started guide pasted again, a vendored schema or recipe
         // (SMD-1250) — replaces a body with no error when the signature
         // matches; this is where the operator learns which body is there, and
-        // which migration owns it. 034 is the last definer of BOTH forms (the
+        // which migration owns it. 035 is the last definer of BOTH forms (the
         // 2-argument body carried verbatim from 033), so one file is the
         // remedy for every stale state.
-        const LAST = "034_recapture_writes_no_provenance.sql";
+        const LAST = "035_recapture_writes_no_provenance.sql";
         const LOCKED = /ob1:capture-takes-fingerprint-lock/;
         const NO_FILL = /ob1:re-capture-writes-no-provenance/;
-        const applyLast = (why: string) => ledgerRemedy("034", `Apply db/migrations/${LAST}${why}`);
+        const applyLast = (why: string) => ledgerRemedy("035", `Apply db/migrations/${LAST}${why}`);
         // The 2-argument body is judged on its own and said beside whichever
         // 3-argument state fires, so a brain with both replaced hears it once
         // rather than on the run after the first remedy (first review pass).
@@ -686,27 +686,27 @@ if (configFailed) {
         const twoUnlocked = two !== undefined && !twoStale && !LOCKED.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
         // Why a body predates the migration that added what it lacks (`stage`:
-        // 033 for the lock, 034 for the fill): the ordinary state on a brain
+        // 033 for the lock, 035 for the fill): the ordinary state on a brain
         // whose ledger stops before it — the run before `migrate.ts` — is not
         // a hand re-apply, and the cause must not say it is (SMD-1043's first
-        // review pass). With the ledger recording 034, the last definer, a
+        // review pass). With the ledger recording 035, the last definer, a
         // hand re-apply is the only way; with it recording `stage` but not
-        // 034, the earlier file was re-applied by hand AND the remedy is still
+        // 035, the earlier file was re-applied by hand AND the remedy is still
         // pending, and the cause says both.
         const pre = (stage: string, earlier: string) => {
-          // The unapplied files, named: 034 alone when `stage` is 034 or the
+          // The unapplied files, named: 035 alone when `stage` is 035 or the
           // ledger has it, both otherwise (a brain at 032 lacks 033 as well).
-          const pending = stage === "034" || (ledgerRead && ledger.has(stage)) ? "migration 034 is" : `migrations ${stage} and 034 are`;
-          return ledger.has("034") ? `${earlier} re-applied by hand puts it back`
-            : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and migration 034 is not yet applied`
+          const pending = stage === "035" || (ledgerRead && ledger.has(stage)) ? "migration 035 is" : `migrations ${stage} and 035 are`;
+          return ledger.has("035") ? `${earlier} re-applied by hand puts it back`
+            : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and migration 035 is not yet applied`
             : ledgerRead ? `${pending} not yet applied`
               : `${pending} not yet applied, or ${earlier} was re-applied by hand`;
         };
         const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre("033", "005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
-        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 034's either — ${TWO_UNLOCKED_WHY}` : "";
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 035's either — ${TWO_UNLOCKED_WHY}` : "";
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 034's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
-              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033 and 034 redefined it, and an earlier file's body alone would drop what every later one added)."));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 035's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
+              applyLast(" — the last definer of both forms (004 created the 3-argument one; 005, 008, 021, 022, 025, 033 and 035 redefined it, and an earlier file's body alone would drop what every later one added)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -714,7 +714,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 034 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 035 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
@@ -727,16 +727,16 @@ if (configFailed) {
         } else if (!NO_FILL.test(three.src)) {
           // 033's body: locked, and still filling a NULL supersedes on a
           // re-capture without walking the chain, under the brain-wide
-          // supersession lock (SMD-1453). The 2-argument body is 033's = 034's.
+          // supersession lock (SMD-1453). The 2-argument body is 033's = 035's.
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 034 (${pre("034", "033")}): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert — about 145 a second at 1,024 dimensions whatever the worker count${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, 025's envelope and the fingerprint lock, but it is from before migration 035 (${pre("035", "033")}): a re-capture naming supersedes fills a NULL pointer without walking the chain, so a dedup can write a two-row loop, and every capture naming supersedes holds the supersession lock through its insert — about 145 a second at 1,024 dimensions whatever the worker count${andTwo}${andOthers}`,
               applyLast("."));
         } else if (twoStale || twoUnlocked) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present and the 3-argument body is 034's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 034's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 035's, but the 2-argument body is ${twoStale ? `not 005's — ${TWO_STALE_WHY}` : `not 035's — ${TWO_UNLOCKED_WHY}`}${andOthers}`,
               applyLast(" — the last definer of the 2-argument form as well."));
         } else {
-          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 034's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop; the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present, both 035's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop; the 2-argument body refuses a non-object payload (005) and takes the lock${andOthers}`);
         }
 
         // The privileges the capture path's SECURITY INVOKER writers need to run

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 034 — a re-capture writes no provenance: the envelope's derived_from and
+-- 035 — a re-capture writes no provenance: the envelope's derived_from and
 --        supersedes land on a first capture only, so the capture path can
 --        never close a supersession loop and needs no supersession lock
 --        (SMD-1453)
@@ -154,15 +154,15 @@
 -- Cost
 --   Less: one advisory lock acquire fewer per capture naming supersedes, and
 --   the ceiling gone. Measured with 033's design — alternating arms each on a
---   fresh schema, 033, 034, 033, 034, the cold first arm discarded — at 1,024
+--   fresh schema, 033, 035, 033, 035, the cold first arm discarded — at 1,024
 --   dimensions, HNSW, a 300-row corpus, the SQL store with 64 connections:
 --   50 concurrent captures naming supersedes against 50 naming none, medians
 --   of four rounds, 292.6 vs 91.3 ms and 284.4 vs 87.7 ms at 033 (3.2×), 94.2
---   vs 79.7 ms and 73.6 vs 74.0 ms at 034 (1.2×, 1.0×); 200 concurrent naming
---   supersedes 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 034 —
+--   vs 79.7 ms and 73.6 vs 74.0 ms at 035 (1.2×, 1.0×); 200 concurrent naming
+--   supersedes 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 035 —
 --   inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at
---   033, 346.8 / 334.5 ms at 034); one serial capture naming supersedes 7.30 / 6.75 ms at 033,
---   7.22 / 6.27 ms at 034 — the per-call cost is the HNSW insert either way,
+--   033, 346.8 / 334.5 ms at 035); one serial capture naming supersedes 7.30 / 6.75 ms at 033,
+--   7.22 / 6.27 ms at 035 — the per-call cost is the HNSW insert either way,
 --   the lock only took the parallelism. 470 pointers written in every arm.
 --   More: one index probe per vectorless 3-argument capture — the row read
 --   that ran only with a vector runs always — under the fingerprint lock, on
@@ -212,9 +212,9 @@
 --   update_thought when provenance was sent and the text was already there.
 --   preflight's `atomic capture` names this file as the last definer of both
 --   capture forms and reads the new sentinel beside the two before it;
---   test-schema [34], test-live [6e] (arm 3: a capture naming supersedes is
+--   test-schema [35], test-live [6e] (arm 3: a capture naming supersedes is
 --   NOT held by the supersession lock now) and [13], and test-upgrade [13]
---   hold the behaviour; db/README.md and FORK.md change 64 say what is true.
+--   hold the behaviour; db/README.md and FORK.md change 66 say what is true.
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 025 (the columns), 032
@@ -274,7 +274,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb) IS
-  'Capture without a vector: content + metadata, merged into the row holding the same normalised text. Reads p_payload.actor (008, here since 033) for the audit trigger. Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED). Refuses a non-object payload (005). Reads no provenance from the envelope. Called by PostgREST clients by name and the two-step capture fallback; the servers capture through the 3- and 4-argument forms. Body unchanged since 033; 034 is the last definer.';
+  'Capture without a vector: content + metadata, merged into the row holding the same normalised text. Reads p_payload.actor (008, here since 033) for the audit trigger. Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED). Refuses a non-object payload (005). Reads no provenance from the envelope. Called by PostgREST clients by name and the two-step capture fallback; the servers capture through the 3- and 4-argument forms. Body unchanged since 033; 035 is the last definer.';
 
 -- ---------------------------------------------------------------------------
 -- The 3-argument form: 033's body; provenance on a fresh row only, no
@@ -292,12 +292,12 @@ DECLARE
   v_fingerprint text;
   v_id          uuid;
   -- 022: whether a row was there to lock, and the model its vector — and so
-  -- its windows — was labelled with before this write (NULL: unknown). 034:
+  -- its windows — was labelled with before this write (NULL: unknown). 035:
   -- read for every capture, so `existed` in the return is always right.
   v_existed     boolean := false;
   v_old_label   text;
   -- 025: the provenance the envelope carries, if any — written on a fresh
-  -- row only (034).
+  -- row only (035).
   v_derived     jsonb;
   v_supersedes  text  := p_payload->>'supersedes';
 BEGIN
@@ -321,7 +321,7 @@ BEGIN
   -- untrusted-input hole (SMD-1253, departure 3). 033: through 032's
   -- validate_derived_from, the one copy of the rule — NULL, JSON null and []
   -- come back NULL; otherwise an array of UUID strings naming thoughts that
-  -- exist, canonicalised, or one of its three exceptions. 034: validated
+  -- exist, canonicalised, or one of its three exceptions. 035: validated
   -- before the write is known to be a dedup, so a bad reference is refused
   -- whether or not the text is new.
   v_derived := validate_derived_from(p_payload->'derived_from');
@@ -343,7 +343,7 @@ BEGIN
 
   v_fingerprint := content_fingerprint_of(p_content);
 
-  -- 034: no supersession lock here. 033 took it first when the envelope named
+  -- 035: no supersession lock here. 033 took it first when the envelope named
   -- supersedes, to order the ON CONFLICT fill of a NULL pointer against
   -- update_thought's cycle walk; the fill is gone, and the pointer a fresh
   -- row writes is one no concurrent walk can reach (see the header).
@@ -362,7 +362,7 @@ BEGIN
   -- lands on THIS row, not on one a concurrent writer commits meanwhile — and
   -- its label before the write, which says whether its windows still hold.
   -- FOR NO KEY UPDATE: ordered against update_thought's row lock, not
-  -- against the FOR KEY SHARE every foreign key onto this row holds. 034:
+  -- against the FOR KEY SHARE every foreign key onto this row holds. 035:
   -- for every capture, not only one with a vector — `existed` below.
   SELECT embedding_model INTO v_old_label
     FROM thoughts WHERE content_fingerprint = v_fingerprint FOR NO KEY UPDATE;
@@ -371,7 +371,7 @@ BEGIN
   -- 021: the label is written beside the vector, from the envelope; NULL when
   -- the caller named none (an older server), which is a vector of unknown model.
   -- 025: derived_from and supersedes are written beside them, validated above
-  -- — on a fresh row (034).
+  -- — on a fresh row (035).
   INSERT INTO thoughts (content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes)
   VALUES (
     p_content,
@@ -392,7 +392,7 @@ BEGIN
                                ELSE EXCLUDED.embedding_model END
         -- ob1:re-capture-writes-no-provenance — a CONTRACT SENTINEL, not
         -- prose (the 014 convention); preflight's `atomic capture` reads it.
-        -- 034: derived_from and supersedes are NOT in this SET. 025 filled a
+        -- 035: derived_from and supersedes are NOT in this SET. 025 filled a
         -- NULL one here (COALESCE(thoughts.x, EXCLUDED.x)) and never walked
         -- the pointer for a loop; a dedup of identical content is not the
         -- place to decide what the existing thought derives from or
@@ -415,18 +415,18 @@ BEGIN
     DELETE FROM thought_chunks WHERE thought_id = v_id;
   END IF;
 
-  -- 034: `existed` — the text was already captured; metadata merged, vector
+  -- 035: `existed` — the text was already captured; metadata merged, vector
   -- and windows by 021/022, provenance in the envelope not written.
   RETURN jsonb_build_object('id', v_id, 'fingerprint', v_fingerprint, 'existed', v_existed);
 END;
 $$;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
-  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (034). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (034). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (034) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed}: existed true means the text was already there and any provenance named was not written.';
+  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (035). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (035). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (035) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed}: existed true means the text was already there and any provenance named was not written.';
 
 -- 032's COMMENT, re-issued with the aside this file makes false ("a capture's
 -- add-if-empty through upsert_thought aside") replaced by the rule: every
 -- write of thoughts.supersedes onto an existing thought goes through
 -- update_thought; a first capture sets it on its own new row.
 COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb, boolean) IS
-  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every write of the column onto an existing thought goes through the one edit function (a first capture sets it on its own new row; since 034 a re-capture does not touch it): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029 / 032 / 034.';
+  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every write of the column onto an existing thought goes through the one edit function (a first capture sets it on its own new row; since 035 a re-capture does not touch it): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029 / 032 / 035.';

@@ -197,7 +197,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 64).
+035 change 66).
 
 ## What changed relative to the guide
 
@@ -1192,14 +1192,14 @@ container.
   3-argument re-capture of Y waits on the same lock: the windows stay when the
   labels match and go when they do not, where before 033 the read found no
   row and left them either way. And a capture naming `supersedes` is NOT held
-  by the supersession lock an edit holds (since 034; at 033 it waited on it).
+  by the supersession lock an edit holds (since 035; at 033 it waited on it).
   `test-upgrade.ts` [12] applies 033 onto a populated 032: no row moves, the
   bodies carry every earlier piece and the sentinel, a capture through the
   2-argument form is attributed.
-- **A re-capture writes no provenance** (migration 034). [13] captures a
+- **A re-capture writes no provenance** (migration 035). [13] captures a
   chain through `upsert_thought` and re-captures one text naming different
   provenance: the existing values stay, a row with none stays with none, and
-  the return says `existed`. `test-upgrade.ts` [13] applies 034 onto a
+  the return says `existed`. `test-upgrade.ts` [13] applies 035 onto a
   populated 033 whose re-capture had just filled a pointer: the pointer stays
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.

@@ -274,7 +274,7 @@ export class PostgrestStore implements ThoughtStore {
       const r = atomic as { id?: string; existed?: unknown } | null;
       const id = r?.id;
       if (!id) throw new Error("upsert_thought returned no id.");
-      // 034: `existed` — the text was already there, the envelope's provenance
+      // 035: `existed` — the text was already there, the envelope's provenance
       // not written. Passed on only when the body said; the two-step fallback
       // below goes through the 2-argument form, which does not say.
       return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed } : {}) };

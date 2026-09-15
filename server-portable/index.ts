@@ -994,7 +994,7 @@ function buildServer(principal: Principal): McpServer {
         }
         confirmation += explainHeadWindow(embedded);
 
-        // Migration 034 (SMD-1453): a re-capture writes no provenance. The text
+        // Migration 035 (SMD-1453): a re-capture writes no provenance. The text
         // was already a thought, so the derived_from / supersedes named here
         // were not written; say so and name the edit that records it, since
         // otherwise nothing would — the trace would show nothing and no
