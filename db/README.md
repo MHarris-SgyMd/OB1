@@ -98,31 +98,65 @@ refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` differs
 from what `ob1_config` records (006 would re-record it — run from a shell
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
-own definition is the update); and an accepted claim row 021's backfill would
-label an unlabelled thought from and 030 would not take back — under a
-*suffixed* key (`reembed:<model>@<dim>:ctx`), or over a thought written since
-the row was enqueued — return it with `reembed.ts --job <key>
---retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
-where `reembed.ts` refuses to run, the refusal prints the statement
-`--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
-a **plain** run too whenever 021 is pending — a brain built by hand through 021
-and adopted by "just run them", or a ledger hole — since the block runs as
-written there as well; and where 030 is recorded and so will not run after 021,
-every acceptance 021 would read is refused, since nothing would take the label
-back. `--baseline` runs no SQL and is never refused on this. The checks read the
-catalog and the claim table under a 10 s lock timeout of their own. A plain run on the baselined brain, where 030 is pending,
-fails at 030 with what is missing and this command, rather than a bare "does
-not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
-remedies name it where the ledger records the migration they find absent.
+own definition is the update). The checks read the catalog and `ob1_config`
+under a 10 s lock timeout of their own. A plain run on the baselined brain,
+where 030 is pending, fails at 030 with what is missing and this command,
+rather than a bare "does not exist"; preflight's `edit signature`, `vector
+models` and `atomic capture` remedies name it where the ledger records the
+migration they find absent.
 
-**Stop the server and any re-embed or extraction worker first.** 001 and 003
+**021's evidence backfill runs with the operator's acceptances out of its
+sight** — on the re-run, and on a plain run where 021 is pending (a brain built
+by hand through 021 and adopted by "just run them", or a ledger hole). 021
+labels an unlabelled thought from its latest succeeded claim row under a key
+naming a model, and the file is hashed and applied as written, from before a
+succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
+--accept-failed`) — a thought that kept the vector it had, by decision not at
+that key's model. 030 takes such a label back where it can tell it from the
+server's own and labels with accepted rows excluded, but 030 cannot know which
+labels 021's block wrote a moment ago; the migrator need not know either.
+Before 021 runs it creates a temp *view* named `thought_work_claims` over the
+real table without the accepted rows — no copy, so the block reads the rows as
+they stand when it runs — and since an unqualified name resolves in `pg_temp`
+before any schema on the search path, 021's block reads the view and labels
+from the latest row that is not an acceptance, or not at all — 030's rule by
+021's own text, nothing wrong ever written, the acceptance standing and no
+claim row touched. The view is dropped right after the file, in the same
+transaction, so 022 onward read the real table; a search path that lists
+`pg_temp` — which is searched first for tables exactly when it is *not* listed
+— has it removed for the transaction, and that the name resolves to the view
+is checked before the file runs; a temp relation of that name already on the
+connection refuses the file. The run says beside 021's line how many thoughts
+the block labelled — zero included, read from the transaction's own statistics
+(not counted where `track_counts` is off). A label 021's block wrote from an acceptance on an earlier
+run, or a paste of the body left, is 030's to take back at its own place — the
+re-run reaches it. Judged before anything runs, in both modes, whenever 021
+will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
+otherwise; 023's call needs one too). A file not named `NNN_name.sql`, or two
+sharing a number, is refused at load, and by the fork checker on every push; a
+set without 021 is refused at load, since the file is named whole. Every
+refusal is collected and reported together, the re-run's included.
+Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
+label and 030 would leave (an acceptance under a suffixed key; a thought
+written since the row's enqueue; with 030 recorded and skipped, any
+acceptance) and printed a way back that spent the acceptance — the refusal
+030's own header still describes, that file being hashed. `--baseline` runs no
+SQL and shadows nothing.
+
+**Stop the server and any re-embed or extraction worker first, and connect
+directly, not through a transaction-mode pooler:** the migrator sets session
+state (the lock timeout, the pgvector search path) and takes locks across
+statements. It sets a 10 s lock timeout for everything it does — for the
+session, and again inside every transaction — so a held lock fails the run
+rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written, and 030, reached after it in the same
-transaction, returns a label whose only evidence is an operator's acceptance to
-unknown and labels with accepted rows excluded (SMD-1193).
+evidence backfill runs as written, the acceptances out of its sight (above);
+030, reached after it in the same transaction, finds nothing of 021's to take
+back and corrects the own-key labels an earlier paste of the body left
+(SMD-1193, SMD-1421).
 
 ## Expected outcome
 
@@ -434,8 +468,8 @@ read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
 adopted with `--baseline` — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
-above; 030, reached after 021 in the same run, takes back what 021's backfill
-read from an accepted row).
+above; the migrator runs 021's backfill with the operator's acceptances out of
+its sight, so it labels from real passes alone).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;

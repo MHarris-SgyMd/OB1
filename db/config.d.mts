@@ -195,11 +195,17 @@ export const ACCEPTED_BY_MODEL_SQL: string;
 /** 021's claim-key grammar as a Postgres regex (the model up to the last "@"), and the model's OWN key — the canonical spelling, no suffix. */
 export const REEMBED_KEY_MODEL_SQL_RE: string;
 export const REEMBED_OWN_KEY_SQL_RE: string;
-/** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 and migrate.ts's gate read. Substituted into 030: changing it is a data migration. Needs 015. */
+/** Whether claim row `c` is the operator's acceptance — the predicate CLAIM_EVIDENCE_ROWS_SQL carries and migrate.ts shadows 021's backfill by (SMD-1421). */
+export const ACCEPTED_CLAIM_SQL: string;
+/** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 reads. Substituted into 030: changing it is a data migration. Needs 015. */
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 /** The migrator's re-run, as every remedy that names it prints it. */
 export const REAPPLY_COMMAND: string;
-/** The SET list that returns a claim row to its pool — requeue()'s, and the statement migrate.ts prints. */
+/** The lock timeout, in seconds, migrate.ts sets for its session and quotes in its messages; test-upgrade derives its expectations from it. */
+export const LOCK_TIMEOUT_S: number;
+/** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */
+export function migrationNameProblem(names: string[]): string | null;
+/** The SET list that returns a claim row to its pool — requeue()'s. */
 export const REQUEUE_SET_SQL: string;
 
 /** Numeric per-component version floor; "0.10.0" is at least 0.8.0 here, unlike as strings. */

@@ -220,6 +220,21 @@ function checkSqlGuards() {
   }]);
 }
 
+// ── 5b: every migration numbered, one per number ────────────────────────────
+//
+// The number is a migration's identity — its order, and how prose names it —
+// and two branches each adding "the next number" is how two files come to
+// share one (the fork has renumbered twice; SMD-1421). migrate.ts refuses such
+// a set at run time, which is every operator's run and every compose start;
+// this is the same rule — config.mjs's duplicateMigrationNumber, one spelling
+// — where the collision is created, on every push.
+
+async function checkMigrationNumbers() {
+  const { migrationNameProblem } = await import("../db/config.mjs");
+  const problem = migrationNameProblem(readdirSync(join(ROOT, "db", "migrations")));
+  if (problem) fail("db/migrations", problem);
+}
+
 // ── 6: shipped content never hands untrusted input a shell ───────────────────
 //
 // SMD-1251. Two vendored recipes did. `gmail-smart-pull` kept a `codex exec`
@@ -674,6 +689,7 @@ for (const d of dirs) {
   checkDeps(meta, d);
 }
 checkSqlGuards();
+await checkMigrationNumbers();
 checkShellHazards(dirs);
 checkCoreFunctions();
 

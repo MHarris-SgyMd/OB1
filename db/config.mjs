@@ -829,10 +829,11 @@ export function reembedKey(model, dim) {
  * that hole). "The model's own key" is the canonical spelling, as poolModelFor
  * has it — a width without a leading zero and no suffix — as a regex, never a
  * cast of the width (a hand-written width past bigint raised out of 030 and
- * the gate; the sixth review pass), so `reembed:m@08` names a model on both
- * sides and is nobody's own key on both. 030 takes the first as a template
- * value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another; migrate.ts's
- * gate reads the constants (SMD-1193).
+ * the migrator; the sixth review pass), so `reembed:m@08` names a model on
+ * both sides and is nobody's own key on both. 030 takes the first as a
+ * template value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another;
+ * migrate.ts shadows the claim table for 021's backfill with a view that
+ * carries no row ACCEPTED_CLAIM_SQL names (SMD-1193, SMD-1421).
  *
  * These, and ACCEPTED_CAVEAT_PREFIX, are substituted into migration 030 —
  * whose file the migrator hashes as a TEMPLATE. Changing any of them changes
@@ -966,25 +967,24 @@ export const ACCEPTED_BY_MODEL_SQL =
  * The claim rows an evidence backfill reads (SMD-1193): every succeeded row
  * under a key naming a model, with the model, whether the key is the model's
  * OWN (no suffix), whether the row is the operator's acceptance, its three
- * timestamps. No window column: the gate wants the greatest finished_at per
- * thought (021 picks one row of a tie and says nothing about which, so every
- * accepted row at that time counts), and it wraps this text to get it — a
- * window function inside the shared subquery made it a barrier the planner
- * could not push `accepted AND own_key` through, so 030's first statement
- * evaluated the regexes over every succeeded row (55× slower at 100k rows,
- * measured in the sixth review pass). Spelled once: migration 030 takes it as
- * the template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's gate reads the
- * constant, so the rows the gate refuses and the rows 030 corrects are decided
- * by one text. The caveat prefix is inlined as a literal, so it may hold no
- * quote — asserted below.
+ * timestamps. No window column: a window function inside the shared subquery
+ * made it a barrier the planner could not push `accepted AND own_key` through,
+ * so 030's first statement evaluated the regexes over every succeeded row (55×
+ * slower at 100k rows, measured in the sixth review pass); a reader that wants
+ * "latest" wraps this text. Spelled once: migration 030 takes it as the
+ * template value {{CLAIM_EVIDENCE_ROWS}}; migrate.ts reads ACCEPTED_CLAIM_SQL
+ * above, the one predicate these rows carry, for the view of the claim table
+ * it shadows 021's backfill with, so what 030 excludes and what 021 never
+ * sees are decided by one text. The caveat prefix is inlined as a literal, so
+ * it may hold no quote — asserted below.
  */
 /**
  * What returning a claim row to its pool sets — reembed.ts's requeue() for
- * --retry-fallbacks and --retry-failed, and the statement migrate.ts prints
- * for the operator to run by hand where reembed.ts cannot. One spelling, so
- * the printed statement is the tool's (the seventh review pass of SMD-1193
- * counted four). claimed_at stays: 030's bound is the enqueue, and readers of
- * an acceptance read the claim — neither is this row's to move.
+ * --retry-fallbacks and --retry-failed. One spelling (the seventh review pass
+ * of SMD-1193 counted four; the statement migrate.ts printed as a way back
+ * went with SMD-1421, and nothing prints it now). claimed_at stays: 030's
+ * bound is the enqueue, and readers of an acceptance read the claim — neither
+ * is this row's to move.
  */
 /**
  * The migrator's re-run, as every remedy that names it prints it — reembed.ts's
@@ -994,13 +994,64 @@ export const ACCEPTED_BY_MODEL_SQL =
  */
 export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
 
+/**
+ * The lock timeout, in seconds, migrate.ts sets for its session — every
+ * transaction it opens, the checks' reads before a re-run, the ledger reads —
+ * and quotes in every message of its own that names it; db/test-upgrade.ts
+ * derives its expectations from it. Ten seconds: long enough for a live
+ * server's statements to finish, short enough that an idle transaction holding
+ * thoughts fails the run rather than freezing it and every reader behind 001's
+ * ACCESS EXCLUSIVE. A session setting overrides a role's or provider's default
+ * for the migrator alone; 023's call sets its own, locally, for its
+ * transaction. db/README.md spells the number in prose. Ten, and only ten:
+ * 023's hashed body sets 10 s with set_config(…, true) — transaction-local,
+ * and under --reapply the transaction is the whole run — so from 023 on the
+ * bound is 023's whatever this says; another value here would be false for
+ * the re-run's tail.
+ */
+export const LOCK_TIMEOUT_S = 10;
+
+/**
+ * What is wrong with a listing of migration files, or null: a .sql not named
+ * NNN_name.sql (the number is a file's identity and its order — `021.sql` or
+ * `021-fix.sql` would sort before `021_…` and run at its number), or two files
+ * sharing a number (two branches each adding "the next number" is how it
+ * happens; the fork has renumbered twice; SMD-1421). One rule, read by
+ * migrate.ts at load — every operator's run and every compose start — and by
+ * scripts/check-fork-consistency.mjs on every push, where the collision is
+ * made. Only .sql files are judged.
+ * @param {string[]} names
+ * @returns {string | null}
+ */
+export function migrationNameProblem(names) {
+  const sorted = names.filter((n) => n.endsWith(".sql")).sort();
+  const odd = sorted.find((n) => !/^\d{3}_.+\.sql$/.test(n));
+  if (odd) return `${odd} is not a migration name: NNN_name.sql, three digits and an underscore — the number is the file's identity and its order`;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].slice(0, 3) === sorted[i - 1].slice(0, 3)) {
+      return `two migrations share the number ${sorted[i].slice(0, 3)}: ${sorted[i - 1]}, ${sorted[i]} — the number is the file's identity and its order; renumber one`;
+    }
+  }
+  return null;
+}
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
+
+/**
+ * Whether claim row `c` is the operator's acceptance of a failure — the caveat
+ * prefix on last_error (starts_with(NULL, …) is NULL, and NOT NULL is not
+ * true, so the IS NOT NULL is load-bearing). Spelled once for the evidence
+ * rows below and for the view of the claim table migrate.ts shadows 021's
+ * backfill with (SMD-1421). Inlined into 030 through the rows: changing it is
+ * a data migration.
+ */
+export const ACCEPTED_CLAIM_SQL = `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}'))`;
 
 export const CLAIM_EVIDENCE_ROWS_SQL =
   "SELECT c.thought_id, c.work_type, c.enqueued_at, c.claimed_at, c.finished_at, " +
   `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +
   `c.work_type ~ '${REEMBED_OWN_KEY_SQL_RE}' AS own_key, ` +
-  `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted ` +
+  `${ACCEPTED_CLAIM_SQL} AS accepted ` +
   `FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL AND c.work_type ~ '${REEMBED_KEY_MODEL_SQL_RE}'`;
 if (ACCEPTED_CAVEAT_PREFIX.includes("'")) throw new Error("ACCEPTED_CAVEAT_PREFIX is inlined into SQL as a literal and may not contain a quote");
 
