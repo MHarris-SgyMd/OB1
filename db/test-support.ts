@@ -19,7 +19,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS = join(HERE, "migrations");
 
 /**
  * Every table the schema owns, in drop order — dependents first. `thoughts` is
@@ -377,6 +378,54 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   const p = Bun.spawn(cmd, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
   return { code: await p.exited, out };
+}
+
+/**
+ * The migrator's shell for a fixture: this process's environment with the
+ * fixture's width, model and trigram choice, and without what migrate.ts would
+ * refuse or read as an override (a truncation request, a provider key, a
+ * backfill batch). For running `migrate.ts` through `runScript` where a suite
+ * or bench wants the ledger the runner keeps — test-upgrade's incremental
+ * cases, bench-hnsw.ts's kept corpus — rather than `applyMigrations`' bare
+ * apply.
+ */
+export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "model" | "trgm">): Record<string, string> {
+  const env: Record<string, string> = {};
+  const set = {
+    ...process.env,
+    DATABASE_URL: url,
+    OB1_EMBEDDING_DIM: String(opts.dim),
+    OB1_EMBEDDING_MODEL: opts.model,
+    OB1_TRGM_INDEX: (opts.trgm ?? DEFAULT_TRGM_INDEX) ? "on" : "off",
+  };
+  for (const [k, v] of Object.entries(set)) if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+  return env;
+}
+
+/**
+ * `migrate.ts` against a URL, from a shell `migratorEnv` built, with any of its
+ * flags: the one spawn test-upgrade, test-live and bench-hnsw used to spell
+ * each for themselves. Exit code and combined output, as runScript gives them.
+ */
+export function runMigrator(url: string, env: Record<string, string>, ...flags: string[]): Promise<{ code: number; out: string }> {
+  return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { env, cwd: HERE });
+}
+
+/**
+ * The migrator's ledger against the tree: `null` where the database has no
+ * ledger (its schema was applied bare, or is not this schema), else the names
+ * recorded as applied that no file under db/migrations carries. migrate.ts
+ * applies what is pending and refuses a file edited since it was recorded, but
+ * it never looks for a recorded name it has no file for — a database migrated
+ * from another branch's tree looks fully applied to it. A bench reusing a kept
+ * corpus asks this first (SMD-1493).
+ */
+export async function ledgerStrangers(sql: SQL): Promise<string[] | null> {
+  const [{ has }] = await sql`SELECT to_regclass('schema_migrations') IS NOT NULL AS has`;
+  if (!has) return null;
+  const files = new Set(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")));
+  const recorded: { name: string }[] = await sql`SELECT name FROM schema_migrations ORDER BY name`;
+  return recorded.map((r) => r.name).filter((name) => !files.has(name));
 }
 
 export function requireDatabaseUrl(script: string): string {

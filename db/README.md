@@ -969,6 +969,12 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 # script's default /dev/shm of 1 GB covers the two published scales).
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
+
+# Keep the corpus between passes (SMD-1493): the first run under a name builds
+# it, every later run under the same name finds it, checks it, applies any
+# migration the tree gained since, and skips to the oracle. One corpus per name.
+OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
+podman volume rm ob1-pg-keep-hnsw10m   # when done with it
 ```
 
 Queries are random vectors, not perturbed copies of a target. A perturbed copy
@@ -1018,6 +1024,29 @@ the exact oracle are. A million rows takes
 about seven minutes; ten million about forty and a container with 11 GB of
 shared memory to build in; a hundred million is ~26 GB of vectors before the
 index and was not run here (FORK.md change 28 says what a run needs).
+
+Thirty of those forty minutes are the load and the builds, and the corpus is
+deterministic, so a pass need not pay them twice. Under `OB1_PG_KEEP=<name>`
+the container and a named volume outlive the run (see [Testing](#testing)),
+and a scale above 100,000 rows is kept: once the load and every build have
+finished the bench writes a marker row (`bench_hnsw_corpus` — the scale, the
+parameters that shape the rows, the tier counts, section L's numbers), and the
+next run at that scale finds it and reuses the corpus instead of rebuilding
+it. What vouches for the rows is checked, not assumed: the migrator's ledger
+against the tree (the whole-schema arm is applied through `migrate.ts` for
+this), then `migrate.ts --dry-run` and `migrate.ts` again — a migration added
+since the build is applied onto the corpus, a file edited since is refused on
+the dry run's `DRIFTED` before anything runs, a recorded name the tree has no
+file for is refused — then both row counts and the corpus's first and last
+rows regenerated from the seed and compared. Section L's `source` column says
+`loaded` or `reused (built …)` per scale, and the run prints what it counted
+and which files it applied. A kept database holds one corpus: a run asking for
+another scale than the one an earlier run kept is refused before anything is
+dropped (run the small scales without `OB1_PG_KEEP`, or under another name); a
+run over several scales keeps the last. The published scales are never kept —
+the before arm needs 001–013 under the rows, and a build that size is seconds.
+Measured at a million rows: 6 min 49 s for the run that built the corpus,
+3 min 45 s for the one that reused it.
 
 ### bench-plan.ts
 
@@ -1180,6 +1209,22 @@ the command and removes the container on exit. It prefers podman (including the
 macOS `/opt/podman/bin` location that is often off `PATH`) and falls back to
 docker. CI does not use it — GitHub Actions supplies the database as a service
 container.
+
+`OB1_PG_KEEP=<name>` keeps the database instead: the container's data
+directory is a named volume, `ob1-pg-keep-<name>`, which the removal on exit
+leaves in place (the container itself is stopped with time to checkpoint, then
+removed as always); a later run under the same name starts a fresh container
+on that volume — the image, `/dev/shm` and port given then apply — and hands
+the command the same database. The container carries the name too, so a
+second invocation while one is running under it is refused rather than sharing
+the database, and the readiness wait is thirty minutes rather than one, since a
+kept data directory may start into crash recovery. `bench-hnsw.ts` uses it to
+reuse a loaded corpus across passes (SMD-1493). What was kept is yours to
+remove, and the exit line prints the command:
+
+```bash
+podman volume rm ob1-pg-keep-<name>
+```
 
 ### What only the live suite can catch
 

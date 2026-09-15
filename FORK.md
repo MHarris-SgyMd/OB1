@@ -8191,6 +8191,119 @@ Reproduce: `OB1_QUERY_LOG=on`, capture then `search_thoughts` then `fetch` a
 returned id, and `SELECT kind, tool FROM query_log` shows the two rows;
 `bun db/test-replay.ts` runs the gate offline.
 
+### 66. A loaded bench corpus outlives the run — `OB1_PG_KEEP` keeps the container and a named volume, and `bench-hnsw.ts` reuses the corpus it finds there, checked and re-migrated, instead of rebuilding it (SMD-1493)
+
+A `bench-hnsw.ts` pass at ten million rows is about forty minutes, and thirty of
+them are the load and the index builds (change 28, "At scale": 207 s of
+INSERTs, 1,134 s for the thoughts HNSW index, 327 s for the chunk index, 63 s
+for the rest). The corpus is deterministic — the same scale is the same rows —
+and SMD-1018's three passes rebuilt an identical table three times before
+measuring anything: an hour and a half spent on what the first pass had built.
+`with-postgres.sh` starts a throwaway container and removes it, with its
+anonymous volume, on exit; nothing survives a run by design (776 leftover
+volumes, 79 GB, once filled a podman VM — change 20's review pass).
+
+**The container (`db/with-postgres.sh`).** `OB1_PG_KEEP=<name>` mounts a
+*named* volume, `ob1-pg-keep-<name>`, at the data directory and otherwise runs
+as every run does — a fresh container, `stop`ped on exit with two minutes for
+Postgres to checkpoint a large database cleanly (the runtimes' default ten
+seconds would SIGKILL it into crash recovery on the next start) and then removed
+with `rm -v`, which removes *anonymous* volumes only on both runtimes, so the
+named one survives and the exit line prints the one command that removes it.
+The next run under the same name mounts it again; the image, shared memory and
+port given then apply, as on any run (the first draft `start`ed the kept
+container instead, which froze all three at creation and put the random port
+back in the way of "address already in use" — the review pass had the simpler
+shape). The container carries the name too, so a second invocation while the
+first is running is refused before anything starts — sharing would let
+whichever exited first stop the database under the other — and a stopped shell
+an interrupted run left behind is removed (its data is in the volume). Under
+the variable the readiness wait is thirty minutes rather than one: a kept
+ten-million-row data directory may start into crash recovery and replay WAL
+for minutes, and giving up would stop it mid-replay and start the next run
+over. Cleanup touches only a container this invocation started. Without the
+variable the script does what it did: a fresh container, removed on exit, no
+volume behind it.
+
+**The corpus (`db/bench-hnsw.ts`).** A scale above the before arm's (100,000
+rows — below it the before arm needs 001–013 under the rows and a build is
+seconds) is applied through **`migrate.ts`** now, not `applyMigrations`' bare
+apply, so the migrator's ledger records what the schema is; and once the load
+and every build have finished the bench writes one marker row
+(`bench_hnsw_corpus`: the scale, the parameters that shape the rows — width,
+tiers and their shares, the chunked share — the tier match counts it counted as
+it generated, and section L's numbers). An interrupted load leaves no marker and
+nothing reads as a corpus (the oracle's premise — every chunk carries its
+parent's vector — is checked on the build, before the marker, and not on a
+reuse, where that join over every chunk row would cost a minute at ten million
+rows to guard against nothing the tree can do to a kept table). The next run at
+that scale finds the marker and, in this order, (1) reads the ledger against
+the tree and refuses a name the ledger records that no file carries — a corpus
+migrated from another branch, which the runner would not notice; (2) runs
+`migrate.ts --dry-run` and refuses on its `DRIFTED` before anything runs — a
+plain run reports a recorded file edited since, but only after applying every
+pending file around it, which on a kept corpus would land a migration and then
+say "nothing was measured" — then `migrate.ts` itself, so a migration added
+since the build is **applied onto the corpus** (as onto a real brain that size,
+which is the measurement wanted), the files it recorded read back from the
+ledger rather than scraped from its output; (3) counts both tables against the
+marker and regenerates the corpus's first and last rows from the seed,
+comparing the tiers exactly and the vectors to float32 — a generator change or
+a foreign table cannot pass as the corpus; then skips to the oracle. Section L
+gains a `source` column — `loaded`, or `reused (built <when>)` with the build's
+own numbers — and the run says which it did, what it counted and which files it
+applied, so a report never silently mixes a fresh build's load line with a
+reused corpus. A kept database holds **one** corpus: a run asking for another
+scale than the one an *earlier* run kept is refused before anything is dropped,
+naming the three ways past (reuse it, run the other scale without `OB1_PG_KEEP`
+or under another name, or remove the volume) — a corpus this run built itself
+is this run's to replace, so the header's two-scale command keeps the last (the
+first draft refused its own second scale, after building and measuring the
+first: review pass); a corpus of the right scale built from other parameters is
+rebuilt, said aloud. The loopback guard every destructive statement used to
+inherit from `resetSchema` is asked once, up front, since the kept paths drop a
+marker table and run the migrator without it. `test-support.ts` gained
+`migratorEnv()` (test-upgrade's local copy, shared), `runMigrator()` (the spawn
+three files spelled for themselves) and `ledgerStrangers()`; `test-upgrade.ts`
+[13] holds the last one's contract — a bare apply has no ledger, the migrator's
+names only the tree's files, a stranger is reported by name where a plain
+`migrate.ts` run skips everything and exits 0. That the migrator itself never
+looks for a recorded name it has no file for — so `--reapply`'s "every recorded
+migration" is silently short on such a brain — is SMD-1504's, not this
+change's: a bench ticket does not change what the migrator refuses.
+
+**Measured.** At a million rows (the README's command, 50 queries): the fresh
+kept run 6 min 49 s end to end, the reuse 3 min 45 s — the load, the two HNSW
+builds and the other indexes gone from the second, section L reading `reused
+(built 2026-09-15 22:55)` with the first run's numbers. At 150,000 rows (the
+smallest kept scale; 3 queries): a fresh kept run 27 s, the reuse 5 s, with
+`150,000 thoughts and 60,000 chunk rows counted, rows 0 and 149,999 regenerated
+from the seed and matched` and `schema already at the tree's; nothing applied`.
+With a pending probe file in the tree (numbered after its last) the reuse
+printed `migrations applied onto it this run: …` and went on; with that file
+edited after being recorded and a second probe pending beside it, the run was
+refused on the dry run's `DRIFTED 1` and the second probe was never applied;
+with the file removed from the tree, the bench refused on the ledger's stranger
+by name. A run asking for 10,000 rows against a kept 150,000 was refused before
+anything was dropped (exit 2); a run over 150,000 and 200,000 rows in one
+throwaway container built both, the second replacing the first. A second
+invocation under a name in use was refused with the owner named. The default
+command left `podman volume ls` at the same count before and after. The first
+two reuse runs each failed on a driver fact: a JSON **string** bound to a
+`$n::jsonb` parameter is JSON-encoded once more by Bun's driver and lands as a
+jsonb string, which `@>` never matches — the double-encoding the README's
+live-suite section already names, met from the other side (bind objects); and
+jsonb hands an object back with its keys in its own order, so a round trip's
+text is not the text that went in (compare a key-sorted serialisation). The
+ten-million-row figure the ticket names — a second pass under fifteen minutes —
+is the same mechanism at the scale it was built for and was not re-run here; the
+reuse skips exactly the load and the builds, whose cost at that scale change 28
+records.
+
+Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
+upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
+bun bench-hnsw.ts` twice; the second run's section L says `reused`.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

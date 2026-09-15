@@ -22,7 +22,7 @@ import { SQL } from "bun";
 import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { applyMigrations, createAssert, dropSchema, ledgerStrangers, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -34,20 +34,9 @@ const MIGRATIONS = readdirSync(join(HERE, "migrations"))
   .filter((f) => f.endsWith(".sql"))
   .sort();
 
-/**
- * The migrator's shell for a fixture: this process's, with the test width and
- * model, and without what the migrator would refuse or read as an override.
- */
-function migratorEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_, OB1_EMBEDDING_DIM: String(OPTS.dim), OB1_EMBEDDING_MODEL: OPTS.model }))
-    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
-  return env;
-}
-
-/** The migrator, from the fixture's shell. */
-const MIGRATOR_ENV = migratorEnv();
-const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env: MIGRATOR_ENV, cwd: HERE });
+/** The migrator, from the fixture's shell (test-support's migratorEnv: the test width and model, the overrides the runner would refuse stripped). */
+const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
+const migrate = (...extra: string[]) => runMigrator(URL_, MIGRATOR_ENV, ...extra);
 
 /** The migrator's lock message, as its one constant spells the timeout — the three modes share the opening. */
 const LOCK_RE = new RegExp(`A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout`);
@@ -1010,6 +999,26 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await windows()) === 1, "re-applying 033 is a no-op: the ACL, the shape and the window as they were");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer33`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_capturer33`);
+  await sql.close();
+}
+
+console.log("\n[13] A kept bench corpus's ledger against the tree: a schema applied bare has none, the migrator's names only the tree's files, and a name the tree lacks is reported where the migrator would not notice it (SMD-1493)");
+{
+  // bench-hnsw.ts reuses a corpus kept across runs only under a schema the
+  // tree vouches for: migrate.ts brings a pending file onto it and refuses a
+  // drifted one, and test-support's ledgerStrangers covers the case the
+  // runner cannot — a ledger from another branch's tree.
+  await resetSchema(URL_, OPTS);
+  const sql = new SQL({ url: URL_, max: 1 });
+  assert((await ledgerStrangers(sql)) === null, "a schema applied bare (applyMigrations) has no ledger, so nothing vouches for it");
+  await dropSchema(URL_);
+  const fresh = await migrate();
+  assert(fresh.code === 0 && /^applied \d+, skipped 0$/m.test(fresh.out), `the migrator applies the tree onto the empty database and records every file ${shown(fresh)}`);
+  assert(JSON.stringify(await ledgerStrangers(sql)) === "[]", "…and its ledger names only files the tree carries");
+  await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('999_from_another_branch.sql', '000000000000')`;
+  assert(JSON.stringify(await ledgerStrangers(sql)) === JSON.stringify(["999_from_another_branch.sql"]), "a recorded name no file carries is reported by name");
+  const again = await migrate();
+  assert(again.code === 0 && /^applied 0, skipped \d+$/m.test(again.out), `…which a plain run of the migrator does not notice: it skips everything and exits 0 ${shown(again)}`);
   await sql.close();
 }
 

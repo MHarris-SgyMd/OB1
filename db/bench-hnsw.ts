@@ -30,7 +30,11 @@
  *      between them, untimed. 014's header argued the walk's bounds
  *      past 2.5 million rows from arithmetic; SMD-1018 asked for the numbers,
  *      and the build's cost and the index's size are the first two a brain
- *      that large would meet.
+ *      that large would meet. A scale above the before arm's is KEPT when the
+ *      database outlives the run (`OB1_PG_KEEP`, with-postgres.sh): the next
+ *      pass finds the corpus, checks it and re-migrates it rather than
+ *      rebuilding it, and the table says per scale which it did ("A kept
+ *      corpus", below).
  *
  *   A. Unfiltered row count at match_count 10 / 20 / 50 / 100 — requested
  *      against returned — and the median latency at match_count 10, which is
@@ -132,6 +136,10 @@
  *   OB1_BENCH_SCALES=1000000,10000000 ./with-postgres.sh bun bench-hnsw.ts
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
  *
+ *   # Keep the ten-million-row corpus between passes: the first run builds it,
+ *   # every later run under the same name finds it and skips to the oracle.
+ *   OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
+ *
  * Vectors are 64-wide random unit vectors: wide enough that HNSW behaves like
  * HNSW, narrow enough that a 100,000-row index builds in a minute and a
  * 10,000,000-row one in twenty; 100,000,000 rows are ~26 GB of vectors before
@@ -181,7 +189,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerStrangers, migratorEnv, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
@@ -192,6 +200,8 @@ const DIM = 64;
 // No trigram index: nothing here reads content, and 011's GIN would otherwise
 // be maintained for every row of the load (review pass).
 const OPTS = { dim: DIM, model: "stub-embed", trgm: false };
+/** The migrator's shell for the whole-schema arm — the same width, model and no trigram index, through migrate.ts so its ledger exists (see the kept corpus, below). */
+const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
 // The defaults are the run every published table came from, so the documented
 // command reproduces the documented numbers — with one caveat since 019: the
 // after arm applies every migration from 014 on, so the function it times and
@@ -405,7 +415,130 @@ type LoadStats = {
   sizes: Record<string, number>;
   maintenanceMem: string;
   workers: number;
+  /** When this build ran (ISO), and whether THIS run did it or reused it. */
+  builtAt: string;
+  source: "loaded" | "reused";
 };
+
+// ── A kept corpus ───────────────────────────────────────────────────────────
+//
+// A pass at ten million rows is about forty minutes, thirty of them the load
+// and the index builds, and the corpus is deterministic: the same scale is the
+// same rows. Under `OB1_PG_KEEP=<name> ./with-postgres.sh …` the database
+// outlives the run, and this bench then finds the corpus it built last time
+// and measures it instead of building it again (SMD-1493). What vouches for
+// the rows is checked, not assumed:
+//
+//   - a marker row this bench writes once the load and every build have
+//     finished — the scale, the parameters that shape the rows (width, tiers,
+//     the chunked share), the tier match counts it counted as it generated,
+//     and section L's numbers — so an interrupted load leaves nothing to reuse;
+//   - the row counts of both tables against the marker's, and the first and
+//     last rows of the corpus regenerated from the seed and compared with what
+//     the table holds, so a generator change or a foreign table cannot pass as
+//     the corpus;
+//   - the migrator's ledger: above the before arm's scales the schema is
+//     applied through migrate.ts, whose ledger records what ran, and a reuse
+//     runs migrate.ts again — a migration added since the build is applied
+//     onto the corpus (as onto a real brain that size); a file edited since is
+//     caught by a `--dry-run` first and refused before the live run, since a
+//     plain run reports drift but still applies what is pending around it;
+//     and a name the ledger records that this tree has no file for is refused
+//     here, since the runner would not notice it. A kept corpus is never
+//     measured under a schema older than the tree's.
+//
+// The published scales are not kept: the before arm needs 001–013 under the
+// rows, a build that size is seconds, and a kept database holds ONE corpus —
+// a run asking for another scale is refused rather than replacing thirty
+// minutes of build without being asked (a corpus this run built itself is
+// this run's to replace: a run over several scales keeps the last).
+const MARKER = "bench_hnsw_corpus";
+type CorpusParams = { dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
+type Marker = { scale: number; builtAt: string; params: CorpusParams; matches: Record<string, number>; stats: LoadStats };
+
+const corpusParams = (tiers: Tier[]): CorpusParams => ({ dim: DIM, tiers: tiers.map((t) => ({ key: t.key, share: t.share })), chunkedShare: CHUNKED_SHARE, chunksPer: CHUNKS_PER });
+/** One spelling for a comparison: jsonb hands an object back with its keys in its own order, so the text of a round trip is not the text that went in (the second reuse run rebuilt on that). */
+const canonical = (x: unknown): string =>
+  JSON.stringify(x, (_k, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, (v as Record<string, unknown>)[k]])) : v));
+
+// The jsonb values below are bound as OBJECTS through the tagged template: a
+// JSON string handed to a `$n::jsonb` parameter is JSON-encoded once more by the
+// driver and lands as a jsonb *string*, which `@>` never matches and a reader
+// has to parse twice (the first reuse run found it).
+async function readMarker(sql: SQL): Promise<Marker | null> {
+  const [{ has }] = await sql`SELECT to_regclass(${MARKER}) IS NOT NULL AS has`;
+  if (!has) return null;
+  const [row] = await sql`SELECT scale, built_at::text AS "builtAt", corpus FROM bench_hnsw_corpus`;
+  if (!row) return null;
+  if (typeof row.corpus !== "object" || row.corpus === null) throw new Error(`${MARKER}.corpus is not a JSON object; the marker is not this bench's`);
+  const corpus = row.corpus as { params: CorpusParams; matches: Record<string, number>; stats: LoadStats };
+  return { scale: Number(row.scale), builtAt: String(row.builtAt), params: corpus.params, matches: corpus.matches, stats: corpus.stats };
+}
+
+async function writeMarker(sql: SQL, n: number, params: CorpusParams, matches: Map<string, number>, stats: LoadStats): Promise<void> {
+  await sql.unsafe(`CREATE TABLE ${MARKER} (one boolean PRIMARY KEY DEFAULT true CHECK (one), scale bigint NOT NULL, built_at timestamptz NOT NULL, corpus jsonb NOT NULL)`);
+  await sql`INSERT INTO bench_hnsw_corpus (scale, built_at, corpus) VALUES (${n}, ${stats.builtAt}::timestamptz, ${{ params, matches: Object.fromEntries(matches), stats }}::jsonb)`;
+}
+
+/** Row i of the n-row corpus, regenerated from the seed without the rows before it. */
+function rowAt(n: number, tiers: Tier[], i: number): Row {
+  const { rnd, unitVector, skip } = seedFor(n);
+  skip(i * (1 + 2 * DIM));
+  const r = rnd();
+  return { doc: i, v: unitVector(DIM), tiers: tiers.filter((t) => r < t.share).map((t) => t.key) };
+}
+
+/**
+ * The kept table holds the corpus this run would generate: both counts, and
+ * the first and last rows byte for byte in their tiers and to float32 in
+ * their vectors (the column is float32; the generator is float64).
+ */
+async function assertKeptCorpus(sql: SQL, n: number, tiers: Tier[], marker: Marker): Promise<void> {
+  const [{ c: rows }] = await sql.unsafe(`SELECT count(*)::bigint AS c FROM thoughts`);
+  if (Number(rows) !== n) throw new Error(`the kept corpus holds ${Number(rows).toLocaleString()} thoughts, not ${n.toLocaleString()}`);
+  const [{ c: chunks }] = await sql.unsafe(`SELECT count(*)::bigint AS c FROM thought_chunks`);
+  if (Number(chunks) !== marker.stats.chunkRows) throw new Error(`the kept corpus holds ${Number(chunks).toLocaleString()} chunk rows; its marker says ${marker.stats.chunkRows.toLocaleString()}`);
+  for (const i of [0, n - 1]) {
+    const want = rowAt(n, tiers, i);
+    const found = await sql`SELECT metadata->'tiers' AS tiers, embedding::text AS v FROM thoughts WHERE metadata @> ${{ doc: i }}::jsonb`;
+    if (found.length !== 1) throw new Error(`row ${i} of the kept corpus: ${found.length} thoughts carry doc ${i}`);
+    const tiersHeld = found[0].tiers;
+    if (JSON.stringify(tiersHeld) !== JSON.stringify(want.tiers)) throw new Error(`row ${i} of the kept corpus carries tiers ${JSON.stringify(tiersHeld)}; the generator says ${JSON.stringify(want.tiers)}`);
+    const held: number[] = JSON.parse(String(found[0].v));
+    const drift = Math.max(...want.v.map((x, k) => Math.abs(x - (held[k] ?? NaN))));
+    if (!(held.length === DIM && drift < 1e-5)) throw new Error(`row ${i} of the kept corpus is not the generator's row ${i} (max component difference ${drift})`);
+  }
+}
+
+/** The ledger's names, or none where there is no ledger yet. */
+async function recorded(sql: SQL): Promise<Set<string>> {
+  const [{ has }] = await sql`SELECT to_regclass('schema_migrations') IS NOT NULL AS has`;
+  if (!has) return new Set();
+  return new Set((await sql`SELECT name FROM schema_migrations`).map((r: { name: string }) => r.name));
+}
+
+/**
+ * The whole schema through migrate.ts — the ledger and the runner's own
+ * refusals — for the arm above the before arm's scales, and again on a reuse,
+ * where what it applies is what the tree gained since the build. A `--dry-run`
+ * goes first: a plain run that finds a recorded file edited since reports the
+ * drift and exits 1, but only AFTER applying every pending file around it, so
+ * on a kept corpus the drift is judged before anything runs. Returns the files
+ * the live run recorded, read from the ledger rather than the runner's output.
+ */
+async function migrateWhole(sql: SQL): Promise<string[]> {
+  const refuse = (run: { code: number; out: string }, what: string) => {
+    console.error(run.out.trimEnd());
+    console.error(`\nbench-hnsw.ts: ${what}. A kept corpus is measured only under the tree's schema; nothing was measured.`);
+    process.exit(1);
+  };
+  const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
+  if (dry.code !== 0 || /DRIFTED/.test(dry.out)) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
+  const before = await recorded(sql);
+  const run = await runMigrator(URL_, MIGRATOR_ENV);
+  if (run.code !== 0) refuse(run, `migrate.ts exited ${run.code} (above)`);
+  return [...(await recorded(sql))].filter((name) => !before.has(name)).sort();
+}
 
 /**
  * The load: every secondary index on both tables dropped and the user
@@ -499,7 +632,7 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   await sql.unsafe(`RESET log_min_messages`).catch(() => undefined);
 
   return {
-    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS },
+    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS, builtAt: new Date().toISOString(), source: "loaded" },
     matches,
   };
 }
@@ -730,6 +863,11 @@ const loads: LoadStats[] = [];
 const walk: WalkRow[] = [];
 const bounds: BoundsRow[] = [];
 
+// Every destructive statement below used to sit behind resetSchema's loopback
+// guard; the kept-corpus paths drop a marker table and run the migrator
+// without it, so the guard is asked once here, for the whole run (review pass).
+assertThrowawayDatabase(URL_);
+
 // The after arm asserts the bounds 014 seeds are in force. A role that does not
 // own the database cannot seed them, and finding that out after a 100,000-row
 // load discards everything measured, so ask first.
@@ -767,11 +905,62 @@ const EF_SEARCH_RAISED = 400;
 const EXACT_CEILING = 110_000;
 
 let banner = false;
+/** Scales whose marker THIS run wrote: a later scale in the same run replaces them rather than being refused (the header's own two-scale command). */
+const wroteThisRun = new Set<number>();
 for (const n of SCALES) {
   const beforeArm = n <= BEFORE_ARM_MAX;
-  console.log(`▸ ${n.toLocaleString()} rows — loading${beforeArm ? "" : " (schema applied whole; the before arm runs up to " + BEFORE_ARM_MAX.toLocaleString() + " rows)"}`);
-  await resetSchema(URL_, { ...OPTS, only: beforeArm ? (f) => f < "014" : undefined });
-  await reconnect();
+  const { tiers, notes } = tiersAt(n);
+  const params = corpusParams(tiers);
+
+  // What the database holds before anything is dropped: a kept corpus of
+  // another scale from an earlier run is refused, not replaced; one of this
+  // scale, built from the same parameters, is reused (above the before arm's
+  // scales — see the section above); one built from other parameters is this
+  // scale's to rebuild, said aloud.
+  const kept = await readMarker(sql);
+  if (kept && kept.scale !== n && !wroteThisRun.has(kept.scale)) {
+    console.error(
+      `bench-hnsw.ts: the database holds a kept ${kept.scale.toLocaleString()}-row corpus (built ${kept.builtAt}); this run asks for ${n.toLocaleString()} rows, which would replace it.\n` +
+        `  Reuse it with OB1_BENCH_SCALES=${kept.scale}; run other scales without OB1_PG_KEEP (a throwaway container) or under another OB1_PG_KEEP name; or remove the kept volume (db/README.md names the command). Nothing was touched.`
+    );
+    process.exit(2);
+  }
+  const reuse = kept !== null && !beforeArm && kept.scale === n && canonical(kept.params) === canonical(params);
+  if (kept && kept.scale === n && !reuse) console.log(`  (the kept ${n.toLocaleString()}-row corpus was built from other parameters — width, tiers or chunk share; rebuilding it)`);
+  if (kept && kept.scale !== n) console.log(`  (replacing the ${kept.scale.toLocaleString()}-row corpus this run built; a kept database holds one corpus, the last)`);
+
+  let stats!: LoadStats;
+  let matches!: Map<string, number>;
+  if (reuse) {
+    console.log(`▸ ${n.toLocaleString()} rows — reusing the corpus kept in this database (built ${kept!.builtAt})`);
+    const strangers = await ledgerStrangers(sql);
+    if (strangers === null) {
+      console.error("bench-hnsw.ts: the kept corpus has no migration ledger, so nothing vouches for the schema under it; remove the kept volume and load again.");
+      process.exit(1);
+    }
+    if (strangers.length > 0) {
+      console.error(`bench-hnsw.ts: the kept corpus was migrated by files this tree does not carry (${strangers.join(", ")}); a kept corpus belongs to one tree. Keep another OB1_PG_KEEP name for this one, or remove its volume.`);
+      process.exit(1);
+    }
+    // migrate.ts onto the corpus: pending files applied, a drifted file refused first.
+    const applied = await migrateWhole(sql);
+    await reconnect();
+    await assertKeptCorpus(sql, n, tiers, kept!);
+    stats = { ...kept!.stats, source: "reused" };
+    matches = new Map(Object.entries(kept!.matches));
+    console.log(`  ${n.toLocaleString()} thoughts and ${stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched`);
+    console.log(applied.length ? `  migrations applied onto it this run: ${applied.join(", ")}` : "  schema already at the tree's; nothing applied");
+  } else {
+    console.log(`▸ ${n.toLocaleString()} rows — loading${beforeArm ? "" : " (schema applied whole through migrate.ts; the before arm runs up to " + BEFORE_ARM_MAX.toLocaleString() + " rows)"}`);
+    await sql.unsafe(`DROP TABLE IF EXISTS ${MARKER}`);
+    if (beforeArm) {
+      await resetSchema(URL_, { ...OPTS, only: (f) => f < "014" });
+    } else {
+      await dropSchema(URL_);
+      await migrateWhole(sql);
+    }
+    await reconnect();
+  }
   if (!banner) {
     // The extension exists only once the schema does, so the banner waits.
     const [{ extversion }] = await sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
@@ -781,15 +970,25 @@ for (const n of SCALES) {
     console.log(`  ${DIM}-dimensional random unit vectors, ${Q} random queries per filter, K=${K}`);
     banner = true;
   }
-  const { tiers, notes } = tiersAt(n);
   for (const note of notes) console.log(`  (${note})`);
   const queries = queriesFor(n);
-  process.stdout.write("  inserting         ");
-  const { stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries);
-  await chunksCarryParentVectors(sql);
+  if (!reuse) {
+    process.stdout.write("  inserting         ");
+    ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
+    console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
+    console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
+    // The oracle's premise, checked on the build — not on a reuse, where the
+    // join over every chunk row at ten million rows would cost a minute to
+    // guard against nothing the tree can do to a kept table (review pass).
+    await chunksCarryParentVectors(sql);
+    // The marker last, once everything a reuse would skip has finished and
+    // passed: an interrupted load leaves nothing that reads as a corpus.
+    if (!beforeArm) {
+      await writeMarker(sql, n, params, matches, stats);
+      wroteThisRun.add(n);
+    }
+  }
   loads.push(stats);
-  console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
-  console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
 
   // The exact answer for each (tier, query) once — shared by both arms.
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
@@ -949,12 +1148,13 @@ await sql.close();
 const mb = (b: number) => (b / 1048576).toFixed(0);
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
-console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched.\n");
-console.log("| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |");
-console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
+console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated.\n");
+console.log("| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |");
+console.log("| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
 for (const l of loads) {
+  const source = l.source === "loaded" ? "loaded" : `reused (built ${l.builtAt.slice(0, 16).replace("T", " ")})`;
   console.log(
-    `| ${l.scale.toLocaleString()} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
+    `| ${l.scale.toLocaleString()} | ${source} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
   );
 }
 
