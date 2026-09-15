@@ -6625,7 +6625,7 @@ passes, when 022 added a DELETE to the 3-argument path and the privilege class
 surfaced — the gap for the audit and chunk-insert writers predated it.
 
 `db/config.mjs`'s `ROLE_GRANTS` is now the single spelling: the tables and
-privileges the fork's writers need, grouped by role (`capture`, `read`, `worker`,
+privileges the fork's writers need, grouped by role (`capture`, `server`, `worker`,
 `extraction`), each naming the migration that introduced it. Three consumers read
 it, so none can drift from the others:
 
@@ -6635,10 +6635,12 @@ it, so none can drift from the others:
   naming each missing privilege in `ROLE_GRANTS` order with its GRANT (quoted
   role, schema-qualified `has_table_privilege`, gated on table presence so a
   brain before 007/008 is a skip not a raise). It stays a refusal: a role that
-  cannot INSERT `thought_audit` fails every capture. The `read` group
-  (`ob1_config`, the agent tables) is documented and granted but not enforced —
-  `resolve_agent` attribution and preflight's own config read degrade to a warn,
-  not a failed capture, without it. Over PostgREST it is a skip, as the old check
+  cannot INSERT `thought_audit` fails every capture. The `server` group
+  (`ob1_config` read, and the agent tables — `resolve_agent` is SECURITY INVOKER
+  and *upserts* them, so they get the writes, not just `SELECT`, which the
+  ticket's own list had wrong) is documented and granted but not enforced:
+  attribution and preflight's config read degrade to a warn without it, not a
+  failed capture. Over PostgREST it is a skip, as the old check
   was: table privileges are read over a direct connection.
 * **`migrate.ts --grant <role>`** issues the whole documented set — `USAGE ON
   SCHEMA public` plus every group, for the tables that exist — in one

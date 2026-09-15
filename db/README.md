@@ -211,16 +211,20 @@ issues every group at once.
 | **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `INSERT` |
-| **read** — used when present, never fatal to a bare capture (`resolve_agent` attribution, preflight's config read) | `ob1_config` (006) | `SELECT` |
-| | `ob1_agents` (010) | `SELECT` |
-| | `ob1_agent_keys` (010) | `SELECT` |
-| **worker** — `reembed.ts`, `consolidate.ts` | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
-| **extraction** — the entity-extraction worker | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
+| **server** — the server's soft extras, beyond capture; never fatal to a bare capture, but `resolve_agent` *upserts* the agent tables, so attribution needs the writes, not just `SELECT` | `ob1_config` (006) | `SELECT` |
+| | `ob1_agents` (010) | `SELECT, INSERT, UPDATE` |
+| | `ob1_agent_keys` (010) | `SELECT, INSERT, UPDATE` |
+| **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config`, and (consolidate) record/resolve proposals | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `ob1_config` (006) | `INSERT, UPDATE` |
+| | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
+| **extraction** — the entity-extraction worker, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
 
 Plus `USAGE ON SCHEMA public`. There are no sequences to grant: every table's
 primary key is a `uuid` or a natural key, so `INSERT` needs no sequence `USAGE`.
+`ob1_config` appears twice — `SELECT` for the server's own read, `INSERT, UPDATE`
+for a worker's job key — and `--grant` merges them into one `GRANT`.
 
 The one executable spelling — run as a role that can grant (the tables' owner or
 a superuser), after the migrations are applied:
@@ -233,9 +237,9 @@ bun migrate.ts --url ... --grant your_role
 transaction; it never creates the role or sets a password, so create the role
 first. `--grant --dry-run` prints the statements without running them, so a
 locked-down deployment can grant a subset by hand. A role that only ever runs the
-server needs the **capture** and **read** groups; add **worker** and
-**extraction** only for the role your bulk passes and entity extraction connect
-as.
+server needs the **capture** and **server** groups; add **worker** for the role
+your bulk passes connect as, and **extraction** on top of that for entity
+extraction.
 
 ## Chunk context, and why it is off
 

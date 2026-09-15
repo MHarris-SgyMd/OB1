@@ -766,8 +766,11 @@ async function checkCapturingGrants() {
     violations.push({ where: "db/README.md", msg: 'no "Grants for a capturing role" section — db/config.mjs ROLE_GRANTS has no documented home (SMD-1226)' });
     return;
   }
+  // Bound at the next level-2 heading, not any `#`-led line: the section holds a
+  // ```bash fence, and a future `# comment` inside it would otherwise read as the
+  // next heading and truncate the section (SMD-1226 review, L3).
   const rest = readme.slice(heading.index + heading[0].length);
-  const next = /^#+\s/m.exec(rest);
+  const next = /^##\s/m.exec(rest);
   const section = next ? rest.slice(0, next.index) : rest;
   for (const table of cfg.grantedTables()) {
     if (!section.includes("`" + table + "`")) {

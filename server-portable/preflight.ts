@@ -746,7 +746,7 @@ if (configFailed) {
           } else {
             const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
             add("write privileges", "ok",
-                `${role} holds the capture path's privileges — ${held}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (ob1_config and the agent tables are read-only and checked elsewhere)`);
+                `${role} holds the capture path's privileges — ${held}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (the config, agent, worker and extraction grants are documented and granted separately — see db/README.md)`);
           }
         }
 

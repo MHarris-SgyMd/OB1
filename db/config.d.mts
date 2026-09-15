@@ -264,9 +264,9 @@ export type RoleGrant = { table: string; privileges: readonly string[]; since: s
  * caller, grouped by the role that needs each group. The single spelling read by
  * preflight's `write privileges` check, `migrate.ts --grant`, and db/README.md.
  */
-export const ROLE_GRANTS: Readonly<Record<"capture" | "read" | "worker" | "extraction", readonly RoleGrant[]>>;
+export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "extraction", readonly RoleGrant[]>>;
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS: readonly ("capture" | "read" | "worker" | "extraction")[];
+export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction")[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */

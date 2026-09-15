@@ -1329,18 +1329,28 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_chunks", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "007" }),
     Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["INSERT"]),                                since: "008" }),
   ]),
-  // Read paths the server uses when present but that do not fail a bare capture:
-  // `resolve_agent` (010) attributes a write when a key is presented, and
-  // preflight reads `ob1_config` (006). A role without these still captures;
-  // preflight warns, it does not refuse. Documented and granted, not enforced.
-  read: Object.freeze([
-    Object.freeze({ table: "ob1_config",     privileges: Object.freeze(["SELECT"]), since: "006" }),
-    Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT"]), since: "010" }),
-    Object.freeze({ table: "ob1_agent_keys", privileges: Object.freeze(["SELECT"]), since: "010" }),
+  // The server's soft extras, beyond the hard capture set: preflight reads its
+  // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
+  // attributes a write when a key is presented — and it UPSERTs both agent
+  // tables (last_used_at, and registering an agent/key), so SELECT alone leaves
+  // it raising. A capture tolerates all of this: the resolve step is caught
+  // (agents.ts) and attribution degrades, and preflight only warns on the
+  // config read. Documented and granted, not enforced — but granted with the
+  // writes `resolve_agent` actually makes, so attribution works when it lands.
+  server: Object.freeze([
+    Object.freeze({ table: "ob1_config",     privileges: Object.freeze(["SELECT"]),                    since: "006" }),
+    Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
+    Object.freeze({ table: "ob1_agent_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
   ]),
-  // A worker role (reembed.ts, consolidate.ts) claims and releases work.
+  // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
+  // releases work, upserts its job key into `ob1_config` (reembed's
+  // --switch-model, extract's key), and, for consolidate.ts, records and
+  // resolves proposals in `supersession_proposals` (029's SECURITY INVOKER
+  // record/accept functions run as the caller).
   worker: Object.freeze([
-    Object.freeze({ table: "thought_work_claims", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
+    Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
+    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
   ]),
   // The entity-extraction worker, additionally, writes the entity graph.
   extraction: Object.freeze([
@@ -1351,7 +1361,7 @@ export const ROLE_GRANTS = Object.freeze({
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "read", "worker", "extraction"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -1381,12 +1391,20 @@ export function grantedTables(groups = ROLE_GRANT_GROUPS) {
  */
 export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
   const ident = quoteIdent(role);
-  const out = [];
+  // A table can appear in more than one group with different privileges
+  // (ob1_config: SELECT in `server`, INSERT/UPDATE in `worker`). Merge per table
+  // so the role gets one GRANT combining them, privileges in a stable order.
+  const ORDER = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+  const byTable = new Map();
   for (const g of groups) {
     for (const row of ROLE_GRANTS[g] ?? []) {
       if (present && !present.has(row.table)) continue;
-      out.push(`GRANT ${row.privileges.join(", ")} ON ${row.table} TO ${ident};`);
+      const set = byTable.get(row.table) ?? new Set();
+      for (const p of row.privileges) set.add(p);
+      byTable.set(row.table, set);
     }
   }
+  const out = [];
+  for (const [table, set] of byTable) out.push(`GRANT ${ORDER.filter((p) => set.has(p)).join(", ")} ON ${table} TO ${ident};`);
   return out;
 }
