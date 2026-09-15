@@ -720,12 +720,11 @@ if (configFailed) {
         // see — is reached only when the trigger, hence 006's ob1_config, exists.
         const [{ role, ident, triggerPresent, canReadConfig }] = (await sql`
           SELECT current_user::text AS role, quote_ident(current_user::text) AS ident,
-                 t.present AS "triggerPresent",
-                 CASE WHEN t.present THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"
-            FROM (SELECT EXISTS (
-                    SELECT 1 FROM pg_trigger
-                     WHERE tgrelid = to_regclass('public.thoughts')
-                       AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS present) t`) as
+                 EXISTS (SELECT 1 FROM pg_trigger
+                          WHERE tgrelid = to_regclass('public.thoughts')
+                            AND tgname = 'thoughts_entity_extraction' AND NOT tgisinternal) AS "triggerPresent",
+                 CASE WHEN to_regclass('public.ob1_config') IS NOT NULL
+                      THEN has_table_privilege('public.ob1_config', 'SELECT') ELSE false END AS "canReadConfig"`) as
           { role: string; ident: string; triggerPresent: boolean; canReadConfig: boolean }[];
         // Read the key in its own statement, run only when the role can SELECT
         // ob1_config — an uncorrelated `(SELECT … FROM ob1_config)` in the query
