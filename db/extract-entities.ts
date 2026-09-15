@@ -123,7 +123,7 @@ if (!url) {
 const WORKERS = numberFlag("workers", 2, 1);
 // One thought per claim. A claim costs half a millisecond against a model call
 // of ten seconds or more, so a bigger batch buys nothing, and a worker that
-// dies holds fewer rows. (Until migration 030 there was a second reason: the
+// dies holds fewer rows. (Until migration 031 there was a second reason: the
 // lease was stamped per claim and could not be moved, so a batch of four at a
 // 300 s timeout could outlive a 900 s lease and be extracted twice. The
 // heartbeat retires it.)
@@ -163,7 +163,7 @@ console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, temperature ${cf
 // One connection per worker and one spare: the heartbeat (db/lease.ts) beats
 // through the pool, and a worker parked on a lock or a long statement holds
 // its own connection, so the spare is what keeps every worker's leases alive
-// then. Tightening this to WORKERS would recreate the lapse 030 removed.
+// then. Tightening this to WORKERS would recreate the lapse 031 removed.
 const sql = new SQL({ url, max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────

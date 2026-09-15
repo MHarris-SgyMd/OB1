@@ -54,6 +54,7 @@ const {
   DEFAULT_METADATA_MODEL: DEF_META,
   DEFAULT_LLM_BASE_URL: DEF_BASE,
   isLocalHostname,
+  REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
 const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
@@ -107,6 +108,13 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
 const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
+/**
+ * Where the ledger already records the migration a check finds absent — a
+ * brain adopted with --baseline whose schema is the guide's — "apply it" is a
+ * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
+ * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
+ */
+const REAPPLY = `The ledger records that migration but the schema installed is older (adopted with --baseline?): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -589,13 +597,31 @@ if (configFailed) {
         let ledgerRead = false;
         if (Number(applied[0].c) > 0) {
           try {
-            const led = await sql`SELECT name FROM schema_migrations WHERE name LIKE '014\\_%' OR name LIKE '019\\_%' OR name LIKE '020\\_%' OR name LIKE '023\\_%'`;
+            // Every recorded name, as its three-digit prefix: the ledger holds a
+            // few dozen short rows, and a list of the migrations that have a
+            // ledger-aware remedy was one more thing to keep in step (it had
+            // drifted from its own comment by the seventh review pass of SMD-1193).
+            const led = await sql`SELECT name FROM schema_migrations`;
             ledger = new Set(led.map((r: { name: string }) => String(r.name).slice(0, 3)));
             ledgerRead = true;
           } catch {
             /* no SELECT on the ledger for this role: a remedy that depends on it says so */
           }
         }
+        /**
+         * The remedy for a migration a check finds absent: recorded in the
+         * ledger, the migrator's re-run (a plain run skips a recorded file);
+         * not recorded, or no ledger, apply it; the ledger unreadable to this
+         * role, apply it — or, if the ledger records it, the re-run — said as
+         * the 023 remedy says it, so an unread ledger is never mistaken for one
+         * that does not record the migration.
+         */
+        const ledgerRemedy = (migration: string, apply: string): string =>
+          ledger.has(migration)
+            ? REAPPLY
+            : ledgerRead || Number(applied[0].c) === 0
+              ? apply
+              : `${apply} — or, if the ledger already records ${migration} (this role cannot read schema_migrations): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
         const three = forms.find((f) => f.n === 3);
         const two = forms.find((f) => f.n === 2);
         // The 3-arg body's semantics are declared by a sentinel in the body
@@ -607,7 +633,7 @@ if (configFailed) {
         // named by nothing.
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
-              "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs).");
+              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs)."));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning, and the remedy says
@@ -617,7 +643,7 @@ if (configFailed) {
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
               "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
-              "Apply db/migrations/022_capture_replaces_chunks.sql.");
+              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql."));
         } else {
           add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them");
         }
@@ -700,7 +726,7 @@ if (configFailed) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const byHand = "re-run the body of db/migrations/023_content_fingerprint_backfill.sql by hand, substituting NULL for {{BACKFILL_LIMIT}} — the migrator will skip it as applied.";
+              const byHand = `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — which re-runs every migration in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).`;
               add("fingerprint backfill", "warn",
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
@@ -986,7 +1012,7 @@ if (configFailed) {
           const current = ut.filter((r) => Number(r.nargs) === 8);
           const extra = ut.filter((r) => Number(r.nargs) !== 8).map((r) => r.sig);
           if (!ut.length) {
-            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", APPLY_021);
+            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("021", APPLY_021));
           } else if (current.length && extra.length === 0) {
             add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 021 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
           } else if (current.length) {
@@ -996,7 +1022,7 @@ if (configFailed) {
           } else {
             add("edit signature", "fail",
                 `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 021; the server sends p_embedding_model, which only 021's form takes — so every edit, and every db/reembed.ts run, would fail`,
-                APPLY_021);
+                ledgerRemedy("021", APPLY_021));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
@@ -1106,7 +1132,7 @@ if (configFailed) {
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
                 `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
-                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? "re-run the body of db/migrations/014_filtered_match_thoughts.sql — the migrator will skip it as already applied (--baseline recorded it)" : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
+                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — since a plain run skips a recorded file (--baseline recorded it)` : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.
@@ -1127,7 +1153,7 @@ if (configFailed) {
             add("filtered search", "warn",
                 `match_thoughts ${setting}, and its body predates 014${dropped}${stale} — so ${EXPOSURE}`,
                 ledgerHas014
-                  ? "Re-run the body of db/migrations/014_filtered_match_thoughts.sql (the migrator will skip it as applied), or carry it into the migration that redefined match_thoughts."
+                  ? `Re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — which restores the last definer's body (a plain run skips a recorded file), or carry the SET clause into the migration that redefined match_thoughts.`
                   : APPLY_014);
           }
         } catch (e) {
@@ -1362,7 +1388,7 @@ if (configFailed) {
           if (!haveLabel) {
             add("vector models", "fail",
                 "thoughts.embedding_model does not exist — the server records the model on every vector it stores, and the writers before migration 021 cannot hold it: captures would silently lose the label and edits would fail",
-                APPLY_021);
+                ledgerRemedy("021", APPLY_021));
           } else {
             // The queries and the arithmetic are config.mjs's, shared with reembed.ts.
             const { ACCEPTED_BY_MODEL_SQL, ACCEPTED_CAVEAT_PREFIX, CORPUS_BY_MODEL_SQL, reembedKey, summariseCorpusByModel } = await import("../db/config.mjs");

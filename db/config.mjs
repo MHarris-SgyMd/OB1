@@ -672,6 +672,11 @@ export function migrationValues(overrides = {}) {
     CHUNK_CONTEXT: String(overrides.chunkContext ?? CHUNK_CONTEXT),
     // 023's one call: NULL is every row waiting; an integer, one batch.
     BACKFILL_LIMIT: String((overrides.backfillLimit === undefined ? resolveBackfillLimit(ENV.OB1_BACKFILL_LIMIT) : overrides.backfillLimit) ?? "NULL"),
+    // 030 reads the claim rows an evidence backfill may trust, and the key
+    // grammar for its early return; one spelling of each, substituted into the
+    // file (SMD-1193). The caveat prefix rides inside the rows.
+    REEMBED_KEY_MODEL_RE: REEMBED_KEY_MODEL_SQL_RE,
+    CLAIM_EVIDENCE_ROWS: CLAIM_EVIDENCE_ROWS_SQL,
     // Not operator configuration — ALTER DATABASE owns that — but the one
     // definition of what 014 seeds, so the SQL, the migrator's remedy,
     // preflight's report and the schema test cannot disagree about it.
@@ -815,11 +820,39 @@ export function reembedKey(model, dim) {
 }
 
 /**
+ * The same grammar for SQL that reads claim rows, as Postgres regexes: the
+ * model up to the LAST "@" of `reembed:<model>@<dim>[:suffix]`, and the width
+ * after it. Byte for byte 021's — `[0-9]+`, a leading zero included — because
+ * 021's hashed backfill decides which rows ARE evidence, and a reader with a
+ * narrower grammar would let 021 label from a row it never saw (the fourth
+ * review pass tightened this to a canonical width and the fifth found exactly
+ * that hole). "The model's own key" is the canonical spelling, as poolModelFor
+ * has it — a width without a leading zero and no suffix — as a regex, never a
+ * cast of the width (a hand-written width past bigint raised out of 030 and
+ * the gate; the sixth review pass), so `reembed:m@08` names a model on both
+ * sides and is nobody's own key on both. 030 takes the first as a template
+ * value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another; migrate.ts's
+ * gate reads the constants (SMD-1193).
+ *
+ * These, and ACCEPTED_CAVEAT_PREFIX, are substituted into migration 030 —
+ * whose file the migrator hashes as a TEMPLATE. Changing any of them changes
+ * what 030 does on every brain where it is still pending, and what every
+ * --reapply does, with no drift signal: that is a data migration, and gets a
+ * new file. db/test-schema.ts pins the literals.
+ */
+export const REEMBED_KEY_MODEL_SQL_RE = "^reembed:(.+)@[0-9]+(?::[^@]*)?$";
+export const REEMBED_OWN_KEY_SQL_RE = "^reembed:.+@(0|[1-9][0-9]*)$";
+
+/**
  * @param {string} key
  * @returns {{model: string, dim: number} | null}
  */
 export function parseReembedKey(key) {
   if (!key.startsWith(REEMBED_KEY_PREFIX)) return null;
+  // `\d+`, as 021's `[0-9]+` reads it: a key names a model whatever its
+  // width's spelling, so `--job reembed:other@01024` is still refused as a
+  // pass to another model and `--retire` still knows the current one. Whether
+  // the key is the model's OWN is poolModelFor's canonical comparison.
   const m = /^(.+)@(\d+)(?::[^@]*)?$/.exec(key.slice(REEMBED_KEY_PREFIX.length));
   return m ? { model: m[1], dim: Number(m[2]) } : null;
 }
@@ -928,6 +961,48 @@ export const ACCEPTED_BY_MODEL_SQL =
   "SELECT 1 FROM thought_work_claims k WHERE k.thought_id = t.id AND k.work_type = $1 " +
   "AND k.status = 'succeeded' AND k.last_error IS NOT NULL AND starts_with(k.last_error, $2) " +
   "AND COALESCE(t.updated_at, t.created_at) <= COALESCE(k.claimed_at, k.finished_at, '-infinity'::timestamptz)) GROUP BY 1";
+
+/**
+ * The claim rows an evidence backfill reads (SMD-1193): every succeeded row
+ * under a key naming a model, with the model, whether the key is the model's
+ * OWN (no suffix), whether the row is the operator's acceptance, its three
+ * timestamps. No window column: the gate wants the greatest finished_at per
+ * thought (021 picks one row of a tie and says nothing about which, so every
+ * accepted row at that time counts), and it wraps this text to get it — a
+ * window function inside the shared subquery made it a barrier the planner
+ * could not push `accepted AND own_key` through, so 030's first statement
+ * evaluated the regexes over every succeeded row (55× slower at 100k rows,
+ * measured in the sixth review pass). Spelled once: migration 030 takes it as
+ * the template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's gate reads the
+ * constant, so the rows the gate refuses and the rows 030 corrects are decided
+ * by one text. The caveat prefix is inlined as a literal, so it may hold no
+ * quote — asserted below.
+ */
+/**
+ * What returning a claim row to its pool sets — reembed.ts's requeue() for
+ * --retry-fallbacks and --retry-failed, and the statement migrate.ts prints
+ * for the operator to run by hand where reembed.ts cannot. One spelling, so
+ * the printed statement is the tool's (the seventh review pass of SMD-1193
+ * counted four). claimed_at stays: 030's bound is the enqueue, and readers of
+ * an acceptance read the claim — neither is this row's to move.
+ */
+/**
+ * The migrator's re-run, as every remedy that names it prints it — reembed.ts's
+ * 021 refusal, preflight's ledger-aware remedies. One spelling (the fourth
+ * review pass of SMD-1193 counted seven). Migration 030's own HINT spells it
+ * with `<url>` instead, ASCII-only, for Bun's sake.
+ */
+export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
+
+export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
+
+export const CLAIM_EVIDENCE_ROWS_SQL =
+  "SELECT c.thought_id, c.work_type, c.enqueued_at, c.claimed_at, c.finished_at, " +
+  `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +
+  `c.work_type ~ '${REEMBED_OWN_KEY_SQL_RE}' AS own_key, ` +
+  `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted ` +
+  `FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL AND c.work_type ~ '${REEMBED_KEY_MODEL_SQL_RE}'`;
+if (ACCEPTED_CAVEAT_PREFIX.includes("'")) throw new Error("ACCEPTED_CAVEAT_PREFIX is inlined into SQL as a literal and may not contain a quote");
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's

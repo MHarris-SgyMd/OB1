@@ -64,6 +64,66 @@ database sitting at 009 it would mark 010 applied too, and the agent registry
 would never be created. For one migration, insert the one `schema_migrations`
 row; `--dry-run` prints the `sha256` to use beside each name.
 
+### 5. Re-applying what the ledger already records
+
+A database adopted with `--baseline` can say 030 in its ledger while its
+functions are the guide's: a plain run skips every recorded file, and
+`reembed.ts` and preflight refuse or warn on the body they find and name this:
+
+```bash
+bun migrate.ts --url ... --reapply
+```
+
+`--reapply` re-runs **every migration** — recorded or pending — in order, in
+**one transaction** with a 10 s lock timeout; recorded rows stay as they are,
+pending ones are recorded in the same transaction. Every file rather than a
+range from the one a symptom names: a later migration may redefine what an
+earlier one created (022 and 025 redefine 021's `upsert_thought`; 020 drops a
+form 014 recreates), and a file's body may reference what only an earlier file
+installs (025's `upsert_thought` reads a column 021 adds, resolved when the
+function first *runs*, not when it is created) — so a start point is safe only
+when everything before it is really present, which nothing can check cheaply.
+Pending files in the same ordered transaction, because a ledger hole (a row
+deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
+*after* the re-run, over the later definitions it had just restored. Every file
+is idempotent, so the run restores the latest definition of everything. One
+transaction, so a failure part-way — a lock not granted within 10 s included —
+rolls back and the schema is as it was. `--dry-run` says what would re-run and
+judges the pgvector floor as the run does.
+
+**Refused before anything runs, and `--dry-run` says "would refuse" for the
+same:** a recorded file that changed since it was applied; the pgvector floor; a
+shell whose `OB1_EMBEDDING_DIM` differs from the column's width (006 would
+refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` differs
+from what `ob1_config` records (006 would re-record it — run from a shell
+configured as the brain is, or change the record on purpose with `reembed.ts
+--switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
+own definition is the update); and an accepted claim row 021's backfill would
+label an unlabelled thought from and 030 would not take back — under a
+*suffixed* key (`reembed:<model>@<dim>:ctx`), or over a thought written since
+the row was enqueued — return it with `reembed.ts --job <key>
+--retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
+where `reembed.ts` refuses to run, the refusal prints the statement
+`--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
+a **plain** run too whenever 021 is pending — a brain built by hand through 021
+and adopted by "just run them", or a ledger hole — since the block runs as
+written there as well; and where 030 is recorded and so will not run after 021,
+every acceptance 021 would read is refused, since nothing would take the label
+back. `--baseline` runs no SQL and is never refused on this. The checks read the
+catalog and the claim table under a 10 s lock timeout of their own. A plain run on the baselined brain, where 030 is pending,
+fails at 030 with what is missing and this command, rather than a bare "does
+not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
+remedies name it where the ledger records the migration they find absent.
+
+**Stop the server and any re-embed or extraction worker first.** 001 and 003
+take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
+`OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
+its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
+when no row is waiting); 025 re-validates its constraints over the table. 021's
+evidence backfill runs as written, and 030, reached after it in the same
+transaction, returns a label whose only evidence is an operator's acceptance to
+unknown and labels with accepted rows excluded (SMD-1193).
+
 ## Expected outcome
 
 `bun test-schema.ts` prints `505 assertions: 505 passed, 0 failed` and `PASS`.
@@ -90,7 +150,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
 | `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
-| `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL that `renew_claims` (030) moves forward on a heartbeat, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the first consumer — see below | Ported from `schemas/thought-work-claims` |
+| `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL that `renew_claims` (031) moves forward on a heartbeat, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the first consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
 | `018_update_thought_unchanged_content.sql` | `update_thought` redefined: an edit whose text normalises to what the row already holds is never `DUPLICATE_CONTENT` — it reports `duplicate_of` when another row carries that fingerprint (a pair from before 003's backfill-less fingerprint) and leaves this row's fingerprint NULL, so the partial unique index is never violated; edits to one fingerprint are serialised on an advisory lock (READ COMMITTED), which also turns 009's constraint-violation race for two concurrent edits into `DUPLICATE_CONTENT` — captures through `upsert_thought` are not covered. 008's actor, 009's guard and 013's context carried forward; 016's `content_fingerprint_of` replaces the third inline copy of the hash rule. `reembed.ts` requires it — see below | This fork |
@@ -102,7 +162,7 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54, 030 change 56).
+029 change 54, 030 change 56, 031 change 57).
 
 ## What changed relative to the guide
 
@@ -204,7 +264,7 @@ ttl)` hands out up to `batch` of them with `FOR UPDATE SKIP LOCKED` under a
 lease, so two workers claiming at the same moment receive disjoint sets;
 `release_thought` marks one `succeeded` or `failed`, and only the holder may;
 `release_claims_for_worker` hands a stopping worker's rows straight back;
-`renew_claims` (migration 030) is the heartbeat — every `--heartbeat` seconds a
+`renew_claims` (migration 031) is the heartbeat — every `--heartbeat` seconds a
 worker moves the deadline of every lease it holds forward, so the lease has to
 outlast a missed beat rather than the batch, and `--ttl` means how long a dead
 worker's rows stay out of the pool. A worker that dies keeps nothing: when its
@@ -369,8 +429,10 @@ worker fingerprints a legacy row still raises that violation, which lands as a
 failed claim naming the constraint, and `--retry-failed` resolves it. The
 read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
-adopted with `--baseline` — ledger says 018, body says 013 — is told to re-run
-the file's body rather than to apply a migration the migrator will skip.
+adopted with `--baseline` — ledger says 021, body says 013 — is told to
+`migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
+above; 030, reached after 021 in the same run, takes back what 021's backfill
+read from an accepted row).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;
@@ -416,13 +478,13 @@ own `--timeout` per model call): a call that never returns — before the header
 during the body — fails the row with the timeout named instead of parking the
 worker until the second Ctrl-C, and a blurb that times out under
 `OB1_CHUNK_CONTEXT=on` puts that reason on the row rather than "fix the metadata
-model". The lease is not sized by that timeout since migration 030: while a
+model". The lease is not sized by that timeout since migration 031: while a
 worker holds rows it renews every lease it holds on a heartbeat (`lease.ts`,
 shared by the three workers), so `--ttl` has to outlast a missed beat — at least
 two `--heartbeat`s, refused otherwise with the arithmetic shown (`--status`
 answers regardless, since it never claims) — and means how long a dead worker's
 rows stay out of the pool; a heartbeat not given is a third of the lease, at
-most 60 s. Until 030 the default lease grew to `--batch` × the timeout and a
+most 60 s. Until 031 the default lease grew to `--batch` × the timeout and a
 shorter one was refused, because a lease was stamped per claim and could not be
 moved. A row with two things wrong records
 both: a refusal is appended to a blurb failure rather than lost behind it. What
@@ -991,7 +1053,7 @@ container.
   then races four workers on four connections through a 600-row pool and
   asserts on ids: none claimed twice, the union exactly the pool. A worker
   "dies" on a 2 s lease and a second worker receives its rows after expiry,
-  on their second attempt. [8e] is the heartbeat (migration 030): a worker on
+  on their second attempt. [8e] is the heartbeat (migration 031): a worker on
   a 5 s lease beats at 4.5 s, a claim past the original deadline gets none of
   its rows and its release succeeds; it stops beating and a claim after the
   renewed deadline receives its rows on their second attempt. [9] then runs
@@ -1083,7 +1145,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 562 properties (at migration 028), including:
+asserts 644 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

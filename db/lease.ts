@@ -4,7 +4,7 @@
  *
  * Shared by the three consumers of migration 015's table — reembed.ts,
  * extract-entities.ts and consolidate.ts — so the rule lives once (SMD-1023).
- * Before migration 030 a lease was stamped per claim and could not be moved,
+ * Before migration 031 a lease was stamped per claim and could not be moved,
  * so each worker carried arithmetic of its own to keep a batch inside it:
  * reembed.ts grew its default lease to --batch × the timeout, the other two
  * refused the product above the lease and defaulted to one thought per claim.
@@ -80,7 +80,7 @@ export function leaseRefusal(ttlS: number, heartbeatS: number, derived = false):
   return (
     `--ttl ${ttlS} s cannot cover two ${derived ? `beats of the ${heartbeatS} s heartbeat derived from it` : `heartbeats of --heartbeat ${heartbeatS} s`}: one delayed beat would let the lease expire, and another worker\n` +
     `  would repeat rows this one is still working on. The lease is how long a dead worker's rows stay out of the pool, and nothing else\n` +
-    `  since migration 030; it need not cover the batch. ${heartbeatS <= 1 ? "Raise --ttl." : "Raise --ttl or lower --heartbeat."}`
+    `  since migration 031; it need not cover the batch. ${heartbeatS <= 1 ? "Raise --ttl." : "Raise --ttl or lower --heartbeat."}`
   );
 }
 

@@ -38,6 +38,9 @@ import {
   DEFAULT_CHUNK_CONTEXT,
   resolveBackfillLimit,
   ACCEPTED_CAVEAT_PREFIX,
+  CLAIM_EVIDENCE_ROWS_SQL,
+  REEMBED_KEY_MODEL_SQL_RE,
+  REEMBED_OWN_KEY_SQL_RE,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2926,7 +2929,22 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   await db.exec(`DELETE FROM ob1_entities`);
 }
 
-// ── 29. Migration 030 — renew_claims ─────────────────────────────────────────
+console.log("\n[29] Migration 030's substituted literals are pinned — 021's grammar, the caveat prefix, the own-key spelling, the evidence rows (SMD-1193)");
+{
+  // 030 is hashed as a template: what it DOES on a brain where it is still
+  // pending, and what every --reapply does, comes from these config.mjs values
+  // at run time, with no drift signal from the ledger. Changing one is a data
+  // migration and gets a new file; this pins the spellings applied brains ran.
+  const file021 = readFileSync(join(MIGRATIONS, "021_embedding_model_per_row.sql"), "utf8");
+  assert(file021.includes(`'${REEMBED_KEY_MODEL_SQL_RE}'`), "REEMBED_KEY_MODEL_SQL_RE is 021's inline regex, byte for byte — 021 decides what is evidence");
+  assert(REEMBED_OWN_KEY_SQL_RE === "^reembed:.+@(0|[1-9][0-9]*)$", "the own-key regex is the canonical spelling poolModelFor compares");
+  assert(ACCEPTED_CAVEAT_PREFIX === "kept the vector it had; accepted by the operator: ", "the caveat prefix is the spelling accepted rows carry");
+  const substituted030 = subst(readFileSync(join(MIGRATIONS, "030_label_from_claims_excludes_accepted.sql"), "utf8"));
+  // Twice in the statements, once more where the header names the template.
+  assert(substituted030.split(CLAIM_EVIDENCE_ROWS_SQL).length >= 3 && !/\{\{/.test(substituted030), "030's substituted text carries the shared evidence rows in both statements and no unresolved template");
+}
+
+// ── 30. Migration 031 — renew_claims ─────────────────────────────────────────
 //
 // The heartbeat, on one connection: which rows a beat moves (the holder's,
 // while claimed), which it leaves (another worker's, pending, terminal), that
@@ -2936,7 +2954,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
 // them on the RENEWED deadline — needs real time and is db/test-live.ts [8e];
 // the workers end to end are [9], [10] and [16] there.
 
-console.log("\n[29] Migration 030: renew_claims moves every lease the worker holds, and nothing else (SMD-1023)");
+console.log("\n[30] Migration 031: renew_claims moves every lease the worker holds, and nothing else (SMD-1023)");
 {
   await db.exec(`DELETE FROM thoughts`);
   for (let i = 0; i < 6; i++) await db.query(`INSERT INTO thoughts (content) VALUES ($1)`, [`renew probe ${i}`]);
@@ -2997,7 +3015,7 @@ console.log("\n[29] Migration 030: renew_claims moves every lease the worker hol
   assert(late === false, "…and A, finishing late, cannot release a row C holds, as 015 says");
   assert(/check constraint/.test(await raises(`UPDATE thought_work_claims SET ttl_expires_at = NULL WHERE thought_id = $1 AND work_type = $2`, [c[0], JOB])),
     "015's CHECK still keeps status and lease in step — asserted here so a later writer of ttl_expires_at is held to it");
-  // The two comments 030 writes, and the literal shape [10] requires of them.
+  // The two comments 031 writes, and the literal shape [10] requires of them.
   const colComment = (await db.query<{ c: string | null }>(
     `SELECT col_description('thought_work_claims'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_work_claims'::regclass AND attname = 'ttl_expires_at'`)).rows[0].c ?? "";
   assert(/renew_claims/.test(colComment) && /missed heartbeat/.test(colComment), "ttl_expires_at's comment names the heartbeat and what the lease now means");

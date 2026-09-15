@@ -764,7 +764,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   assert(lat.length === 626, `626 calls empty the pool — 625 batches and one empty answer (got ${lat.length})`);
   assert(last <= first * 2, `the last hundred claims are within twice the first hundred (${last.toFixed(2)} ms vs ${first.toFixed(2)} ms)`);
 
-  // (e) The heartbeat (migration 030, SMD-1023). A worker that renews across its
+  // (e) The heartbeat (migration 031, SMD-1023). A worker that renews across its
   // deadline keeps its rows — a claim made after the ORIGINAL deadline gets
   // none of them and its release succeeds — and a worker that stops renewing
   // loses them on the RENEWED deadline, not the original, to a second worker
@@ -1043,7 +1043,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const [{ model: stillRecorded }] = await sql`SELECT value AS model FROM ob1_config WHERE key = 'embedding_model'`;
   assert(stillRecorded === recordedModel && Object.keys(await claimCounts()).length === 0, "…touching neither ob1_config nor the pool");
   // A lease under two heartbeats is refused before anything is touched: since
-  // migration 030 the lease has to outlast a missed beat, not the batch.
+  // migration 031 the lease has to outlast a missed beat, not the batch.
   const shortLease = await reembed("--switch-model", "--ttl", "3", "--heartbeat", "2");
   assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out) && /Raise --ttl or lower --heartbeat/.test(shortLease.out),
     `a --ttl under two heartbeats is refused with exit 2, showing the arithmetic (exit ${shortLease.code})`);
@@ -1051,7 +1051,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const statusShort = await reembed("--status", "--ttl", "3", "--heartbeat", "2");
   assert(statusShort.code === 0 && /status: \d+ thoughts/.test(statusShort.out), `…while --status answers whatever the lease, since it never claims (exit ${statusShort.code})`);
   // Neither the batch nor the timeout sizes the lease any more: eight rows at
-  // any timeout run under the default 900 s lease and 60 s heartbeat (until 030
+  // any timeout run under the default 900 s lease and 60 s heartbeat (until 031
   // this derived a 1084 s lease from a 120.3 s timeout), and a lease given
   // without a heartbeat derives one of a third of it.
   const defaults = await reembedIn({ OB1_LLM_TIMEOUT: "120.3" }, "--dry-run");
@@ -1584,10 +1584,10 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   }
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${CTX_KEY}`;
 
-  // The heartbeat end to end (migration 030): a batch whose work outlasts the
+  // The heartbeat end to end (migration 031): a batch whose work outlasts the
   // lease, under workers that beat. Every embedding takes 600 ms, sixteen per
   // claim, a 6 s lease with a 1 s heartbeat: a batch runs near ten seconds,
-  // and until 030 its lease expired mid-way — the rows went to the other
+  // and until 031 its lease expired mid-way — the rows went to the other
   // worker on their second attempt, the first's releases returned false, and
   // three such batches marked rows failed. Six seconds, not three, because a
   // runner that pauses the process for two seconds must not read as a lapse —
@@ -1703,7 +1703,7 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   let calls = 0;
   let hemlockIsProse = true;
   // While set, every answer takes this long: the first run, so the heartbeat
-  // (migration 030) has time to beat.
+  // (migration 031) has time to beat.
   let slowMs = 0;
   const model = Bun.serve({
     port: 0,
@@ -1761,10 +1761,10 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const bareLimit = await extract("--limit");
   assert(bareLimit.code === 2 && /--limit needs a value/.test(bareLimit.out), "a bare --limit is refused rather than read as no limit");
   const shortLease = await extract("--ttl", "3", "--heartbeat", "2");
-  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
+  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 031)");
   const bigBatch = await extract("--dry-run", "--batch", "4", "--timeout", "300");
   assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out) && /900 s leases renewed every 60 s\. Nothing was written/.test(bigBatch.out),
-    `…while a batch of four at a 300 s timeout, refused until 030 as able to outlive the lease, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
+    `…while a batch of four at a 300 s timeout, refused until 031 as able to outlive the lease, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
 
   // A 6 s lease with a 1 s heartbeat, and 400 ms answers — ten thoughts across
   // two workers, some two seconds each — so the beats fire during the run, and
@@ -2217,7 +2217,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   let hemlockIsProse = true;
   const seen: { a: string; b: string }[] = [];
   // While set, every verdict takes this long: the first run, so the heartbeat
-  // (migration 030) has time to beat.
+  // (migration 031) has time to beat.
   let slowMs = 0;
   const judge = Bun.serve({
     port: 0,
@@ -2293,10 +2293,10 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   assert((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY}`)[0].c === 0 && (await proposals()).length === 0, "…no claim row, no proposal");
   assert((await sql`SELECT count(*)::int AS c FROM ob1_agents WHERE label = 'consolidator'`)[0].c === 0, "…and it did not register the worker's agent either");
   const shortLease = await consolidate("--ttl", "3", "--heartbeat", "2");
-  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 030)");
+  assert(shortLease.code === 2 && /--ttl 3 s cannot cover two heartbeats of --heartbeat 2 s/.test(shortLease.out), "a lease under two heartbeats is refused (migration 031)");
   const bigBatch = await consolidate("--dry-run", "--batch", "4", "--k", "5", "--timeout", "120");
   assert(bigBatch.code === 0 && /Nothing was written/.test(bigBatch.out) && /900 s leases renewed every 60 s\. Nothing was written/.test(bigBatch.out),
-    `…while a batch whose k calls exceed the lease, refused until 030, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
+    `…while a batch whose k calls exceed the lease, refused until 031, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
 

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 030 — renew_claims: a heartbeat moves the deadline of every lease a worker
+-- 031 — renew_claims: a heartbeat moves the deadline of every lease a worker
 --        holds, so a lease has to outlast a missed beat, not a whole batch
 --        (SMD-1023)
 --
@@ -51,14 +51,14 @@
 -- What it does not touch
 --   claim_thoughts is not redefined; the claim stays one locking pass over the
 --   pending index and the reaper stays its first statement, as 015 wrote them
---   (db/test-schema.ts [29] asserts 015 is still the last file to define it,
+--   (db/test-schema.ts [30] asserts 015 is still the last file to define it,
 --   and db/test-live.ts [8a] and [8b] still hold the concurrent claims
 --   disjoint). release_thought and release_claims_for_worker are untouched;
 --   028's comments on last_error and release_thought stand as applied. 023's
 --   header, also applied and so not editable (migrate.ts hashes the file),
 --   advises stopping both 015 consumers before its backfill because a worker
 --   parked on its lock would wait out a lease stamped once per batch; since
---   030 a parked worker keeps beating through its pool's spare connection
+--   031 a parked worker keeps beating through its pool's spare connection
 --   (each worker opens WORKERS + 1, and says why beside the number) and its
 --   leases hold, so long as each beat reaches a row before a claim's reaper
 --   does — the row-lock race above — so the advice survives as throughput
@@ -149,4 +149,4 @@ COMMENT ON FUNCTION renew_claims(text, text, int) IS
   'The heartbeat: move the deadline of every lease this worker holds under the work_type to now() plus p_ttl_seconds, never backward, and return the ids renewed. Only claimed rows whose worker_id is p_worker_id. A row of the caller''s batch not returned is no longer this worker''s: reaped by a claim (and, at its last allowed expiry, marked failed still naming this worker), requeued by an edit, or deleted; the caller reads the row to learn which. Does not touch the claim statement (claim_thoughts is 015''s as applied).';
 
 COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS
-  'The lease''s deadline while status is claimed, NULL otherwise (the CHECK keeps the two in step). Stamped by claim_thoughts at now() plus its p_ttl_seconds and moved forward by renew_claims on each heartbeat; a claim_thoughts call by any worker returns a row past it to the pool, or marks it failed at p_max_attempts. Since 030 the lease has to outlast a missed heartbeat, not a batch: it is how long a dead worker''s rows stay out of the pool.';
+  'The lease''s deadline while status is claimed, NULL otherwise (the CHECK keeps the two in step). Stamped by claim_thoughts at now() plus its p_ttl_seconds and moved forward by renew_claims on each heartbeat; a claim_thoughts call by any worker returns a row past it to the pool, or marks it failed at p_max_attempts. Since 031 the lease has to outlast a missed heartbeat, not a batch: it is how long a dead worker''s rows stay out of the pool.';
