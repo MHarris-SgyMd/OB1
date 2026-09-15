@@ -34,6 +34,14 @@
  * filter-inside-the-scan path (014) a filtered `search_thoughts` takes. The
  * control below asserts no result came from outside the history.
  *
+ * LOADING. The corpus is read as a STREAM of top-level question objects, not one
+ * `readFileSync` — LongMemEval-M is ~2.5 GB and a single string that large
+ * exceeds JavaScriptCore's ~2.14 GB cap (bun throws ENOMEM). Streaming holds
+ * only one question object plus the deduped session map at a time, so a multi-GB
+ * corpus loads with the SAME one command as S. And because a single process
+ * still sees every question, each session's `lme_q` is the union of all its
+ * questions' ids by construction — no shard-and-complete post-pass (SMD-1438).
+ *
  * DEDUP. 003's fingerprint makes two session ids with identical text one row.
  * The loader records which ids share a row, and scoring credits a row with
  * every session id it stands for.
@@ -125,7 +133,15 @@ type Question = {
   answer_session_ids: string[];
 };
 
-const questions = JSON.parse(readFileSync(DATA, "utf8")) as Question[];
+/**
+ * Only the fields scoring reads — the gold set, the question text and type, and
+ * the session-id list the isolation control checks against. The heavy
+ * `haystack_sessions` transcripts are folded into `sessions` as each question
+ * streams by and then dropped, so the whole corpus never sits in memory at once
+ * (SMD-1438).
+ */
+type ScoreQ = Pick<Question, "question_id" | "question_type" | "question" | "answer_session_ids" | "haystack_session_ids">;
+const questions: ScoreQ[] = [];
 
 /**
  * One session as a captured transcript. The date leads, because a pasted
@@ -140,18 +156,86 @@ function sessionText(date: string, turns: Turn[]): string {
 /** Distinct sessions with every question they belong to and the date they carry. */
 type Session = { sid: string; date: string; text: string; qids: string[] };
 const sessions = new Map<string, Session>();
-for (const q of questions) {
-  q.haystack_session_ids.forEach((sid, i) => {
-    const s = sessions.get(sid);
-    if (s) { s.qids.push(q.question_id); return; }
-    sessions.set(sid, { sid, date: q.haystack_dates[i], text: sessionText(q.haystack_dates[i], q.haystack_sessions[i]), qids: [q.question_id] });
-  });
+
+/** Concatenate the byte pieces of one streamed object into a single buffer. */
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0];
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
 }
 
-// A smoke run (OB1_EVAL_MAX_QUESTIONS) loads only the histories it will score.
-if (MAXQ) {
-  const keep = new Set(questions.filter((q) => !q.question_id.endsWith("_abs")).slice(0, MAXQ).map((q) => q.question_id));
-  for (const [sid, s] of sessions) if (!s.qids.some((id) => keep.has(id))) sessions.delete(sid);
+/**
+ * Stream the top-level objects of a JSON array file one at a time, so the file
+ * is never a single string (LongMemEval-M is past JavaScriptCore's string cap;
+ * SMD-1438). Scans bytes for the structural `{ } [ ]` while tracking string
+ * state and escapes — those, plus `"` and `\`, are single ASCII bytes that
+ * never occur inside a UTF-8 multibyte sequence, so byte scanning is exact —
+ * and decodes-then-parses each depth-1 object on its own. Zero dependencies;
+ * evals run under bare bun.
+ */
+async function streamJsonArray<T>(path: string, onItem: (item: T) => void): Promise<void> {
+  const reader = Bun.file(path).stream().getReader();
+  const decoder = new TextDecoder();
+  let depth = 0, inStr = false, esc = false, collecting = false;
+  let pieces: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value as Uint8Array;
+      // If a prior chunk left an object open, this chunk contributes from byte 0.
+      let sliceStart = collecting ? 0 : -1;
+      for (let i = 0; i < chunk.length; i++) {
+        const b = chunk[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (b === 0x5c) esc = true;    // backslash: next char is literal
+          else if (b === 0x22) inStr = false; // closing quote
+          continue;
+        }
+        if (b === 0x22) { inStr = true; continue; } // opening quote
+        else if (b === 0x7b) {                       // {
+          depth++;
+          if (depth === 2) { collecting = true; sliceStart = i; } // a top-level object opens
+        } else if (b === 0x7d) {                     // }
+          depth--;
+          if (depth === 1) {                         // the top-level object closed at i
+            pieces.push(chunk.slice(sliceStart, i + 1));
+            onItem(JSON.parse(decoder.decode(concatBytes(pieces))) as T);
+            pieces = [];
+            collecting = false;
+            sliceStart = -1;
+          }
+        } else if (b === 0x5b) depth++;              // [
+        else if (b === 0x5d) depth--;                // ]
+      }
+      if (collecting && sliceStart >= 0) pieces.push(chunk.slice(sliceStart, chunk.length));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Build the session map and the slim question list by streaming the corpus. */
+async function ingest(): Promise<void> {
+  await streamJsonArray<Question>(DATA!, (q) => {
+    q.haystack_session_ids.forEach((sid, i) => {
+      const s = sessions.get(sid);
+      if (s) { s.qids.push(q.question_id); return; }
+      sessions.set(sid, { sid, date: q.haystack_dates[i], text: sessionText(q.haystack_dates[i], q.haystack_sessions[i]), qids: [q.question_id] });
+    });
+    questions.push({ question_id: q.question_id, question_type: q.question_type, question: q.question, answer_session_ids: q.answer_session_ids, haystack_session_ids: q.haystack_session_ids });
+  });
+
+  // A smoke run (OB1_EVAL_MAX_QUESTIONS) loads only the histories it will score.
+  if (MAXQ) {
+    const keep = new Set(questions.filter((q) => !q.question_id.endsWith("_abs")).slice(0, MAXQ).map((q) => q.question_id));
+    for (const [sid, s] of sessions) if (!s.qids.some((id) => keep.has(id))) sessions.delete(sid);
+  }
 }
 
 /** `2023/05/20 (Sat) 02:21` → ISO; the benchmark's own format. */
@@ -295,7 +379,7 @@ async function loadWindows(): Promise<void> {
   console.log(`✓ ${rows} windows at ${limit} tokens (${tokens.toLocaleString()} estimated tokens) over ${items.length} sessions in ${CHUNKS}`);
 }
 
-type Arm = { key: string; label: string; run: (qv: string, q: Question, k: number) => Promise<string[]> };
+type Arm = { key: string; label: string; run: (qv: string, q: ScoreQ, k: number) => Promise<string[]> };
 
 async function score(): Promise<void> {
   const map = readMap();
@@ -310,7 +394,7 @@ async function score(): Promise<void> {
 
   // An object, not a JSON string: Bun stringifies a ::jsonb parameter itself,
   // and a string would arrive as a jsonb scalar that nothing contains.
-  const filterFor = (q: Question) => ({ lme_q: [q.question_id] });
+  const filterFor = (q: ScoreQ) => ({ lme_q: [q.question_id] });
   const idsOf = (rows: { id: string }[]) => rows.map((r) => r.id);
   const shipped: Arm[] = [
     {
@@ -342,7 +426,7 @@ async function score(): Promise<void> {
   // measure vectors, and must not measure plans.
   type Scored = { id: string; whole: number | null; win: number | null; est: number };
   const scoredCache = new Map<string, Scored[]>();
-  const scoredFor = async (qv: string, q: Question): Promise<Scored[]> => {
+  const scoredFor = async (qv: string, q: ScoreQ): Promise<Scored[]> => {
     const hit = scoredCache.get(q.question_id);
     if (hit) return hit;
     const rows = (await sql.unsafe(
@@ -365,7 +449,7 @@ async function score(): Promise<void> {
     scoredCache.set(q.question_id, scored);
     return scored;
   };
-  const rank = (score: (s: Scored) => number | null) => async (qv: string, q: Question, k: number) =>
+  const rank = (score: (s: Scored) => number | null) => async (qv: string, q: ScoreQ, k: number) =>
     (await scoredFor(qv, q))
       .map((s) => ({ id: s.id, sim: score(s) }))
       .filter((s): s is { id: string; sim: number } => s.sim !== null)
@@ -401,7 +485,7 @@ async function score(): Promise<void> {
     ["2049–4096", (t) => t > 2048 && t <= 4096],
     [">4096", (t) => t > 4096],
   ];
-  const bucketOf = (q: Question): string => {
+  const bucketOf = (q: ScoreQ): string => {
     const longest = Math.max(...q.answer_session_ids.map((sid) => estimateTokens(sessions.get(sid)!.text)));
     return BUCKETS.find(([, fits]) => fits(longest))![0];
   };
@@ -524,6 +608,7 @@ async function score(): Promise<void> {
   for (const m of misses.slice(0, 25)) console.log(`  ${m}`);
 }
 
+await ingest();
 if (PHASE === "load" || PHASE === "both") await load();
 if (PHASE === "windows") await loadWindows();
 if (PHASE === "score" || PHASE === "both") await score();
