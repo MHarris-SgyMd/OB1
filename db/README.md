@@ -256,6 +256,7 @@ issues every group at once.
 | **extraction** — the entity-extraction worker, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
+| **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
 
 Plus `USAGE ON SCHEMA public`. There are no sequences to grant: every table's
 primary key is a `uuid` or a natural key, so `INSERT` needs no sequence `USAGE`.
@@ -275,7 +276,11 @@ first. `--grant --dry-run` prints the statements without running them, so a
 locked-down deployment can grant a subset by hand. A role that only ever runs the
 server needs the **capture** and **server** groups; add **worker** for the role
 your bulk passes connect as, and **extraction** on top of that for entity
-extraction.
+extraction. The **querylog** group is issued too, so `OB1_QUERY_LOG=on` works out
+of the box — but unlike the capture set it is not enforced: the query log is off
+by default and preflight cannot read a server env flag, so a role missing
+`query_log` `INSERT` is reported by the `query log` check, not refused (the log's
+write is best-effort and never fails a search).
 
 **One cross-cutting exception (016's enqueue trigger).** Migration 016 adds a
 trigger on `thoughts` that fires on every capture and content-edit and runs as

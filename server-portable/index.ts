@@ -7,7 +7,8 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
-import { authenticate, canWrite, type Principal } from "./auth.ts";
+import { queryLogEnabled } from "../db/config.mjs";
+import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
@@ -53,6 +54,17 @@ type Env = {
   /** "on" to generate a situating blurb per chunk before embedding it. Off by
    *  default, and measured off — see db/config.mjs and evals/eval-contextual.ts. */
   OB1_CHUNK_CONTEXT?: string;
+  /**
+   * "on" to record the opt-in query log (migration 034, SMD-1295): one row per
+   * search and one per follow-up fetch/edit/delete of a returned id, so a
+   * retrieval change can be replayed against real use (evals/eval-replay.ts).
+   * Off by default — anything but "on" writes nothing. Personal data at rest
+   * (every query typed); see SETUP.md. The write is best-effort and never fails
+   * a search; prune_query_log() enforces the retention window below.
+   */
+  OB1_QUERY_LOG?: string;
+  /** Days query_log rows are kept by prune_query_log(); default 30. See db/config.mjs. */
+  OB1_QUERY_LOG_RETENTION_DAYS?: string;
   /** Model for metadata extraction. No schema dependency — safe to change anytime. */
   OB1_METADATA_MODEL?: string;
   /** Sampling temperature for extraction. Defaults to 0 — see metadataTemperature. */
@@ -300,6 +312,43 @@ function buildServer(principal: Principal): McpServer {
     version: "1.0.0",
   });
 
+  // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
+  // and best-effort either way: a log write is never allowed to fail a search, a
+  // fetch or a capture, so every call is guarded and every rejection swallowed.
+  // The flag is read from the boot-time env snapshot (initEnv freezes it on the
+  // first request), so it is set at start-up, not toggled per request. Nothing
+  // here reads the log back — the export tool does, offline.
+  const logSearchCall = async (
+    tool: string,
+    args: { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown> },
+    data: { id: string; score?: number | null }[],
+  ): Promise<void> => {
+    if (!queryLogEnabled(env())) return;
+    try {
+      await (await db()).logSearch({
+        tool,
+        agentId: principal.agentId,
+        query: args.query,
+        matchCount: args.limit,
+        threshold: args.threshold,
+        recencyWeight: args.recencyWeight,
+        filter: args.filter,
+        resultIds: data.map((t) => t.id),
+        resultScores: data.map((t) => t.score ?? null),
+      });
+    } catch {
+      // best-effort: a log failure must never reach the caller.
+    }
+  };
+  const logActionCall = async (tool: string, targetId: string): Promise<void> => {
+    if (!queryLogEnabled(env())) return;
+    try {
+      await (await db()).logAction({ tool, agentId: principal.agentId, targetId });
+    } catch {
+      // best-effort.
+    }
+  };
+
   // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
   // research look for exact read-only `search` and `fetch` tool shapes.
   //
@@ -348,6 +397,8 @@ function buildServer(principal: Principal): McpServer {
           recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT,
         });
 
+        await logSearchCall("search", { query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, filter: {} }, data);
+
         const results = data.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
@@ -389,6 +440,11 @@ function buildServer(principal: Principal): McpServer {
             isError: true,
           };
         }
+
+        // Click-through relevance (034): the caller opened this id after a
+        // search. Only on a hit — a fetch of a missing id labels nothing.
+        await logActionCall("fetch", id);
+
         const document = {
           id: thought.id,
           title: thoughtTitle(thought.content, thought.created_at),
@@ -471,6 +527,8 @@ function buildServer(principal: Principal): McpServer {
           filter: {},
           recencyWeight: recency_weight,
         });
+
+        await logSearchCall("search_thoughts", { query, limit, threshold, recencyWeight: recency_weight, filter: {} }, data);
 
         if (data.length === 0) {
           // Nothing cleared the threshold and no literal matched — but WHY is
@@ -1099,6 +1157,10 @@ function buildServer(principal: Principal): McpServer {
 
         if (!result.ok) return toolError(explainRefusal(result, id));
 
+        // Click-through relevance (034): the caller edited this id after a
+        // search. Only on a written edit, not a refusal.
+        await logActionCall("update_thought", id);
+
         const what = [
           content !== undefined ? "content re-embedded" : null,
           metadata_patch !== undefined ? "metadata merged" : null,
@@ -1143,6 +1205,11 @@ function buildServer(principal: Principal): McpServer {
           actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
         });
         if (!result.ok) return toolError(explainRefusal(result, id));
+
+        // Click-through relevance (034): the caller deleted this id after a
+        // search — a strong signal it was the one they meant. Only on success.
+        await logActionCall("delete_thought", id);
+
         return {
           content: [{
             type: "text" as const,
@@ -1162,7 +1229,7 @@ function buildServer(principal: Principal): McpServer {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
@@ -1286,12 +1353,12 @@ app.options("*", (c) => {
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 app.all("*", async (c) => {
-  // Accept the access key via header OR URL query parameter. The query form stays
-  // because Claude Desktop custom connectors are URL-only; scopes are what limit
-  // the damage when such a URL leaks. See auth.ts.
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-
-  const principal = authenticate(provided, {
+  // Accept the access key via header, bearer token OR URL query parameter — every
+  // form presented is tried, so a gateway's own bearer token beside the client's
+  // `?key=` does not shadow it. The query form stays because Claude Desktop
+  // custom connectors are URL-only; scopes are what limit the damage when such a
+  // URL leaks. See auth.ts.
+  const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   });

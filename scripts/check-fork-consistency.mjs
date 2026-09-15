@@ -25,6 +25,10 @@
  *      directories whole and docs/, the owned sets read from db/migrations/,
  *      with counted per-(file, function) exceptions for the files that create
  *      a brain rather than add to one
+ *   8. a credential read from the environment is never compared with an
+ *      equality operator — inline or through an identifier bound from the read
+ *      — in the same files as 7, with counted per-file exceptions for the
+ *      vendored files a ticket holds
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -59,7 +63,10 @@ function contributionDirs() {
     const base = join(ROOT, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      if (name === "_template") continue;
+      // _template is the category's placeholder, _shared the module the
+      // extensions import, node_modules extensions/test-auth.ts's install
+      // (gitignored) — none is a contribution.
+      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
     }
@@ -680,6 +687,249 @@ function checkCoreFunctions() {
   }
 }
 
+
+// ── 8: a credential from the environment is never compared with === ─────────
+//
+// SMD-1252. Seven vendored extension servers authenticated with two lines —
+// `const expected = Deno.env.get("MCP_ACCESS_KEY"); if (!key || key !== expected)`
+// — and then ran as the service role: one shared plaintext secret, compared
+// byte by byte (the timing leak fix 14 closed in the core server), no scope,
+// no revocation short of re-keying every client, and full write access on a
+// key accepted from a URL query string. FORK.md change 64 made them consumers
+// of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
+// is never given the tools that write — and this is what keeps the next rebase
+// from bringing the two lines back.
+//
+// The rule is the MECHANISM, not the seven files' spelling: a strict or loose
+// (in)equality with a value read from the environment under a credential's
+// name (…KEY, …SECRET, …TOKEN, …PASSWORD) on either side — read inline, in
+// any wrapping (`!== Deno.env.get("MCP_ACCESS_KEY")`, `!== (Deno.env.get(…) ??
+// "")`, `Deno.env.get(…)!.trim() ===`), or through an identifier the file binds
+// from a statement that contains such a read (`const expected = Deno.env.get(…)`,
+// `const KEY = String(process.env.KEY ?? "").trim()`, `expected ??= …`, `const {
+// API_TOKEN } = process.env`, `const { API_TOKEN: expected } = process.env`,
+// Python's `os.environ`), the read spelled `Deno.env.get`, `process.env`,
+// `Bun.env`, Hono's `c.env` and `env(c)` (the `hono/adapter` form, the one a
+// server on Workers or Deno reaches for), a bare `env(…)`/`env.X`, or
+// `os.environ` — in every
+// non-binary, non-ignored file under the seven category directories and docs/,
+// prose included, since a README's code block is what the next extension is
+// copied from. Not a compare of the credential: `.length` (a timing-safe
+// compare guards its lengths first), a call or an index on it, `typeof`, or a
+// literal on the other side — nullish or empty (`if (KEY === undefined)` is a
+// presence check) or a string (`if (KEY === "your-key-here")` is a placeholder
+// check, a different smell). A name bound from a credential read is the
+// credential for the WHOLE file: every compare of it counts, wherever it sits.
+// Three review passes tried to except a re-declared name — a loop variable, a
+// parameter, a destructure — and each pass found the previous pass's scoping
+// both silencing real compares and failing ordinary code, because scope in
+// regex over unparsed text is not a thing; the fourth took the altitude. A
+// false positive here fails CI in the open and is answered with a rename or a
+// counted exception; a miss is silent. Outside the rule, and said so: `.includes`,
+// `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
+// an object property, a helper that returns the key, several declarators on
+// one statement, a read through `Deno.env.toObject()` into a variable, a read
+// by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
+// (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
+// and braces or `=>` inside a string, comment or regex literal — each a
+// spelling the review passes named and this rule does not chase. Exceptions are
+// per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
+// integrations that carry the same compare are listed with the ticket that
+// holds their fix, for exactly the lines each has today — one fixed drops out
+// as stale, one added fails.
+const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
+const IDENT = String.raw`[A-Za-z_$][\w$]*`;
+/** One read of the environment; the variable's name is the first defined group. */
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*${IDENT}\s*\)\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.[gG]etenv\(\s*["'](${IDENT})["'])`;
+/** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
+const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
+/** What on the far side of a compare makes it a presence or placeholder check, not a compare of the credential. */
+const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|"[^"\n]*"|'[^'\n]*'|` + "`[^`\n]*`" + `)`;
+/** What may wrap an inline read on the left of a compare: `!`, `)`, `?? ""`, `|| ""`, `.trim()`. */
+const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
+/** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare — not `x.y`, `x(`, `x[` or `x?.y`; a ternary's `?` after it is fine. */
+const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*(?:[.(\[]|\?\.)))`;
+const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
+
+/**
+ * The 1-based lines of `text` that compare an environment credential with an
+ * equality operator, by the rule above. Bindings are collected over the whole
+ * text first, so a compare may sit above or below the read it compares.
+ */
+function credentialComparesIn(text) {
+  const names = new Set();
+  // `x = <anything on the statement containing a credential read>` — `=`, `??=`
+  // and `||=`, a type annotation before it, a line break after it, a wrapper
+  // (`String(…)`, `(… ?? "")`, `.trim()`) around the read.
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])\s*[^;\n]*?${ENV_READ}`, "g"))) {
+    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
+  }
+  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
+  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\))(?![\w$])/g)) {
+    for (const part of m[1].split(",")) {
+      const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
+      if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
+    }
+  }
+  const lines = new Set();
+  const lineOf = (i) => text.slice(0, i).split("\n").length;
+  const flag = (re, keep = () => true) => {
+    for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
+  };
+  const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
+  flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
+  flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
+  for (const name of names) {
+    const N = name.replace(/\$/g, "\\$");
+    // The credential on the right: `key !== expected`, `!== expected.trim()`, `!== String(expected)`, `!== (expected ?? "")`
+    // — not `expected.length`, `expected(`, `expected[`, `expected?.x`.
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${bound(N)}`, "g"));
+    // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
+    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
+  }
+  return [...lines].sort((a, b) => a - b);
+}
+
+/** Texts the rule must catch — the check's own negative tests, run on every run. */
+const CREDENTIAL_COMPARE_PROBES = [
+  'const key = c.req.query("key") || c.req.header("x-access-key");\nconst expected = Deno.env.get("MCP_ACCESS_KEY");\nif (!key || key !== expected) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;\n// …\nif (!provided || provided !== MCP_ACCESS_KEY) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";\nreturn key === MCP_ACCESS_KEY;',
+  'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (body.secret !== READWISE_WEBHOOK_SECRET) {',
+  'const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;\nif (secret !== expectedSecret) {',
+  'if (key !== Deno.env.get("MCP_ACCESS_KEY")) {',
+  'if (req.headers.get("x-key") != process.env.API_TOKEN) {',
+  'if (process.env["BRAIN_ACCESS_KEY"] === provided) ok();',
+  'if key != os.environ.get("API_KEY"):',
+  'if presented == os.Getenv("API_KEY") {',
+  'if presented == os.getenv(\'MCP_ACCESS_KEY\'):',
+  'EXPECTED = os.environ["WEBHOOK_SECRET"]\nif token == EXPECTED:',
+  'const { MCP_ACCESS_KEY } = process.env;\nif (k === MCP_ACCESS_KEY) {',
+  'let token: string | undefined = process.env.BOT_TOKEN;\nreturn token === presented;',
+  'const expected = env("MCP_ACCESS_KEY");\nif (provided !== expected) return 401;',
+  'const AUDITOR_ACCESS_KEY = Deno.env.get("AUDITOR_ACCESS_KEY")!;\nif (key !== AUDITOR_ACCESS_KEY) {',
+  'return Boolean(provided && provided === MCP_ACCESS_KEY);\nconst MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;',
+  // What the first review pass found slipping past: a renamed destructure, Hono's
+  // bindings and Bun's env, a wrapped read, a wrapped inline compare, `??=`.
+  'const { MCP_ACCESS_KEY: expected } = process.env;\nif (key !== expected) {',
+  'if (provided !== c.env.MCP_ACCESS_KEY) {',
+  'const KEY = Bun.env.MCP_ACCESS_KEY;\nreturn key === KEY;',
+  'const expected = (Deno.env.get("MCP_ACCESS_KEY") ?? "").trim();\nif (key !== expected) {',
+  'const expected = String(process.env.MCP_ACCESS_KEY);\nif (key !== expected) {',
+  'let expected: string | undefined;\nexpected ??= Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected) {',
+  'if (key !== (Deno.env.get("MCP_ACCESS_KEY") ?? "")) {',
+  'if (Deno.env.get("MCP_ACCESS_KEY")! !== key) {',
+  'if (Deno.env.get("MCP_ACCESS_KEY")!.trim() === key) ok();',
+  // What the second review pass found slipping past: wrappers on the bound
+  // name, template quotes, import.meta.env, a suffixed name, a compare that
+  // precedes a shadow rather than following one.
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key.trim() !== expected.trim()) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected?.trim()) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== String(expected)) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif ((key ?? "") !== (expected ?? "")) {',
+  'const expected = Deno.env.get(`MCP_ACCESS_KEY`);\nif (key !== expected) {',
+  'if (import.meta.env.VITE_API_KEY === presented) {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY_V2");\nif (key !== expected) {',
+  'const token = process.env.API_TOKEN;\nif (presented === token) ok();\nfor (const token of list) use(token);',
+  // What the third review pass found the shadow rule silencing: a declaration
+  // whose block has closed, one in another function, one before the binding,
+  // and a second binding of the same name.
+  'const token = process.env.BOT_TOKEN;\nfunction lens() { return tokens.map((token) => token.length); }\nif (presented === token) ok();',
+  'const secret = Deno.env.get("WEBHOOK_SECRET");\nfunction other() { for (const secret of list) use(secret); }\nif (body.secret !== secret) deny();',
+  'const key = Deno.env.get("MCP_ACCESS_KEY");\nfunction lookup(key) { return map.get(key); }\nif (c.req.query("key") !== key) deny();',
+  'const token = process.env.API_TOKEN;\nfor (const token of tokens) { use(token); }\nif (presented === token) ok();',
+  'function a() { let expected = 0; return expected; }\nconst expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected) deny();',
+  'app.post("/mcp", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });\napp.post("/sse", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });',
+  // What the fourth review pass found the (since removed) shadow rule silencing,
+  // plus a ternary and a binding broken over two lines.
+  'const token = process.env.API_TOKEN;\nfor (const token of tokens) if (token === close) break;\nif (presented === token) deny();',
+  'const key = process.env.API_KEY;\nconst hit = list.some((key) => key === wanted);\nif (presented === key) deny();',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nreturn key === expected ? ok() : deny();',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nconst status = key !== expected ? 401 : 200;',
+  'const expected =\n  Deno.env.get("MCP_ACCESS_KEY");\nif (k !== expected) deny();',
+  // The fifth pass: Hono's adapter form.
+  'import { env } from "hono/adapter";\nif (provided !== env(c).MCP_ACCESS_KEY) deny();',
+  'const { MCP_ACCESS_KEY } = env(c);\nif (provided !== MCP_ACCESS_KEY) deny();',
+];
+/** Texts the rule must not catch — ordinary code and prose. */
+const CREDENTIAL_COMPARE_NON_PROBES = [
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (!MCP_ACCESS_KEY) throw new Error("unset");',
+  'const expected = process.env.BRAIN_ACCESS_KEY;\nif (key.length !== expected.length) return false;\nreturn timingSafeEqual(Buffer.from(key), Buffer.from(expected));',
+  'if (process.env.OB1_STORE === "postgrest") {',
+  'if (response.status !== expectedStatus) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (MCP_ACCESS_KEY === undefined) fail();',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";\nif (MCP_ACCESS_KEY === "") console.warn("unset");',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (typeof MCP_ACCESS_KEY !== "string") fail();',
+  'if (embedding.length !== EXPECTED_DIM) {',
+  'const apiKey = process.env.OPENROUTER_API_KEY;\nif (args.grader === "openrouter" && !apiKey) {',
+  'const key = c.req.query("key");\nif (!key) return c.json({ error: "Unauthorized" }, 401);',
+  'supabase secrets set MCP_ACCESS_KEY=your-generated-key-here',
+  'MCP_ACCESS_KEYS=laptop:write:<sha256 of the key>',
+  'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") });',
+  'const token = process.env.TELEGRAM_BOT_TOKEN;\nif (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");',
+  'const expected = process.env.EXPECTED_DIM;\nif (_embedDimCache !== expected) {',
+  'seven files compared the key with `!==` and are consumers of auth.ts now',
+  'const secret = process.env.WEBHOOK_SECRET ?? "";\nconst ok = secret.length > 0 && timingSafeEqual(a, b);',
+  'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nif (key === "your-service-role-key") throw new Error("placeholder");',
+  'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
+  'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (expected?.length !== 64) warn();',
+];
+// The vendored recipes and integrations that carry the same compare, each for
+// exactly this many lines, held by the ticket named; fixing one makes its entry
+// stale (remove it), adding a compare beside one fails.
+const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 64 did";
+const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
+  ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
+  ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
+  ["recipes/ob-graph/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/work-operating-model-activation/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/editorial-policy/auditor/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/vercel-neon-telegram/src/app/api/telegram/route.ts", { why: `${HELD} (Telegram's webhook secret header)`, lines: 1 }],
+  ["integrations/delete-thought-mcp/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/update-thought-mcp/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/kubernetes-deployment/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/entity-extraction-worker/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/consolidation-workers/bio/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/consolidation-workers/metadata-norm/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/agent-memory-api/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/open-brain-rest/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/readwise-capture/index.ts", { why: `${HELD} (the secret Readwise echoes in the webhook body)`, lines: 1 }],
+  ["integrations/telegram-capture/README.md", { why: `${HELD} (the README's sample handler)`, lines: 1 }],
+  ["docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs", { why: `${HELD} (the walkthrough's stub REST server)`, lines: 1 }],
+]);
+
+function checkCredentialCompares() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const probe of CREDENTIAL_COMPARE_PROBES) {
+    // Every line of a probe that carries a compare must be caught — a probe with
+    // two routes is two compares, and the second binding is not a shadow of the first.
+    const expected = probe.split("\n").map((l, i) => (/(?:!==|===|!=|==)/.test(l) ? i + 1 : 0)).filter(Boolean);
+    const got = credentialComparesIn(probe);
+    if (expected.some((l) => !got.includes(l))) fail(SELF, `credential-compare rule no longer catches its probe (lines ${expected.join(",")}, caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
+  }
+  for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
+    if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
+  }
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 64), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const counts = new Map();
+  for (const file of textFilesUnder(SCANNED_ROOTS)) {
+    const rel = relOf(file);
+    const hits = credentialComparesIn(readFileSync(file, "utf8"));
+    if (hits.length === 0) continue;
+    counts.set(rel, hits.length);
+    if (!CREDENTIAL_COMPARE_EXCEPTIONS.has(rel)) for (const line of hits) fail(`${rel}:${line}`, MSG);
+  }
+  for (const [rel, { why, lines }] of CREDENTIAL_COMPARE_EXCEPTIONS) {
+    const seen = counts.get(rel) ?? 0;
+    if (seen !== lines) {
+      fail(rel, seen === 0
+        ? `listed as a credential-compare exception (${why}) but matches nothing — remove it from CREDENTIAL_COMPARE_EXCEPTIONS`
+        : `credential-compare exception (${why}) covers ${lines} line(s) but ${seen} match — a new compare beside the documented one, or the exception's count is stale`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -692,6 +942,7 @@ checkSqlGuards();
 await checkMigrationNumbers();
 checkShellHazards(dirs);
 checkCoreFunctions();
+checkCredentialCompares();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
@@ -841,6 +1092,84 @@ function checkComposeForwardsDocumentedEnv() {
   }
 }
 checkComposeForwardsDocumentedEnv();
+
+/**
+ * 9: committed fixtures carry NO thought content (SMD-1295).
+ *
+ * export-queries.ts redacts a real brain's log to query text and ids, and the
+ * replay fixture is ids and vectors, so a fixture can be committed without the
+ * corpus. This guards that promise. A committed fixture has a tiny, known shape,
+ * so the rule is an ALLOWLIST, not a denylist of field names: every STRING value
+ * anywhere in the tree — including array elements and nested objects — must be
+ * one of a thought id (a uuid), or text under a key the fixture format defines
+ * as free text (`query` — what the caller typed; `note`/`origin`/`generated` —
+ * tool-authored labels, deliberately NOT content-adjacent names like `source`).
+ * Object KEYS are checked too — a legitimate key is a plain field name or an id,
+ * so a thought body smuggled as a key (prose, spaces) fails closed like any value.
+ * Any other string is a possible leak — a thought body under `content`, an array
+ * of `chunks`, a `title` derived from content, or any newly-added key that is not
+ * one of the four free-text ones — and fails closed. The only way to hide content
+ * is to put it under those four keys; the fixture format never does, so a future
+ * export must not either. A self-test on every run keeps it honest both ways.
+ *
+ * Note this guards THOUGHT content, not query text: the export fixture's `query`
+ * strings are the searcher's own words — personal data — and are allowed here
+ * because a replay needs them. Committing an export fixture from a real brain
+ * therefore commits real queries; that is a privacy call for the maintainer, and
+ * SETUP.md/FORK.md say so. Only the synthetic replay-fixture is truly content-free.
+ */
+function checkFixtureRedaction() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  const FREE_TEXT_KEYS = new Set(["query", "note", "origin", "generated"]);
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  // A structural field name — the only shape an object key legitimately takes in
+  // a fixture. A thought body smuggled AS a key (prose, spaces) is not one, so
+  // keys are checked too, not just values.
+  const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  // Recurse carrying the nearest object key that governs a value; an array's
+  // elements are governed by the array's own key, so `relevant: [uuid]` passes
+  // and `chunks: ["body"]` does not.
+  const scan = (node, key, path, hits) => {
+    if (typeof node === "string") {
+      if (node.trim() !== "" && !FREE_TEXT_KEYS.has(key) && !UUID.test(node.trim())) hits.push(`${path} (value under "${key}")`);
+      return;
+    }
+    if (Array.isArray(node)) { node.forEach((v, i) => scan(v, key, `${path}[${i}]`, hits)); return; }
+    if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) {
+      // A key that is neither a plain field name nor an id is content-shaped.
+      if (!IDENT.test(k) && !UUID.test(k)) hits.push(`${path}.${JSON.stringify(k.slice(0, 40))} (object key)`);
+      scan(v, k, `${path}.${k}`, hits);
+    }
+  };
+  // Self-test: thought content must be caught however it hides — a plain field,
+  // an array of strings, or an off-list key; a query/ids/vectors fixture must not.
+  for (const [probe, why] of [
+    [{ queries: [{ query: "q", content: "a leaked thought body" }] }, "a `content` field"],
+    [{ thoughts: [{ id: "x", chunks: ["a leaked chunk body"] }] }, "content in an array of strings"],
+    [{ title: "a leaked title derived from content" }, "content under an off-list key (`title`)"],
+    [{ thoughts: { "a leaked thought body used as a key": 1 } }, "content used as an object key"],
+  ]) {
+    const bad = []; scan(probe, "$", "$", bad);
+    if (bad.length === 0) fail(SELF, `fixture redaction check no longer catches ${why} (its own probe)`);
+  }
+  const good = []; scan(
+    { generated: "2026-01-01T00:00:00Z", origin: "query_log", note: "a description",
+      queries: [{ query: "how many projects have I led", relevant: ["10000000-0000-4000-8000-000000000001"], baseline: ["10000000-0000-4000-8000-000000000002"] }],
+      thoughts: [{ id: "10000000-0000-4000-8000-000000000003", embedding: [0.1, -0.2] }] }, "$", "$", good);
+  if (good.length) fail(SELF, `fixture redaction check false-positives on a query/ids/vectors fixture (${good.join(", ")})`);
+
+  const dir = join(ROOT, "evals", "fixtures");
+  if (!existsSync(dir)) return;
+  for (const file of walk(dir, [], /\.json$/)) {
+    let data;
+    try { data = JSON.parse(readFileSync(file, "utf8")); }
+    catch { fail(relOf(file), "committed fixture is not valid JSON"); continue; }
+    const hits = [];
+    scan(data, "$", "$", hits);
+    for (const h of hits) fail(relOf(file), `committed fixture carries a non-id, non-query string at ${h} — thought content must not be committed (SMD-1295)`);
+  }
+}
+checkFixtureRedaction();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

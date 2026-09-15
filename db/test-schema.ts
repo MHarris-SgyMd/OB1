@@ -31,6 +31,7 @@ import {
   HNSW_SEED_MAX_SCAN_TUPLES,
   MATCH_COUNT_CEILING,
   MATCH_THOUGHTS_SIGNATURE,
+  QUERY_LOG,
   UPDATE_THOUGHT_SIGNATURE,
   migrationValues,
   parseSetConfig,
@@ -3452,6 +3453,137 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
   await db.exec(`DELETE FROM thoughts`);
 }
+
+// ── 34. Migration 034 — the opt-in query log ─────────────────────────────────
+//
+// A new table and one maintenance function, nothing on the capture path. This
+// section is the table's shape (the two CHECKs that keep a search row and an
+// action row honest), the two indexes the export join uses, the export join
+// itself over hand-made rows, and prune_query_log's bounded delete. The
+// server-side on/off behaviour is server-portable's e2e (this file has no
+// server); here the table stands on its own, as [30]/[31] do for their tables.
+
+console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, and prune_query_log's bounded delete (SMD-1295)");
+{
+  // The one spelling: the table and function this section drives are the names
+  // config.mjs hands the server, preflight and the export tool.
+  assert(QUERY_LOG.table === "query_log" && QUERY_LOG.prune === "prune_query_log", `config.mjs QUERY_LOG names the 034 objects (${QUERY_LOG.table}, ${QUERY_LOG.prune})`);
+
+  const cols = (await db.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns WHERE table_name = 'query_log' ORDER BY ordinal_position`)).rows.map((r) => r.column_name);
+  const expected = ["id", "logged_at", "kind", "agent_id", "tool", "query", "match_count", "threshold", "recency_weight", "filter", "result_ids", "result_scores", "target_id"];
+  assert(JSON.stringify(cols) === JSON.stringify(expected), `query_log has exactly its columns in order (${cols.join(", ")})`);
+
+  // The two indexes the export join relies on: a btree on (agent_id, logged_at)
+  // and a partial GIN on result_ids for the @> containment lookup.
+  const idx = (await db.query<{ indexname: string; indexdef: string }>(
+    `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'query_log'`)).rows;
+  assert(idx.some((r) => /USING btree \(agent_id, logged_at\)/.test(r.indexdef)), "(agent_id, logged_at) btree exists for the join's agent-and-time narrowing");
+  assert(idx.some((r) => /USING gin \(result_ids\)/.test(r.indexdef) && /WHERE \(kind = 'search'::text\)/.test(r.indexdef)), "a partial GIN on result_ids (search rows) answers the @> containment lookup");
+
+  // The CHECKs: a search row must carry a query, an action row a target.
+  let refusedSearch = false;
+  try { await db.exec(`INSERT INTO query_log (kind, tool) VALUES ('search', 'search_thoughts')`); }
+  catch { refusedSearch = true; }
+  assert(refusedSearch, "a 'search' row with no query is refused by the CHECK");
+  let refusedAction = false;
+  try { await db.exec(`INSERT INTO query_log (kind, tool) VALUES ('action', 'fetch')`); }
+  catch { refusedAction = true; }
+  assert(refusedAction, "an 'action' row with no target_id is refused by the CHECK");
+  let refusedKind = false;
+  try { await db.exec(`INSERT INTO query_log (kind, tool, query) VALUES ('other', 'x', 'q')`); }
+  catch { refusedKind = true; }
+  assert(refusedKind, "an unknown kind is refused by the CHECK");
+
+  // The export join over hand-made rows: an agent searches (id a and b returned,
+  // a null score among them), then fetches b. The action links to the search by
+  // (agent, id, window). A second, anonymous delete of a — returned by the same
+  // search — does NOT link, because a NULL agent is its own bucket.
+  const A = "11111111-1111-4111-8111-111111111111";
+  const B = "22222222-2222-4222-8222-222222222222";
+  const AG = "99999999-9999-4999-8999-999999999999";
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
+      VALUES ('search', 'search_thoughts', '${AG}'::uuid, 'how many projects have I led', 10, 0, 0, '{}'::jsonb,
+              ARRAY['${A}','${B}']::uuid[], ARRAY[0.42, NULL]::real[]);
+    INSERT INTO query_log (kind, tool, agent_id, target_id) VALUES ('action', 'fetch', '${AG}'::uuid, '${B}'::uuid);
+    INSERT INTO query_log (kind, tool, target_id)          VALUES ('action', 'delete_thought', '${A}'::uuid);`);
+
+  const joined = (await db.query<{ action: string; from_query: string | null }>(`
+    SELECT act.tool AS action,
+           (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' ORDER BY act.tool`)).rows;
+  assert(joined.length === 2, "two action rows to attribute");
+  const del = joined.find((r) => r.action === "delete_thought");
+  const fetchRow = joined.find((r) => r.action === "fetch");
+  assert(fetchRow?.from_query === "how many projects have I led", "the fetch of a returned id links to the search that returned it");
+  assert(del?.from_query === null, "the anonymous delete does not link to an agent's search — a NULL agent is its own bucket");
+
+  // A search row keeps its null score element and its empty-array shape.
+  const scores = (await db.query<{ result_scores: (number | null)[] }>(
+    `SELECT result_scores FROM query_log WHERE kind='search'`)).rows[0];
+  // real is single-precision, so 0.42 comes back as its float4 rounding; a SQL
+  // NULL element arrives as null, undefined or NaN depending on the driver
+  // (PGlite gives NaN, Bun's Postgres gives null) — all mean "no score for this
+  // returned id", which the export ignores anyway (it needs the ids, not scores).
+  const s0 = scores.result_scores[0] as number;
+  const s1 = scores.result_scores[1] as number | null | undefined;
+  assert(Array.isArray(scores.result_scores) && Math.abs(s0 - 0.42) < 1e-6 && (s1 == null || Number.isNaN(s1)), `result_scores carries a score and a null element (${JSON.stringify(scores.result_scores)})`);
+
+  // The window bound the export applies (export-queries.ts): a touch links only
+  // to a search within OB1_EXPORT_WINDOW_MIN before it. A search older than the
+  // window does not attribute, even though it returned the id — the clause
+  // [33] mirrors from the export so the window's behaviour is not unexercised.
+  const C = "33333333-3333-4333-8333-333333333333";
+  const AG2 = "88888888-8888-4888-8888-888888888888";
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, logged_at)
+      VALUES ('search', 'search_thoughts', '${AG2}'::uuid, 'a stale search', 10, 0, 0, '{}'::jsonb,
+              ARRAY['${C}']::uuid[], ARRAY[0.9]::real[], now() - interval '2 hours');
+    INSERT INTO query_log (kind, tool, agent_id, target_id) VALUES ('action', 'fetch', '${AG2}'::uuid, '${C}'::uuid);`);
+  const windowed = (await db.query<{ from_query: string | null }>(`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.query IS NOT NULL
+               AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at
+               AND s.logged_at >= act.logged_at - make_interval(mins => 30)
+               AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG2}'::uuid`)).rows[0];
+  assert(windowed.from_query === null, "a search older than the export window does not attribute a later touch");
+
+  // Positive control (a clean bucket): a search INSIDE the window does attribute,
+  // so the null above is the window bound excluding, not the whole clause failing.
+  const D = "44444444-4444-4444-8444-444444444444";
+  const AG3 = "77777777-7777-4777-8777-777777777777";
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, logged_at)
+      VALUES ('search', 'search_thoughts', '${AG3}'::uuid, 'a fresh search', 10, 0, 0, '{}'::jsonb,
+              ARRAY['${D}']::uuid[], ARRAY[0.9]::real[], now() - interval '5 minutes');
+    INSERT INTO query_log (kind, tool, agent_id, target_id) VALUES ('action', 'fetch', '${AG3}'::uuid, '${D}'::uuid);`);
+  const inWindow = (await db.query<{ from_query: string | null }>(`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.query IS NOT NULL
+               AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at
+               AND s.logged_at >= act.logged_at - make_interval(mins => 30)
+               AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
+  assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
+
+  // prune_query_log: default arg, bounded delete, and a refusal on a bad window.
+  const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
+  const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
+  assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  const wiped = (await db.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n;
+  assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes everything older than now() (${wiped})`);
+  let refusedNeg = false;
+  try { await db.exec(`SELECT prune_query_log(-1)`); } catch { refusedNeg = true; }
+  assert(refusedNeg, "prune_query_log refuses a negative window");
 
 console.log("\n[35] Migration 035: a re-capture writes no provenance — the envelope's derived_from and supersedes land on a first capture only, no capture takes the supersession lock, and the return says existed (SMD-1453)");
 {

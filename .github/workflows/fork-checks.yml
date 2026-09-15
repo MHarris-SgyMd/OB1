@@ -72,7 +72,7 @@ jobs:
       # is not installed on the maintainer's machine, so a node-only run was
       # the one step nobody could reproduce locally); the script is plain ESM
       # and runs under either.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards and core-function redefinitions
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions and credential compares
         run: bun scripts/check-fork-consistency.mjs
 
   deno-check:
@@ -97,6 +97,13 @@ jobs:
       - name: deno check server/index.ts
         working-directory: server
         run: deno check --node-modules-dir=none index.ts
+
+      # The two extensions still on supabase-js resolve under Deno (the other
+      # five import the SQL shim, which imports `bun`), so they are checked as
+      # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
+      - name: deno check extensions/family-calendar and job-hunt
+        working-directory: extensions/family-calendar
+        run: deno check --node-modules-dir=none index.ts ../job-hunt/index.ts
 
   portable-server:
     name: Portable server (Bun + Workers)
@@ -143,6 +150,22 @@ jobs:
           CLOUDFLARE_API_TOKEN: ""
           WRANGLER_SEND_METRICS: "false"
 
+      # The seven vendored extension servers are consumers of this server's
+      # auth module (extensions/_shared/auth.ts, a byte copy). Their test runs
+      # in THIS job because main's ruleset requires it: a separate job would
+      # not gate a merge. Pinned to the extensions' deno.json — the test fails
+      # if one drifts — so the servers run on the libraries they deploy with.
+      - name: Install the extensions' pinned test dependencies
+        working-directory: extensions
+        run: bun install --frozen-lockfile
+
+      # Imported as deployed under a stand-in for Deno's two globals: a wrong or
+      # revoked key is refused, a read-scoped key never sees a tool that writes,
+      # the copy is byte for byte auth.ts. No database.
+      - name: Scoped access keys reach the extensions
+        working-directory: extensions
+        run: bun test-auth.ts
+
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-latest
@@ -170,6 +193,28 @@ jobs:
         env:
           OB1_EMBEDDING_DIM: "768"
           OB1_EMBEDDING_MODEL: nomic-embed-text
+
+  replay-gate:
+    name: Retrieval replay gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # SMD-1295. Replays the committed, content-free fixture through the shipped
+      # retrieval on PGlite — no service container, no model, no key — and fails
+      # when recall@5 drops past the fixture's floor. The live corpus stays out
+      # of CI; the fixture is ids and vectors only (evals/build-replay-fixture.ts).
+      - name: Replay the query fixture and hold the recall floor
+        working-directory: db
+        run: bun test-replay.ts
 
   db-live:
     name: Schema against real Postgres
