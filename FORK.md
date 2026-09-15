@@ -6235,6 +6235,33 @@ then an acceptance at M: 021 writes M, the sketch keeps it, E is right).
 Setting the snapshot rows to the latest non-accepted row's model, as 030 does,
 has no such case and costs the same statement.
 
+**Review, first pass (high), triaged.** The snapshot's read took ACCESS SHARE
+on `thoughts` before 021's ADD COLUMN asked for ACCESS EXCLUSIVE — a lock
+upgrade the file alone never did — so on a plain run with the server still up
+a label written in that window would be set back as if 021 had written it, and
+two migrators would deadlock; the bracket now takes 021's lock first, and
+within 10 s (the plain loop had no timeout, and the removed checks were the
+only fail-fast a plain run with 021 pending had — [7] holds the lock and reads
+the failure at 021 with nothing recorded). The count line said every set-back
+label was "from an acceptance" when the count is the rows the rule disagreed
+with 021 on — 021's unnamed pick of a tie included — and the count itself was
+read from an undeclared `count` field on Bun's result; it is now `WITH changed
+AS (UPDATE … RETURNING 1) SELECT count(*)`, `reembed.ts`'s idiom, and the line
+says "set by 030's rule instead". The snapshot was corpus-sized and built even
+where no succeeded claim row names a model; the bracket short-circuits on
+030's own test and snapshots only thoughts with such a row (a thought without
+one is labelled by neither side, so the writes and the count are unchanged).
+The rule was spelled twice in one UPDATE (the SET and the predicate) — a
+derived table computes it once. The `startsWith("021_")` literal was doubled
+by a scalar slot; the re-run collects a map and `sql.begin` returns the plain
+run's value. The checks' own lock timeout had lost its only test with the
+gate; [7] locks `ob1_config` and reads "could not be judged". A stale comment
+in [7] still called the gate current. **Ticketed: SMD-1434** — the altitude
+above this one: a plain run applies a pending file after recorded later
+siblings (a ledger hole) with no judgement, and 021's body over 022's and
+025's `upsert_thought` is only the case this ticket's fixture happens to show;
+the loop can refuse, or warn under `--dry-run`, and name `--reapply`.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6247,15 +6274,17 @@ Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
 acceptance over a thought written since its enqueue *before* the re-run, and
 asserts the run goes with no refusal, the six labels (`stub-embed`, NULL,
 `earlier-model`, NULL, NULL, NULL), every acceptance standing, and the line
-beside 021 counting four; then deletes 021's ledger row with 030 recorded,
-plants a fifth acceptance under a suffixed key, and asserts a plain run applies
-021 bracketed — exit 0, 030 skipped, four set back, every other label as the
-re-run left it, 021 recorded, the trigger enabled — and that a second
-`--reapply` over the same corpus sets the same four back and changes no label.
-The hazard refusals and the checks-lock case went with the gate; the rest of
-[7] and all of [8] are unchanged. `test-schema` [29] pins
+beside 021 counting four; that an exclusive lock on `ob1_config` fails the
+checks before the run within their own timeout; then deletes 021's ledger row
+with 030 recorded, plants a fifth acceptance under a suffixed key, and asserts
+a held lock on `thoughts` fails the plain run's 021 within the bracket's 10 s
+with nothing recorded, that the plain run then applies 021 bracketed — exit 0,
+030 skipped, four set, every other label as the re-run left it, 021 recorded,
+the trigger enabled — and that a second `--reapply` over the same corpus sets
+the same four and changes no label. The hazard refusals went with the gate;
+the rest of [7] and all of [8] are unchanged. `test-schema` [29] pins
 `LATEST_UNACCEPTED_CLAIM_SQL` against 030's substituted text. `test-upgrade`
-106/106, `test-schema` 645/645, `test-preflight` 174/174, `test-live` 419/419,
+110/110, `test-schema` 645/645, `test-preflight` 174/174, `test-live` 419/419,
 `tsc` clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).
 

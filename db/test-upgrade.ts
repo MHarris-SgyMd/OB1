@@ -436,7 +436,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
          `reembed.ts --status on the baselined brain names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
 
   // 021 pending too, from here on: a ledger hole on the very file whose block
-  // the gate is about, so a plain run reaches it.
+  // applyBracketed brackets, so a plain run reaches it.
   await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const ledgerBefore = await ledger();
 
@@ -476,6 +476,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const writtenSince = (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES ('unlabelled; written during the attempt that was refused and accepted', '{}'::jsonb, ${vec}::vector, now() - interval '30 minutes') RETURNING id`)[0].id as string;
   await enqueue(KEY, [writtenSince]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', enqueued_at = now() - interval '2 hours', claimed_at = now() - interval '1 hour', finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${writtenSince}::uuid`;
+  // A session holding ACCESS EXCLUSIVE on ob1_config: the checks before the
+  // run read it, and would wait for ever without a timeout of their own.
+  const excl = new SQL({ url: URL_, max: 1 });
+  await excl.unsafe("BEGIN");
+  await excl.unsafe("LOCK TABLE ob1_config IN ACCESS EXCLUSIVE MODE");
+  const blockedChecks = await migrate("--reapply");
+  await excl.unsafe("ROLLBACK");
+  await excl.close();
+  assert(blockedChecks.code === 1 && /--reapply\s+could not be judged: .*lock timeout/.test(blockedChecks.out) && /within the 10 s the checks before the run set/.test(blockedChecks.out) && !/re-applying every migration/.test(blockedChecks.out),
+         `an exclusive lock on ob1_config fails the checks before the run within their own timeout (exit ${blockedChecks.code})`);
+  assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // A session holding a lock on thoughts — an idle transaction, a server left
   // running: 001's DROP TRIGGER wants ACCESS EXCLUSIVE, the 10 s lock_timeout
   // fails it, and the one transaction rolls back with nothing changed.
@@ -517,8 +528,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(models[suffixedHazard] === null && models[writtenSince] === null, "the acceptance under a suffixed key and the own-key acceptance over a thought written since its enqueue — both labels 021's block wrote and 030 leaves — end NULL: the bracket set them back");
   const standing = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE status = 'succeeded' AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`)[0].c);
   assert((await standing()) === 4, "…and every acceptance stands, spent by nobody");
-  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill wrote 4 label\(s\) from an acceptance; set back/.test(run.out),
-         "…and the run says, beside 021's line, how many labels the bracket set back: the four 021's block wrote from an acceptance");
+  assert(new RegExp(`021_embedding_model_per_row\\.sql\\s+applied\\n\\s+·\\s+021's evidence backfill: 4 label\\(s\\) it wrote set by 030's rule instead`).test(run.out),
+         "…and the run says, beside 021's line, how many labels the bracket set: the four 021's block wrote from an acceptance");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );
@@ -541,9 +552,23 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const lateSuffixed = await plant("unlabelled since the upgrade; a backfill under a suffixed key was refused and accepted");
   await enqueue(SUFFIXED, [lateSuffixed]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${SUFFIXED} AND thought_id = ${lateSuffixed}::uuid`;
+  // A session holding a lock on thoughts while the plain run reaches 021: the
+  // bracket takes 021's ACCESS EXCLUSIVE lock first, within 10 s, so the file
+  // fails in its own transaction rather than the snapshot waiting for ever
+  // behind the holder — and nothing is written or recorded.
+  const heldPlain = new SQL({ url: URL_, max: 1 });
+  await heldPlain.unsafe("BEGIN");
+  await heldPlain.unsafe("LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE");
+  const blockedPlain = await migrate();
+  await heldPlain.unsafe("ROLLBACK");
+  await heldPlain.close();
+  assert(blockedPlain.code === 1 && /021_embedding_model_per_row\.sql\s+FAILED: .*lock timeout/.test(blockedPlain.out) && /10 s for 021, set by the bracket around its backfill/.test(blockedPlain.out),
+         `a held lock on thoughts fails a plain run's 021 within the bracket's 10 s (exit ${blockedPlain.code})`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c) === 0 && (await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${lateSuffixed}::uuid`)[0].m === null,
+         "…and 021 is not recorded, nothing labelled");
   const holeAt021 = await migrate();
   assert(holeAt021.code === 0 && /021_embedding_model_per_row\.sql\s+applied/.test(holeAt021.out) && /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(holeAt021.out) &&
-           /021's evidence backfill wrote 4 label\(s\) from an acceptance; set back/.test(holeAt021.out) && !/refus/.test(holeAt021.out),
+           new RegExp(`021's evidence backfill: 4 label\\(s\\) it wrote set by 030's rule instead`).test(holeAt021.out) && !/refus/.test(holeAt021.out),
          `with 030 recorded and skipped, a plain run with a hole at 021 applies it bracketed — no refusal, the four labels its block wrote from acceptances set back (exit ${holeAt021.code})${holeAt021.code === 0 ? "" : `:\n${holeAt021.out}`}`);
   const labels = async () => Object.fromEntries(((await sql`SELECT id, embedding_model AS m FROM thoughts ORDER BY id`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m]));
   const afterHole = await labels();
@@ -559,7 +584,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // are restored (the state preflight's `atomic capture` names, with this
   // remedy).
   const again = await migrate("--reapply");
-  assert(again.code === 0 && /021's evidence backfill wrote 4 label\(s\) from an acceptance/.test(again.out), `a second --reapply brackets 021 the same way (exit ${again.code})`);
+  assert(again.code === 0 && new RegExp(`021's evidence backfill: 4 label\\(s\\) it wrote set by 030's rule instead`).test(again.out), `a second --reapply brackets 021 the same way (exit ${again.code})`);
   assert(JSON.stringify(await labels()) === JSON.stringify(afterHole), "…and every label is as before: the bracket is idempotent");
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument

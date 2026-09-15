@@ -114,15 +114,19 @@ operator's *acceptance* of a failure (`reembed.ts --accept-failed`) — a though
 that kept the vector it had, by decision not at that key's model. 030 takes
 such a label back where it can tell it from the server's own and labels with
 accepted rows excluded, but 030 cannot know which labels 021's block wrote a
-moment ago; the migrator can. It notes the thoughts unlabelled before 021
-(every thought with a vector, where the column does not yet exist) in a temp
-table on its connection, and after the file sets each of them by 030's rule —
-the latest row that is not an acceptance, when nothing has written the thought
-since it finished, else unknown — in the same transaction as the file, with the
-`updated_at` trigger held as 021 and 030 hold it. A label from a plain latest
-row is written again unchanged; a label from an acceptance goes back to
-unknown, or to the earlier pass that did write the vector; the acceptance
-stands, spent by nobody. The run says how many it set back, beside 021's line.
+moment ago; the migrator can. It takes 021's own lock on `thoughts` first,
+within 10 s (so a held lock fails the file rather than the snapshot waiting
+behind it), notes the thoughts unlabelled before 021 that have a claim row
+naming a model (every such thought with a vector, where the column does not
+yet exist) in a temp table on its connection, and after the file sets each of
+them by 030's rule — the latest row that is not an acceptance, when nothing has
+written the thought since it finished, else unknown — in the same transaction
+as the file, with the `updated_at` trigger held as 021 and 030 hold it. Where
+no succeeded claim row names a model there is nothing to snapshot, and the file
+runs bare. A label from a plain latest row is written again unchanged; a label
+from an acceptance goes back to unknown, or to the earlier pass that did write
+the vector; the acceptance stands, spent by nobody. The run says how many
+labels it set, beside 021's line.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any

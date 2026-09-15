@@ -53,6 +53,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
+  CLAIM_EVIDENCE_ROWS_SQL,
   LATEST_UNACCEPTED_CLAIM_SQL,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
@@ -327,7 +328,7 @@ function explainFailure(err: unknown, m: Migration | null, mode: "plain" | "reap
         ? "  A lock was not granted within the re-run's 10 s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first."
         : mode === "checks"
           ? "  A lock was not granted within the 10 s the checks before the run set for their reads: a session holds an exclusive lock on ob1_config — an idle transaction that altered it. End it first."
-          : "  A lock was not granted within the session's lock_timeout (023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
+          : "  A lock was not granted within the lock_timeout in force (10 s for 021, set by the bracket around its backfill; 023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
     );
   }
   if (hint) lines.push(`  ${hint}`);
@@ -404,54 +405,89 @@ async function reportSeeds(m: Migration): Promise<void> {
  * standing, spent by nobody. A row labelled before the file is not in the
  * snapshot and is not touched. The same transaction as the file — under
  * --reapply the whole re-run's, on a plain run the file's own — so the snapshot
- * can neither predate nor outlive what it brackets; the trigger held as 021 and
- * 030 hold it, the label being a fact about a vector and not an edit; the temp
- * table dropped at commit. Whenever 021 runs — 030 following in the same run,
- * or recorded and skipped (a ledger hole at 021 alone) — because the correction
- * is the migrator's, not 030's. Needs TEMP on the database, which PUBLIC has
- * unless revoked.
+ * can neither predate nor outlive what it brackets; and the lock 021's ADD
+ * COLUMN takes on thoughts, ACCESS EXCLUSIVE, is taken FIRST, within 10 s as
+ * the re-run's: the snapshot's read would otherwise hold ACCESS SHARE while the
+ * ALTER waited for ACCESS EXCLUSIVE — a window a running server could label a
+ * snapshot row in, which the bracket would then set back as if 021 had written
+ * it, and one two migrators would deadlock across (first review pass). Under
+ * --reapply 001 holds that lock and the timeout is set already; both are
+ * idempotent inside the transaction. The trigger held as 021 and 030 hold it,
+ * the label being a fact about a vector and not an edit; the temp table
+ * dropped at commit. Whenever 021 runs — 030 following in the same run, or
+ * recorded and skipped (a ledger hole at 021 alone) — because the correction is
+ * the migrator's, not 030's. Nothing to snapshot where no succeeded claim row
+ * names a model, as 030 returns early on the same test: the file runs bare,
+ * since its block can label nothing; and the snapshot holds only thoughts with
+ * such a row, since neither 021 nor the rule labels one without (a LEFT JOIN
+ * miss is NULL, which is not distinct from the NULL it had). Needs TEMP on the
+ * database, which PUBLIC has unless revoked, as 023 does.
  *
  * This replaced a gate that refused the run on the rows 021 would label and 030
  * would leave, and printed a way back that spent the acceptance; SMD-1193's
  * seven review passes each found a seam in it, since it was the difference of
  * two rules — 030's header, hashed, still describes it. Returns how many labels
- * the rule changed (each one 021's block wrote from an acceptance, or its pick
- * of a tie), null for any other file.
+ * the rule changed — each one 021's block wrote from an acceptance, or its
+ * unnamed pick of a tie on finished_at, the rule's being the key — and null for
+ * any other file.
  */
 async function applyBracketed(tx: SQL, m: Migration): Promise<number | null> {
   if (!m.name.startsWith("021_")) {
     await tx.unsafe(m.sql);
     return null;
   }
-  const [{ has_label }] = (await tx`
-    SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label`) as { has_label: boolean }[];
+  await tx.unsafe("SET LOCAL lock_timeout = '10s'");
+  await tx.unsafe("LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE");
+  // Two statements, not one: a relation named in a statement is resolved when
+  // the statement is parsed, so the claim table cannot be asked about in the
+  // statement that asks whether it exists.
+  const [{ has_label, has_claims }] = (await tx`
+    SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
+           to_regclass('thought_work_claims') IS NOT NULL AS has_claims`) as { has_label: boolean; has_claims: boolean }[];
+  const hasEvidence = has_claims && ((await tx.unsafe(`SELECT EXISTS (SELECT 1 FROM (${CLAIM_EVIDENCE_ROWS_SQL}) c) AS e`)) as { e: boolean }[])[0].e;
+  if (!hasEvidence) {
+    await tx.unsafe(m.sql);
+    return 0;
+  }
   await tx.unsafe(
-    "CREATE TEMP TABLE ob1_unlabelled_before_021 ON COMMIT DROP AS SELECT id FROM thoughts WHERE embedding IS NOT NULL" + (has_label ? " AND embedding_model IS NULL" : "")
+    "CREATE TEMP TABLE ob1_unlabelled_before_021 ON COMMIT DROP AS SELECT t.id FROM thoughts t WHERE t.embedding IS NOT NULL" +
+      (has_label ? " AND t.embedding_model IS NULL" : "") +
+      ` AND EXISTS (SELECT 1 FROM (${CLAIM_EVIDENCE_ROWS_SQL}) c WHERE c.thought_id = t.id)`
   );
   await tx.unsafe("ANALYZE pg_temp.ob1_unlabelled_before_021");
   await tx.unsafe(m.sql);
   await tx.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
-  // 021's bound, `t.updated_at <= finished_at`, spelled as 021 and 030 spell
-  // it: a NULL updated_at is never labelled by either, and is not here.
-  const set = await tx.unsafe(
-    "UPDATE thoughts t\n" +
-      "   SET embedding_model = CASE WHEN t.updated_at <= e.finished_at THEN e.model END\n" +
-      "  FROM pg_temp.ob1_unlabelled_before_021 s\n" +
-      `  LEFT JOIN (${LATEST_UNACCEPTED_CLAIM_SQL}) e ON e.thought_id = s.id\n` +
-      " WHERE t.id = s.id\n" +
-      "   AND t.embedding_model IS DISTINCT FROM CASE WHEN t.updated_at <= e.finished_at THEN e.model END"
-  );
+  // The rule computed once, in a derived table, and read twice: what to write,
+  // and whether the row differs from it (which is also the count). 021's
+  // bound, `updated_at <= finished_at`, spelled as 021 and 030 spell it: a
+  // NULL updated_at is never labelled by either, and is not here.
+  const [{ n }] = (await tx.unsafe(
+    "WITH changed AS (\n" +
+      "  UPDATE thoughts t\n" +
+      "     SET embedding_model = v.want\n" +
+      "    FROM (\n" +
+      "      SELECT s.id, CASE WHEN th.updated_at <= e.finished_at THEN e.model END AS want\n" +
+      "        FROM pg_temp.ob1_unlabelled_before_021 s\n" +
+      "        JOIN thoughts th ON th.id = s.id\n" +
+      `        LEFT JOIN (${LATEST_UNACCEPTED_CLAIM_SQL}) e ON e.thought_id = s.id\n` +
+      "    ) v\n" +
+      "   WHERE t.id = v.id\n" +
+      "     AND t.embedding_model IS DISTINCT FROM v.want\n" +
+      "  RETURNING 1\n" +
+      ")\n" +
+      "SELECT count(*)::int AS n FROM changed"
+  )) as { n: number }[];
   await tx.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
-  return Number((set as unknown as { count: number }).count);
+  return Number(n);
 }
 
-/** What the bracket set back, when anything — beside 021's line, so the operator can tell it from 030's own work. */
-function reportBracket(corrected: number | null): void {
-  if (corrected) {
-    console.log(
-      `  ·  021's evidence backfill wrote ${corrected} label(s) from an acceptance; set back — to the pass that did write the vector, or unknown — with the acceptance standing`
-    );
-  }
+/**
+ * What the bracket set, when anything — beside the file's line, so the operator
+ * can tell it from 030's own work. Not "from an acceptance": the count is the
+ * rows the rule disagreed with 021 on, which is those and 021's pick of a tie.
+ */
+function reportBracket(n: number | null | undefined): void {
+  if (n) console.log(`  ·  021's evidence backfill: ${n} label(s) it wrote set by 030's rule instead — the latest pass that did write the vector, or unknown; every acceptance stands`);
 }
 
 // ── The re-run, one transaction ─────────────────────────────────────────────
@@ -571,14 +607,16 @@ if (reapply) {
 if (reapply && !dryRun) {
   // An object, not a `let`: an assignment inside the callback is invisible to
   // the type checker's flow analysis, which would narrow a `let` to null.
-  const progress: { current: Migration | null; corrected: number | null } = { current: null, corrected: null };
+  const progress: { current: Migration | null } = { current: null };
+  /** What the bracket set, by the file it bracketed. */
+  const corrected = new Map<string, number>();
   try {
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe("SET LOCAL lock_timeout = '10s'");
       for (const m of migrations) {
         progress.current = m;
-        const corrected = await applyBracketed(tx, m);
-        if (corrected !== null) progress.corrected = corrected;
+        const n = await applyBracketed(tx, m);
+        if (n !== null) corrected.set(m.name, n);
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
@@ -595,7 +633,7 @@ if (reapply && !dryRun) {
   for (const m of migrations) {
     const again = applied.has(m.name);
     console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
-    if (m.name.startsWith("021_")) reportBracket(progress.corrected);
+    reportBracket(corrected.get(m.name));
     if (again) reapplied++;
     else ran++;
   }
@@ -656,13 +694,13 @@ for (const m of reapply && !dryRun ? [] : migrations) {
   // Each migration runs in its own transaction: a failure leaves earlier ones
   // applied and recorded, so a rerun resumes rather than starting over.
   try {
-    const bracket: { corrected: number | null } = { corrected: null };
-    await sql.begin(async (tx: SQL) => {
-      bracket.corrected = await applyBracketed(tx, m);
+    const corrected = await sql.begin(async (tx: SQL) => {
+      const n = await applyBracketed(tx, m);
       await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
+      return n;
     });
     console.log(`  ✓  ${m.name}  applied`);
-    reportBracket(bracket.corrected);
+    reportBracket(corrected as number | null);
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);
