@@ -22,7 +22,7 @@
  * adopted with --baseline whose schema is older than its ledger says —
  * reembed.ts and preflight name the command where they find that. Every file,
  * not a range from the one a symptom names: a later migration may redefine what
- * an earlier one created (022 and 025 redefine 021's upsert_thought; 020 drops a
+ * an earlier one created (022, 025 and 033 redefine 021's upsert_thought; 020 drops a
  * form 014 recreates), and a file's body may reference what only an earlier
  * file installs (025's upsert_thought reads a column 021 adds, resolved when the
  * function first RUNS, not when it is created) — so a start point is safe only
@@ -638,7 +638,7 @@ if (shadows021) {
 // Every migration — recorded or pending — in order, in ONE transaction: a
 // failure part-way would otherwise leave the files before it at their own
 // definitions while a later file's redefinition of the same objects — 022's and
-// 025's of 021's upsert_thought; 020's drop of the 4-argument match_thoughts
+// 025's and 033's of 021's upsert_thought; 020's drop of the 4-argument match_thoughts
 // that 014 and 019 recreate — was not yet restored, with nothing in the catalog
 // to say so; and a pending file left for the loop would apply AFTER the re-run,
 // over what it restored. All or nothing, and the output says which. Judged

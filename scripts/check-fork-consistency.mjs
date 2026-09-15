@@ -695,7 +695,7 @@ function checkCoreFunctions() {
 // — and then ran as the service role: one shared plaintext secret, compared
 // byte by byte (the timing leak fix 14 closed in the core server), no scope,
 // no revocation short of re-keying every client, and full write access on a
-// key accepted from a URL query string. FORK.md change 63 made them consumers
+// key accepted from a URL query string. FORK.md change 64 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
 // is never given the tools that write — and this is what keeps the next rebase
 // from bringing the two lines back.
@@ -868,7 +868,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry
 // stale (remove it), adding a compare beside one fails.
-const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 63 did";
+const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 64 did";
 const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
   ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
   ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
@@ -901,7 +901,7 @@ function checkCredentialCompares() {
   for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 63), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 64), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);

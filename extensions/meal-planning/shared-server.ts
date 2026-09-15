@@ -22,7 +22,7 @@
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_HOUSEHOLD_ACCESS_KEYS (the older single MCP_HOUSEHOLD_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
-// that write. FORK.md change 63; extensions/test-auth.ts exercises it.
+// that write. FORK.md change 64; extensions/test-auth.ts exercises it.
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";

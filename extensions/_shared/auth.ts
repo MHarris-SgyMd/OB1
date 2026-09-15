@@ -32,7 +32,7 @@
  * Consumers: server-portable/index.ts, and the six vendored extensions under
  * extensions/ (seven servers), which authenticated with `key !== expected` on a
  * URL query key and ran as the service role until they were made consumers of
- * this module (SMD-1252, FORK.md change 63). They import extensions/_shared/
+ * this module (SMD-1252, FORK.md change 64). They import extensions/_shared/
  * auth.ts — a byte-for-byte copy of this file, because a Supabase Edge Function
  * is bundled from supabase/functions/ and `_shared/` is the one place beside it
  * a shared module can live; extensions/test-auth.ts fails if the two differ.

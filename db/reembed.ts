@@ -179,9 +179,11 @@
  * needs 016's function and says so on an older schema). --dry-run reports the
  * 018 refusal a run would make instead of the worker plan. Whether a pair should be one thought is the
  * operator's call; nothing is written to the claim row about it. 018's lock
- * serialises edits only: a capture of the same text committing while a worker
- * fingerprints a legacy row still raises the unique violation, which lands as
- * a failed claim naming the constraint, and --retry-failed resolves it. Since
+ * serialised edits only until migration 033: a capture of the same text
+ * committing while a worker fingerprinted a legacy row raised the unique
+ * violation, which landed as a failed claim naming the constraint for
+ * --retry-failed to resolve; since 033 upsert_thought takes the same lock, so
+ * the worker waits for the capture and is told duplicate_of instead. Since
  * migration 023 the corpus is fingerprinted once at upgrade — every legacy
  * singleton, and the oldest of each group (created_at, then id) — so a pass
  * finds NULL/fingerprinted pairs, and a NULL/NULL pair is a load that inserted
@@ -1527,10 +1529,12 @@ async function processRow(row: Row): Promise<Outcome> {
       continue;
     }
     // Anything else is reported as what it is. Not an error code at all: a
-    // capture of the same text committing while this row is fingerprinted
-    // (018's lock covers edits, not upsert_thought — SMD-1043) raises a unique
-    // violation into the catch in worker(): failed with the constraint named,
-    // and --retry-failed then finds the other row and reports duplicate_of.
+    // load that inserted the same text around upsert_thought while this row
+    // is fingerprinted raises a unique violation into the catch in worker():
+    // failed with the constraint named, and --retry-failed then finds the
+    // other row and reports duplicate_of. A CAPTURE of that text cannot do
+    // this since migration 033: upsert_thought takes 018's fingerprint lock,
+    // so the two are serialised and the later one is told, not refused.
     return { outcome: "failed", error: `update_thought: ${result.error}` };
   }
   return { outcome: "failed", error: "update_thought: STALE_READ or DUPLICATE_CONTENT three times in a row — the thought is being edited faster than it can be re-embedded; --retry-failed once it settles" };
