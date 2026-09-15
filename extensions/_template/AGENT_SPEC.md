@@ -127,34 +127,49 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+// The core server's access keys: named, scoped, SHA-256-hashed entries in
+// MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
+// auth.ts is server-portable/auth.ts, copied so Supabase bundles it. Never
+// compare a key with `!==` yourself (the fork's consistency check refuses it).
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
 // --- Environment Variables ---
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // --- MCP Server ---
-const server = new McpServer({
-  name: "extension-slug",
-  version: "1.0.0",
-});
+// Built per request, for the principal that authenticated: a tool that writes
+// is registered only for a write-scoped key, so a read-scoped key (the one to
+// put in a URL) does not see it in tools/list at all.
+function buildServer(principal: Principal): McpServer {
+  const server = new McpServer({
+    name: "extension-slug",
+    version: "1.0.0",
+  });
 
-// --- Tools ---
-// Register tools here using server.registerTool()
+  // --- Tools ---
+  // Register read tools with server.registerTool(); wrap each tool that
+  // inserts, updates or deletes in `if (canWrite(principal)) server.registerTool(...)`.
+
+  return server;
+}
 
 // --- Hono App with Auth ---
 const app = new Hono();
 
 app.all("*", async (c) => {
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
   const transport = new StreamableHTTPTransport();
-  await server.connect(transport);
+  await buildServer(principal).connect(transport);
   return transport.handleRequest(c);
 });
 

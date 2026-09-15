@@ -18,18 +18,31 @@
  * - Cannot create/delete recipes or meal plans
  */
 
+// ob1-fork (SMD-1252): access keys go through _shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_HOUSEHOLD_ACCESS_KEYS (the older single MCP_HOUSEHOLD_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is never given the tools
+// that write. FORK.md change 64; extensions/test-auth.ts exercises it.
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
 
 app.post("/mcp", async (c) => {
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
+  // is server-portable/auth.ts, held identical by test-auth.ts). MCP_HOUSEHOLD_ACCESS_KEYS
+  // holds name:scope:sha256 entries; the older single MCP_HOUSEHOLD_ACCESS_KEY still
+  // works, compared by digest. A read-scoped key is never given the tools that
+  // write, so it cannot see them, let alone call them.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -148,7 +161,7 @@ app.post("/mcp", async (c) => {
   );
 
   // mark_item_purchased tool
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "mark_item_purchased",
     "Toggle an item's purchased status on the shopping list",
     {

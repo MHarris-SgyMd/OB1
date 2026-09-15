@@ -25,7 +25,7 @@ Your agent can reason across five datasets — what you've cooked before, what's
 
 ## What It Does
 
-A complete meal planning system with recipes, weekly meal plans, and auto-generated shopping lists. Includes a separate shared MCP server so your partner can view plans and check off grocery items without accessing your full Open Brain.
+A complete meal planning system with recipes, weekly meal plans, and auto-generated shopping lists. Includes a separate shared MCP server so your partner can view plans — and, with a write-scoped key, check off grocery items — without accessing your full Open Brain.
 
 **Tables:**
 - `recipes` — Your recipe collection with JSONB ingredients and instructions
@@ -126,6 +126,8 @@ supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
 
 ### 3. Deploy the Primary MCP Server
 
+> **Not deployable as it stands.** Both of this extension's servers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`.
+
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
 
 | Setting | Value |
@@ -186,6 +188,8 @@ For this guide, we'll use Option B (shared service account).
 
 ### 2. Deploy the Shared Edge Function
 
+> Not deployable as it stands either — see the note above the primary server's table (SMD-1480).
+
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide with these differences:
 
 | Setting | Value |
@@ -193,7 +197,9 @@ Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) gui
 | Function name | `meal-planning-shared-mcp` |
 | Download path | `extensions/meal-planning` |
 | Server file | `shared-server.ts` (not `index.ts`) |
-| Access key secret name | `MCP_HOUSEHOLD_ACCESS_KEY` (not `MCP_ACCESS_KEY`) |
+| Access key secret name | `MCP_HOUSEHOLD_ACCESS_KEYS` (not `MCP_ACCESS_KEYS`; the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works) |
+
+Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
 
 You'll also need to set the household Supabase key:
 
@@ -210,7 +216,7 @@ Your spouse/partner follows the [Remote MCP Connection](../../primitives/remote-
 | Connector name | `Meal Planning (Shared)` |
 | URL | The shared server's MCP Connection URL |
 
-They can view meal plans and check off grocery items. They cannot create recipes, modify meal plans, or access other parts of your Open Brain.
+They can view meal plans and recipes; with a write-scoped key they can also check off grocery items. They cannot create recipes, modify meal plans, or access other parts of your Open Brain.
 
 ### 4. Test the Shared Server
 
@@ -219,7 +225,7 @@ Your spouse can now use prompts like:
 ```
 What's for dinner this week?
 Show me the shopping list for this week.
-Mark "chicken breast" as purchased.
+Mark "chicken breast" as purchased.        (needs a write-scoped key — mark_item_purchased is the one tool that writes)
 Search recipes tagged "quick".
 ```
 
@@ -245,7 +251,7 @@ Your agent can now:
 - Store and search your recipe collection
 - Plan weekly meals with a mix of recipes and custom entries
 - Auto-generate shopping lists by aggregating recipe ingredients
-- Let your spouse view plans and check off grocery items without full system access
+- Let your spouse view plans (and, with a write-scoped key, check off grocery items) without full system access
 
 The shared server demonstrates a key Open Brain principle: your data, your rules. You control exactly what someone else can see and do.
 
