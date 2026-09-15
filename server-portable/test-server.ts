@@ -1,4 +1,5 @@
 import { createAssert } from "../db/test-support.ts";
+import { queryLogEnabled, queryLogRetentionDays, QUERY_LOG } from "../db/config.mjs";
 /**
  * test-server.ts
  *
@@ -233,6 +234,29 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
     assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
   }
   // The MCP endpoint at / is untouched — [4] through [10] above.
+}
+
+console.log("\n[12] Query log flag — off by default, so the guard writes nothing (SMD-1295)");
+{
+  // The whole OFF guarantee rests on this predicate: the handlers' only log call
+  // sites are behind `if (!queryLogEnabled(env())) return;`, so anything that is
+  // not "on" means no store method is ever reached — no table write, no read.
+  // Only the exact "on" idiom (case-insensitive, trimmed) turns it on.
+  assert(queryLogEnabled({}) === false, "unset → off (the default)");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "" }) === false, "empty → off");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "off" }) === false, "\"off\" → off");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "1" }) === false, "\"1\" → off (only \"on\" enables it)");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "true" }) === false, "\"true\" → off");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "on" }) === true, "\"on\" → on");
+  assert(queryLogEnabled({ OB1_QUERY_LOG: "  ON  " }) === true, "\"  ON  \" → on (trimmed, case-insensitive)");
+  assert(queryLogEnabled(undefined) === false && queryLogEnabled(null) === false, "undefined/null env → off");
+
+  // The retention window prune_query_log uses, from the env or the default.
+  assert(queryLogRetentionDays({}) === QUERY_LOG.retentionDaysDefault, `unset → the default ${QUERY_LOG.retentionDaysDefault} days`);
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "7" }) === 7, "a valid number is honoured");
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "0" }) === 0, "0 is honoured (prune everything older than now)");
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "-3" }) === QUERY_LOG.retentionDaysDefault, "a negative falls back to the default");
+  assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "abc" }) === QUERY_LOG.retentionDaysDefault, "a non-number falls back to the default");
 }
 
 server.stop();
