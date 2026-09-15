@@ -1072,8 +1072,10 @@ else {
         await asRole.close();
       }
     } finally {
-      await dropCaptureRole();
+      // Clear the shared state that later sub-blocks see first, so it runs even
+      // if dropping the role throws; then drop the role.
       await claims.unsafe("DELETE FROM ob1_config WHERE key = 'entity_extraction_key'").catch(() => {});
+      await dropCaptureRole();
     }
   }
 

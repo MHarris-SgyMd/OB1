@@ -772,8 +772,12 @@ async function checkCapturingGrants() {
   const rest = readme.slice(heading.index + heading[0].length);
   const next = /^##\s/m.exec(rest);
   const section = next ? rest.slice(0, next.index) : rest;
+  // Match within the markdown table rows (pipe-led lines), not the section's
+  // prose: a table named only in a paragraph would otherwise satisfy the check
+  // even if its privilege row were deleted. The rows are where the grant lives.
+  const tableRows = section.split("\n").filter((l) => l.trimStart().startsWith("|")).join("\n");
   for (const table of cfg.grantedTables()) {
-    if (!section.includes("`" + table + "`")) {
+    if (!tableRows.includes("`" + table + "`")) {
       violations.push({
         where: "db/README.md",
         msg: `"Grants for a capturing role" does not name \`${table}\`, which db/config.mjs's ROLE_GRANTS requires — the list and the docs have drifted (SMD-1226)`,
