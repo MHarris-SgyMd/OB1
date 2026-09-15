@@ -3119,7 +3119,7 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(/ob1:vector-replaces-chunks/.test(three022) && !UPSERT_THREE_ARG_SHIPPED_RE.test(three022), "022 re-applied over 025 keeps 022's sentinel and drops 025's envelope, which the second recogniser sees");
   // 005 re-applied: both forms from before 022, and the 2-argument one 005's
   // — the guard, no lock. The way back is the migrations in order — what
-  // --reapply runs — and 033 is the last definer of both forms, so one file
+  // --reapply runs — and 034 is the last definer of both forms, so one file
   // is the remedy for either.
   await reapply("005");
   assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)) && UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && !/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)),
@@ -3525,6 +3525,15 @@ console.log("\n[34] Migration 034: a re-capture writes no provenance — the env
   raised = "";
   try { await cap("034 the earlier note", { metadata: {}, supersedes: "nope" }, unit(0)); } catch (e) { raised = (e as Error).message; }
   assert(/upsert_thought: supersedes must be a thought UUID string/.test(raised), "…and a malformed supersedes likewise");
+  // A supersedes that names NO thought on a dedup: the FK ran only on the fill,
+  // so nothing refuses it here — existed, nothing written — and update_thought,
+  // the path the tool's reply names, refuses it by name (stated in the header).
+  const ghost = await cap("034 the earlier note", { metadata: {}, supersedes: "00000000-0000-4000-8000-000000000000" }, unit(0));
+  assert(ghost.id === a.id && ghost.existed === true && (await prov(a.id)).s === null, "a re-capture naming a supersedes that names no thought is not refused: existed, nothing written");
+  assert((await edit(a.id, { supersedes: "00000000-0000-4000-8000-000000000000" })).error === "SUPERSEDES_NOT_FOUND", "…and update_thought, the path the reply names, refuses it by name");
+  let fkRaised = "";
+  try { await cap("034 a fresh note naming a ghost", { metadata: {}, supersedes: "00000000-0000-4000-8000-000000000000" }, unit(6)); } catch (e) { fkRaised = (e as Error).message; }
+  assert(/foreign key|violates/.test(fkRaised), `…while a first capture naming one still fails its FK check, as 025 left it (${fkRaised.slice(0, 60)})`);
 
   // SMD-1453's case, sequential: R with no pointer, X superseding R, then R's
   // text captured naming X. [33] wrote R → X → R at 033; now nothing is

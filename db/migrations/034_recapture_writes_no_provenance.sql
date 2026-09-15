@@ -40,9 +40,11 @@
 --      supersedes. A fresh INSERT writes both from the envelope as 025 did; a
 --      re-capture leaves both columns exactly as they were, whatever the
 --      envelope names. Validation is unchanged and runs before the write is
---      known to be a dedup: a malformed derived_from or supersedes is refused
---      either way (validate_derived_from's message, 025's shape message), so a
---      caller learns of a bad reference whether or not the text is new.
+--      known to be a dedup: a malformed derived_from (one naming no thought
+--      included) or a supersedes that is not a UUID string is refused either
+--      way (validate_derived_from's message, 025's shape message). A
+--      supersedes UUID that names no thought is the FK's to refuse, and the
+--      FK runs on the INSERT only — see "What it closes".
 --   2. The supersession lock leaves the capture path. 033 took
 --      pg_advisory_xact_lock(hashtext('ob1:supersession-review')) first when
 --      the envelope named supersedes; with no pointer ever written onto an
@@ -54,16 +56,21 @@
 --      written. 022's label read — FOR NO KEY UPDATE on the row the text
 --      lands on — runs for every capture now, not only with a vector, so the
 --      flag is right for a vectorless capture too (one index probe under the
---      fingerprint lock; the chunk DELETE keeps its condition). 013's
+--      fingerprint lock; the chunk DELETE keeps its condition). `existed`
+--      means a row HELD THIS FINGERPRINT: a legacy row with a NULL one (from
+--      before 003, until 023's backfill reaches it) is not found, and the
+--      capture inserts a twin — 003/023's semantics, unchanged here. 013's
 --      4-argument form returns v_result || {"chunks": n}, so the key passes
---      through to both servers; the capture tool says so to the caller when
---      it named provenance and the row existed.
+--      through to both servers; the capture tool tells the caller, naming
+--      update_thought's `supersedes` when supersedes was sent, and saying the
+--      tools have no way to set derived_from on an existing thought when that
+--      was.
 --   4. The 2-argument form is carried verbatim from 033 — 005's guard, 008's
 --      actor, content_fingerprint_of, the fingerprint lock, its sentinel — so
 --      this file is the last definer of BOTH inserting forms and preflight's
 --      `atomic capture` has one remedy for every stale state, as 033 had. It
---      takes no vector and reads no provenance (025's and 033's headers say
---      so); it returns no `existed` — the two-step fallback is its one
+--      takes no vector and reads no provenance (033's header says so); it
+--      returns no `existed` — the two-step fallback is its one
 --      caller and attaches the vector afterwards either way.
 --   Otherwise the 3-argument body is 033's, verbatim: 005's guard, 008's
 --   actor, 016's content_fingerprint_of, 021's label in the INSERT and its ON
@@ -120,6 +127,13 @@
 --   not have" is gone. A caller that captured a thought and later wants to
 --   record what it supersedes or derives from re-captures nothing: it calls
 --   update_thought with the envelope (the capture tool's reply names it).
+--   Changed with it: a re-capture naming a supersedes that names NO thought
+--   is not refused — the FK ran only on the fill; a first capture's FK still
+--   refuses one — so `existed` is true with nothing written, and
+--   update_thought, the path the reply names, refuses it by name
+--   (SUPERSEDES_NOT_FOUND): the caller learns one step later, not never.
+--   The shape checks (a UUID string; validate_derived_from's existence
+--   check for derived_from) run on a dedup as before.
 --   Not closed, and not this file's: delete_thought outside the lock order
 --   (SMD-1462); the 2-argument form's silence on the envelope's provenance
 --   (PostgREST's two-step fallback drops it, as it has since 025); a walk
@@ -139,15 +153,15 @@
 --
 -- Cost
 --   Less: one advisory lock acquire fewer per capture naming supersedes, and
---   the ceiling gone. Measured as 033 measured it (1,024 dimensions, HNSW, a
---   300-row corpus, the SQL store with 64 connections, alternating arms each
---   on a fresh schema — 033, 034, 033, 034 — the cold first arm discarded):
+--   the ceiling gone. Measured with 033's design — alternating arms each on a
+--   fresh schema, 033, 034, 033, 034, the cold first arm discarded — at 1,024
+--   dimensions, HNSW, a 300-row corpus, the SQL store with 64 connections:
 --   50 concurrent captures naming supersedes against 50 naming none, medians
 --   of four rounds, 292.6 vs 91.3 ms and 284.4 vs 87.7 ms at 033 (3.2×), 94.2
 --   vs 79.7 ms and 73.6 vs 74.0 ms at 034 (1.2×, 1.0×); 200 concurrent naming
 --   supersedes 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 034 —
---   the same as the 200 naming none (410.9 / 317.2 ms at 033, 346.8 / 334.5
---   ms at 034); one serial capture naming supersedes 7.30 / 6.75 ms at 033,
+--   inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at
+--   033, 346.8 / 334.5 ms at 034); one serial capture naming supersedes 7.30 / 6.75 ms at 033,
 --   7.22 / 6.27 ms at 034 — the per-call cost is the HNSW insert either way,
 --   the lock only took the parallelism. 470 pointers written in every arm.
 --   More: one index probe per vectorless 3-argument capture — the row read
@@ -159,9 +173,10 @@
 --   * Additive. No column, no signature change (CREATE OR REPLACE under the
 --     two existing signatures, so each form's ACL is kept), no table change,
 --     no data change, no backfill: a pointer a re-capture filled before this
---     file stays, loop or not — SMD-1453's loop case is sequential, and the
---     shipped tools never sent supersedes on a re-capture (the capture tool
---     names it for a NEW thought). To find a loop that was written: a
+--     file stays, loop or not. No shipped code sends supersedes on its own
+--     (consolidate.ts writes through the review path), but capture_thought
+--     forwards a caller's, so a loop is possible wherever a client re-captured
+--     existing text naming one. To find a loop that was written: a
 --     two-row one is `SELECT a.id, b.id FROM thoughts a JOIN thoughts b ON
 --     b.id = a.supersedes AND b.supersedes = a.id`; update_thought's envelope
 --     with {"supersedes": null} clears one side, audited.
@@ -173,8 +188,10 @@
 --     extra key (both stores read `id`; 013's form appends `chunks`).
 --   * 032's COMMENT on review_supersession_proposal said "a capture's
 --     add-if-empty through upsert_thought aside"; 032's file is applied and
---     hashed by the ledger, so the COMMENT is re-issued here without the
---     aside, as 033 re-issued update_thought's.
+--     hashed by the ledger, so the COMMENT is re-issued here with the aside
+--     replaced by the rule (a first capture sets the column on its own new
+--     row; a re-capture does not touch it) and "every edit" made "every
+--     write onto an existing thought", as 033 re-issued update_thought's.
 --
 -- What a successor to upsert_thought must carry
 --   Everything 033 listed — 005's non-object guard, 008's ob1.actor in both
@@ -405,10 +422,11 @@ END;
 $$;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
-  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s. Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (034). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (034) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed}: existed true means the text was already there and any provenance named was not written.';
+  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (034). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (034). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (034) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed}: existed true means the text was already there and any provenance named was not written.';
 
--- 032's COMMENT, re-issued without the aside this file makes false ("a
--- capture's add-if-empty through upsert_thought aside"): every write of
--- thoughts.supersedes onto an existing thought now goes through update_thought.
+-- 032's COMMENT, re-issued with the aside this file makes false ("a capture's
+-- add-if-empty through upsert_thought aside") replaced by the rule: every
+-- write of thoughts.supersedes onto an existing thought goes through
+-- update_thought; a first capture sets it on its own new row.
 COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb, boolean) IS
   'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every write of the column onto an existing thought goes through the one edit function (a first capture sets it on its own new row; since 034 a re-capture does not touch it): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029 / 032 / 034.';

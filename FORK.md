@@ -6676,7 +6676,7 @@ diff with the actor — what 029's `UPDATE` did under the triggers, now by the
 one path. Content, vector, label, fingerprint and windows are untouched unless
 `content` arrived. `derived_from` through the envelope **replaces** the array;
 a merge would be a second verb, and 025's re-capture already does "add if
-empty".
+empty" (until change 64, which drops the fill).
 
 **The row lock is `FOR NO KEY UPDATE` now, not 018's `FOR UPDATE`** — the one
 line of 018's this migration changes, found by the first review pass. Writing
@@ -7325,7 +7325,8 @@ with no pointer, X superseding R, then R's text captured naming X, one after
 another with no race, writes R → X → R. 025's "add if empty" never walked; the
 lock orders the fill against the walk, it does not add one. `trace_provenance`
 is cycle-guarded, so the cost is two rows both labelled superseded; [33] writes
-the loop and shows `update_thought`'s walk seeing it, and **SMD-1453** holds
+the loop and shows `update_thought`'s walk seeing it (as of this change; since
+change 64 that case is [34]'s and asserts the reverse), and **SMD-1453** holds
 whether the fill should walk, refuse, or go — change 60's envelope makes "go"
 possible (gone, in change 64: migration 034 drops the fill, and with it the
 supersession lock from the capture path). Also unchanged on purpose: 022's "unknown vouches for nothing" for a
@@ -7336,11 +7337,13 @@ form's silence on `derived_from` / `supersedes`.
 `ob1:capture-takes-fingerprint-lock` (014's convention). `atomic capture` reads
 it over a direct connection beside 022's sentinel and 025's clause, so the
 warning now grades a stale 3-argument body four ways — before 022, before 025,
-before 033, or missing — and a stale 2-argument body two ways — before 005 (no
-guard) or before 033 (005's guard, no lock) — and the remedy is one file in
-every case, since 033 is the last definer of both forms; the "apply 005, then
-025 again" two-step is gone. `test-preflight` walks 021, 022, 025, 003 and 005
-re-applied by hand over 033 and asserts each warning's text and its one remedy.
+before 033, or missing (five, with before 034, since change 64) — and a stale
+2-argument body two ways — before 005 (no guard) or before 033 (005's guard,
+no lock) — and the remedy is one file in every case, since 033 is the last
+definer of both forms (034 since change 64); the "apply 005, then 025 again"
+two-step is gone. `test-preflight` walks 021, 022, 025, 003 and 005 re-applied
+by hand over 033 (over 034, with 033 in the walk, since change 64) and asserts
+each warning's text and its one remedy.
 
 **Where the disclaimers went.** 018's file is applied and hashed by the ledger,
 so its header and COMMENT stay as written and 033 re-issues the COMMENT on
@@ -7401,7 +7404,8 @@ acquisition order read by position in the source (supersession, fingerprint,
 the label read, the INSERT; supersession, fingerprint, the row in
 `update_thought`), no inline copy of either rule left, every earlier piece by
 name, a 2-argument capture attributed, no advisory lock held after a call, the
-residue loop written and seen by the walk, and the trap — 025 re-applied puts
+residue loop written and seen by the walk (as of this change — [34] holds the
+reverse since change 64), and the trap — 025 re-applied puts
 an unlocked 3-argument body back, 005 both, 032 puts 018's order back in
 `update_thought`, 033 restores all three; [22], [23], [31] follow the last
 definer. `test-live` [6f] (479): the four-way, by hand in 018's order to the
@@ -7412,7 +7416,8 @@ and is told `DUPLICATE_CONTENT` when the capture commits, one row holding X; a
 first 4-argument capture with a window held open while a chunkless re-capture
 waits on the same lock, the window kept at the same label and gone at another;
 a capture naming `supersedes` waiting on the supersession lock while one
-naming none is not. `test-upgrade` [12] (147): 033 onto a populated 032 — no
+naming none is not (as of this change; arm 3 asserts the reverse since change
+64). `test-upgrade` [12] (147): 033 onto a populated 032 — no
 column, signature, row, window or audit row moves, the 3-argument form's
 hardened ACL is kept across `CREATE OR REPLACE`, `update_thought` one function
 with the lock before its row where 032's had it after, a same-model re-capture
@@ -7468,13 +7473,14 @@ a vector, so the flag is right for a vectorless capture too — one index probe
 under the fingerprint lock, on the partial unique index the INSERT's
 arbitration reads anyway. 013's 4-argument form returns `v_result ||
 {"chunks": n}`, so the key passes through to both servers, and the
-`capture_thought` tool's reply names `update_thought` when the caller sent
-provenance and the text existed. The 2-argument body is carried verbatim from
+`capture_thought` tool's reply names `update_thought`'s `supersedes` when the
+caller sent one and the text existed, and says the tools cannot set
+`derived_from` on an existing thought when that was sent. The 2-argument body is carried verbatim from
 033 so 034 is the last definer of both inserting forms and preflight keeps one
 remedy; `update_thought` is not redefined — 033 stays its last definer, with
 the order 033 gave it. 032's `COMMENT ON review_supersession_proposal` said "a
 capture's add-if-empty through upsert_thought aside", and is re-issued here
-without the aside, as 033 re-issued `update_thought`'s.
+with the aside replaced by the rule, as 033 re-issued `update_thought`'s.
 
 **Why a capture needs no supersession lock.** The lock serialises writers of
 the `supersedes` column so that `update_thought`'s walk reads pointers no
@@ -7504,9 +7510,15 @@ silence on the envelope's provenance (PostgREST's two-step fallback has
 dropped it since 025); `derived_from`, an array with no acyclicity rule
 anywhere, which `trace_provenance` is cycle-guarded against (change 47);
 022's "unknown vouches for nothing" (SMD-1245). No data changes: a pointer a
-re-capture filled before 034 stays, loop or not — the shipped tools never sent
-`supersedes` on a re-capture, and the header gives the two-row query and the
-envelope's `{"supersedes": null}` to clear one.
+re-capture filled before 034 stays, loop or not — no shipped code sends
+`supersedes` on its own, but `capture_thought` forwards a caller's, so a loop is
+possible wherever a client re-captured existing text naming one; the header
+gives the two-row query and the envelope's `{"supersedes": null}` to clear one.
+One more thing changed, and stated: a re-capture naming a `supersedes` that
+names no thought is not refused — the FK ran only on the fill, and a first
+capture's FK still refuses one — so `existed` comes back true with nothing
+written, and `update_thought`, the path the reply names, refuses it by name
+(`SUPERSEDES_NOT_FOUND`); the caller learns one step later, not never.
 
 **The sentinel, and the preflight.** The 3-argument body carries
 `ob1:re-capture-writes-no-provenance` beside 022's and 033's. `atomic capture`
@@ -7516,20 +7528,47 @@ as change 63 made it, and says both halves when the ledger records 033 but not
 034 and the body lacks 033's lock (025 re-applied by hand *and* 034 pending).
 `test-preflight` adds 033 re-applied by hand over 034 to the walk.
 
-**Cost.** Less, and measured as change 63 measured (1,024 dimensions, HNSW, a
-300-row corpus, the SQL store with 64 connections, alternating arms each on a
-fresh schema — 033, 034, 033, 034 — the cold first arm discarded): 50
+**A first review pass, triaged: no code defect, ten wording fixes, one
+behaviour stated.** Three reviewers, one each on the SQL, the callers and
+tests, and the prose. The SQL reviewer ran eight workers of captures, edits and
+review decisions over a seeded brain with and without deletes: no loop of any
+length, no deadlock without deletes, and with them only SMD-1462's
+review-versus-delete cycle, never raised in a capture or an edit; a capture
+naming `supersedes` completed in 2 ms while another connection held the
+supersession lock; the unconditional read against 023's `LOCK TABLE` held
+under a real backfill with fifty concurrent vectorless captures. The one
+behaviour both the SQL and the callers reviewer found: a re-capture naming a
+`supersedes` that names no thought is not refused — the FK ran only on the
+fill — so `existed` is true with nothing written, and `update_thought`, which
+the reply names, refuses it by name. Stated above and in the header, and [34]
+holds it, with a first capture's FK still refusing. The wording: the capture
+reply names `update_thought` for `supersedes` only, and says the tools cannot
+set `derived_from` on an existing thought; "the shipped tools never sent
+`supersedes` on a re-capture" was a claim about clients nobody can check and
+now says what is checkable; the bench's corpus and connection count were this
+change's, not 63's; "the same as the 200 naming none" over-read one pair; the
+2-argument form's silence is 033's header's statement, not 025's; the review
+COMMENT's re-issue replaces the aside with the rule rather than deleting it;
+preflight's cause for a pre-033 body on a brain at 032 now names both pending
+files; the capture tool's input descriptions no longer promise a reply the
+PostgREST two-step fallback cannot give; change 60 and change 63's present
+tenses carry a note; and both store suites now assert `existed`, which they
+had not.
+
+**Cost.** Less, and measured with change 63's design — alternating arms each
+on a fresh schema, 033, 034, 033, 034, the cold first arm discarded — at 1,024
+dimensions, HNSW, a 300-row corpus, the SQL store with 64 connections: 50
 concurrent captures naming `supersedes` against 50 naming none, medians of
 four rounds, 292.6 vs 91.3 ms and 284.4 vs 87.7 ms at 033 (3.2×), 94.2 vs
 79.7 ms and 73.6 vs 74.0 ms at 034 (1.2×, 1.0×); 200 concurrent naming
-`supersedes` 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 034 — the
-same as the 200 naming none (410.9 / 317.2 ms at 033, 346.8 / 334.5 ms at
-034); one serial capture naming `supersedes` 7.30 / 6.75 ms at 033, 7.22 /
+`supersedes` 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 034 —
+inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at 033,
+346.8 / 334.5 ms at 034); one serial capture naming `supersedes` 7.30 / 6.75 ms at 033, 7.22 /
 6.27 ms at 034. The per-call cost is the HNSW insert either way; the lock only
 took the parallelism. More: one index probe per vectorless 3-argument capture,
 under the fingerprint lock.
 
-**Verified.** `test-schema` [34] (819): 034 the last definer of
+**Verified.** `test-schema` [34] (822): 034 the last definer of
 `upsert_thought` and 033 of `update_thought`; the 3-argument body read from
 `pg_proc` — 034's sentinel beside the two before it, no supersession lock, an
 `ON CONFLICT` clause that sets neither column while the INSERT lists both, the

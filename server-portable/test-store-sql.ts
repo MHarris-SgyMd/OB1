@@ -303,6 +303,7 @@ console.log("\n[6] Dedup and merge behave as the tools expect");
     embedding: unit(0),
   });
   assert((await store.countThoughts()) === before, "a normalised duplicate adds no row");
+  assert(again.existed === true, "…and the store passes 034's existed through, so the capture tool can say the text was already there");
 
   const merged = await store.getThought(again.id);
   assert(merged?.metadata.kind === "a" && merged?.metadata.extra === 1, "metadata merged rather than replaced");

@@ -693,11 +693,15 @@ if (configFailed) {
         // hand re-apply is the only way; with it recording `stage` but not
         // 034, the earlier file was re-applied by hand AND the remedy is still
         // pending, and the cause says both.
-        const pre = (stage: string, earlier: string) =>
-          ledger.has("034") ? `${earlier} re-applied by hand puts it back`
+        const pre = (stage: string, earlier: string) => {
+          // The unapplied files, named: 034 alone when `stage` is 034 or the
+          // ledger has it, both otherwise (a brain at 032 lacks 033 as well).
+          const pending = stage === "034" || (ledgerRead && ledger.has(stage)) ? "migration 034 is" : `migrations ${stage} and 034 are`;
+          return ledger.has("034") ? `${earlier} re-applied by hand puts it back`
             : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and migration 034 is not yet applied`
-            : ledgerRead ? "migration 034 is not yet applied"
-              : `migration 034 is not yet applied, or ${earlier} was re-applied by hand`;
+            : ledgerRead ? `${pending} not yet applied`
+              : `${pending} not yet applied, or ${earlier} was re-applied by hand`;
+        };
         const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre("033", "005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 034's either — ${TWO_UNLOCKED_WHY}` : "";
         if (!three) {
