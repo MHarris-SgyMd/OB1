@@ -930,7 +930,10 @@ for the sentence-transformers cross-encoder (bge-reranker-v2-m3), and
 `rerank-llm-reranker.py` for the causal-LM yes/no rerankers (Qwen3-Reranker,
 MemReranker). `rerank-heldout.ts` builds the held-out Linear-corpus pool, and
 `query-decompose.ts` measures the decomposition lever (the subsection after this
-one) off the same load.
+one) off the same load. `decompose-rerank.ts` measures the follow-up —
+reranking each sub-question's pool (the subsection two below; declined — reranking
+one pool is the lever, decomposition is not) — reusing `query-decompose.ts`'s
+sub-question dump and `rerank-llm-reranker.py` unchanged.
 
 | reranker of the top-30 pool | MS strict | MS any-hit | temporal strict | temporal any-hit |
 | --- | --- | --- | --- | --- |
@@ -1066,6 +1069,83 @@ query, on a local-by-default fork); the measured, motivated follow-up is
 **decompose-then-rerank** — lift each sub-pool's gold to rank 0, then interleave —
 whose headroom is the 39% of golds not yet at rank 0. Like the reranker itself
 (SMD-1304), that belongs on a *hard* held-out corpus, not only LongMemEval.
+(Measured in the subsection below and **declined**: reranking one pool is the lever,
+not decomposition — and how you combine the sub-pools makes no significant
+difference, on two corpora. Assembly was never the bottleneck.)
+
+### Decompose-then-rerank: the reranker is the lever, not decomposition — how you combine the pools does not matter (SMD-1420)
+
+SMD-1318 predicted that reranking each sub-question's pool and interleaving would
+"convert decomposition's coverage into strict@5." Measuring it forced a broader
+question: there are three ways to feed a decomposed query to a cross-encoder —
+**rerank each sub-pool and interleave**, **merge the sub-pools into one candidate
+set and rerank once**, or (the SMD-1304 arm, no decomposition) **just rerank the one
+blended pool** — and the honest test is which, if any, beats the others. The harness
+`evals/decompose-rerank.ts` emits all three pools from one dump (`POOL_OUT` for
+interleave, `.merged` for the union, `.blended` for the one-pool arm), reranks each
+with `rerank-llm-reranker.py` (reused unchanged), and scores them together. Two
+checks pin the scorer under round-robin: an identity reranker reproduces the
+SMD-1318 decomp-only tally exactly, and a gold-first reranker recovers the set up to
+sub-pool coverage.
+
+It was run on **two** corpora, because the answer depends on headroom:
+LongMemEval-**S** (~40 sessions/question) is near-saturated once reranked, so
+differences can't separate; LongMemEval-**M-cleaned** (~476 sessions/question, ~10×
+the haystack) has a low baseline and real room. Fired-only strict recall_all@5
+(round-robin), MemReranker-4B, multi-session / temporal:
+
+| fired-set arm | S (multi / temporal) | M (multi / temporal) |
+| --- | --- | --- |
+| baseline (one vector) | 80.0% / 82.7% | 52.0% / 59.6% |
+| decomposition-only | 82.0% / 80.8% | 62.0% / 57.7% |
+| **one blended pool → rerank** | 96.0% / 78.8% | 78.0% / 78.8% |
+| decompose → interleave rerank | 94.0% / 78.8% | 78.0% / 75.0% |
+| decompose → merge → rerank once | 98.0% / 78.8% | 78.0% / 78.8% |
+| oracle | 100.0% / 96.2% | 86.0% / 86.5% |
+
+Read by eye, the S row tempts a story (merge 98 > one-pool 96 > interleave 94). The
+**paired significance test says that story is noise.** McNemar exact on the
+per-question hits (fired set):
+
+- **Reranking vs baseline** is a large, *significant* lift on multi-session for
+  every pool method (S p ≈ 0.02, M p = 0.002–0.004) and on M temporal for the
+  one-pool and merge arms (p = 0.021; the interleave arm's smaller M-temporal lift,
+  75.0%, is p = 0.06 — not significant). On the harder M it is +26 points on multi
+  (52% → 78%). The reranker earns its place.
+- **The pool-combination technique — interleave vs merge vs one blended pool — is
+  not significant anywhere**: either corpus, either slice, either reranker (every
+  pairwise p ≥ 0.375, net win/loss of 0–4 questions between any two methods; **merge
+  == one-pool *exactly* on M**, b = 0 / c = 0 on temporal). The S 94/96/98 spread is
+  a handful of questions flipping. M — with far more room (multi baseline miss-rate
+  20% on S → 48% on M), the fair test — confirms it: decomposition does not separate
+  from reranking one pool even where a real difference had every chance to show.
+
+Two findings specific to the harder corpus. **Decomposition-as-retrieval does help
+on M** (+10 multi, 52% → 62% before any rerank) — several vectors cover more of a
+476-session haystack than one — but **reranking one pool subsumes it** (78% ≥ 62%).
+And on M even the *generic* Qwen3-Reranker-4B lifts multi significantly (52% → 72%,
+p = 0.021), so the multi benefit is **not** purely MemReranker's benchmark-fit in
+the hard regime (SMD-1304's held-out caveat still bears on the magnitude, and on
+temporal, where only the calibrated MemReranker helps).
+
+**Decision: decline decompose-then-rerank.** Decomposition is not the lever and how
+you combine the pools does not matter; *reranking one pool* is the lever, and it pays
+off most on hard, large-haystack retrieval. That points the follow-up squarely at a
+capable **non-benchmark** reranker over one pool (hosted Voyage `rerank-2.5`,
+SMD-1319), and it **validates SMD-1039's premise** first-hand: the harder corpus
+separated rerank-from-baseline cleanly where the saturated one could not, so a hard
+held-out corpus is what a shippable reranker must be judged on.
+
+Reproducing the two corpora: **S** — a persisted `eval-longmemeval.ts` load, then
+the phase-1/2/3 commands in `decompose-rerank.ts`'s header. **M** — the loader
+`readFileSync`s the whole corpus and bun (JavaScriptCore) cannot allocate a 2.5 GB
+string, so M is loaded in question shards into its own DB (`ob1lmem`, schema cloned
+from the S DB), with a post-load pass completing each session's `lme_q` (sessions are
+shared across shards, mean 4.6 questions each, so the per-shard load leaves it
+partial); then this harness is pointed at a **slim** M file (the `haystack_sessions`
+transcripts dropped — already in the DB; only the light fields are read here) with
+the **same** decomposition dump, since M's 500 questions are S's (0 text
+differences). The loader's inability to read a >2 GB corpus is filed as a follow-up.
 
 ### Verifying Matryoshka support against the model cards
 
