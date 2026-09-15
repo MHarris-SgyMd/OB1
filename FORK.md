@@ -7222,7 +7222,11 @@ order, which the first pass's list also left out), then the supersession lock,
 the superseding row, and asks `KEY SHARE` on the thought being deleted. Two
 shipped functions, a cycle of two — reproduced 23 times in 40 against a real
 server, the delete the victim each time; a plain edit naming `supersedes`
-against the same delete 0 in 40, since it holds no proposal row. Pre-existing
+against the same delete 0 in 40 (0 in 60 on the third pass — and not, as
+this paragraph first said, because it holds no proposal row: the delete's SET
+NULL cascade does wait on the edited row, and no cycle forms because the FK
+check takes `KEY SHARE` on the target only when the pointer *changes*, and a
+changed pointer names another row than the one being deleted). Pre-existing
 since 029/032 and not this change's to fix — the fix is a `delete_thought`
 that takes the supersession lock first, **SMD-1462**, which also carries the
 smaller thing the probe saw (a target deleted between `update_thought`'s walk
@@ -7280,7 +7284,37 @@ and 0.68 ms at 033; fresh 3-argument capture with a vector 5.8 ms at 032, 5.0
 and 5.7 ms at 033 (the HNSW insert is the cost); re-capture without a vector
 2.3–2.7 ms at 032, 2.0–3.0 ms at 033; re-capture with a vector at the same
 label 2.2–2.6 ms at 032, 2.2–3.4 ms at 033. Inside the run-to-run spread on
-every line, on either side of it.
+every line, on either side of it. One cost is a ceiling rather than a
+per-operation figure, and the third pass measured it: a capture *naming*
+`supersedes` holds the one brain-wide supersession key from before its label
+read to commit, HNSW insert included, so such captures have no parallelism
+among themselves — 200 concurrent at 1,024 dimensions took 1,388 ms, 6.9 ms
+each, exactly the serial per-call cost; 50 concurrent ran 3.4–4.4× slower than
+the same 50 without `supersedes`. About 145 pointer-naming captures a second at
+the shipped width, whatever the worker count; a consolidation or import
+pipeline that writes pointers is bounded by it. A fresh row cannot close a
+loop — only the ON CONFLICT fill can — but which a capture is becomes known
+only under the fingerprint lock, and the supersession lock must precede that
+one, so the lock cannot be narrowed without changing the fill; SMD-1453 holds
+that question together with the fill's.
+
+**A third pass, at the user's call, run rather than read: two documentation
+findings, nothing that fails.** The migrator applied 033 onto a populated
+032-ledger brain (one applied, bodies and ledger sha right, no row or audit row
+moved), `--reapply` re-ran all thirty-three in one transaction and left
+`update_thought` one function with the lock before its row, `--dry-run` saw
+nothing pending and no drift; preflight on the day-of-upgrade brain said
+"migration 033 is not yet applied" from the ledger branch the fixture cannot
+reach, and "025 re-applied by hand puts it back" once the ledger recorded 033;
+twenty concurrent captures of one text with twenty concurrent edits into it
+through the SQL store gave one row, twenty merged keys, twenty
+`DUPLICATE_CONTENT`s, nothing thrown; twenty two-argument captures audited
+twenty distinct actors; `reembed.ts` over thirty raw legacy-twin pairs with
+four workers finished with no failed claim and thirty `duplicate_of` groups;
+sixty raced delete-versus-edit pairs gave no 40P01 (the accept-versus-delete
+control gave 14 of 20, SMD-1462 as stated). The two findings are above: the
+serialisation ceiling the Cost section omitted, and the wrong "why" in the
+second pass's residue sentence.
 
 **Verified.** `test-schema` [33] (791): three overloads and one
 `update_thought`, the lock spelled once across the three bodies, the

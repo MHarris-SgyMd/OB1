@@ -94,7 +94,13 @@
 --   row, is a cycle of two shipped functions — reproduced 23 times in 40
 --   against a real server, pre-existing since 029/032, and SMD-1462's: the
 --   delete takes the supersession lock first there. A plain edit naming
---   supersedes does not cross it (0 in 40): it holds no proposal row.
+--   supersedes does not cross it (0 in 60): the delete's SET NULL cascade
+--   (025's FK) does wait on the edited row, but the edit takes KEY SHARE on
+--   the target only when it CHANGES the pointer — Postgres skips the FK
+--   check for an unchanged value — and a changed pointer names another row
+--   than the one being deleted, so the two never hold what the other waits
+--   for. (A target deleted between the walk and the UPDATE surfaces as
+--   23503, not SUPERSEDES_NOT_FOUND — SMD-1462 carries that too.)
 --
 --   Why the edit's order moved. The first version of this file took the
 --   capture's locks fingerprint → row and left 018's edit at row →
@@ -170,6 +176,18 @@
 --   without a vector 2.3–2.7 ms against 2.0–3.0 ms; with a vector at the same
 --   label 2.2–2.6 ms against 2.2–3.4 ms. Inside the run-to-run spread on
 --   every line (FORK.md change 62 has the design).
+--   One cost is not per operation but a ceiling (third review pass): a
+--   capture NAMING supersedes holds the one brain-wide supersession key from
+--   before its label read to commit — through the HNSW insert — so such
+--   captures have no parallelism among themselves: 200 concurrent at 1,024
+--   dimensions took 1,388 ms, 6.9 ms each, the serial per-call cost; 50
+--   concurrent ran 3.4–4.4× slower than the same 50 without supersedes.
+--   About 145 pointer-naming captures a second at the shipped width,
+--   whatever the worker count. A fresh row cannot close a loop — only the
+--   ON CONFLICT fill can — but which of the two a capture is becomes known
+--   only under the fingerprint lock, and the supersession lock must come
+--   before it (update_thought's order); SMD-1453 holds whether the fill
+--   should stay, and with it whether this lock stays on the capture path.
 --
 -- Safety
 --   * Additive. No column, no signature change (CREATE OR REPLACE under the
