@@ -833,7 +833,7 @@ else {
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 022's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 022 — captures work, search is over-inclusive.
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(021, 005, 008 or 013 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there\)/.test(reapplied021.out) && /Apply db\/migrations\/025_thought_provenance\.sql — the last definer; 022's file alone would leave 025's provenance envelope out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there\)/.test(reapplied021.out) && /Apply db\/migrations\/025_thought_provenance\.sql — the last definer; 022's file alone would leave 025's provenance envelope out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
          "021 re-applied over 025 leaves 021's 3-argument upsert_thought, and the start warns naming 025 — the last definer, not 022 — rather than refusing");
   // 022 re-applied by hand over 025: the sentinel is back, the provenance
   // envelope is not — derived_from and supersedes would be dropped silently
@@ -843,7 +843,9 @@ else {
   const reapplied022 = await run(SQL_ENV);
   assert(reapplied022.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 \(022 re-applied by hand puts it back\)/.test(reapplied022.out) && /Apply db\/migrations\/025_thought_provenance\.sql\./.test(reapplied022.out),
          "022 re-applied over 025 keeps 022's sentinel and loses 025's envelope, and the start warns naming 025");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") });
+  // 025 re-applied puts 025's trace_provenance over 026's too; 026 follows
+  // it here and below, so no later "healthy" run carries the provenance warn.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's\s*$/m.test((await run(SQL_ENV)).out),
          "…and 025 re-applied is the shipped body again, said as such");
   // The 2-argument form from before 005 — what the getting-started guide, the
@@ -866,7 +868,7 @@ else {
   const fiveAlone = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022/.test(fiveAlone.out) && !/either/.test(fiveAlone.out) && /Apply db\/migrations\/025_thought_provenance\.sql — the last definer/.test(fiveAlone.out),
          "…and 005 re-applied alone leaves a pre-022 3-argument body with the 2-argument one right again, which is why the remedy says 'then 025 again'");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 025's/.test((await run(SQL_ENV)).out), "…and 025 after it is the shipped pair again");
   // The 3-argument form gone from a 025 database: the remedy is the last
   // definer, not 004 or 022 — whose bodies would drop 005's guard, 008's
@@ -875,7 +877,7 @@ else {
   const noThree = await run(SQL_ENV);
   assert(noThree.code === 1 && /atomic capture\s+2 upsert_thought overload\(s\) — the 3-argument form, the atomic capture, is missing/.test(noThree.out) && /Apply db\/migrations\/025_thought_provenance\.sql — the last definer of the 3-argument form/.test(noThree.out) && !/Apply db\/migrations\/00[24]_/.test(noThree.out) && !/Apply db\/migrations\/022_/.test(noThree.out),
          "the 3-argument form missing is a refusal whose remedy is 025, the last definer — not 004, not 022");
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   assert((await run(SQL_ENV)).code === 0, "…which 025 re-applied performs");
   // A database whose update_thought predates 021.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
@@ -885,7 +887,9 @@ else {
          "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
   // 021 puts the column back; 022 and 025 put the shipped 3-argument body back
   // over 021's (022 alone would leave 025's envelope out, a warning below).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") || f.startsWith("025") });
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") || f.startsWith("025") || f.startsWith("026") });
+  assert(/provenance\s+trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded/.test((await run(SQL_ENV)).out),
+         "…and trace_provenance is 026's again: every 025 re-applied above was followed by 026, so no later healthy run carries the provenance warn");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
 
   await claims.unsafe("DROP TABLE thought_work_claims");

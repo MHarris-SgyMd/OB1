@@ -560,9 +560,9 @@ const CORE_FUNCTION_EXCEPTIONS = new Map([
   // Files that create a brain from the getting-started shape, not sidecars
   // that add to one. Exactly this many lines, for exactly these functions.
   ["docs/01-getting-started.md", {
-    update_updated_at: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
-    match_thoughts: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
-    upsert_thought: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+    update_updated_at: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+    match_thoughts: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+    upsert_thought: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
   }],
   ["recipes/content-fingerprint-dedup/README.md", {
     upsert_thought: { why: "the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it", lines: 1 },
@@ -617,7 +617,7 @@ function checkCoreFunctions() {
   const counts = scanLines(textFilesUnder(scanned), [...OWNED_FUNCTIONS].map(([fn, file]) => ({
     name: fn,
     re: coreFunctionStatement(fn),
-    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}) — a CREATE OR REPLACE on a matching signature replaces that body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there; vendored SQL must not touch a function a migration owns (SMD-1250)`,
+    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}) — a CREATE OR REPLACE on a matching signature replaces that body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there; vendored SQL must not touch a function a migration owns (SMD-1250). Cut the statement and say in the file's header which migration owns the function (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason`,
     suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
   })));
   for (const [rel, byFn] of CORE_FUNCTION_EXCEPTIONS) {

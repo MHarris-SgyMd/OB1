@@ -40,7 +40,7 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
 ## Steps
 
 1. Open your **Supabase SQL Editor** (Dashboard → SQL Editor).
-2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. The script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe.
+2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
 3. Confirm the table and RPCs exist:
 
    ```sql
@@ -269,6 +269,9 @@ WHERE work_type = 'enrichment'
 ORDER BY claimed_at DESC;
 
 -- Re-run a batch: clear terminal rows so those thoughts become claimable again.
+-- (This fork: do not run this against a re-embed work_type — the succeeded
+--  rows are the evidence migrations 021 and 030 and reembed.ts --accept-failed
+--  read; db/README.md has the re-run path.)
 DELETE FROM public.thought_work_claims
 WHERE work_type = 'enrichment' AND status IN ('succeeded', 'failed');
 ```

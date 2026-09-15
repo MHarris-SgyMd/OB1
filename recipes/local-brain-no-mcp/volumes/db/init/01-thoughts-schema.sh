@@ -7,7 +7,7 @@
 # until the Postgres volume is wiped -- pgvector will reject inserts of a
 # different-sized vector.
 #
-# This mirrors db/migrations/001–005 (the canonical OB1 thoughts schema as
+# This mirrors db/migrations/001–003 (the canonical OB1 thoughts schema as
 # applicable files; docs/01-getting-started.md is the prose) so that
 # cloud-shaped recipes work against this local stack
 # with a base-URL swap. The only deviation is the parameterized embedding

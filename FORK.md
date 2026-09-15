@@ -6432,8 +6432,8 @@ read the 3-argument body's sentinel and nothing else; two of its remedies named
 change 46 — so the remedy itself would have put 022's body over 025's, dropping
 the provenance envelope silently, the exact class this change is about. Now:
 the 3-argument form missing is a refusal naming 025; a 3-argument body without
-022's sentinel warns naming 021 re-applied or the cost-optimization recipe's
-overload, remedy 025; a body with 022's sentinel but without 025's envelope
+022's sentinel warns naming 004, 005, 008 or 021 re-applied without 025 after
+them, or the cost-optimization recipe's overload, remedy 025; a body with 022's sentinel but without 025's envelope
 (022 re-applied by hand — a state preflight passed as shipped before) warns
 naming 025; a 2-argument body without 005's guard (the guide, the fingerprint
 recipe's Step 2, or a schema that mirrors columns on write, pasted onto a
@@ -6449,8 +6449,12 @@ body has (005's `jsonb_typeof(p_payload) <> 'object'`, 025's
 gain one (a hashed file). The two forms are picked by signature, not arity —
 a vendored bootstrap's `upsert_thought(text, vector, jsonb)` is a third
 3-argument form, and reading whichever the catalog returned first judged a
-healthy brain by the wrong body — and any other overload beside them is named
-in the detail. The 2-argument body is judged on its own and said beside
+healthy brain by the wrong body — with the signature built from `pg_type`'s
+names rather than `regprocedure`'s text, which schema-qualifies `vector` when
+pgvector is off the search path (the shape change 43's check already fails)
+and would have called a present form missing; any other overload is named in
+the detail. The 2-argument verdict rides every 3-argument state, the refusal
+included. The 2-argument body is judged on its own and said beside
 whichever 3-argument state fires, with 005-then-025 as the remedy, so a brain
 with both replaced hears it once rather than on the run after the first
 remedy. Over PostgREST none of this is reachable, and the skip says so as
@@ -6473,7 +6477,7 @@ Postgres: 021 over 025, 022 over 025, 003 over 005, 003 and 021 together (one
 warning naming both bodies, remedy 005 then 025), 005 alone (a pre-022
 3-argument body with the 2-argument one right, which is why the remedy says
 "then 025 again"), the form dropped (remedy 025, not 004, not 022), 025 over
-026 for `provenance`; 681 and 181 assertions. `check-fork-consistency` passes
+026 for `provenance`; 681 and 182 assertions. `check-fork-consistency` passes
 the fixed tree and failed the probes above.
 
 **Not done, and why.** Vendored `COMMENT ON COLUMN`, `DROP INDEX` and `ADD

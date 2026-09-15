@@ -22,7 +22,7 @@ These functions power the **Provenance Chains Pipeline** recipe (backfill, eval,
 
 ### Provenance round-trip for stock RPC
 
-The canonical `upsert_thought` RPC only preserves the `metadata` blob on `content_fingerprint` conflicts — not the new top-level `derived_from` / `derivation_layer` / `derivation_method` columns. To keep provenance durable across re-captures, the recipe mirrors those fields into `metadata.provenance`. That mirror is applied via `merge_thought_provenance_metadata`, which atomically merges the subtree into `metadata.provenance` server-side, avoiding read-modify-write races with other writers (e.g., `eval.mjs` storing `eval_score`).
+Upstream's canonical `upsert_thought` RPC only preserves the `metadata` blob on `content_fingerprint` conflicts — not the new top-level `derived_from` / `derivation_layer` / `derivation_method` columns (on this fork, migration 025's `upsert_thought` writes `derived_from` and `supersedes` from the capture envelope; the two columns this file adds are still metadata-only). To keep provenance durable across re-captures, the recipe mirrors those fields into `metadata.provenance`. That mirror is applied via `merge_thought_provenance_metadata`, which atomically merges the subtree into `metadata.provenance` server-side, avoiding read-modify-write races with other writers (e.g., `eval.mjs` storing `eval_score`).
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ The canonical `upsert_thought` RPC only preserves the `metadata` blob on `conten
 
 ### Canonical-schema compatibility
 
-The helpers `trace_provenance` and `find_derivatives` surface three fields — `type`, `source_type`, and `sensitivity_tier` — that the canonical `public.thoughts` table stores inside `metadata`, not as top-level columns. This migration reads them via `metadata->>'…'` so it installs cleanly on a stock OB1 setup. No extra `ADD COLUMN` is required. If your fork has already promoted any of these to real columns, edit the metadata reads inside `schema.sql` to direct column reads before you run the migration.
+Upstream's helpers `trace_provenance` and `find_derivatives` surfaced three fields — `type`, `source_type`, and `sensitivity_tier` — that the canonical `public.thoughts` table stores inside `metadata`, not as top-level columns, reading them via `metadata->>'…'`. On this fork the two helpers are migrations 025 and 026's, which read `type` and `source_type` the same way and have no tier; nothing in this file reads them any more.
 
 ### RLS compatibility
 
@@ -39,7 +39,7 @@ The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `
 
 ### `derived_from` validation
 
-The migration only enforces that `derived_from` is NULL or a JSON array (`thoughts_derived_from_is_array_check`). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
+The migration only enforces that `derived_from` is NULL or a JSON array (on this fork that is 025's `thoughts_derived_from_is_array`; upstream's file added the same check as `thoughts_derived_from_is_array_check`, which is not added here). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
 
 - **Write time:** `recipes/provenance-chains/backfill.mjs` rejects any non-UUID ref (e.g., legacy `#123` integer references) with a clear error before it calls PATCH, so nothing malformed reaches PostgREST.
 - **Read time:** `trace_provenance` casts each element to `::uuid` inside its walk (upstream's recursive CTE; the fork's 026 keeps only UUID-shaped elements before the cast) and `find_derivatives` compares against a UUID-typed needle, so any non-UUID element that slips in surfaces as a `22P02 invalid_text_representation` error instead of silent bad output.
@@ -163,11 +163,11 @@ NOTIFY pgrst, 'reload schema';
 ```
 
 > [!CAUTION]
-> `DROP COLUMN` permanently removes the column and all recorded values. If you want to keep the data but disable the helpers, drop only the functions and indexes.
+> `DROP COLUMN` permanently removes the column and all recorded values. If you want to keep the data, drop only the index and constraints this file added; the two query helpers are migrations 025 and 026's here and stay.
 
 ## Next Steps
 
-Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function.
+Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function. On this fork those handlers read `restricted`, `derivation_layer` and `sensitivity_tier` from rows the fork's two functions do not return, and `find_derivatives` filters nothing — expect those fields undefined and every derivative listed (SMD-1250).
 
 ## Troubleshooting
 

@@ -114,7 +114,7 @@ const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
  * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
-const REAPPLY = `The ledger records that migration but the schema installed is older (adopted with --baseline?): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
+const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -579,12 +579,21 @@ if (configFailed) {
               `Put ${vec.schema} on the connection's search_path. Least-scoped (this role only): ${setPath("ALTER ROLE", vec.role_ident)}  — or database-wide: ${setPath("ALTER DATABASE", vec.db_ident)}  then reconnect. This adds a setting beside any hnsw.* bounds, it does not replace them.`);
         }
 
-        // One schema-qualified read of every form, arity and body; no name or
-        // type resolved through the session's search_path (to_regprocedure
+        // One schema-qualified read of every form, signature and body; no name
+        // or type resolved through the session's search_path (to_regprocedure
         // returns NULL where `vector` is out of the path on PG16, and raises
         // on PG15 — into the catch below, taking every later check with it).
+        // The signature is built from pg_type's names, not regprocedure's
+        // text: that text schema-qualifies `vector` when pgvector is off the
+        // path (the shape the `vector extension` check above fails), and a
+        // pick by it would then have called a present form missing (second
+        // review pass, SMD-1250).
         const forms = (await sql`
-          SELECT p.oid::regprocedure::text AS sig, p.prosrc AS src FROM pg_proc p
+          SELECT p.proname || '(' || COALESCE((SELECT string_agg(t.typname, ',' ORDER BY a.n)
+                                                 FROM unnest(p.proargtypes) WITH ORDINALITY AS a(o, n)
+                                                 JOIN pg_type t ON t.oid = a.o), '') || ')' AS sig,
+                 p.prosrc AS src
+          FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { sig: string; src: string }[];
         const { UPSERT_TWO_ARG_SHIPPED_RE, UPSERT_THREE_ARG_SHIPPED_RE } = await import("../db/config.mjs");
@@ -634,7 +643,7 @@ if (configFailed) {
         // vendored file's, and is named.
         const FOUR = "upsert_thought(text,jsonb,vector,jsonb)";
         const others = forms.filter((f) => f !== three && f !== two && f.sig !== FOUR).map((f) => f.sig);
-        const andOthers = others.length ? `; ${others.length} other overload(s) beside them (${others.join(", ")}), which no migration defines and the servers never call` : "";
+        const andOthers = others.length ? `; ${others.length} other upsert_thought overload(s) (${others.join(", ")}), which no migration defines and the servers never call` : "";
         // The 3-arg body's semantics are declared by a sentinel in the body
         // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
         // windows stay while the label vouches for them and go otherwise. 025
@@ -660,8 +669,8 @@ if (configFailed) {
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : "";
         const remedyThree = (alone: string) => (twoStale ? ledgerRemedy("005", FIVE_THEN_LAST) : ledgerRemedy("025", alone));
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
-              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${andTwo}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning.
@@ -669,7 +678,7 @@ if (configFailed) {
               ledgerRemedy("005", FIVE_THEN_LAST));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021, 005, 008 or 013 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has${andTwo}${andOthers}`,
               remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",

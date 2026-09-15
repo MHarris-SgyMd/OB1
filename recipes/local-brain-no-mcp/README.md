@@ -143,5 +143,5 @@ To restore: `docker compose down`, `docker volume rm` the db volume, recreate em
 ## Related
 
 - [`skills/ob1-local-http`](../../skills/ob1-local-http/) -- the companion skill pack that runs on each dev host
-- [`db/migrations/`](../../db/migrations/) -- the canonical thoughts schema this recipe mirrors, as applicable files (001–005 are the guide's tables and functions)
+- [`db/migrations/`](../../db/migrations/) -- the canonical thoughts schema this recipe mirrors, as applicable files (001–003 are the guide's tables and functions; 004 onward is the fork's)
 - [`server/index.ts`](../../server/index.ts) -- the canonical MCP server this recipe deliberately does NOT use as a transport
