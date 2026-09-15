@@ -469,7 +469,7 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   // One connection each, as [6b]: A holds the backfill's transaction open; B
   // captures the singleton's text; C re-embeds the newer twin with its own
   // text. Both must wait on the TABLE lock — B at 022's FOR NO KEY UPDATE
-  // read before its INSERT, C at 018's FOR UPDATE, both ROW SHARE, which
+  // read before its INSERT, C at update_thought's row lock (018's, FOR NO KEY UPDATE since 032), both ROW SHARE, which
   // conflicts with EXCLUSIVE — and then act on the committed keys: B merges
   // instead of inserting a second row, C is told duplicate_of instead of
   // raising 23505 at its UPDATE.
@@ -524,6 +524,95 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
   await connA.close();
   await connB.close();
   await connC.close();
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
+{
+  await sql`DELETE FROM thoughts`;
+  // Q is about to supersede Z and take the text T; Z is being edited to T at
+  // the same moment. A stands where update_thought stands mid-call with
+  // content T and supersedes Z — the supersession lock, Q's row, the
+  // fingerprint lock for T held — and then writes the pointer, whose FK check
+  // takes FOR KEY SHARE on Z. B holds Z and waits on the fingerprint lock.
+  const T = "the text both edits take";
+  const zId = ((await sql`SELECT upsert_thought('the target, before', '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+  const qId = ((await sql`SELECT upsert_thought('the newer note', '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+  type R = { ok: boolean; error?: string; duplicate_of?: string };
+  const fpT = (await sql`SELECT content_fingerprint_of(${T}) AS f`)[0].f as string;
+
+  /** A's stance, then its pointer write once `go` resolves; the transaction is held until `done` resolves. */
+  const standAsA = (conn: SQL, go: Promise<void>, done: Promise<void>, out: { wrote?: boolean; error?: string }) =>
+    conn.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      await tx`SELECT pg_advisory_xact_lock(hashtext('ob1:supersession-review'))`;
+      await tx`SELECT 1 FROM thoughts WHERE id = ${qId}::uuid FOR NO KEY UPDATE`;
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${fpT}, 0))`;
+      await go;
+      await tx`UPDATE thoughts SET supersedes = ${zId}::uuid WHERE id = ${qId}::uuid`;
+      out.wrote = true;
+      await done;
+    }).catch((e: Error) => { out.error = e.message; });
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const advisoryWaiters = async (pid: number) => Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${pid}`)[0].n);
+
+  // Arm 1 — the lock 018 took, by hand in B's place: a deadlock, detected and
+  // raised (40P01) in one of the two, where the tool promised DUPLICATE_CONTENT
+  // or a clean edit.
+  {
+    const connA = new SQL({ url: URL_, max: 1 });
+    const connB = new SQL({ url: URL_, max: 1 });
+    let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
+    let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
+    const a: { wrote?: boolean; error?: string } = {};
+    const aDone = standAsA(connA, goP, doneP, a);
+    let bPid = -1; let bError = "";
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await tx`SELECT 1 FROM thoughts WHERE id = ${zId}::uuid FOR UPDATE`;
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${fpT}, 0))`;
+    }).catch((e: Error) => { bError = e.message; });
+    await waitFor(async () => bPid > 0 && (await advisoryWaiters(bPid)) === 1);
+    assert((await advisoryWaiters(bPid)) === 1, "B holds Z FOR UPDATE and waits on the fingerprint lock A holds");
+    go();
+    await waitFor(() => a.wrote === true || a.error !== undefined || bError !== "");
+    done();
+    await aDone; await bDone;
+    assert(/deadlock detected/.test(a.error ?? "") || /deadlock detected/.test(bError), `with Z held FOR UPDATE, A's pointer write — KEY SHARE on Z — and B's wait close a cycle Postgres has to break (A: ${(a.error ?? "wrote").slice(0, 40)}; B: ${(bError || "ok").slice(0, 40)})`);
+    await connA.close(); await connB.close();
+    await sql`UPDATE thoughts SET supersedes = NULL WHERE id = ${qId}::uuid`;
+  }
+
+  // Arm 2 — B is update_thought itself, whose row lock is FOR NO KEY UPDATE
+  // since 032: A's KEY SHARE on Z is granted under it, A commits, B follows
+  // and edits Z cleanly.
+  {
+    const connA = new SQL({ url: URL_, max: 1 });
+    const connB = new SQL({ url: URL_, max: 1 });
+    let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
+    let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
+    const a: { wrote?: boolean; error?: string } = {};
+    const aDone = standAsA(connA, goP, doneP, a);
+    let bPid = -1; let bError = "";
+    const bDone = connB.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      bPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      return ((await tx`SELECT update_thought(${zId}::uuid, ${T}, NULL::jsonb, ${unit(2)}::vector) AS r`) as { r: R }[])[0].r;
+    }).catch((e: Error) => { bError = e.message; return undefined; });
+    await waitFor(async () => bPid > 0 && (await advisoryWaiters(bPid)) === 1);
+    assert((await advisoryWaiters(bPid)) === 1, "update_thought on Z holds Z's row and waits on the fingerprint lock A holds");
+    go();
+    await waitFor(() => a.wrote === true || a.error !== undefined);
+    assert(a.wrote === true && a.error === undefined, `A's pointer write is granted its KEY SHARE on Z while update_thought holds Z (${a.error ?? "wrote"})`);
+    done();
+    await aDone;
+    const bResult = await bDone;
+    assert(bResult?.ok === true && bError === "", `…and B's edit of Z completes once A commits (${bError || JSON.stringify(bResult)})`);
+    const [after] = await sql`SELECT (SELECT supersedes FROM thoughts WHERE id = ${qId}::uuid) AS s, (SELECT content FROM thoughts WHERE id = ${zId}::uuid) AS c`;
+    assert(after.s === zId && after.c === T, "Q supersedes Z and Z carries the new text — both writes landed");
+    await connA.close(); await connB.close();
+  }
   await sql`DELETE FROM thoughts`;
 }
 

@@ -85,6 +85,24 @@
 --     naming supersedes takes the same three in the same order; an edit
 --     without it takes row then fingerprint lock, as 018 wrote. No two
 --     orders cross.
+--   * The row lock is FOR NO KEY UPDATE now, not 018's FOR UPDATE — the one
+--     change to a line 018 wrote, and this migration's reason: writing
+--     supersedes is the first time update_thought writes a FOREIGN KEY
+--     column, and the FK check takes FOR KEY SHARE on the TARGET row — a
+--     fourth lock, on another row of thoughts, taken last. FOR KEY SHARE
+--     conflicts with FOR UPDATE and not with FOR NO KEY UPDATE. Under FOR
+--     UPDATE: A edits Q with content T and supersedes Z (holds the
+--     supersession lock, Q, the fingerprint lock for T); B edits Z with
+--     content T (holds Z, waits on the fingerprint lock); A's UPDATE waits
+--     for KEY SHARE on Z — a deadlock, and one caller gets 40P01 where 018
+--     promised DUPLICATE_CONTENT. Under FOR NO KEY UPDATE A's UPDATE proceeds
+--     and B follows. What FOR NO KEY UPDATE keeps: it conflicts with itself,
+--     with FOR UPDATE and with FOR SHARE, so two edits of one row still
+--     serialise, 022's FOR NO KEY UPDATE read in upsert_thought is still
+--     ordered against it, and delete_thought's DELETE (FOR UPDATE) still
+--     waits. What it gives up: nothing — the id never changes, and KEY SHARE
+--     is the only lock it lets through. db/test-live.ts [6d] holds both arms
+--     (a FOR UPDATE holder deadlocks, the function does not).
 --   * derived_from through the envelope REPLACES the array (null or []
 --     clears it); it does not append. 025's re-capture already does "add if
 --     empty", a merge would be a second verb, and a caller who wants to add
@@ -107,7 +125,8 @@
 -- What a successor to update_thought must carry
 --   Everything 021 listed — 008's ob1.actor; 009's millisecond guard as a
 --   predicate in the UPDATE; 013's context in the chunk INSERT; 016's
---   content_fingerprint_of; 018's FOR UPDATE, advisory lock, duplicate_of /
+--   content_fingerprint_of; 018's row lock (FOR NO KEY UPDATE since this
+--   file — see the lock-order rule), advisory lock, duplicate_of /
 --   fingerprint_held_by and the ob1:unchanged-edit-not-duplicate sentinel;
 --   021's label CASE — AND the envelope read (shape guard, the two "key
 --   present" flags), validate_derived_from, the supersession lock before the
@@ -202,15 +221,17 @@ COMMENT ON FUNCTION validate_derived_from(jsonb) IS
 -- aclitem[] as text; empty — and the replay below does nothing — when the
 -- 9-argument form already exists (a re-run: CREATE OR REPLACE keeps its ACL),
 -- when no older form exists, or when its ACL is NULL (the defaults). The
--- 8-argument form's ACL is preferred; 018's 7-argument form — a hand re-apply
--- of 018 over 021 leaves it beside the current one — is the fallback.
+-- 8-argument form's ACL is taken when that form EXISTS — its NULL (the
+-- defaults) is the answer then, not a reason to look further; 018's
+-- 7-argument form — a hand re-apply of 018 over 021 leaves it beside the
+-- current one — is read only when there is no 8-argument form.
 -- ---------------------------------------------------------------------------
 SELECT set_config('ob1.acl_update_thought',
                   CASE WHEN to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)') IS NOT NULL THEN ''
-                       ELSE COALESCE(
-                         (SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)')),
-                         (SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)')),
-                         '') END,
+                       WHEN to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)') IS NOT NULL THEN
+                         COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)')), '')
+                       ELSE
+                         COALESCE((SELECT p.proacl::text FROM pg_proc p WHERE p.oid = to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)')), '') END,
                   false);
 
 -- Beside the 9-argument form either older one would make every call with its
@@ -298,13 +319,18 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
   END IF;
 
-  -- FOR UPDATE: what "unchanged" is decided against below is the row as it is
-  -- NOW, and stays so until this transaction ends. Without the lock a caller
-  -- passing no if_unchanged_since could read text X, have another edit commit
-  -- Y, and write X back over it as an "unchanged" edit that 013 would have
-  -- refused. Taken before the fingerprint advisory lock, so the two are always
-  -- acquired in the same order — see 018's "The rule", 2.
-  SELECT * INTO v_existing FROM thoughts WHERE id = p_id FOR UPDATE;
+  -- The row lock: what "unchanged" is decided against below is the row as it
+  -- is NOW, and stays so until this transaction ends. Without the lock a
+  -- caller passing no if_unchanged_since could read text X, have another edit
+  -- commit Y, and write X back over it as an "unchanged" edit that 013 would
+  -- have refused. Taken before the fingerprint advisory lock, so the two are
+  -- always acquired in the same order — see 018's "The rule", 2. FOR NO KEY
+  -- UPDATE, not 018's FOR UPDATE (032): the supersedes write below takes
+  -- FOR KEY SHARE on the target row, which FOR UPDATE on that row — another
+  -- edit of it, waiting on a fingerprint lock this one holds — would
+  -- deadlock with; see "Lock order" in the header. Two edits of one row still
+  -- serialise, and delete_thought still waits.
+  SELECT * INTO v_existing FROM thoughts WHERE id = p_id FOR NO KEY UPDATE;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
   END IF;
@@ -492,7 +518,7 @@ $acl$;
 -- Re-issued: a DROP loses the COMMENT (021's). A description, not a marker —
 -- the sentinel in the body is that.
 COMMENT ON FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb) IS
-  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. The row is locked FOR UPDATE and edits that would take a key the row does not own are serialised on an advisory lock (READ COMMITTED; captures through upsert_thought are not); both locks are held until the caller''s transaction ends, refusals included. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. p_embedding_model (021) is written to thoughts.embedding_model beside the vector — the label follows the vector: untouched without content, NULL with content and no vector. p_provenance (032) is the envelope {"supersedes": uuid|null, "derived_from": [uuid…]|null}: an absent key leaves the column, a JSON null clears it, a value sets it — derived_from validated by validate_derived_from, supersedes an existing thought that closes no loop, the write serialised with review_supersession_proposal''s. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT | SUPERSEDES_NOT_FOUND | WOULD_CYCLE.';
+  'Edit a thought by id. Recomputes content_fingerprint and replaces chunks — with their context — when content changes; an edit whose text normalises to what the row holds is never DUPLICATE_CONTENT, and reports duplicate_of when another row holds that text (a pair from before migration 003), or fingerprint_held_by when a row holds the key under other text, leaving this row''s fingerprint NULL. The row is locked FOR NO KEY UPDATE (032; FOR UPDATE until then, which the supersedes write''s FK check could deadlock with) and edits that would take a key the row does not own are serialised on an advisory lock (READ COMMITTED; captures through upsert_thought are not); both locks are held until the caller''s transaction ends, refusals included. Checks if_unchanged_since as a predicate in the UPDATE, so the guard is atomic. p_embedding_model (021) is written to thoughts.embedding_model beside the vector — the label follows the vector: untouched without content, NULL with content and no vector. p_provenance (032) is the envelope {"supersedes": uuid|null, "derived_from": [uuid…]|null}: an absent key leaves the column, a JSON null clears it, a value sets it — derived_from validated by validate_derived_from, supersedes an existing thought that closes no loop, the write serialised with review_supersession_proposal''s. Returns {ok:false, error} for NOT_FOUND | STALE_READ | DUPLICATE_CONTENT | SUPERSEDES_NOT_FOUND | WOULD_CYCLE.';
 
 -- ---------------------------------------------------------------------------
 -- review_supersession_proposal — 029's body, writing thoughts through

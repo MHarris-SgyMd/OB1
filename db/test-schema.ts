@@ -1690,7 +1690,7 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(/date_trunc\('milliseconds'/.test(src) && /p_if_unchanged_since IS NULL\s+OR/.test(src), "…009's millisecond-truncated guard as a predicate in the UPDATE");
   assert(/elem->>'context'/.test(src), "…013's context in the chunk insert");
   assert(/content_fingerprint_of\(/.test(src) && !/regexp_replace/.test(src), "…016's fingerprint function rather than a third inline copy of the rule");
-  assert(/FROM thoughts WHERE id = p_id FOR UPDATE/.test(src), "…the row read FOR UPDATE, so \"unchanged\" is decided against a row that cannot change under the call");
+  assert(/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/.test(src), "…the row read FOR NO KEY UPDATE (018's FOR UPDATE, weakened by 032 for the FK's KEY SHARE), so \"unchanged\" is decided against a row that cannot change under the call");
   assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
   assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
   await db.exec(`DELETE FROM thoughts`);
@@ -2168,7 +2168,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
   assert(Number(proc?.n) === 9, `…of nine parameters since 032 (${proc?.n})`);
   for (const [re, what] of [
-    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR UPDATE/, "018's FOR UPDATE"],
+    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
     [/pg_advisory_xact_lock/, "018's advisory lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
     [/date_trunc\('milliseconds'/, "009's guard"], [/jsonb_typeof\(p_payload\) <> 'object'/, null],
   ] as [RegExp, string | null][]) {
@@ -3141,6 +3141,10 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
     (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: string }>(
       `SELECT supersedes AS s, derived_from AS d, content, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis,
               embedding_model AS m, (metadata->>'k')::int AS k, updated_at::text AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
+  // By created_at, not id — thought_audit.id is a uuid, so ordering by it is
+  // random ([28] had that flake latent). created_at is now(), the
+  // transaction's start, and every call here is its own transaction writing
+  // at most one audit row for the thought, so the newest is unambiguous.
   const lastAudit = async (id: string) =>
     (await db.query<{ actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> }>(
       `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [id])).rows[0];
@@ -3157,7 +3161,7 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
     `032 is the last definer of update_thought, review_supersession_proposal and validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
   const src = await srcOf(UT);
   for (const [re, what] of [
-    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR UPDATE/, "018's FOR UPDATE"],
+    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
     [/pg_advisory_xact_lock\(hashtextextended/, "018's fingerprint lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
     [/date_trunc\('milliseconds'/, "009's guard"], [/p_embedding IS NULL THEN NULL/, "021's label CASE"],
     [/validate_derived_from\(p_provenance->'derived_from'\)/, "032's one derived_from rule"], [/hashtext\('ob1:supersession-review'\)/, "029's supersession lock, taken here too"],
@@ -3197,6 +3201,10 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   r = await edit(b, { derived_from: [] });
   assert(r.ok === true && (await rowOf(b)).d === null, "an empty derived_from array clears the column — [] and null are one spelling");
   r = await edit(b, { derived_from: [c], supersedes: a });
+  row = await rowOf(b);
+  assert(r.ok === true && row.s === a && JSON.stringify(row.d) === JSON.stringify([c]), "both keys set in one envelope");
+  audit = await lastAudit(b);
+  assert(audit.diff.supersedes?.after === a && JSON.stringify(audit.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${JSON.stringify(audit.diff)})`);
   r = await edit(b, { derived_from: null, supersedes: null });
   row = await rowOf(b);
   assert(r.ok === true && row.s === null && row.d === null, "…both cleared in one envelope");

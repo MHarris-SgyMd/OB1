@@ -6665,13 +6665,29 @@ of `pg_proc` by name, as [19] and [22] do). Three things the redefinition adds:
   `EDITED_SINCE`, `ALREADY_SUPERSEDES`, `pointer_written`, "undo only your own
   write" — are untouched, and [28] passes over the new body unchanged.
 
-A provenance-only edit is an edit: the row is locked `FOR UPDATE`,
-`if_unchanged_since` is a predicate on the write, `updated_at` moves, and the
-audit row carries the diff with the actor — what 029's `UPDATE` did under the
-triggers, now by the one path. Content, vector, label, fingerprint and windows
-are untouched unless `content` arrived. `derived_from` through the envelope
-**replaces** the array; a merge would be a second verb, and 025's re-capture
-already does "add if empty".
+A provenance-only edit is an edit: the row is locked, `if_unchanged_since` is
+a predicate on the write, `updated_at` moves, and the audit row carries the
+diff with the actor — what 029's `UPDATE` did under the triggers, now by the
+one path. Content, vector, label, fingerprint and windows are untouched unless
+`content` arrived. `derived_from` through the envelope **replaces** the array;
+a merge would be a second verb, and 025's re-capture already does "add if
+empty".
+
+**The row lock is `FOR NO KEY UPDATE` now, not 018's `FOR UPDATE`** — the one
+line of 018's this migration changes, found by the first review pass. Writing
+`supersedes` is the first time `update_thought` writes a foreign-key column,
+and the FK check takes `FOR KEY SHARE` on the *target* row: a fourth lock, on
+another row, taken last. `KEY SHARE` conflicts with `FOR UPDATE` and not with
+`FOR NO KEY UPDATE`. So under 018's lock: A edits Q with content T and
+`supersedes` Z (holds the supersession lock, Q, the fingerprint lock for T); B
+edits Z with content T (holds Z, waits on the fingerprint lock); A's `UPDATE`
+waits for `KEY SHARE` on Z — a deadlock, and one caller gets 40P01 where 018
+promised `DUPLICATE_CONTENT`. `FOR NO KEY UPDATE` still conflicts with itself,
+with `FOR UPDATE` and with `FOR SHARE`, so two edits of one row serialise as
+before, 022's read in `upsert_thought` is still ordered against it, and
+`delete_thought` still waits; the id never changes, so `KEY SHARE` is the only
+lock it lets through. `test-live` [6d] holds both arms: a `FOR UPDATE` holder
+in B's place deadlocks, the function does not.
 
 **Callers.** `UPDATE_THOUGHT_SIGNATURE` names the 9-argument form and
 `SUPERSEDED_SIGNATURES` the 8-argument one (the schema reset drops it, as a
@@ -6711,10 +6727,16 @@ and only that one; 018's form alone and 021's form alone each refused naming
 union rather than a throw. `test-update-delete` [9] drives the tool: set with
 the reply naming the pointer and the audit row under the key's name, a loop
 and a ghost refused in the tool's words, omit leaves, null clears.
-`test-live` [16] is unchanged in outcome. Green: `test-schema` 747/747,
-`test-preflight` 191/191, `test-store-sql`, `test-store-postgrest`,
-`test-update-delete`, `test-e2e-sql`, `test-live`, `tsc`, the consistency
-checker.
+`test-live` [16] is unchanged in outcome; [6d] holds the lock-order arms.
+`test-upgrade` [10] applies 032 through the migrator onto a populated 031
+with a hardened 8-argument form: one 9-argument function afterwards, the ACL
+carried, no row and no audit row moved, an 8-argument positional call still
+resolving, the envelope clearing a capture-time pointer, a re-run a no-op —
+and [7]'s `--reapply` assertion follows the arity (the first review pass found
+it still saying eight; CI runs that suite). Green: `test-schema`
+749/749, `test-preflight` 191/191, `test-upgrade` 119/119,
+`test-live` 455/455, `test-store-sql`, `test-store-postgrest`,
+`test-update-delete`, `test-e2e-sql`, `tsc`, the consistency checker.
 
 **Not done, and why.** `upsert_thought` still carries its inline copy of the
 derived_from rule — switching it is a redefinition of the other function, which
