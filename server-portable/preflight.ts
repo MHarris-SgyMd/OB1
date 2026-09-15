@@ -96,7 +96,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 /**
@@ -1898,6 +1898,27 @@ if (configFailed) {
           add("migration ledger", "warn", "no schema_migrations table — the schema was applied by hand",
               "Adopt it with: cd db && bun migrate.ts --url $DATABASE_URL --baseline");
         else add("migration ledger", "ok", "schema_migrations present");
+
+        // The opt-in query log (034, SMD-1295). Never fatal: it is off by default
+        // and its write is best-effort, so this reports its presence and setting
+        // rather than refuses. A self-hosted role also needs query_log INSERT to
+        // record it — documented, not enforced (db/README.md grants).
+        try {
+          const [{ present }] = await sql`SELECT to_regclass('public.query_log') IS NOT NULL AS present`;
+          if (!present) {
+            add("query log", "skip", "not present — the opt-in query log (migration 034) is not applied");
+          } else {
+            const { queryLogEnabled, queryLogRetentionDays } = await import("../db/config.mjs");
+            const on = queryLogEnabled(env as unknown as Record<string, string | undefined>);
+            const days = queryLogRetentionDays(env as unknown as Record<string, string | undefined>);
+            add("query log", "ok",
+              `present; ${on ? "ON (OB1_QUERY_LOG=on) here" : "off by default — set OB1_QUERY_LOG=on to record"}. ` +
+              `Logs each search and the fetch/edit/delete of a returned id (query text, arguments, returned ids — personal data at rest), read offline by evals/export-queries.ts. ` +
+              `Retention: prune_query_log(${days}); a self-hosted role needs query_log INSERT (db/README.md).`);
+          }
+        } catch (e) {
+          add("query log", "warn", `could not verify: ${(e as Error).message}`, "The check reads to_regclass('public.query_log').");
+        }
 
         await sql.close();
       } catch (e) {

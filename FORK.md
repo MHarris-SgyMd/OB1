@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-two numbered changes on top of the pin. Seven fix defects found in an
+Sixty-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–62 are the numbered `###` sections** further down, which is
+sections. Changes **18–63 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -7182,6 +7182,60 @@ r LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO r; GRANT SELECT ON
 ALL TABLES IN SCHEMA public TO r;` then run preflight as `r` (refused, naming the
 chunk and audit writes), `bun db/migrate.ts --grant r` (granted), preflight again
 (ok), and a windowed `upsert_thought` through `r`.
+
+### 63. An opt-in query log turns real use into a replayable eval, and a CI gate holds a recall floor against the searches people actually ran (SMD-1295)
+
+Every retrieval decision this fork has shipped is measured on one corpus the
+baseline already saturates — 441 Linear issues, recall@10 0.98 — so the reranker
+cascade, hybrid fusion, contextual chunks and GraphRAG all came out neutral or
+worse there, and each write-up (and change 30, SMD-1041) names the corpus as the
+reason. The other ground truth a real brain produces on every request — the query
+someone typed, and which returned thought they opened next — the server used to
+discard. This change records it, behind a flag, and gates PRs on it.
+
+**The log (migration 034, `query_log`).** Off by default; `OB1_QUERY_LOG=on`
+makes the two search tools write one row per call (query text, `match_count`,
+`threshold`, `recency_weight`, `filter`, and the ids returned in rank order with
+scores) and the three action tools (`fetch`, `update_thought`, `delete_thought`)
+write one row per touch of a *returned* id. Nothing reads it on the hot path; the
+write is best-effort — a failure is swallowed so it can never fail a search or a
+capture — and it is a new table off the capture path, no trigger, no `thoughts`
+change. A search and the action that followed are **not** joined at write time:
+there is no request/session token in the MCP handlers (008's actor envelope has a
+`session` slot nothing populates), so the link is recovered at export by the only
+keys both rows share — the acting agent (010) and the returned id, within a
+window — a NULL agent its own bucket, not a wildcard. `prune_query_log(p_keep_days)`
+is the retention window (default 30, `OB1_QUERY_LOG_RETENTION_DAYS`; the DELETE
+always bounded by `logged_at`), part of this version because the log is personal
+data at rest — every query typed. `db/config.mjs`'s `QUERY_LOG` is the one
+spelling of the flag, names, tool sets and retention, read by the server,
+preflight and the tests; a `querylog` grant group (query_log `INSERT`, since 034)
+means a self-hosted role that runs `--grant` can turn the flag on and have it
+work — documented, but not enforced, since preflight cannot read a server env
+flag and the log is off by default.
+
+**Export → replay → gate (`evals/`).** `export-queries.ts` reads the log and
+writes an **ids-only** fixture (`query`, `relevant` = the touched ids, `baseline`
+= the recorded ranking); no thought content leaves the brain, so it is
+committable, and `scripts/check-fork-consistency.mjs` check 9 fails any committed
+fixture that carries a content-bearing field (self-tested both directions each
+run). `eval-replay.ts` replays a fixture through the shipped
+`search_thoughts_hybrid` over the live corpus and reports recall@k / MRR against
+`relevant` and rank drift against `baseline`, in `eval-real.ts`'s table shape.
+`db/test-replay.ts` is the CI gate (job *Retrieval replay gate*): offline PGlite,
+no model or key, ~0.5 s, replaying a committed **content-free** synthetic fixture
+(`build-replay-fixture.ts` — seeded vectors and ids) through `match_thoughts` and
+failing when mean recall@5 drops past the fixture's floor. It proves the floor has
+teeth by replaying random query vectors and watching recall collapse (0.154 <
+0.8), so a scrambling regression fails it without a git-revert to stage one. The
+`relevant` label is click-through relevance — a proxy, a fetch can be a wrong
+guess — kept beside the hand-labelled sets, not instead of them.
+
+Upstream status: **not applicable** — a fork-only measurement mechanism; the log
+is a self-hosting feature and the gate is fork CI. **Unfiled** upstream.
+Reproduce: `OB1_QUERY_LOG=on`, capture then `search_thoughts` then `fetch` a
+returned id, and `SELECT kind, tool FROM query_log` shows the two rows;
+`bun db/test-replay.ts` runs the gate offline.
 
 ## Detached from the fork network
 

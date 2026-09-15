@@ -2652,6 +2652,62 @@ instrument for both, and `--replay` re-scores a dump in seconds.
   later build (601 by that afternoon) changes the candidate table and can make
   the entity dump's fingerprints stale for edited issues.
 
+## The query-log replay loop — measuring against real use (SMD-1295)
+
+Every number above is measured on the same 441 Linear issues, where the baseline
+already reaches recall@10 0.98. On a corpus that saturated, the reranker cascade,
+hybrid fusion, contextual chunks and GraphRAG all came out neutral or worse, and
+each write-up names the corpus as the reason (SMD-1039). There is a second ground
+truth a real brain produces on every request and the server used to discard: the
+queries people and agents send to `search`, and which returned thought they went
+on to open. This loop captures it and gates PRs on it.
+
+**The loop.**
+
+1. **Log** — off by default. `OB1_QUERY_LOG=on` records one row per search (query,
+   arguments, and the ids returned in rank order with scores) and one per
+   follow-up fetch/edit/delete of a returned id (migration 034; `db/README.md`).
+   A caller who searches then opens result 3 has labelled result 3 relevant —
+   *click-through relevance*, a proxy, kept beside the hand-labelled sets, not
+   instead of them.
+2. **Export** — `bun export-queries.ts [out.json]` reads the log from
+   `DATABASE_URL`, attributes each touch to the most recent prior search (same
+   agent, in a window) that returned its id, and writes an **ids-only** fixture:
+   `{ query, relevant, baseline }`. No thought content leaves the brain, so the
+   fixture can be committed without the corpus (`scripts/check-fork-consistency.mjs`
+   check 9 guards it).
+3. **Replay** — `DATABASE_URL=… OB1_EVAL_EMBED=… bun eval-replay.ts fixture.json`
+   re-runs each query through the shipped `search_thoughts_hybrid` over the live
+   corpus and reports recall@k / MRR against `relevant` and rank drift against
+   `baseline`, in the leaderboard shape above:
+
+   ```
+   fixture                         queries   R@1    R@5   R@10    MRR    drift    sec
+   ──────────────────────────────────────────────────────────────────────────────
+   fixture.json                          N    ...%   ...%  ...%  0.xxx    x.xx    x.x
+   ```
+
+   `drift` is the mean absolute rank change of the relevant ids from where the
+   log last saw them, so a change that reorders the pool is visible even when
+   recall@5 is unmoved. `reachable` reports how many relevant ids the current
+   corpus still holds — a low count means the fixture is from a different brain,
+   not a regression.
+4. **Gate** — `bun ../db/test-replay.ts` (CI job *Retrieval replay gate*). Offline:
+   real PostgreSQL 17 in WASM (PGlite), no service container, no model, no key,
+   ~0.5 s. It replays a committed, **content-free** fixture
+   (`fixtures/replay-fixture.json`, seeded synthetic vectors from
+   `build-replay-fixture.ts`) through `match_thoughts` and fails when mean
+   recall@5 drops past the fixture's floor. At HEAD every gold is rank 1 (recall
+   1.000); the gate proves its floor has teeth by replaying random query vectors
+   and watching recall collapse (0.154 < 0.8) — a scrambling regression would
+   score the same. The live corpus stays out of CI.
+
+**Why two fixtures.** The export fixture (query text + ids) drives the local,
+model-backed `eval-replay.ts` against your own brain. The gate fixture (ids +
+vectors, no text) drives the offline PGlite gate with no model. In production the
+gate's corpus comes from the export's redaction; in this repo it is generated so
+the repo can gate itself.
+
 ## Related
 
 - `../SETUP.md` — the two decisions these evals inform

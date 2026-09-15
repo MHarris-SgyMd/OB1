@@ -34,6 +34,20 @@ other, and files the conflicts as proposals for you to accept or reject — up t
 a few calls per thought, both thoughts' text per call, and nothing changes in
 the store until you accept one.
 
+A third opt-in feature stores data rather than spending model calls, and is also
+**off until you turn it on**: the query log (`OB1_QUERY_LOG=on`, migration 034).
+With it on, the server records one row per search — the query text, its arguments
+and the ids returned — and one per follow-up fetch, edit or delete of a returned
+id, so a retrieval change can be replayed against what the brain was actually
+asked (`evals/eval-replay.ts`). It is **personal data at rest**: every query you
+typed. Nothing leaves your machine — this is a local table, not a provider call —
+and nothing reads it on the capture or search path; the write is best-effort and
+never fails a search. `prune_query_log()` enforces a retention window
+(`OB1_QUERY_LOG_RETENTION_DAYS`, default 30), and `evals/export-queries.ts`
+redacts the log to ids and query text — no thought content — before it becomes a
+committable fixture. A self-hosted role needs `query_log` `INSERT` to record it
+(`db/README.md`, "Grants for a capturing role").
+
 | Model | Width | Note |
 | --- | --- | --- |
 | **`qwen3-embedding:4b`** | 2560 → **1024** | **The default.** Best measured on real data — 0.903 MRR vs `embeddinggemma`'s 0.873 over 441 real issues with full descriptions and comments — and the only local model that embeds a long capture whole. Costs ~5x the latency and 2.5 GB. Truncation is automatic. |
