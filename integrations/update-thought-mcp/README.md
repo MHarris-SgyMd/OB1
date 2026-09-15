@@ -62,10 +62,15 @@ supabase functions new update-thought-mcp
 
 ```bash
 curl -o supabase/functions/update-thought-mcp/index.ts \
-  https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/integrations/update-thought-mcp/index.ts
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/index.ts
 curl -o supabase/functions/update-thought-mcp/deno.json \
-  https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/integrations/update-thought-mcp/deno.json
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/update-thought-mcp/deno.json
+mkdir -p supabase/functions/_shared
+curl -o supabase/functions/_shared/auth.ts \
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/_shared/auth.ts
 ```
+
+The third file is the access-key module the function imports from `../_shared/auth.ts` — the core server's, copied so Supabase bundles it (`supabase/functions/_shared/` ships with every function; if you already have it from another server on this fork, it is the same file).
 
 ### 2. Set environment variables
 
@@ -74,8 +79,10 @@ Reuse the same secrets as the core Open Brain server:
 ```bash
 supabase secrets set \
   OPENROUTER_API_KEY="your-openrouter-key" \
-  MCP_ACCESS_KEY="your-mcp-access-key"
+  MCP_ACCESS_KEYS="laptop:write:<sha256-of-your-key>"
 ```
+
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. Use a `write` key: `update_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by the platform.
 
@@ -90,7 +97,7 @@ supabase functions deploy update-thought-mcp --no-verify-jwt
 Open **Settings → Connectors → Add custom connector** and paste:
 
 ```
-https://<project>.supabase.co/functions/v1/update-thought-mcp?key=<MCP_ACCESS_KEY>
+https://<project>.supabase.co/functions/v1/update-thought-mcp?key=<your-key>
 ```
 
 Name it something distinct from your main Open Brain connector (e.g. `Open Brain — Update`) so the tool shows up clearly in your tool list.
@@ -117,7 +124,7 @@ The [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) covers ho
 ## Troubleshooting
 
 **Issue: Tool call returns `401 Invalid or missing access key`**
-Solution: Make sure the `?key=` parameter in your connector URL matches the `MCP_ACCESS_KEY` secret you set with `supabase secrets set`. If you rotate the key, re-deploy the function and update the connector URL.
+Solution: Make sure the `?key=` parameter in your connector URL is the **key** whose hash sits in the `MCP_ACCESS_KEYS` secret (the URL carries the key, the secret its hash). If you rotate the key, update the secret's entry and the connector URL. A `read`-scoped key authenticates but is given no tool — the connector shows nothing to call.
 
 **Issue: `OPENROUTER_API_KEY is not set on this Edge Function; content updates cannot re-embed.`**
 Solution: This appears only when a caller passes `content`. Set the secret (`supabase secrets set OPENROUTER_API_KEY=...`) and re-deploy. Updates that only pass `metadata_patch` work without an embedding provider.

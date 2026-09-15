@@ -27,7 +27,7 @@ This Edge Function exposes the v1 OB1 Agent Memory contract. OpenClaw is the fir
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - [`schemas/agent-memory`](../../schemas/agent-memory/) applied
 - Supabase CLI installed
-- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEY` configured as Supabase secrets
+- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` configured as Supabase secrets — `name:scope:sha256` entries, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope.
 
 ## Credential Tracker
 
@@ -63,8 +63,12 @@ Copy this folder into your Supabase project:
 supabase functions new agent-memory-api
 cp integrations/agent-memory-api/index.ts supabase/functions/agent-memory-api/index.ts
 cp integrations/agent-memory-api/deno.json supabase/functions/agent-memory-api/deno.json
+mkdir -p supabase/functions/_shared
+cp integrations/_shared/auth.ts supabase/functions/_shared/auth.ts
 supabase functions deploy agent-memory-api --no-verify-jwt
 ```
+
+The function imports the access-key module from `../_shared/auth.ts` — the core server's, copied so Supabase bundles it (if you already have `supabase/functions/_shared/auth.ts` from another server on this fork, it is the same file).
 
 **Done when:** `supabase functions list` shows `agent-memory-api` as active.
 
@@ -134,7 +138,10 @@ The default mode is dry-run. Add `--apply` to mark matching active test memories
 ## Troubleshooting
 
 **Issue: `Invalid or missing access key`**
-Solution: Confirm the request includes `?key=...` or `x-brain-key`.
+Solution: Confirm the request includes the key — `?key=...`, `x-brain-key`, `x-access-key` or a bearer token — and that its SHA-256 hash is an entry in `MCP_ACCESS_KEYS` (the request carries the key, the secret its hash).
+
+**Issue: `Forbidden: this key is read-scoped and this route writes`**
+Solution: The key's entry in `MCP_ACCESS_KEYS` has scope `read`. Write-back, usage reporting and review need a `write` key.
 
 **Issue: recall returns no memories**
 Solution: Confirm write-back has created `agent_memories`, and that those memories are confirmed or `include_unconfirmed` is true.

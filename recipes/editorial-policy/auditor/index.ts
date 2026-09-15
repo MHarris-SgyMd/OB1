@@ -20,12 +20,19 @@
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 //   OPENROUTER_API_KEY
 //   SLACK_BOT_TOKEN, SLACK_CAPTURE_CHANNEL (or SLACK_DIGEST_CHANNEL to override)
-//   AUDITOR_ACCESS_KEY (random secret you set; gates the function URL)
+//   AUDITOR_ACCESS_KEYS (name:scope:sha256 entries — see the README; the older
+//     single AUDITOR_ACCESS_KEY still works). A read-scoped key may dry_run only.
 //   POLICY_VERSION (optional; defaults to "1.3", bump when editorial-policy.md changes)
 //
 // Schedule: see schedule.sql in this recipe folder.
 
+// ob1-fork (SMD-1455): access keys go through ../../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key may only dry_run. FORK.md
+// change 65; extensions/test-auth.ts exercises it.
 import { createClient } from "../../../compat/supabase-sql/index.ts";
+import { authenticate, authenticateRequest, canWrite } from "../../_shared/auth.ts";
 
 // ── Env ──────────────────────────────────────────────────────────────────
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -35,7 +42,6 @@ const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const SLACK_DIGEST_CHANNEL =
   Deno.env.get("SLACK_DIGEST_CHANNEL") ?? SLACK_CAPTURE_CHANNEL;
-const AUDITOR_ACCESS_KEY = Deno.env.get("AUDITOR_ACCESS_KEY")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const POLICY_VERSION = Deno.env.get("POLICY_VERSION") ?? "1.3"; // bump when docs/editorial-policy.md changes
@@ -502,9 +508,16 @@ async function postToSlack(channel: string, text: string): Promise<void> {
 // ── HTTP entrypoint ──────────────────────────────────────────────────────
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
-    const url = new URL(req.url);
-    const key = url.searchParams.get("key") ?? req.headers.get("x-auditor-key");
-    if (key !== AUDITOR_ACCESS_KEY) {
+    // Named, scoped, hashed keys through the shared module (AUDITOR_ACCESS_KEYS;
+    // the older single AUDITOR_ACCESS_KEY still works, compared by digest). The
+    // module reads ?key=, x-brain-key, x-access-key and a bearer token; this
+    // function's own x-auditor-key header is tried beside them.
+    const keys = {
+      MCP_ACCESS_KEYS: Deno.env.get("AUDITOR_ACCESS_KEYS"),
+      MCP_ACCESS_KEY: Deno.env.get("AUDITOR_ACCESS_KEY"),
+    };
+    const principal = authenticateRequest(req, keys) ?? authenticate(req.headers.get("x-auditor-key"), keys);
+    if (!principal) {
       return new Response("unauthorized", { status: 401 });
     }
 
@@ -515,6 +528,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const days: number = Number.isFinite(body.days) ? body.days : 30;
     const postSlackFlag: boolean = body.post_to_slack ?? true;
     const dryRun: boolean = body.dry_run ?? false;
+    // An audit stores a report and may post to Slack. A read-scoped key may
+    // preview — dry_run does neither — and nothing more.
+    if (!canWrite(principal) && !dryRun) {
+      return new Response("forbidden: this key is read-scoped; only dry_run is allowed", { status: 403 });
+    }
     const priorAuditCount: number = Number.isFinite(body.prior_audit_count)
       ? body.prior_audit_count
       : 4;

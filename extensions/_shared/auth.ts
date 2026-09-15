@@ -31,15 +31,19 @@
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
  *
- * Consumers: server-portable/index.ts, and the six vendored extensions under
+ * Consumers: server-portable/index.ts; the six vendored extensions under
  * extensions/ (seven servers), which authenticated with `key !== expected` on a
  * URL query key and ran as the service role until they were made consumers of
- * this module (SMD-1252, FORK.md change 64). They import extensions/_shared/
- * auth.ts — a byte-for-byte copy of this file, because a Supabase Edge Function
- * is bundled from supabase/functions/ and `_shared/` is the one place beside it
- * a shared module can live; extensions/test-auth.ts fails if the two differ.
+ * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
+ * integrations that compared the same way — nine MCP and HTTP servers, four
+ * workers and one webhook receiver (SMD-1455, change 65). Each imports a
+ * `_shared/auth.ts` beside it — extensions/_shared/, recipes/_shared/,
+ * integrations/_shared/ and integrations/consolidation-workers/_shared/, every
+ * one a byte-for-byte copy of this file, because a Supabase Edge Function is
+ * bundled from supabase/functions/ and `_shared/` is the one place beside it a
+ * shared module can live; extensions/test-auth.ts fails if any copy differs.
  * Everything here is runtime-neutral — node:crypto and node:buffer resolve on
- * Bun, Node, Workers (nodejs_compat) and Deno — so the copy runs as it is.
+ * Bun, Node, Workers (nodejs_compat) and Deno — so the copies run as they are.
  */
 
 import { Buffer } from "node:buffer";
@@ -142,6 +146,19 @@ function digestsMatch(a: string, b: string): boolean {
   const bufB = Buffer.from(b, "hex");
   if (bufA.length !== bufB.length || bufA.length === 0) return false;
   return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Whether a shared secret the caller echoes — a webhook's `secret_token`, the
+ * value Readwise puts in its payload — is the one configured. Both sides are
+ * hashed first and the digests compared timing-safe, so neither the secret's
+ * length nor its prefix reaches the response time; empty on either side is a
+ * refusal, never a match. No scope and no name: a webhook secret identifies the
+ * caller's platform, not a client, so there is no principal to give.
+ */
+export function secretMatches(presented: string | null | undefined, expected: string | null | undefined): boolean {
+  if (!presented || !expected) return false;
+  return digestsMatch(hashKey(presented), hashKey(expected));
 }
 
 export type AuthConfig = {

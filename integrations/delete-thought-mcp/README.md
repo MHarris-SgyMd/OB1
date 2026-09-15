@@ -55,16 +55,23 @@ supabase functions new delete-thought-mcp
 
 ```bash
 curl -o supabase/functions/delete-thought-mcp/index.ts \
-  https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/integrations/delete-thought-mcp/index.ts
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/delete-thought-mcp/index.ts
 curl -o supabase/functions/delete-thought-mcp/deno.json \
-  https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/integrations/delete-thought-mcp/deno.json
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/delete-thought-mcp/deno.json
+mkdir -p supabase/functions/_shared
+curl -o supabase/functions/_shared/auth.ts \
+  https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/integrations/_shared/auth.ts
 ```
+
+The third file is the access-key module the function imports from `../_shared/auth.ts` — the core server's, copied so Supabase bundles it (`supabase/functions/_shared/` ships with every function; if you already have it from another server on this fork, it is the same file).
 
 ### 2. Set environment variables
 
 ```bash
-supabase secrets set MCP_ACCESS_KEY="your-mcp-access-key"
+supabase secrets set MCP_ACCESS_KEYS="laptop:write:<sha256-of-your-key>"
 ```
+
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. Use a `write` key: `delete_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by the Supabase platform.
 
@@ -79,7 +86,7 @@ supabase functions deploy delete-thought-mcp --no-verify-jwt
 In Claude Desktop: **Settings → Connectors → Add custom connector**, paste:
 
 ```
-https://<project>.supabase.co/functions/v1/delete-thought-mcp?key=<MCP_ACCESS_KEY>
+https://<project>.supabase.co/functions/v1/delete-thought-mcp?key=<your-key>
 ```
 
 Use a distinct connector name (e.g. `Open Brain — Delete`) so the tool is easy to spot in your tool list.
@@ -126,7 +133,7 @@ Left out of the base integration to keep its dependencies to a single table.
 ## Troubleshooting
 
 **Issue: Tool call returns `401 Invalid or missing access key`**
-Solution: Confirm the `?key=` in your custom connector URL matches the `MCP_ACCESS_KEY` secret set on the Edge Function. If you rotate the key, re-deploy and update the connector URL.
+Solution: Confirm the `?key=` in your custom connector URL is the **key** whose hash sits in the `MCP_ACCESS_KEYS` secret (the URL carries the key, the secret its hash). If you rotate the key, update the secret's entry and the connector URL. A `read`-scoped key authenticates but is given no tool — the connector shows nothing to call.
 
 **Issue: `delete_thought error: permission denied for table thoughts`**
 Solution: Ensure your service role has DELETE permission on `public.thoughts`. The getting-started guide grants this in Step 2.5 — re-run `grant select, insert, update, delete on table public.thoughts to service_role;` in the SQL editor if it was missed.

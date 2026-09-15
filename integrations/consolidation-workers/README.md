@@ -18,7 +18,7 @@ Both workers:
 - Use three-tier LLM fallback: OpenRouter (primary) > OpenAI > Anthropic
 - Support dry-run mode for previewing changes without writing
 - Log all operations to the `consolidation_log` table for auditability
-- Use fail-closed authentication via `MCP_ACCESS_KEY`
+- Authenticate through `_shared/auth.ts` (the core server's module): named, scoped, SHA-256-hashed keys in `MCP_ACCESS_KEYS`, fail-closed when none is configured; a `read` key may only dry-run
 - Use wildcard CORS for flexible deployment
 
 For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repository root.
@@ -49,7 +49,7 @@ cp -r integrations/consolidation-workers/metadata-norm supabase/functions/consol
 cp -r integrations/consolidation-workers/_shared supabase/functions/_shared
 ```
 
-If you already have a `_shared/` folder from the enhanced MCP server, the files are identical — no need to overwrite.
+If you already have a `_shared/` folder from the enhanced MCP server, its files are identical — but make sure `_shared/auth.ts` is there too: both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
 
@@ -62,9 +62,11 @@ supabase functions deploy consolidation-metadata --no-verify-jwt
 
 ```bash
 supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
+  MCP_ACCESS_KEYS="cron:write:<sha256-of-your-key>" \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
+
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
@@ -92,7 +94,7 @@ supabase secrets set \
 
 ### 4. Run the Bio Worker
 
-Generate a biographical profile (dry run first):
+Generate a biographical profile (dry run first — the one thing a `read`-scoped key may do):
 
 ```bash
 curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio?dry_run=true" \

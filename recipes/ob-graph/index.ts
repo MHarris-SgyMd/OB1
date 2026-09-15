@@ -17,13 +17,24 @@
  *   - delete_node       — Remove a node and all its edges
  *   - delete_edge       — Remove a specific edge
  *   - list_edge_types   — List all relationship types in use
+ *
+ * The five that write — create_node, create_edge, update_node, delete_node,
+ * delete_edge — are registered only for a write-scoped key.
  */
 
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is never given the tools
+// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
+// The import above is this file's first from outside its own directory: deploy
+// it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
 import { Hono, type Context } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
 
@@ -56,9 +67,16 @@ app.all("*", async (c) => {
     Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
+  // is server-portable/auth.ts, held identical by extensions/test-auth.ts).
+  // MCP_ACCESS_KEYS holds name:scope:sha256 entries; the older single
+  // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
+  // given the tools that write, so it cannot see them, let alone call them.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -79,7 +97,7 @@ app.all("*", async (c) => {
   // ==========================================================================
   // Tool: create_node
   // ==========================================================================
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "create_node",
     "Add a node to the knowledge graph. Nodes represent entities like people, projects, concepts, tools, or places.",
     {
@@ -125,7 +143,7 @@ app.all("*", async (c) => {
   // ==========================================================================
   // Tool: create_edge
   // ==========================================================================
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "create_edge",
     "Create a directed relationship (edge) between two nodes in the graph.",
     {
@@ -379,7 +397,7 @@ app.all("*", async (c) => {
   // ==========================================================================
   // Tool: update_node
   // ==========================================================================
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "update_node",
     "Update an existing node's label, type, or properties.",
     {
@@ -441,7 +459,7 @@ app.all("*", async (c) => {
   // ==========================================================================
   // Tool: delete_node
   // ==========================================================================
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "delete_node",
     "Remove a node and all its connected edges from the graph.",
     {
@@ -474,7 +492,7 @@ app.all("*", async (c) => {
   // ==========================================================================
   // Tool: delete_edge
   // ==========================================================================
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "delete_edge",
     "Remove a specific edge (relationship) from the graph.",
     {

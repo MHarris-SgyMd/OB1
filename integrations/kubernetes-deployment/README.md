@@ -57,10 +57,10 @@ EMBEDDING/CHAT API
 
 ### 1. Build the MCP Server Docker Image
 
-From this directory, build and import the image:
+From this directory, build and import the image. The context is the parent `integrations/` directory, because `index.ts` imports the shared access-key module from `../_shared/auth.ts` and Docker cannot copy from outside its context:
 
 ```bash
-docker build -t openbrain-mcp-server:latest .
+docker build -t openbrain-mcp-server:latest -f Dockerfile ..
 
 # For K3s:
 docker save openbrain-mcp-server:latest | sudo k3s ctr images import -
@@ -80,6 +80,8 @@ cp k8s/secrets.yml.example k8s/secrets.yml
 ```
 
 Edit `k8s/secrets.yml` with your actual credentials. **Never commit this file.**
+
+`mcp-access-keys` holds the MCP access keys as `name:scope:sha256` entries, comma-separated — the SHA-256 hash of each key, never the key itself; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. Clients present the key (`x-brain-key`, `x-access-key`, `?key=` or a bearer token). A `read`-scoped key gets the search and listing tools; `capture_thought` is registered only for a `write` key. The older single plaintext key still works if you set `MCP_ACCESS_KEY` on the container instead.
 
 ### 3. Deploy to Kubernetes
 

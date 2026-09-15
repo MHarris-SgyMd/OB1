@@ -85,18 +85,17 @@ Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) gui
 | Function name | `ob-graph-mcp` |
 | Download path | `recipes/ob-graph` |
 
-Before you deploy, generate an MCP access key and decide which Open Brain user this graph belongs to. Then set the function secrets from `.env.example`:
+The guide's Step 2 also downloads `_shared/auth.ts` — the server imports it from `../_shared/auth.ts` (the copy in `recipes/_shared/` is the same file). Before you deploy, mint an access key as the guide's Step 3 shows and decide which Open Brain user this graph belongs to. Then set the function secrets:
 
 ```bash
-openssl rand -hex 32
 supabase secrets set \
-  MCP_ACCESS_KEY=your-generated-key \
+  MCP_ACCESS_KEYS=laptop:write:<sha256-of-your-key> \
   DEFAULT_USER_ID=your-user-uuid
 ```
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically by Supabase for Edge Functions. You only need to set `MCP_ACCESS_KEY` and `DEFAULT_USER_ID` manually.
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically by Supabase for Edge Functions. You only need to set `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID` manually. `MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; the older single `MCP_ACCESS_KEY` still works, compared by digest. A `read` key sees the query tools only; the five tools that write (`create_node`, `create_edge`, `update_node`, `delete_node`, `delete_edge`) are registered only for a `write` key.
 
-Done when: The `ob-graph-mcp` function is deployed successfully and its secrets include `MCP_ACCESS_KEY` and `DEFAULT_USER_ID`.
+Done when: The `ob-graph-mcp` function is deployed successfully and its secrets include `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID`.
 
 ---
 

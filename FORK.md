@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-four numbered changes on top of the pin. Seven fix defects found in an
+Sixty-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–64 are the numbered `###` sections** further down, which is
+sections. Changes **18–65 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -183,9 +183,13 @@ scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys)
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 65 widened it to every vendored server
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
+<17 vendored files>              # change 65 (twelve servers onto _shared/auth.ts with scopes; five webhook receivers and samples onto a timing-safe compare)
+recipes/_shared/auth.ts          # change 65 (new file — server-portable/auth.ts byte for byte)
+integrations/_shared/auth.ts     # change 65 (new file — the same)
+integrations/consolidation-workers/_shared/auth.ts  # change 65 (new file — the same, beside the workers' existing _shared/)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -7844,6 +7848,189 @@ its key.
 
 
 
+### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: twelve servers onto a `_shared/auth.ts` with scopes, five webhook receivers and samples onto a compare of digests, and check 8's exception list empty (SMD-1455)
+
+`server-portable/auth.ts` (one export added, the consumers paragraph), its four
+copies — `extensions/_shared/auth.ts`, and the new `recipes/_shared/auth.ts`,
+`integrations/_shared/auth.ts` and
+`integrations/consolidation-workers/_shared/auth.ts` — the seventeen files
+check 8 held by count: `recipes/ob-graph/index.ts`,
+`recipes/work-operating-model-activation/index.ts`,
+`recipes/editorial-policy/auditor/index.ts`,
+`recipes/edge-function-cost-optimization/examples/before/per-request-server.ts`
+and `examples/after/index.ts` (with `examples/after/server.ts`),
+`recipes/vercel-neon-telegram/src/app/api/telegram/route.ts` (with
+`src/lib/auth.ts`), `integrations/delete-thought-mcp/index.ts`,
+`integrations/update-thought-mcp/index.ts`,
+`integrations/kubernetes-deployment/index.ts` (with its `Dockerfile`,
+`k8s/openbrain.yml` and `k8s/secrets.yml.example`),
+`integrations/entity-extraction-worker/index.ts`,
+`integrations/consolidation-workers/bio/index.ts` and
+`metadata-norm/index.ts`, `integrations/agent-memory-api/index.ts`,
+`integrations/open-brain-rest/index.ts`, `integrations/readwise-capture/index.ts`,
+`integrations/telegram-capture/README.md`,
+`docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs`; the READMEs of
+those servers and `recipes/editorial-policy/schedule.sql`;
+`primitives/deploy-edge-function/README.md`; `extensions/test-auth.ts`;
+`scripts/check-fork-consistency.mjs` and `.github/workflows/fork-checks.yml`
+(Linear SMD-1455, filed from change 64's implementation). No migration.
+
+**The finding.** Change 64 made the seven extension servers consumers of the
+core server's auth module and gave the fork checker check 8: a value read from
+the environment under a credential's name is never compared with an equality
+operator. The rule's first run found the same compare in seventeen more
+vendored files, and change 64 listed each in `CREDENTIAL_COMPARE_EXCEPTIONS`
+for exactly the one line it had, with this ticket as the reason. By what they
+compared: ten MCP servers, HTTP APIs and workers comparing a URL-query or
+header key with `MCP_ACCESS_KEY` and then running as the service role — the
+extensions' shape exactly; two more under another name (`AUDITOR_ACCESS_KEY`,
+the dashboard walkthrough's `OB1_DASHBOARD_DEMO_KEY`); three webhook receivers
+comparing a secret the caller echoes (Readwise's payload field, Telegram's
+secret-token header, twice); and the cost recipe's before/after teaching pair
+— the "after" teaching the compare too.
+
+**Adopt, as change 64 did — and where the module lives.** The ticket's sketch
+said to import `server-portable/auth.ts` by relative path, the shape fix 13's
+shim import has. Change 64's first review pass had already found why not: a
+Supabase Edge Function is bundled from `supabase/functions/`, and an import
+that leaves it does not deploy. Four of the seventeen deploy today —
+`ob-graph` and `agent-memory-api` on supabase-js, `metadata-norm` on an inline
+`npm:` specifier, `kubernetes-deployment` from a Dockerfile — and the rest
+already import the SQL shim across the tree (fix 13; the state SMD-1480
+records for five extensions). So the module is a `_shared/auth.ts` beside each
+server, imported as `../_shared/auth.ts` from its function directory — where
+Supabase looks — which in this repository is one copy per category
+(`recipes/_shared/`, `integrations/_shared/`) and one in the consolidation
+workers' own `_shared/`, already their deploy-time shared directory beside
+`helpers.ts` and `network.ts`. The auditor and the two samples sit deeper and
+reach the category copy by `../../` and `../../../`. Four copies of one file,
+each byte for byte `server-portable/auth.ts`, the test failing if any differs;
+the deploy primitive says any one of them serves. The Kubernetes image is
+built with `integrations/` as its context so the copy is inside it, the
+Dockerfile mirroring the repository layout; the README's build line changed.
+
+**What each server became.** The MCP servers register a tool that writes only
+`if (canWrite(principal))`, as the extensions do. Where a server was built per
+request (`ob-graph`, `kubernetes-deployment`'s `buildServer()`, the "before"
+sample) the principal is a parameter; where it was a module singleton
+(`delete-thought-mcp`, `update-thought-mcp`, `work-operating-model-activation`)
+`buildServer(principal)` runs once per key scope and `serverFor(principal)`
+hands back the cached one — two servers at most, not one per request, which is
+the property those files and the cost recipe care about. A server with no
+tool for a read-scoped principal (the two single-tool integrations) declares
+no tools capability; a client that lists anyway is told the method does not
+exist. The two HTTP APIs resolve the principal in one `app.use("*")` middleware
+and put a `requireWrite` middleware on the routes that write — for
+`agent-memory-api` write-back, usage reporting and review; for
+`open-brain-rest` the thought `PUT` and `DELETE`, capture, reflection and
+ingest — answering 403 with the reason before the route parses a body. A
+recall is a read even though it records itself: it inserts a trace row and its
+items, which the usage route later marks used or ignored — and that route is
+a write. The four workers keep their fail-closed 503 when no key is configured
+and let a read-scoped key do the one thing that writes nothing: a dry run
+(`?dry_run=true`, or the auditor's `dry_run` body flag); anything else is 403.
+The consolidation workers' undocumented `x-mcp-key` header went; the
+auditor's own `x-auditor-key` is tried beside the module's four forms, its
+keys `AUDITOR_ACCESS_KEYS` with the older `AUDITOR_ACCESS_KEY` still accepted.
+Every server reads its keys per request, where they are used, so a rotation
+takes effect without a restart and the test can set and unset them. The
+"after" sample's session map remembers the scope a session was minted under:
+a session id is not a credential, so a read key presenting a write session's
+id gets a fresh read-scoped session, not the write surface.
+
+**The webhook secrets.** A secret the caller echoes has no name and no scope,
+so there is no principal to give — the fix is a timing-safe compare, and it
+lives in one place: `auth.ts` gained `secretMatches(presented, expected)`,
+which hashes both sides and compares the digests with `timingSafeEqual`, so
+neither the secret's length nor its prefix reaches the response time and an
+empty value on either side is a refusal. `readwise-capture` uses it through
+`integrations/_shared/auth.ts`, with a string check first so a non-string
+payload field is refused rather than hashed. The Next.js recipe's route uses a
+`secretMatches` added to its own `src/lib/auth.ts`, beside the
+`timingSafeEqual` it already had for the access key — a Next.js app does not
+import this fork's server. The Telegram README's sample handler — pasted into
+a fresh Supabase project, where nothing else of this fork exists — carries a
+six-line Web Crypto version (`crypto.subtle.digest` and Deno's
+`crypto.subtle.timingSafeEqual`), and the dashboard walkthrough's Node stub a
+`node:crypto` one, because a stub is what gets copied.
+
+**The test.** `extensions/test-auth.ts` is now the one test for every vendored
+server under scoped keys: the seven extensions and the eleven recipes and
+integrations it can import, plus the webhook receiver, run as deployed under
+the stand-in for Deno's two globals — `Deno.serve({ port }, handler)` now
+captured too — and, for the recipes and integrations, under a Bun loader that
+reads their Deno specifiers: a `jsr:` type-only import is dropped,
+`npm:pkg@version` becomes `pkg`, the Deno postgres driver becomes a stub that
+never connects, and a bare package name resolves from `extensions/`' install,
+since theirs is a deno.json. (Bun's runtime `onResolve` is not consulted for a
+`jsr:` or bare specifier at all — the first two attempts recursed or fell
+through — so the loader rewrites the source instead.) Each MCP server gets the
+extensions' assertions; each HTTP API: a read key passes a read route and is
+told 403 by every write route before it parses anything, a write key passes
+them all; each worker: a read key is refused a real run and allowed a dry run;
+the receiver: the right secret admits, a wrong, missing, non-string or
+digest-for-secret one is refused. No database — a handler that must query
+before it can answer is pointed at a port nothing listens on and refused at
+once. Then the drift guards, widened: every mounted route classified and
+exactly the writes take `requireWrite`, a route's reach including the
+file-level functions it calls; `.delete()` a table verb only with no argument
+(`searchParams.delete("page")` had made two reads writes); raw `INSERT INTO`
+counts for the Kubernetes server's SQL; the read's own trace inserts allowed
+by table name; the four copies identical; each deno.json's exact `npm:` pins
+matching what the test installs; and the five files it cannot run — the
+"after" sample whose tool modules are not in the repository, the Next.js
+route, the README, the stub — say the same thing in their text. 631
+assertions.
+
+**Check 8.** The exception list is empty; the shape stays, the header says why,
+and the failure message names both places a fix can go — the `_shared/auth.ts`
+beside the file, or `secretMatches()` for a secret the caller echoes. Said in
+the rule's text too: a compare routed through a function is outside the rule
+by design, because the operator is what it catches and a call is where the
+timing-safe compare lives.
+
+**Docs.** Each converted server's README: the secret is `MCP_ACCESS_KEYS`
+(`name:scope:sha256`, minted as the deploy primitive's Step 3 shows, the older
+single key still accepted), the `_shared/auth.ts` copy is downloaded or copied
+beside the function, and the tools or routes that need a write-scoped key are
+named. The two thought integrations' download URLs pointed at upstream, where
+the file they now import does not exist; they point at this fork's `main`. The
+deploy primitive says the category copies are the same file. The auditor's
+`schedule.sql` says the URL carries the key and the secret its hash, and that
+the schedule needs write scope. The Kubernetes manifests take
+`MCP_ACCESS_KEYS` from a `mcp-access-keys` secret with an example entry.
+
+**What did not change, and why.** `server/index.ts`, upstream's Edge
+Function, keeps its compare: outside the check's directories and the
+vendored-tree standard, as the ticket says. `integrations/rest-api` and
+`enhanced-mcp` keep their hand-rolled timing-safe loops: not hits, and not
+this ticket. The servers still answer a bare 401 rather than the core's
+JSON-RPC envelope, for change 64's reason. The shim-importing files among the
+seventeen still neither bundle as an Edge Function nor run under Deno, fix
+13's consequence, unchanged here — SMD-1480 records it for five extensions and
+now carries a comment widening it to these. Read scope on the workers means a
+dry run, which still spends LLM calls; that is a cost, not a write.
+
+**Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
+(integrations writing around `update_thought`). SMD-1480 holds the
+deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
+`validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
+length leak the ticket did not name and this change did not touch.
+
+**Verified:** `extensions/test-auth.ts` 631/631 (the seven extensions' 243
+among them); `server-portable/test-auth.ts` 59/59, `test-server.ts` 73/73,
+`tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
+--node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
+`agent-memory-api`, `consolidation-workers/metadata-norm` and
+`kubernetes-deployment`, each from its own directory — the four CI now checks;
+`bun scripts/check-fork-consistency.mjs` PASS with the exception list empty
+(47 probes, 21 non-probes, no vendored hit). The ticket's verify grep —
+`req.query("key")` under `extensions/`, `recipes/`, `integrations/` — returns
+nothing.
+
+**Upstream status:** not applicable — the compares are upstream's; the module
+they now use is this fork's.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -7921,11 +8108,12 @@ best, under this repository's name, in a repo whose stated differentiator is
 that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
 carries the audit so a rebase cannot quietly undo it. Three rules are audited
-today. Credentials (SMD-1252, change 64): check 8 fails the build on a value
-read from the environment under a credential's name compared with an equality
-operator — the one shared plaintext key seven extension servers compared with
-`!==` before they became consumers of `server-portable/auth.ts` — with counted
-per-file exceptions for the seventeen vendored files SMD-1455 holds. Core
+today. Credentials (SMD-1252, change 64; SMD-1455, change 65): check 8 fails
+the build on a value read from the environment under a credential's name
+compared with an equality operator — the one shared plaintext key seven
+extension servers, and then seventeen more vendored files, compared with `!==`
+before they became consumers of `server-portable/auth.ts` — with counted
+per-file exceptions, and the list has been empty since change 65. Core
 ownership (SMD-1250, change 58): check 7 fails the build on any
 vendored statement that redefines, drops or re-comments a function
 `db/migrations/` owns, the owned set read from the migrations, with counted
@@ -7941,11 +8129,10 @@ for prose that names a flag in order to say it was removed, and probe lists the
 check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
-with its reason. SMD-1250 landed in that shape as change 58 and SMD-1252 as
-change 64; two tickets hold the rest of the standard — SMD-1455 (the
-seventeen vendored recipes, integrations and samples check 8 holds by count)
-and SMD-1228 (integrations writing around `update_thought`) — and each should
-land the same way.
+with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
+change 64 and SMD-1455 as change 65; one ticket holds the rest of the standard
+— SMD-1228 (integrations writing around `update_thought`) — and it should land
+the same way.
 
 ### Landing a rebase on `main`, which is protected
 

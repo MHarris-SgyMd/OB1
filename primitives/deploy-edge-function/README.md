@@ -60,7 +60,7 @@ curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.
 curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
 ```
 
-The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it:
+The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it, and so do the recipes and integrations that authenticate the same way (`recipes/_shared/auth.ts` and `integrations/_shared/auth.ts` are the same file byte for byte, so this one copy serves them all):
 
 ```bash
 mkdir -p supabase/functions/_shared

@@ -4,6 +4,9 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1455): the access key goes through ../../../_shared/auth.ts (recipes/_shared/,
+// the core server's server-portable/auth.ts) — FORK.md change 65. The anti-pattern this file
+// teaches is the per-request construction below, not the key compare it used to carry.
 // ❌ ANTI-PATTERN — McpServer reconstructed on every HTTP request.
 //
 // Every tool call by Claude triggers ~4 HTTP requests (initialize +
@@ -18,14 +21,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../../../compat/supabase-sql/index.ts";
+import { authenticateRequest } from "../../../_shared/auth.ts";
 
 const app = new Hono();
 
 app.post("*", async (c) => {
-  // Auth check
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Auth check — named, scoped, hashed keys through the shared module; the one
+  // tool here reads, so there is nothing to withhold from a read-scoped key.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 

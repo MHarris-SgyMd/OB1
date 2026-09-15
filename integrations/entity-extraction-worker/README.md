@@ -31,7 +31,7 @@ The knowledge graph enables queries like "what projects does Sarah work on?" or 
 
 ### 1. Deploy the Edge Function
 
-Copy the `integrations/entity-extraction-worker/` folder into your Supabase project's `supabase/functions/` directory, then deploy:
+Copy the `integrations/entity-extraction-worker/` folder into your Supabase project's `supabase/functions/` directory, and `integrations/_shared/auth.ts` to `supabase/functions/_shared/auth.ts` — the worker imports the access-key module from `../_shared/auth.ts` (if you already have it from another server on this fork, it is the same file). Then deploy:
 
 ```bash
 supabase functions deploy entity-extraction-worker --no-verify-jwt
@@ -41,9 +41,11 @@ supabase functions deploy entity-extraction-worker --no-verify-jwt
 
 ```bash
 supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
+  MCP_ACCESS_KEYS="cron:write:<sha256-of-your-key>" \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
+
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The worker writes, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
@@ -94,7 +96,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/entity-extract
   -H "x-brain-key: your-access-key"
 ```
 
-For a dry run (preview without writing):
+For a dry run (preview without writing — the one thing a `read`-scoped key may do):
 
 ```bash
 curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/entity-extraction-worker?limit=5&dry_run=true" \

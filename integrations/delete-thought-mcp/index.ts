@@ -4,6 +4,11 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is never given the tools
+// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
 /**
  * delete-thought-mcp — Standalone MCP Edge Function that adds a single tool:
  *   delete_thought(id)
@@ -18,12 +23,15 @@
  *   - Hard delete — the row is gone once this returns. Recovery depends on
  *     your database backup strategy (see README).
  *
- * Auth: x-brain-key header OR ?key=... URL query parameter.
+ * Auth: named, scoped, hashed keys in MCP_ACCESS_KEYS through ../_shared/auth.ts
+ * (the older single MCP_ACCESS_KEY still works, compared by digest), presented
+ * as x-brain-key, x-access-key, ?key= or a bearer token. delete_thought writes,
+ * so a read-scoped key is given no tool at all (SMD-1455, FORK.md change 65).
  *
  * Env vars:
  *   SUPABASE_URL
  *   SUPABASE_SERVICE_ROLE_KEY
- *   MCP_ACCESS_KEY
+ *   MCP_ACCESS_KEYS (or the older single MCP_ACCESS_KEY)
  *
  * Extension hook:
  *   If you install the thought_audit schema (see `schemas/thought-audit`)
@@ -39,93 +47,112 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // --- MCP Server Setup ---
 
-const server = new McpServer({
-  name: "open-brain-delete-thought",
-  version: "1.0.0",
-});
+/** The tool surface for one principal: delete_thought writes, so a read-scoped key is given no tool at all. */
+function buildServer(principal: Principal): McpServer {
+  const server = new McpServer({
+    name: "open-brain-delete-thought",
+    version: "1.0.0",
+  });
 
-server.registerTool(
-  "delete_thought",
-  {
-    title: "Delete Thought",
-    description:
-      "Permanently delete a thought by UUID. The row is hard-deleted — recovery depends on your database backups. Returns a confirmation including the prior content length so the caller can log what was removed.",
-    inputSchema: {
-      id: z.string().uuid().describe("UUID of the thought to delete"),
+  if (canWrite(principal)) server.registerTool(
+    "delete_thought",
+    {
+      title: "Delete Thought",
+      description:
+        "Permanently delete a thought by UUID. The row is hard-deleted — recovery depends on your database backups. Returns a confirmation including the prior content length so the caller can log what was removed.",
+      inputSchema: {
+        id: z.string().uuid().describe("UUID of the thought to delete"),
+      },
     },
-  },
-  async ({ id }) => {
-    try {
-      // Pre-flight fetch so "not found" is a clear, distinct outcome.
-      const { data: existing, error: fetchError } = await supabase
-        .from("thoughts")
-        .select("id, content")
-        .eq("id", id)
-        .single();
+    async ({ id }) => {
+      try {
+        // Pre-flight fetch so "not found" is a clear, distinct outcome.
+        const { data: existing, error: fetchError } = await supabase
+          .from("thoughts")
+          .select("id, content")
+          .eq("id", id)
+          .single();
 
-      if (fetchError || !existing) {
+        if (fetchError || !existing) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Thought not found: ${id}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const { error } = await supabase.from("thoughts").delete().eq("id", id);
+
+        if (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `delete_thought error: ${error.message}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const priorLength =
+          typeof existing.content === "string" ? existing.content.length : 0;
+
         return {
           content: [
             {
               type: "text" as const,
-              text: `Thought not found: ${id}`,
+              text: `Deleted thought ${id} (prior content length: ${priorLength} chars).`,
             },
           ],
-          isError: true,
         };
-      }
-
-      const { error } = await supabase.from("thoughts").delete().eq("id", id);
-
-      if (error) {
+      } catch (err: unknown) {
         return {
           content: [
-            {
-              type: "text" as const,
-              text: `delete_thought error: ${error.message}`,
-            },
+            { type: "text" as const, text: `Error: ${(err as Error).message}` },
           ],
           isError: true,
         };
       }
+    },
+  );
 
-      const priorLength =
-        typeof existing.content === "string" ? existing.content.length : 0;
+  return server;
+}
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Deleted thought ${id} (prior content length: ${priorLength} chars).`,
-          },
-        ],
-      };
-    } catch (err: unknown) {
-      return {
-        content: [
-          { type: "text" as const, text: `Error: ${(err as Error).message}` },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
+// One server per key scope, built on first use — a read-scoped principal is
+// handed a server on which the tool was never registered, and neither server
+// is rebuilt per request.
+const servers = new Map<boolean, McpServer>();
+function serverFor(principal: Principal): McpServer {
+  const write = canWrite(principal);
+  let server = servers.get(write);
+  if (!server) {
+    server = buildServer(principal);
+    servers.set(write, server);
+  }
+  return server;
+}
 
 // --- Hono app with auth + CORS ---
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id",
+    "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
@@ -145,9 +172,16 @@ app.all("*", async (c) => {
     return c.json({ error: "Method not allowed" }, 405, { ...corsHeaders, Allow: "POST, OPTIONS" });
   }
 
-  const provided =
-    c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
+  // is server-portable/auth.ts, held identical by extensions/test-auth.ts).
+  // MCP_ACCESS_KEYS holds name:scope:sha256 entries; the older single
+  // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
+  // given the tool, so it cannot see it, let alone call it.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
   }
 
@@ -165,7 +199,7 @@ app.all("*", async (c) => {
   }
 
   const transport = new StreamableHTTPTransport();
-  await server.connect(transport);
+  await serverFor(principal).connect(transport);
   return transport.handleRequest(c);
 });
 

@@ -89,15 +89,15 @@ Convert your N MCP functions into **one** function with the structure shown in [
 
 ```
 supabase/functions/open-brain-mcp/
-  index.ts            # Hono app, auth, CORS, session map, transport wiring
-  server.ts           # module-scope McpServer; calls register() per tool module
+  index.ts            # Hono app, auth (../_shared/auth.ts: scoped keys), CORS, session map, transport wiring
+  server.ts           # module-scope McpServer per key scope; calls register(server, principal) per tool module
   lib/
     cache.ts          # TTL Map with tag-based invalidation
     supabase.ts       # createClient() singleton
     embeddings.ts     # getEmbedding() + 10-min cache
     metadata.ts       # extractMetadata() (LLM call)
   tools/
-    <extension-1>.ts  # exports register(server)
+    <extension-1>.ts  # exports register(server, principal); a tool that writes only if canWrite(principal)
     <extension-2>.ts
     ...
 ```
@@ -169,8 +169,10 @@ In Claude Desktop → Settings → Connectors:
 2. **Add** a single new connector pointing to:
 
    ```
-   https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<MCP_ACCESS_KEY>
+   https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-key>
    ```
+
+   The key itself — `MCP_ACCESS_KEYS` on the function holds its `name:scope:sha256` entry, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. A `read`-scoped key gets a server on which the tools that write were never registered.
 
 3. Restart Claude Desktop. All your tools (now from a single server) appear in the tools panel.
 

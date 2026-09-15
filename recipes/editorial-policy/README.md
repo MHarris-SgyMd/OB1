@@ -114,7 +114,7 @@ Run the contents of `schema.sql` in your Supabase SQL Editor. This adds the `get
 In the Supabase dashboard: **Settings → Edge Functions → Secrets**. Set:
 
 ```
-AUDITOR_ACCESS_KEY = <a random string you generate, e.g. with `openssl rand -hex 16`>
+AUDITOR_ACCESS_KEYS = cron:write:<sha256-of-a-key you generate — see Deploy an Edge Function, Step 3 (primitives/deploy-edge-function); the hash, never the key. Write scope: the audit stores a report. The older single AUDITOR_ACCESS_KEY still works.>
 SLACK_DIGEST_CHANNEL = <optional; defaults to SLACK_CAPTURE_CHANNEL>
 POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
 ```
@@ -126,6 +126,8 @@ POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
 mkdir -p supabase/functions/auditor
 cp <recipe>/auditor/index.ts  supabase/functions/auditor/index.ts
 cp <recipe>/auditor/deno.json supabase/functions/auditor/deno.json
+mkdir -p supabase/functions/_shared
+cp recipes/_shared/auth.ts    supabase/functions/_shared/auth.ts   # the access-key module index.ts imports
 supabase functions deploy auditor
 ```
 
@@ -166,7 +168,7 @@ A typical critical finding looks like:
 
 **Issue: Auditor returns 401 Unauthorized**
 
-Solution: the `AUDITOR_ACCESS_KEY` secret isn't set, or the value in your `schedule.sql` doesn't match. Check **Settings → Edge Functions → Secrets** and the `?key=…` param in the cron URL.
+Solution: the `AUDITOR_ACCESS_KEYS` secret isn't set, or the `?key=…` in your `schedule.sql` is not the key whose hash it holds (the URL carries the key, the secret its hash). Check **Settings → Edge Functions → Secrets** and the cron URL. A 403 means the key's entry is `read`-scoped: a scheduled run stores a report, so it needs `write`; only a `dry_run` is allowed on `read`.
 
 **Issue: Auditor runs but finds nothing useful**
 

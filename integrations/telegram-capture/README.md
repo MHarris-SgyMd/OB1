@@ -128,6 +128,15 @@ const UPDATE_ON_EDIT = Deno.env.get("UPDATE_ON_EDIT") === "true";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// Whether the secret Telegram echoes is the configured one, compared timing-safe:
+// both sides hashed, so the digests are one length, then compared byte for byte
+// with the time taken independent of where they differ.
+async function secretMatches(presented: string | null, expected: string): Promise<boolean> {
+  if (!presented) return false;
+  const digest = async (s: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+  return crypto.subtle.timingSafeEqual(await digest(presented), await digest(expected));
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
@@ -201,7 +210,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // internet traffic from hitting the endpoint if anyone discovers the URL.
     if (TELEGRAM_WEBHOOK_SECRET) {
       const secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (secret !== TELEGRAM_WEBHOOK_SECRET) {
+      if (!(await secretMatches(secret, TELEGRAM_WEBHOOK_SECRET))) {
         return new Response("unauthorized", { status: 401 });
       }
     }

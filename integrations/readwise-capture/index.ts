@@ -4,6 +4,10 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: https://esm.sh/@supabase/supabase-js@2
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
+// digest to digest, through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function.
+// FORK.md change 65; extensions/test-auth.ts exercises it.
 // readwise-capture / index.ts
 //
 // Supabase Edge Function that receives Readwise highlight webhooks,
@@ -13,6 +17,7 @@
 // without one Readwise API call per highlight.
 
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { secretMatches } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -145,9 +150,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return new Response("invalid json", { status: 400 });
     }
 
-    // Readwise echoes the webhook secret in the payload; reject anything
-    // that doesn't match our configured value.
-    if (body.secret !== READWISE_WEBHOOK_SECRET) {
+    // Readwise echoes the webhook secret in the payload; reject anything that
+    // does not match the configured value — compared timing-safe, digest to
+    // digest, so the response time says nothing about the secret.
+    if (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) {
       return new Response("unauthorized", { status: 401 });
     }
 

@@ -1,20 +1,27 @@
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is refused by the routes
+// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
+// The import above is this file's first from outside its own directory: deploy
+// it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { createClient } from "@supabase/supabase-js";
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
 };
 
@@ -196,11 +203,6 @@ async function getEmbedding(text: string): Promise<number[]> {
   return d.data[0].embedding;
 }
 
-function auth(c: { req: { header: (name: string) => string | undefined; url: string } }) {
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  return provided && provided === MCP_ACCESS_KEY;
-}
-
 function unsafeReasons(text: string): string[] {
   const reasons: string[] = [];
   if (/-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----/.test(text)) reasons.push("private_key");
@@ -325,14 +327,31 @@ async function audit(event_type: string, payload: Record<string, unknown>) {
   });
 }
 
-const app = new Hono();
+const app = new Hono<{ Variables: { principal: Principal } }>();
 
 app.options("*", (c) => c.text("ok", 200, corsHeaders));
 
+// Named, scoped, hashed keys through the shared module (MCP_ACCESS_KEYS; the
+// older single MCP_ACCESS_KEY still works, compared by digest); every presented
+// form — x-brain-key, x-access-key, ?key=, a bearer token — is tried.
 app.use("*", async (c, next) => {
-  if (!auth(c)) return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  c.set("principal", principal);
   await next();
 });
+
+// Routes that change what is stored take a write-scoped key; a read-scoped key
+// is told so, not merely refused. A recall is a read even though
+// it records itself — a trace row and its items, later marked used or ignored
+// through the usage route, which is a write.
+const requireWrite: MiddlewareHandler<{ Variables: { principal: Principal } }> = async (c, next) => {
+  if (!canWrite(c.get("principal"))) return c.json({ error: "Forbidden: this key is read-scoped and this route writes" }, 403, corsHeaders);
+  await next();
+};
 
 app.get("/health", (c) => c.json({ ok: true, service: "agent-memory-api", version: "0.1.0" }, 200, corsHeaders));
 
@@ -421,7 +440,7 @@ app.post("/recall", async (c) => {
   }, 200, corsHeaders);
 });
 
-app.post("/writeback", async (c) => {
+app.post("/writeback", requireWrite, async (c) => {
   const parsed = writebackSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid write-back payload", details: parsed.error.flatten() }, 400, corsHeaders);
   const req = parsed.data;
@@ -560,7 +579,7 @@ app.post("/writeback", async (c) => {
   return c.json({ schema_version: writebackResponseSchema(req.schema_version), memories: created.map(responseMemory) }, 200, corsHeaders);
 });
 
-app.post("/recall/:request_id/usage", async (c) => {
+app.post("/recall/:request_id/usage", requireWrite, async (c) => {
   const request_id = c.req.param("request_id");
   const parsed = usageSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid usage payload", details: parsed.error.flatten() }, 400, corsHeaders);
@@ -629,7 +648,7 @@ app.get("/memories/:id", async (c) => {
   return c.json({ memory: data }, 200, corsHeaders);
 });
 
-app.patch("/memories/:id/review", async (c) => {
+app.patch("/memories/:id/review", requireWrite, async (c) => {
   const id = c.req.param("id");
   const parsed = reviewSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid review payload", details: parsed.error.flatten() }, 400, corsHeaders);

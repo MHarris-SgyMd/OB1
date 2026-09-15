@@ -28,7 +28,7 @@
  *   8. a credential read from the environment is never compared with an
  *      equality operator — inline or through an identifier bound from the read
  *      — in the same files as 7, with counted per-file exceptions for the
- *      vendored files a ticket holds
+ *      vendored files a ticket holds (none today)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -63,9 +63,10 @@ function contributionDirs() {
     const base = join(ROOT, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      // _template is the category's placeholder, _shared the module the
-      // extensions import, node_modules extensions/test-auth.ts's install
-      // (gitignored) — none is a contribution.
+      // _template is the category's placeholder, _shared the auth module the
+      // category's servers import (a copy of server-portable/auth.ts), and
+      // node_modules extensions/test-auth.ts's install (gitignored) — none is
+      // a contribution.
       if (name === "_template" || name === "_shared" || name === "node_modules") continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
@@ -698,7 +699,10 @@ function checkCoreFunctions() {
 // key accepted from a URL query string. FORK.md change 64 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
 // is never given the tools that write — and this is what keeps the next rebase
-// from bringing the two lines back.
+// from bringing the two lines back. Its first run found the same compare in
+// seventeen more vendored files; change 65 (SMD-1455) moved every one — the
+// MCP and HTTP servers onto the module, the webhook receivers onto a
+// timing-safe compare of digests — and the exception list below emptied.
 //
 // The rule is the MECHANISM, not the seven files' spelling: a strict or loose
 // (in)equality with a value read from the environment under a credential's
@@ -725,7 +729,12 @@ function checkCoreFunctions() {
 // both silencing real compares and failing ordinary code, because scope in
 // regex over unparsed text is not a thing; the fourth took the altitude. A
 // false positive here fails CI in the open and is answered with a rename or a
-// counted exception; a miss is silent. Outside the rule, and said so: `.includes`,
+// counted exception; a miss is silent. Also outside the rule, by design: a
+// compare of a secret the CALLER echoes — a webhook's `secret_token` — when it
+// is not read from the environment on either side, and any compare routed
+// through a function (`secretMatches(a, b)`, `timingSafeEqual`): the rule
+// catches the operator, and a call is where the timing-safe compare lives.
+// Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
 // an object property, a helper that returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable, a read
@@ -733,10 +742,10 @@ function checkCoreFunctions() {
 // (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
 // and braces or `=>` inside a string, comment or regex literal — each a
 // spelling the review passes named and this rule does not chase. Exceptions are
-// per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
-// integrations that carry the same compare are listed with the ticket that
-// holds their fix, for exactly the lines each has today — one fixed drops out
-// as stale, one added fails.
+// per file and COUNTED, as checks 6 and 7's are: a vendored file that must keep
+// a compare is listed with the ticket that holds its fix, for exactly the lines
+// it has today — one fixed drops out as stale, one added fails. The list has
+// been empty since change 65.
 const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
@@ -875,29 +884,12 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
   'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (expected?.length !== 64) warn();',
 ];
-// The vendored recipes and integrations that carry the same compare, each for
-// exactly this many lines, held by the ticket named; fixing one makes its entry
-// stale (remove it), adding a compare beside one fails.
-const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 64 did";
-const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
-  ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
-  ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
-  ["recipes/ob-graph/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/work-operating-model-activation/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/editorial-policy/auditor/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/vercel-neon-telegram/src/app/api/telegram/route.ts", { why: `${HELD} (Telegram's webhook secret header)`, lines: 1 }],
-  ["integrations/delete-thought-mcp/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/update-thought-mcp/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/kubernetes-deployment/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/entity-extraction-worker/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/consolidation-workers/bio/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/consolidation-workers/metadata-norm/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/agent-memory-api/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/open-brain-rest/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/readwise-capture/index.ts", { why: `${HELD} (the secret Readwise echoes in the webhook body)`, lines: 1 }],
-  ["integrations/telegram-capture/README.md", { why: `${HELD} (the README's sample handler)`, lines: 1 }],
-  ["docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs", { why: `${HELD} (the walkthrough's stub REST server)`, lines: 1 }],
-]);
+// Empty since SMD-1455 (FORK.md change 65) moved the seventeen files check 8's
+// first run found onto the shared module. The shape stays for the next audit: a
+// vendored file that must keep a compare is listed with its line count and the
+// ticket that holds its fix, and the count is checked both ways — one fixed
+// makes its entry stale (remove it), one added beside it fails.
+const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([]);
 
 function checkCredentialCompares() {
   const SELF = "scripts/check-fork-consistency.mjs";
@@ -911,7 +903,7 @@ function checkCredentialCompares() {
   for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 64), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through the _shared/auth.ts beside the file (a copy of server-portable/auth.ts) as the extensions, recipes and integrations do (SMD-1252 and SMD-1455, FORK.md changes 64 and 65) — or, for a secret the caller echoes, compare digests with its secretMatches() — or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);

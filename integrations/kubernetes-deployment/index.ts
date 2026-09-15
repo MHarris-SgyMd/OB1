@@ -13,15 +13,24 @@
  *   CHAT_API_BASE - Base URL for OpenAI-compatible chat API (defaults to EMBEDDING_API_BASE)
  *   CHAT_API_KEY - API key for chat service (defaults to EMBEDDING_API_KEY)
  *   CHAT_MODEL - Model name for metadata extraction (default: gpt-4o-mini)
- *   MCP_ACCESS_KEY - Authentication key for MCP endpoint
+ *   MCP_ACCESS_KEYS - name:scope:sha256 access keys (the older single MCP_ACCESS_KEY still works);
+ *                     capture_thought is registered only for a write-scoped key
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  */
 
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is never given the tools
+// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
+// The import is this file's first from outside its own directory: the Docker
+// build context is integrations/ so that ../_shared/auth.ts is in it (see the Dockerfile).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
 // --- Configuration ---
 
@@ -38,8 +47,6 @@ const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "openai/text-embeddin
 const CHAT_API_BASE = Deno.env.get("CHAT_API_BASE") || EMBEDDING_API_BASE;
 const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") || EMBEDDING_API_KEY;
 const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "openai/gpt-4o-mini";
-
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 // --- PostgreSQL Connection Pool ---
 
@@ -137,7 +144,7 @@ Only extract what's explicitly there.`,
 
 // --- MCP Server Setup ---
 
-function buildServer(): McpServer {
+function buildServer(principal: Principal): McpServer {
   const server = new McpServer({
     name: "open-brain",
     version: "1.0.0",
@@ -507,7 +514,7 @@ function buildServer(): McpServer {
   );
 
   // Tool 4: Capture Thought (replaces supabase insert with raw SQL)
-  server.registerTool(
+  if (canWrite(principal)) server.registerTool(
     "capture_thought",
     {
       title: "Capture Thought",
@@ -571,7 +578,7 @@ function buildServer(): McpServer {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, content-type, x-brain-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+  "Access-Control-Allow-Headers": "authorization, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
@@ -591,8 +598,16 @@ app.all("*", async (c) => {
     return c.json({ error: "Method not allowed" }, 405, { ...corsHeaders, Allow: "POST, OPTIONS" });
   }
 
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  // Named, scoped, hashed keys — the core server's auth path (_shared/auth.ts
+  // is server-portable/auth.ts, held identical by extensions/test-auth.ts).
+  // MCP_ACCESS_KEYS holds name:scope:sha256 entries; the older single
+  // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
+  // given the tool that writes, so it cannot see it, let alone call it.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
   }
 
@@ -610,7 +625,7 @@ app.all("*", async (c) => {
     Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
-  const server = buildServer();
+  const server = buildServer(principal);
   const transport = new StreamableHTTPTransport();
   await server.connect(transport);
   const response = await transport.handleRequest(c);
