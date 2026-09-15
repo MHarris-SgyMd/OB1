@@ -1633,44 +1633,56 @@ survive contact with the planner. Machine, for every number below: Apple M5
 Pro host, podman libkrun VM with 8 vCPUs and 14.8 GB, `pgvector/pgvector:0.8.6-pg16`
 (PostgreSQL 16.15) at its image defaults — `shared_buffers` 128 MB,
 `work_mem` 4 MB — so the ten-million-row index lives in the VM's page cache,
-not in Postgres's buffers. The 64-dimensional random corpus is the one above,
-byte for byte at the two published scales (nearest query-to-row cosine 0.560
-and 0.588, as before), streamed from the same generator in two passes so
-nothing holds a million vectors in memory. The before arm runs at the
-published scales only; above them the question is about the shipped function.
-Latencies on this VM ran 1.2–2× the lines published above for the same tiers
-(the before arm's default path 2.0 ms against 1.26; the recall columns
-reproduce within 0.5), and two full passes agreed within about 30% on nearly
-every latency and within 0.3 on nearly every recall figure — the exceptions
-are the ten-million ceiling (0.7 s in the first pass, 1.2 in the second) and
-the 1% tier at ten million, whose plan flipped between passes (below) — so the
-tables are the second pass's, they compare within a run, and the slopes are
-the finding, not the third digit.
+not in Postgres's buffers. The 64-dimensional random corpus is the one above —
+the vectors, the queries and the share tiers' membership at the two published
+scales are exactly the published run's (nearest query-to-row cosine 0.560 and
+0.588, as before), though each row's metadata now also carries the fixed-count
+tiers it fell into, so the heap and the GIN index are a little wider — streamed
+from the same generator in two passes so nothing holds a million vectors in
+memory. The before arm runs at the published scales only; above them the
+question is about the shipped function.
+
+**Three full passes were run, and the tables are the third's.** Latencies on
+this VM ran 1.2–2× the lines published above for the same tiers (the before
+arm's default path 2.4 ms against 1.26; the recall columns reproduce within
+0.5). Between passes the latencies agreed within about 30% and the recall
+figures within 0.3 — with one exception that turned out to be the finding:
+for filters matching roughly half a percent to one percent of the table, the
+planner's choice between the GIN index and the HNSW walk flipped from pass to
+pass, at a million rows and at ten million, on the same rows under a fresh
+`ANALYZE` each time. Where a cell below has two values, that is why.
 
 *The load.* Bun's SQL driver has no COPY protocol (a `COPY … FROM STDIN` hangs),
-so rows go in as multi-row INSERTs into a table whose two HNSW indexes have
-been dropped, and the indexes are built afterwards with `maintenance_work_mem`
-sized for the graph. The parallel build keeps the graph in dynamic shared
-memory, which a container gets 64 MB of by default — the first attempt failed
-at a million rows with "could not resize shared memory segment … No space left
-on device" — so `with-postgres.sh` now takes `OB1_PG_SHM_SIZE`. At ten million
-rows the graph fit in 9 GB (the container peaked at 10.0 GB; pgvector's
-"graph no longer fits" NOTICE never fired), and built in nineteen minutes:
+so rows go in as multi-row INSERTs into a table whose secondary indexes have
+all been dropped and whose user triggers are disabled — 008's audit trigger
+and 016's extraction trigger would otherwise write a row per row, and only
+above 100,000 rows, since the before arm loads under 001–013; what remains per
+row is the heap and the primary key, the same under either schema — and only
+the INSERT round-trips are timed. The indexes are built afterwards with
+`maintenance_work_mem` sized for the graph. The parallel build keeps the graph
+in dynamic shared memory, which a container gets 64 MB of by default — the
+first attempt failed at a million rows with "could not resize shared memory
+segment … No space left on device" — so `with-postgres.sh` now takes
+`OB1_PG_SHM_SIZE`. At ten million rows the graph fit in 9 GB (the container
+peaked at 10.0 GB; pgvector's "graph no longer fits" NOTICE never fired) and
+built in nineteen minutes. The bench's section L, as printed (the two large
+runs with `OB1_PG_SHM_SIZE=4g` and `OB1_PG_SHM_SIZE=11g
+OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say):
 
-| rows | insert s | rows/s | thoughts heap MB | thoughts HNSW MB | build s | chunk rows | chunk heap MB | chunk HNSW MB | build s | maintenance_work_mem |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 10,000 | 0 | 29,000 | 4 | 5 | 1 | 4,000 | 1 | 1 | 0 | 256 MB |
-| 100,000 | 4 | 27,000 | 38 | 54 | 6 | 40,000 | 13 | 11 | 1 | 256 MB |
-| 1,000,000 | 61 | 16,000 | 391 | 544 | 89 | 400,000 | 125 | 109 | 24 | 977 MB |
-| 10,000,000 | 846 | 11,800 | 3,907 | 5,437 | 1,165 | 4,000,000 | 1,250 | 1,099 | 298 | 9 GB |
+| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 10,000 | 001–013 | 0 | 52,125 | 4,000 | 0 | 4 | 5 | 1 | 1 | 1 | 0 | 0 | 256MB | 4 |
+| 100,000 | 001–013 | 2 | 61,243 | 40,000 | 0 | 38 | 54 | 5 | 13 | 11 | 1 | 0 | 256MB | 4 |
+| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 | 977MB | 4 |
+| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 | 9GB | 4 |
 
 The index is 1.4× its heap at this width and about 540 bytes a row; the build
-is linear-ish at ~8,600 rows a second in memory. A hundred million rows was
-not run: by these slopes it is a 39 GB heap, a 54 GB index, 23 GB of chunks and
-their index, a graph that wants ~90 GB of `maintenance_work_mem` to build in
-memory (or pgvector's far slower on-disk phase), and about three hours of
-build — a machine with 128 GB and 200 GB of fast disk, and the numbers past
-ten million are stated below as extrapolation where they are stated at all.
+runs at ~9,000 rows a second in memory. A hundred million rows was not run:
+by these slopes it is a 39 GB heap, a 54 GB index, 23 GB of chunks and their
+index, a graph that wants ~90 GB of `maintenance_work_mem` to build in memory
+(or pgvector's far slower on-disk phase), and about three hours of build — a
+machine with 128 GB and 200 GB of fast disk. Nothing below is stated past ten
+million except as that extrapolation.
 
 *The unfiltered default path, and the floor under everything.* Ten rows asked,
 no filter, median over 50 random queries, and — new in this run — the rows
@@ -1679,186 +1691,186 @@ scored against an exact scan of the whole table, at pgvector's default
 
 | rows | median ms, asked 10 | median ms, asked 500 | in exact top-10 (ef_search 40) | at ef_search 400 | median ms at 400 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 1.25 | 12.5 | 8.2 | 10.0 | 3.8 |
-| 100,000 | 3.79 | 75.7 | 4.6 | 9.5 | 14.8 |
-| 1,000,000 | 6.92 | 164 | 1.9 | 6.6 | 42.1 |
-| 10,000,000 | 36.7 | 1,214 | 0.5 | 3.2 | 224 |
+| 10,000 | 1.52 | 14.4 | 8.3 | 10.0 | 4.2 |
+| 100,000 | 3.20 | 52.5 | 5.0 | 9.4 | 11.8 |
+| 1,000,000 | 6.95 | 181 | 2.2 | 6.8 | 41.7 |
+| 10,000,000 | 17.7 | 224 | 0.5 | 2.9 | 49.0 |
 
-The default path costs 2–5× per decade of rows and is 37 ms at ten million;
-the ceiling of 500 rows is a second there (0.7 in the first pass, 1.2 in the
-second — the widest spread in these runs). But the recall column
-is the finding: at the default `ef_search` the index returns **two of the true
-ten** at a million random rows and one in twenty at ten million, and
-every filtered figure below sits under that floor — a 50% filter cannot beat
-the index with no filter in the way. Raising `ef_search` tenfold recovers
-most of it for 6× the latency. This is the "recall at these scales is a
-floor" caveat the ticket carried, now with a number on it: random uniform
-vectors in 64 dimensions are HNSW's worst case (every distance is nearly the
-same distance), a real embedding corpus is clustered and will do better, and
-how much better is a measurement on real vectors this run cannot make
-(SMD-1039's corpus is the place). What it can say is that nothing in
-`match_thoughts` sets `ef_search`, so at whatever scale a real brain's recall
-turns, the knob is a session or database setting away and costs what the
-last column says.
+The default path costs 2–5× per decade of rows and is 18 ms at
+ten million; the ceiling of 500 rows is a quarter of a second (0.7 s and 1.2 s in the two earlier passes — the widest spread in these runs) there. But the
+recall column is the finding: at the default `ef_search` the index returns
+**two of the true ten** at a million random rows and one in twenty at ten
+million, and every filtered figure below sits under that floor — a 50% filter
+cannot beat the index with no filter in the way. Raising `ef_search` tenfold
+recovers most of it for 6× the latency. This is the "recall at these scales
+is a floor" caveat the ticket carried, now with a number on it: random
+uniform vectors in 64 dimensions are HNSW's worst case (every distance is
+nearly the same distance), a real embedding corpus is clustered and will do
+better, and how much better is a measurement on real vectors this run cannot
+make (SMD-1039's corpus is the place; SMD-1465 is the question). What it can
+say is that nothing in `match_thoughts` sets `ef_search`, so at whatever
+scale a real brain's recall turns, the knob is a session or database setting
+away and costs what the last column says.
 
 *Filtered, through the function.* Ten asked, 50 queries, the tiers above
 plus three fixed at 900, 2,000 and 5,000 matching rows whatever the scale, so
 the same filter can be followed as the table grows. The `matches` column is
-what was actually planted (a row count is a coin per row). At a million rows:
+what was actually planted (a row count is a coin per row). At a million rows,
+with the plan the function got this pass, and in brackets what the same tier
+did in the two passes where the planner walked HNSW for it:
 
 | filter | matches | returned | in exact top-10 | median ms | how the function answered |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 50% | 499,443 | 10.0 | 2.6 | 36.9 | route 26 ms, then the HNSW walk (custom plan) |
-| 10% | 99,748 | 10.0 | 5.3 | 50.4 | route ~5 ms, then the HNSW walk |
-| 1% | 9,951 | 10.0 | 9.2 | 279 | the HNSW walk, ~270 ms of it |
-| 5,000 rows | 4,916 | 10.0 | 8.8 | 368 | the HNSW walk |
-| 2,000 rows | 1,963 | 10.0 | 10.0 | 10.3 | the "walk" branch, served by the GIN index — exact |
-| 0.1% | 1,034 | 10.0 | 10.0 | 7.1 | the same |
-| 900 rows | 934 | 10.0 | 10.0 | 5.6 | the exact branch |
-| 0.01% | 99 | 10.0 | 10.0 | 1.1 | the exact branch |
-| nothing | 0 | 0.0 | — | 0.2 | one GIN probe |
+| 50% | 499,443 | 10.0 | 3.0 | 38.6 | route ~27 ms, then the HNSW walk |
+| 10% | 99,748 | 10.0 | 5.9 | 48.1 | route ~5 ms, then the HNSW walk |
+| 1% | 9,951 | 10.0 | 10.0 (9.0–9.2) | 32.8 (279–287) | the "walk" branch served by GIN — exact (passes 1–2: the HNSW walk) |
+| 5,000 rows | 4,916 | 10.0 | 10.0 (8.8) | 20.3 (352–368) | the same (passes 1–2: the HNSW walk) |
+| 2,000 rows | 1,963 | 10.0 | 10.0 | 12.1 | the "walk" branch served by GIN — exact, all three passes |
+| 0.1% | 1,034 | 10.0 | 10.0 | 9.0 | the same |
+| 900 rows | 934 | 10.0 | 10.0 | 8.7 | the exact branch |
+| 0.01% | 99 | 10.0 | 10.0 | 1.2 | the exact branch |
+| nothing | 0 | 0.0 | — | 0.3 | one GIN probe |
 
 And at ten million:
 
 | filter | matches | returned | in exact top-10 | median ms | how the function answered |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 50% | 4,998,406 | 10.0 | 1.0 | 307 | route 252 ms of it, then the HNSW walk |
-| 10% | 999,827 | 10.0 | 2.2 | 255 | route ~55 ms, then the HNSW walk |
-| 1% | 99,633 | 10.0 | 6.0 | 1,450 | the HNSW walk this pass; the first pass served it from GIN — 10.0 in 794 ms (the planner's edge, below) |
-| 0.1% | 10,231 | 10.0 | 10.0 | 100 | the same |
-| 5,000 rows | 5,088 | 10.0 | 10.0 | 51 | the same |
-| 2,000 rows | 1,978 | 10.0 | 10.0 | 29 | the same |
-| 0.01% | 959 | 10.0 | 10.0 | 10.2 | the exact branch |
-| 900 rows | 886 | 10.0 | 10.0 | 8.3 | the exact branch |
+| 50% | 4,998,406 | 10.0 | 0.8 | 268 | route ~240 ms of it, then the HNSW walk |
+| 10% | 999,827 | 10.0 | 1.9 | 151 | route ~50 ms, then the HNSW walk |
+| 1% | 99,633 | 10.0 | 10.0 (6.0) | 753 (1,450) | the "walk" branch served by GIN — exact, and slow (pass 2: the HNSW walk) |
+| 0.1% | 10,231 | 10.0 | 10.0 | 97 | the same, all three passes |
+| 5,000 rows | 5,088 | 10.0 | 10.0 | 52 | the same |
+| 2,000 rows | 1,978 | 10.0 | 10.0 | 30 | the same |
+| 0.01% | 959 | 10.0 | 10.0 | 10.6 | the exact branch |
+| 900 rows | 886 | 10.0 | 10.0 | 9.4 | the exact branch |
 | nothing | 0 | 0.0 | — | 0.2 | one GIN probe |
 
 **What the arithmetic got wrong.** The header modelled the walk branch as an
 HNSW walk that visits `v_fetch × N / matches` tuples and is cut by the seeded
 bounds when that exceeds 100,000 — so at ten million rows a filter matching
 2,000 thoughts (200,000 tuples by the formula) should have returned short
-under the seed and complete only under a larger one. It returned 10.0 of 10
-in 32 ms under the seed, under pgvector's defaults, and under any bound at
-all, because the planner never walked HNSW for it: with the filter's
-selectivity in view (custom plan) it took the GIN index for the `thoughts`
-side and the parent's GIN index for the chunk side, sorted the matches by
-distance, and answered exactly. Section C reads that off the deployed body at
-every scale, and section E runs every walk tier through the function under
-the seeded bounds, under pgvector's defaults (`20000 / 1`) and under the seed
-with `ef_search` raised — the ticket's own verification, "returns exact
-under the seeded bounds and short under the defaults", asked of the function
-rather than of a statement extracted from it. Where the planner takes the
-vector index the tuple formula is not what binds, and where it takes GIN
-nothing binds:
+under the seed and complete only under a larger one. It returned 10 of 10 in
+about 30 ms under the seed, under pgvector's defaults, and under any bound at
+all, in every pass, because the planner never walked HNSW for it: with the
+filter's selectivity in view (custom plan) it took the GIN index for the
+`thoughts` side and the parent's GIN index for the chunk side, sorted the
+matches by distance, and answered exactly. Section C reads that off the
+deployed body at every scale, and section E runs every walk tier through the
+function under the seeded bounds, under pgvector's defaults (`20000 / 1`) and
+under the seed with `ef_search` raised — the ticket's own verification,
+"returns exact under the seeded bounds and short under the defaults", asked
+of the function rather than of a statement extracted from it — beside the
+exact branch's own statement with its floor lifted to cover the same tier.
+The third pass's section E, with the earlier passes' HNSW-walk cells in
+brackets where the plan differed:
 
 | rows | filter | matches | "walk visits" by the formula | seeded: in exact top-10 / ms | defaults: in exact top-10 / ms | ef_search 400: in exact top-10 / ms | exact branch, floor lifted: in exact top-10 / ms |
 | ---: | --- | ---: | ---: | --- | --- | --- | --- |
-| 1,000,000 | 0.1% | 1,034 | 38,685 | 10.0 / 7.8 | 10.0 / 7.8 | 10.0 / 8.3 | 10.0 / 9.4 |
-| 1,000,000 | 2,000 rows | 1,963 | 20,377 | 10.0 / 10.8 | 10.0 / 10.8 | 10.0 / 10.1 | 10.0 / 13.9 |
-| 1,000,000 | 5,000 rows | 4,916 | 8,137 | 8.8 / 332 | **4.9** / 116 | 8.9 / 364 | **10.0 / 33.3** |
-| 1,000,000 | 1% | 9,951 | 4,020 | 9.2 / 283 | **5.5** / 119 | 9.2 / 322 | **10.0 / 75.8** |
-| 1,000,000 | 10% | 99,748 | 401 | 5.3 / 77.4 | 5.3 / 58.7 | 6.1 / 58.6 | — |
-| 1,000,000 | 50% | 499,443 | 80 | 2.6 / 37.6 | 2.6 / 39.4 | 6.1 / 71.2 | — |
-| 10,000,000 | 2,000 rows | 1,978 | 202,224 | 10.0 / 32.7 | 10.0 / 33.2 | 10.0 / 32.4 | 10.0 / 31.4 |
-| 10,000,000 | 5,000 rows | 5,088 | 78,616 | 10.0 / 54.2 | 10.0 / 53.7 | 10.0 / 54.4 | 10.0 / 61.6 |
-| 10,000,000 | 0.1% | 10,231 | 39,097 | 10.0 / 101 | 10.0 / 101 | 10.0 / 102 | 10.0 / 165 |
-| 10,000,000 | 1% | 99,633 | 4,015 | 6.0 / 1,463 | **2.7** / 368 | 6.2 / 1,572 | — |
-| 10,000,000 | 10% | 999,827 | 400 | 2.2 / 265 | 2.2 / 266 | 2.9 / 410 | — |
-| 10,000,000 | 50% | 4,998,406 | 80 | 1.0 / 300 | 1.0 / 269 | 3.0 / 405 | — |
+| 1,000,000 | 0.1% | 1,034 | 38,685 | 10.0 / 8.5 | 10.0 / 9.6 | 10.0 / 9.8 | 10.0 / 9.3 |
+| 1,000,000 | 2,000 rows | 1,963 | 20,377 | 10.0 / 15.2 | 10.0 / 13.7 | 10.0 / 12.5 | 10.0 / 15.6 |
+| 1,000,000 | 5,000 rows | 4,916 | 8,137 | 10.0 / 22.6 (8.8 / 332) | 10.0 / 20.7 (**4.9** / 116) | 10.0 / 21.7 (8.9 / 364) | 10.0 / 28.4 |
+| 1,000,000 | 1% | 9,951 | 4,020 | 10.0 / 37.9 (9.2 / 283) | 10.0 / 41.2 (**5.5** / 119) | 10.0 / 41.8 (9.2 / 322) | 10.0 / 70.9 |
+| 1,000,000 | 10% | 99,748 | 401 | 5.9 / 67.0 | 5.9 / 65.7 | 6.6 / 91.9 | 10.0 / 784 |
+| 1,000,000 | 50% | 499,443 | 80 | 3.0 / 40.9 | 3.0 / 38.1 | 6.4 / 66.0 | — |
+| 10,000,000 | 2,000 rows | 1,978 | 202,224 | 10.0 / 30.1 | 10.0 / 31.7 | 10.0 / 31.0 | 10.0 / 18.6 |
+| 10,000,000 | 5,000 rows | 5,088 | 78,616 | 10.0 / 51.7 | 10.0 / 52.3 | 10.0 / 51.4 | 10.0 / 42.0 |
+| 10,000,000 | 0.1% | 10,231 | 39,097 | 10.0 / 93.5 | 10.0 / 92.5 | 10.0 / 92.4 | 10.0 / 119 |
+| 10,000,000 | 1% | 99,633 | 4,015 | 10.0 / 708 (6.0 / 1,463) | 10.0 / 713 (**2.7** / 368) | 10.0 / 719 (6.2 / 1,572) | 10.0 / 944 |
+| 10,000,000 | 10% | 999,827 | 400 | 1.9 / 125 | 1.9 / 124 | 2.5 / 158 | — |
+| 10,000,000 | 50% | 4,998,406 | 80 | 0.8 / 230 | 0.8 / 233 | 2.9 / 268 | — |
 
-Read across a row and three things fall out.
+Read across a row and four things fall out.
 
-- **The seeded bounds matter in one band, and not the one the formula
-  named.** They matter where the planner walks HNSW for a filter of a few
-  thousand to a hundred thousand matches: at a million rows the 0.5% and 1%
-  tiers — 4,000–8,000 tuples by the formula, well under pgvector's default
-  cap of 20,000 — lose three to four points of recall under the defaults
-  (8.8 → 4.9, 9.2 → 5.5) and keep them under the seed; at ten million the 1%
-  tier, in the pass the planner walked it, goes 6.0 → 2.7. That is the memory
-  bound, not the tuple cap: `work_mem × 1` is 4 MB, the iterative scan's
-  visited set is the graph nodes it touched rather than the tuples it
-  emitted, and on random vectors it touches many more than it emits. The
-  header's "pgvector's default covers 500,000 rows at the default count" is
-  therefore wrong in the direction that matters: the defaults fail at a
-  million rows for a 0.5% filter. The seed of 8× covers that case. Everywhere
-  else the bounds are not what binds: every tier under 1% at ten million is
-  served by GIN whatever they say, and the broad tiers (10%, 50%) need a few
-  hundred tuples and are bound by nothing but `ef_search`. **Neither seed
-  should scale with the table**; what they buy is that band, and they buy it.
-- **Where the walk does walk, the exact branch would have been both faster
-  and exact.** At a million rows, 5,000 matching thoughts cost the HNSW walk
-  332 ms for 8.8 of 10; the exact branch's own statement with its floor lifted
-  to cover them scores every match and its chunks in 33 ms for 10 of 10. Ten
-  thousand: 283 ms and 9.2 against 76 ms and 10.0. The exact branch costs
-  6–8 µs per matching row at a million rows — primary-key probes into a heap
-  that fits in the page cache — and 17 µs at ten million (165 ms for 10,231
-  matches), where the GIN-served "walk" reads the matching heap pages in
-  physical order and wins (5,000 matches 54 ms against 62, ten thousand 101
-  against 165). So the threshold should not scale with the table either:
-  raising the floor from 1,000 to about 10,000 would be a clear win at a
-  million rows and a modest loss at ten million, and which way that trade
-  goes is a decision with a migration behind it, not a bench's to make. The
-  numbers are in the follow-up (SMD-1464); the header's arithmetic is retired
-  here either way.
+- **Between about half a percent and one percent of the table, the walk
+  branch is on the planner's edge, and which side it lands on is decided by
+  the statistics sample.** At a million rows the 5,000-match and 10,000-match
+  tiers walked HNSW in two passes (332 ms and 283 ms for 8.8 and 9.2 of 10)
+  and were served from the GIN index in the third (23 and 38 ms for 10 of
+  10); at ten million the 1% tier was served from GIN in two passes (753 and 794 ms for 10 of 10) and walked HNSW in one (1,450 ms for 6.0). Same rows, same statistics
+  target, a fresh `ANALYZE` each time. The GIN side of the coin is exact and
+  an order of magnitude cheaper; the HNSW side is approximate, slower, and the
+  only place the seeded bounds do anything.
+- **The seeded bounds matter on that HNSW side, and nowhere else.** In the
+  passes that walked, the same tiers lost three to four points of recall
+  under pgvector's defaults (8.8 → 4.9, 9.2 → 5.5, and 6.0 → 2.7 at ten million) and
+  kept them under the seed — the memory bound, not the tuple cap, since the
+  formula's 4,000–8,000 tuples are well under the default cap of 20,000:
+  `work_mem × 1` is 4 MB, the iterative scan's visited set is the graph nodes
+  it touched rather than the tuples it emitted, and on random vectors it
+  touches many more than it emits. The header's "pgvector's default covers
+  500,000 rows at the default count" is therefore wrong in the direction that
+  matters, and the seed of 8× covers the case. Everywhere else nothing binds:
+  every thinner tier is served by GIN whatever the bounds say, and the broad
+  tiers (10%, 50%) need a few hundred tuples and are bound by nothing but
+  `ef_search`. **Neither seed should scale with the table**; what they buy is
+  the HNSW side of that band, and they buy it.
+- **The exact branch with its floor lifted is exact, and its cost is the
+  match count: 6–8 µs a matching row at a million rows** (28 ms for 4,916,
+  71 ms for 9,951 — primary-key probes into a heap that fits in the page
+  cache), and 9–17 µs at ten million across the passes (42 ms for 5,088 and
+  944 ms for 99,633 in the third; 165 ms for 10,231 in the second), where the
+  heap no longer sits in Postgres's buffers. That puts it well under the HNSW walk in the
+  band (28 against 332, 71 against 283) and a little over the GIN-served walk
+  (28 against 23, 71 against 38), and far over either at 100,000 matches
+  (784 ms against 67 for the 10% tier at a million rows). So raising the
+  threshold from 1,000 to about 10,000 is not a universal win but a hedge: it
+  takes the band off the planner's coin at the cost of a few tens of
+  milliseconds on the GIN side, and it should not scale with the table. That
+  is a decision with a migration behind it, not a bench's to make; the
+  numbers are in SMD-1464, and the header's arithmetic is retired here either
+  way.
 - **The recall the walk loses on broad filters is the index's, not the
-  filter's.** 10% and 50% at a million rows score 5.3 and 2.6; the unfiltered
-  default path scores 1.9 on the same corpus. The iterative scan keeps going
+  filter's.** 10% and 50% at a million rows score 5.9 and 3.0; the unfiltered
+  default path scores 2.2 on the same corpus. The iterative scan keeps going
   for a filter and finds a little more than the plain scan does — which is the
-  fix working — and `ef_search` at 400 lifts both tiers to 6.1. A brain that
-  large wants a larger `ef_search`, whatever it does about filters, and the
-  measurement to size it is on real vectors (above).
+  fix working — and `ef_search` at 400 lifts both tiers to 6.4–6.6. A brain
+  that large wants a larger `ef_search`, whatever it does about filters, and
+  the measurement to size it is on real vectors (above).
 
 *Two costs that do grow with the table, measured.* The routing statement —
 the capped GIN collection every filtered call runs first — builds its whole
 bitmap before the `LIMIT v_exact + 1` can stop anything, and at 50% that is
-1.3 ms at 10,000 rows, 5.5 at 100,000, 25.9 at a million and 252 at
-ten million: 54 ns a matching row, linear, paid by every broad filtered call
-before the walk starts, and at ten million it is four fifths of the 50%
+1.7 ms at 10,000 rows, 11 at 100,000, 27 at a million and 240 at ten
+million: about 50 ns a matching row, linear, paid by every broad filtered call
+before the walk starts, and at ten million it is nine tenths of the 50%
 tier's whole latency. The mitigation the twelfth review pass declined for want
 of a number — estimate the match count from `pg_class.reltuples` and the
 planner's `@>` selectivity, or a `TABLESAMPLE`, and run the capped collection
 only when the estimate is plausibly under the threshold — now has its number
 and is SMD-1463. And the plan mode: plpgsql runs a statement's first five
 executions on custom plans and may switch to a generic one after; for the walk
-branch the generic plan has the filter as a parameter and a flat 1% estimate,
-and section C shows what that costs at a million rows — the 50% tier 259 ms
-generic against 15.6 custom (a GIN bitmap over 499,443 rows sorted by distance,
-where the custom plan walked HNSW for 80 tuples), the 0.1% tier 327 ms against
-5.8 (the chunk side walking its HNSW index through 20,789 parent lookups where
-the custom plan took the parent's GIN bitmap). The custom plan has an edge of
-its own: the 1% tier at ten million (99,633 matches) was served from GIN in
-the first pass — 794 ms, 10 of 10 — and walked HNSW in the second — 1,450 ms,
-6.0 of 10 — on the same rows, the same statistics target, a fresh `ANALYZE`
-each time; at that selectivity the planner's two estimates are close enough
-that the sample decides, and the exact answer costs half what the approximate
-one does. At ten million the generic plan for the 50% walk takes **14.4
-seconds** (a GIN bitmap over 4,998,406 rows — 460,687 of its heap blocks lossy
-under 4 MB of `work_mem`, every one rechecked — sorted by distance, on both
-sides) where the custom plan walks HNSW in 12 ms; and every generic plan carries a further
-30–130 ms that the custom one does not, in the top node's startup, with the
-same shape and the same rows underneath — 32 ms for the routing count on the
-EMPTY filter (0.04 ms custom), 121 ms for the exact branch (21), 154 ms for
-the 2,000-row walk (21). That is consistent with JIT: the generic plan's flat
-estimate makes these statements' costs 2,200–9,800 at 100,000 rows (read with
-`COSTS` on), the estimate grows with the table, and between a million and ten
-million rows it crosses `jit_above_cost` (100,000) — the walk's crosses
-`jit_optimize_above_cost` too — so every call JIT-compiles its expressions the
-way 017 found `search_thoughts_hybrid` doing (15 ms where its arms cost 1.3).
-It is consistent with, not read: the bench's EXPLAIN ran with `COSTS OFF`,
-which also suppresses the JIT summary, so the attribution at ten million is
-inferred from the arithmetic and from a forced compilation at 100,000 rows
-(2.5–8 ms for these statements without optimisation), and the explainers now
-run with costs on so the next run at scale reads it (SMD-1464 carries the
-check). Both sessions of this bench stayed on custom plans throughout — the medians
-above are the custom plans' — but the choice is the planner's estimate
-against its own average, made per session after five calls, and a session
-that lands on the generic plan pays these numbers on every filtered call. 014
-removed the function-level `plan_cache_mode` on purpose (the ninth review pass,
-above); whether it comes back is part of SMD-1464.
+branch the generic plan has the filter as a parameter and a flat estimate, and
+section C shows what that costs at a million rows — the 50% tier 292 ms
+generic against 15 custom (a GIN bitmap over 499,443 rows sorted by distance,
+where the custom plan walked HNSW for 80 tuples), the 0.1% tier 360 ms
+against 6 (the chunk side walking its HNSW index through some twenty thousand
+parent lookups where the custom plan took the parent's GIN bitmap).
+At ten million the generic plan for the 50% walk takes **11.6 seconds** (a
+GIN bitmap over 4,998,406 rows — hundreds of thousands of its heap blocks
+lossy under 4 MB of `work_mem`, every one rechecked — sorted by distance, on
+both sides) where the custom plan walks HNSW in 15 ms, and `jit = off`
+changes nothing there (11.7 s): that cost is the bitmap. Every other generic
+plan at ten million carries 30–110 ms its custom twin does not — the routing
+count on the EMPTY filter 31 ms against 0.03, the exact branch 108 against
+24, the 2,000-row walk 136 against 20 — and with `jit = off` those become
+0.03, 11 and 23: **it is JIT.** The generic plan's flat estimate carries these
+statements' costs past `jit_above_cost` (100,000) somewhere between a million
+rows (where the same generic route on the empty filter costs 0.02 ms) and ten
+million, and every call then compiles its expressions, the way 017 found
+`search_thoughts_hybrid` doing (15 ms where its arms cost 1.3). The second
+pass of this bench could only infer that, because its EXPLAIN ran with
+`COSTS OFF`, which also suppresses the JIT summary; the explainers now print
+costs and section C carries the `jit = off` arm. Every session of this bench stayed on custom plans throughout
+— the medians above are the custom plans' — but the choice is the planner's
+estimate against its own average, made per session after five calls, and a
+session that lands on the generic plan pays these numbers on every filtered
+call. 014 removed the function-level `plan_cache_mode` on purpose (the ninth
+review pass, above); whether it comes back is part of SMD-1464.
 
 *Section D at scale.* The walk's own statement forced onto the thin and empty
-filters, where it has next to nothing to find: 105–119 ms at 100,000 rows,
-353 ms (900 matches), 997 ms (99) and 1,020 ms (none) at a million, and
-89–102 ms at ten million — the bounds hold it to about a second whatever the
+filters, where it has next to nothing to find: 115–117 ms at 100,000 rows,
+395 ms (900 matches), 1,193 ms (99) and 1,065 ms (none) at a million, and
+85–99 ms at ten million — the bounds hold it to about a second whatever the
 table, which is what they are for, and the function never sends those filters
 there.
 
@@ -1879,11 +1891,11 @@ recall floor on real embeddings rather than random vectors, and the
 `ef_search` that follows from it (SMD-1465). SMD-969 asked whether the
 *unfiltered* candidate scan reaches the HNSW index at scale: at 64 dimensions
 it does at every scale here (section A's row counts and the default path's
-slope, 1.25 → 3.8 → 6.9 → 28 ms), and at the shipped width change 36 measured
-it to 100,000 rows, where the answer was no until 019; the shipped width at a
-million rows is 4 GB of vectors a run this bench has not made. SMD-958 (change
-32) built beside this body and SMD-945 (change 37) redefined it on this body;
-neither reintroduced the post-filter.
+slope, 1.5 → 3.2 → 7.0 → 17.7 ms), and at the shipped width change 36
+measured it to 100,000 rows, where the answer was no until 019; the shipped
+width at a million rows is 4 GB of vectors a run this bench has not made.
+SMD-958 (change 32) built beside this body and SMD-945 (change 37) redefined
+it on this body; neither reintroduced the post-filter.
 
 ### 29. A lease per thought, and the re-embed that proves it
 

@@ -22,7 +22,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows.
-  `bench-hnsw.ts` at a million rows and up wants an hour and a container with
+  `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
 
 ## Steps
@@ -888,14 +888,16 @@ the scale tables are in FORK.md change 28; the real-corpus version is
 
 The before arm runs only up to 100,000 rows: its defect is established there,
 and above that every question is about the shipped function. The rows are
-streamed from one seeded generator in two passes (the corpus at the published
-scales is byte for byte the published one) into a table whose vector indexes
-have been dropped, and the indexes are rebuilt after the load, timed. Bun's
-SQL driver has no COPY protocol, so the rows go in as multi-row INSERTs —
-28,000 rows a second at the published scales and 12,000 at ten million on the
-machine the tables came from, so the load is never the long part; the index
-build and the exact oracle are. A million rows takes
-about ten minutes; ten million about an hour and a container with 11 GB of
+streamed from one seeded generator in two passes — the vectors, the queries
+and the share tiers' membership at the published scales are exactly the
+published corpus's; each row's metadata also carries the fixed-count tiers it
+fell into, so the heap and the GIN index are a little wider — into a table
+whose secondary indexes have been dropped and whose user triggers are
+disabled, and the indexes are rebuilt after the load, timed. Bun's SQL driver
+has no COPY protocol, so the rows go in as multi-row INSERTs, and only the
+round-trips are timed; the load is never the long part, the index build and
+the exact oracle are. A million rows takes
+about seven minutes; ten million about forty and a container with 11 GB of
 shared memory to build in; a hundred million is ~26 GB of vectors before the
 index and was not run here (FORK.md change 28 says what a run needs).
 

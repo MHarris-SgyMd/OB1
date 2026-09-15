@@ -143,7 +143,7 @@
  * every filter up to about 1% of a ten-million-row table from the GIN index
  * (exact, whatever the bounds say) and walks HNSW only for broad filters,
  * where the walk needs a few hundred tuples and the recall it loses is the
- * index's own at the default ef_search (section A's control: 8.2 / 4.6 / 1.9
+ * index's own at the default ef_search (section A's control: 8.3 / 5.0 / 2.2
  * of 10 unfiltered at 10k / 100k / 1M random rows). The seeded bounds matter
  * in one band — moderately selective filters at around a million rows, where
  * the walk does walk and pgvector's default MEMORY bound cuts it short — and
