@@ -7894,8 +7894,8 @@ said to import `server-portable/auth.ts` by relative path, the shape fix 13's
 shim import has. Change 64's first review pass had already found why not: a
 Supabase Edge Function is bundled from `supabase/functions/`, and an import
 that leaves it does not deploy. Four of the seventeen deploy today —
-`ob-graph` and `agent-memory-api` on supabase-js, `metadata-norm` on an inline
-`npm:` specifier, `kubernetes-deployment` from a Dockerfile — and the rest
+`ob-graph`, `agent-memory-api` and `metadata-norm` on supabase-js through their
+`deno.json`, `kubernetes-deployment` from a Dockerfile — and the rest
 already import the SQL shim across the tree (fix 13; the state SMD-1480
 records for five extensions). So the module is a `_shared/auth.ts` beside each
 server, imported as `../_shared/auth.ts` from its function directory — where
@@ -8045,8 +8045,11 @@ read-key write probes send a body no route could parse, so the 403 is proven
 to come from the gate; `passed()` no longer counts a refusal by another status;
 the postgres stub has a per-process name and is removed after the imports; the
 loader's filter is anchored to this checkout. Counts corrected: thirteen files
-import the module, four compare digests (both cost samples import it; the stub
-does not); twelve importable vendored servers, six text-only files. The "after"
+take a principal from the module (both cost samples among them) and four compare
+digests — `readwise-capture` through the module's `secretMatches`, so fourteen
+of the seventeen import a copy; the Next.js route through its own, the README
+sample and the stub inline; twelve importable vendored servers, six text-only
+files. The "after"
 sample says its cached `principal` is the first caller's for that scope and is
 for `canWrite()` only; the header note that said "the import above" sat above
 the import; the Docker context gained a `.dockerignore` so the whole
@@ -8058,20 +8061,51 @@ Noted, not changed: `primitives/remote-mcp` and `docs/` do not mention
 the deploy primitive's Step 3); the download URL for `integrations/_shared/auth.ts`
 answers 404 on `main` until this merges, as any doc pointing at `main` does.
 
+**Review, second pass** (triaged; two reviewers, thirteen findings, nine fixed,
+the rest noted — and the two at the top were consequences of the first pass's
+recall fix: the stop signal). A read-scoped recall's `request_id: null` broke
+the published v1 response contract,
+`recipes/openclaw-agent-memory/contracts/recall-response.schema.json`, which
+required a non-empty string; the contract allows null and says when, and the
+agent-memory README's endpoint table and smoke section say a read key gets no
+trace and the harness needs a write key. Two of the first pass's guards were
+fooled by mutation, run rather than reasoned: the recall guard accepted a
+`canWrite` check with a no-op body — it requires the check to precede the trace
+insert and to return — and the pin guard passed an unversioned or non-npm
+specifier (`npm:hono`, a `jsr:` or URL import would deploy on latest while the
+test ran the pin) — it requires the exact pin whatever the spelling. Also run:
+five other mutations against the servers and a deno.json, each caught by the
+test (and the Telegram revert by check 8 as well); the Docker build from
+`integrations/` succeeds and `deno check` inside the image resolves
+`../_shared/auth.ts`; an SDK probe of the empty-tools server answers `{ tools:
+[] }` and -32601 on a call, as this section says; every shim-importing file's
+`deno check` errors are the shim's (fix 13), none inside this branch's hunks;
+two overlapping requests to a module singleton hang on `main` and here alike —
+SMD-1497 has the trigger, any two, not a burst. Text: `metadata-norm` deploys
+through its `deno.json`, not an inline specifier; fourteen importers, not
+thirteen; the Verified line's count; two non-probes record spellings the rule
+must keep ignoring (a property of a bound principal, a `typeof` beside a bound
+secret); the Next.js dashboard README told users to enter `MCP_ACCESS_KEY`
+against `open-brain-rest`, converted here. Noted, not changed:
+`consolidation-workers/deno.json`'s `check` task still names `bio/index.ts`,
+whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone);
+`readwise-capture` answers an empty body 200 before the secret check —
+upstream's accommodation of Readwise's Test Webhook button, unchanged.
+
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
-**Verified:** `extensions/test-auth.ts` 631/631 (the seven extensions' 243
+**Verified:** `extensions/test-auth.ts` 634/634 (the seven extensions' 243
 among them); `server-portable/test-auth.ts` 59/59, `test-server.ts` 73/73,
 `tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
 --node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
 `agent-memory-api`, `consolidation-workers/metadata-norm` and
 `kubernetes-deployment`, each from its own directory — the four CI now checks;
 `bun scripts/check-fork-consistency.mjs` PASS with the exception list empty
-(47 probes, 21 non-probes, no vendored hit). The ticket's verify grep —
+(47 probes, 23 non-probes, no vendored hit). The ticket's verify grep —
 `req.query("key")` under `extensions/`, `recipes/`, `integrations/` — returns
 nothing.
 

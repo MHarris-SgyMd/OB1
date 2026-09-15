@@ -883,6 +883,10 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
   'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
   'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (expected?.length !== 64) warn();',
+  // Change 65's servers: a property of a bound principal is not the credential, and a
+  // typeof test beside a bound secret is a type check, not a compare of it.
+  'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS") });\nif (session.scope !== principal.scope) session = undefined;',
+  'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) deny();',
 ];
 // Empty since SMD-1455 (FORK.md change 65) moved the seventeen files check 8's
 // first run found onto the shared module. The shape stays for the next audit: a

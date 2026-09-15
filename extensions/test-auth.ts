@@ -490,7 +490,11 @@ for (const s of SERVERS) {
       else {
         assert(!writes(reach), `…${m.route} does not write (a read may insert its own trace; any RPC it calls is in RPC_READS)`);
         // A read that records itself does so only for a principal that could write anyway.
-        if (LOG_INSERT.test(reach)) assert(/if \(!canWrite\(c\.get\("principal"\)\)\)/.test(block), `…${m.route} records its trace only behind a canWrite check — a read-scoped key stores nothing`);
+        if (LOG_INSERT.test(reach)) {
+          // Not merely present: the check returns, and it sits before the insert (a no-op body was let through once).
+          const gate = block.search(/if \(!canWrite\(c\.get\("principal"\)\)\) \{\s*return /);
+          assert(gate >= 0 && gate < block.search(LOG_INSERT), `…${m.route} returns for a read-scoped key before it records its trace — the check precedes the insert and returns`);
+        }
       }
     }
     assert(text.includes("authenticateRequest(c.req.raw,") && text.includes('c.set("principal", principal)'),
@@ -558,8 +562,9 @@ for (const t of TEXT_ONLY) {
     if (!existsSync(join(ROOT, file)) || seen.has(file)) continue;
     seen.add(file);
     const imports = JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports as Record<string, string>;
-    // Every npm pin of a package installed here — scoped names included — must be this exact version.
-    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && /^npm:@?[^@]+@/.test(spec) && spec !== `npm:${name}@${pkg[name]}`);
+    // Every import of a package installed here — scoped or not, and whatever its spelling (an unversioned
+    // `npm:hono`, a `jsr:` or URL import would deploy on latest while the test ran the pin) — is this exact npm pin.
+    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
 }

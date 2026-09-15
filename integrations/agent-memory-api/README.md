@@ -94,7 +94,7 @@ The API accepts the runtime-neutral core schema versions and the OpenClaw launch
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/health` | GET | Verify deployment |
-| `/recall` | POST | Retrieve scoped memories before work starts |
+| `/recall` | POST | Retrieve scoped memories before work starts (under a `read` key no trace is stored and `request_id` is `null`) |
 | `/writeback` | POST | Save compact operational memory after work finishes |
 | `/recall/:request_id/usage` | POST | Report which recalled memories were used or ignored |
 | `/memories` | GET | List memories by workspace, project, status, runtime, type, or task prefix |
@@ -111,7 +111,7 @@ The trust model is documented in [Safe Agent Memory and Provenance](../../docs/s
 
 ## Smoke Harness
 
-Use the live smoke harness after deploying the Edge Function or rotating secrets:
+Use the live smoke harness after deploying the Edge Function or rotating secrets, with a `write`-scoped key — the harness writes back first, then reports usage against the recall's `request_id`:
 
 ```bash
 OB1_AGENT_MEMORY_ENDPOINT="https://YOUR_PROJECT_REF.supabase.co/functions/v1/agent-memory-api" \
