@@ -6340,8 +6340,11 @@ store calls the 3-argument form and was not touched by these three). Nothing
 would have said so: preflight's body checks read sentinels, and 005's body
 predates the convention.
 
-**The scan found worse.** Check 7's first run over the tree as vendored, before
-any fix, listed 23 statements in 11 files. Beyond the ticket's three:
+**The scan found worse.** Check 7 run over the tree as vendored, before any
+fix, lists 35 statements in 16 files under the rule as shipped: 24 violations
+in 8 sidecar files, and 11 statements in the 8 bootstrap files the exceptions
+cover (23 and 11 under its first draft, before `COMMENT ON FUNCTION` joined
+it). Beyond the ticket's three:
 `schemas/provenance-chains/schema.sql` defines `trace_provenance(uuid, int,
 int)` and `find_derivatives(uuid, int)` — the signatures 025 and 026 use — so
 applying it puts upstream's per-path recursive walk back over 026's bounded one
@@ -6371,10 +6374,14 @@ redefining statements **cut** and a header naming the migration that owns each
 function and why the cut is safe: enhanced-thoughts loses its section 6 (its
 README never mentioned the upsert; the columns are filled by the file's own
 backfill, and a capture does not update them — the README says so now);
-provenance-chains loses sections 5 and 6 and its two comments on 025's columns
-(the metadata-merge helpers, which have no counterpart in the migrations, stay;
-the README's example calls work unchanged against 025's and 026's functions,
-and its rollback no longer drops them or 025's columns); the cost-optimization
+provenance-chains loses sections 5 and 6, its two comments on 025's columns
+and its copy of 025's array `CHECK` under another name (the metadata-merge
+helpers, which have no counterpart in the migrations, stay; the README's
+example calls run against 025's and 026's functions, and the README now says
+what those return and do not do — the fork's columns, no tier redaction,
+`SECURITY INVOKER` — where upstream's text promised redaction; its rollback no
+longer drops the two functions, 025's two columns or 025's two indexes); the
+cost-optimization
 migration loses both functions and now says why, with the recipe's Edge Function
 steps standing and its step 1 rewritten; and thought-work-claims, every
 statement of which targets 015's table, becomes a stub — its README carries the
@@ -6391,23 +6398,33 @@ note above its Step 2 saying what pasting it onto a migrated brain would do.
 
 **Check 7.** `scripts/check-fork-consistency.mjs` reads the owned set from
 `db/migrations/` — every `CREATE [OR REPLACE] FUNCTION` at the start of a line,
-comments stripped, with the file that last defines it: 36 names today, never
-typed, through `ownedFunctionsIn` in `db/config.mjs` so `test-schema` reads the
-same set — and fails any `CREATE`, `DROP` or `ALTER FUNCTION`, or `COMMENT ON
-FUNCTION`, naming one at the start of a line, in every non-binary, non-ignored
-file under the seven contribution directories and `docs/`. By name, not
-signature: a matching signature is the silent replacement, and an overload
-beside an owned function is the ambiguity 004's header names. `COMMENT` because
-028 and 031 carry a data contract in a function's comment, which a vendored
-`COMMENT ON` overwrites as silently as `CREATE OR REPLACE` overwrites the body.
-Ten strings the rule must catch and eleven it must not — a `GRANT`, a `REVOKE`,
-a `COMMENT ON COLUMN`, a `SELECT`, a header comment quoting a statement,
-`update_updated_at_column()`, `match_thoughts_recency(` — run through the
-scan's own machinery on every invocation, and exceptions are counted as check
-6's are. Proven: a probe file with a definition, a drop and a comment failed on
-three lines; one line appended beside the excepted statement in the fingerprint
-README failed as "covers 1 line(s) but 2 match"; the fixed tree passes, 118
-contributions, no violations.
+dollar-quoted bodies and then comments stripped first, with the file that last
+defines it: 36 names today, never typed, through `ownedFunctionsIn` in
+`db/config.mjs`, and `test-schema` reads the same set and holds it to 36 or
+more (a smaller set is a reader that lost definitions, not a migration gone) —
+and fails any `CREATE`, `DROP` or `ALTER` of a `FUNCTION`, `PROCEDURE` or
+`ROUTINE`, or a `COMMENT ON` one, naming an owned function at the start of a
+line, bare or schema-qualified, quoted or not (the quoting a Supabase dashboard
+export emits), in every non-binary, non-ignored file under the seven category
+directories whole — their root READMEs and `_template`s included, which the
+per-contribution walk the other checks use skips — and `docs/`. The rule is
+one regex, `coreFunctionStatement` in `db/config.mjs`, and `test-schema` [31]
+applies it to the fixed enhanced-thoughts file. By name, not signature: a
+matching signature is the silent replacement, and an overload beside an owned
+function is the ambiguity 004's header names. `COMMENT` because 028 and 031
+carry a data contract in a function's comment, which a vendored `COMMENT ON`
+overwrites as silently as `CREATE OR REPLACE` overwrites the body. Fourteen
+strings the rule must catch and thirteen it must not — a `GRANT`, a `REVOKE`, a
+`COMMENT ON COLUMN`, a `SELECT`, a header comment quoting a statement,
+`update_updated_at_column()`, `match_thoughts_recency(`, `upsert_thought_v2(`
+— run through the scan's own machinery on every invocation, and exceptions are
+counted as check 6's are. Proven: a probe file with a definition, a drop and a
+comment failed on three lines; one line appended beside the excepted statement
+in the fingerprint README failed as "covers 1 line(s) but 2 match"; the fixed
+tree passes, 118 contributions, no violations. Known and accepted: a statement
+whose name is on the line after `FUNCTION`, or a `DROP FUNCTION a(), b()` list,
+is not caught — no vendored file writes either, and a rebase that brought one
+would meet `test-schema` [31] only if it touched enhanced-thoughts.
 
 **Preflight names the body, and the migration that owns it.** `atomic capture`
 read the 3-argument body's sentinel and nothing else; two of its remedies named
@@ -6427,9 +6444,17 @@ ones. `provenance` reads `trace_provenance`'s body for 026's
 re-applied by hand or the vendored provenance-chains schema. The two
 recognisers, `UPSERT_TWO_ARG_SHIPPED_RE` and `UPSERT_THREE_ARG_SHIPPED_RE`, live
 in `db/config.mjs`: each is the one clause that migration added and no earlier
-body has (005's `jsonb_typeof(p_payload) <> 'object'`, 025's `derived_from`),
-where the migrations have no sentinel and cannot gain one (a hashed file). Over
-PostgREST none of this is reachable, and the skip says so as before.
+body has (005's `jsonb_typeof(p_payload) <> 'object'`, 025's
+`p_payload->'derived_from'`), where the migrations have no sentinel and cannot
+gain one (a hashed file). The two forms are picked by signature, not arity —
+a vendored bootstrap's `upsert_thought(text, vector, jsonb)` is a third
+3-argument form, and reading whichever the catalog returned first judged a
+healthy brain by the wrong body — and any other overload beside them is named
+in the detail. The 2-argument body is judged on its own and said beside
+whichever 3-argument state fires, with 005-then-025 as the remedy, so a brain
+with both replaced hears it once rather than on the run after the first
+remedy. Over PostgREST none of this is reachable, and the skip says so as
+before.
 
 **Proof.** `test-schema` [31] reads the owned set as the checker does and pins
 the three last definers preflight's remedies spell (`upsert_thought` 025,
@@ -6444,17 +6469,20 @@ changes exactly one owned body, and the double-encoded payload is emptied
 silently again — and what the recogniser is for: 022 over 025 keeps the
 sentinel and drops the envelope; then the last definers re-applied put every
 body back. `test-preflight` drives each warning and its remedy against real
-Postgres: 021 over 025, 022 over 025, 003 over 005 and 005 alone (a pre-022
-3-argument body, which is why the remedy says "then 025 again"), the form
-dropped (remedy 025, not 004, not 022), 025 over 026 for `provenance`; 681 and
-180 assertions. `check-fork-consistency` passes the fixed tree and failed the
-probes above.
+Postgres: 021 over 025, 022 over 025, 003 over 005, 003 and 021 together (one
+warning naming both bodies, remedy 005 then 025), 005 alone (a pre-022
+3-argument body with the 2-argument one right, which is why the remedy says
+"then 025 again"), the form dropped (remedy 025, not 004, not 022), 025 over
+026 for `provenance`; 681 and 181 assertions. `check-fork-consistency` passes
+the fixed tree and failed the probes above.
 
-**Not done, and why.** Vendored `COMMENT ON COLUMN` and `ADD CONSTRAINT` over
-025's columns (provenance-chains adds two `CHECK`s of its own beside 025's and
-two columns 025 declined) are a column-level owned set — check 5 covers an
-unguarded `ADD COLUMN`; the rest waits for a ticket that reads columns from
-the migrations as this one reads functions. `thought_stats_summary` and
+**Not done, and why.** Vendored `COMMENT ON COLUMN`, `DROP INDEX` and `ADD
+CONSTRAINT` over 025's columns are a column-level owned set — cut here where
+found (two comments, two index drops, one duplicate `CHECK`), with
+provenance-chains keeping two `CHECK`s on the two columns 025 declined; check
+5 covers an unguarded `ADD COLUMN`, and the rest waits for a ticket that reads
+columns and indexes from the migrations as this one reads functions.
+`thought_stats_summary` and
 `release_thought` have no recogniser: nothing in 024's or 015's body is a
 clause a vendored body would lack by construction, so check 7 is their guard
 and SMD-1227's table of sentinels the way to more. The getting-started guide

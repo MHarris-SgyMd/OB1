@@ -24,7 +24,13 @@
 --   walk back over 026's bounded one (the timeout SMD-1288 removed) and
 --   upstream's find_derivatives over 025's, with no error. Sections 5 and 6
 --   are removed; the two functions the README's examples call are 025's and
---   026's and answer the same calls. Section 4's comments on derived_from and
+--   026's — the same argument lists, so the calls run, but the fork's columns
+--   (no derivation_layer, sensitivity_tier or restricted flag), SECURITY
+--   INVOKER and ungranted, with no redaction by tier: 025's header,
+--   departures 1 and 2. Section 2's CHECK on derived_from is removed as well:
+--   025's thoughts_derived_from_is_array is the same expression, and a second
+--   copy under another name is two constraints to fire on every write.
+--   Section 4's comments on derived_from and
 --   supersedes are removed too — 025 writes those columns' comments, and a
 --   COMMENT ON here would overwrite them as silently. The metadata-merge
 --   helpers in sections 7 and 8 have no counterpart in the migrations and stay.
@@ -72,11 +78,8 @@ ALTER TABLE public.thoughts
 -- before writing) and, at read time, by the ::uuid casts inside
 -- trace_provenance / find_derivatives, which surface any non-UUID element as
 -- a 22P02 error. See schemas/provenance-chains/README.md for details.
-ALTER TABLE public.thoughts
-  DROP CONSTRAINT IF EXISTS thoughts_derived_from_is_array_check;
-ALTER TABLE public.thoughts
-  ADD CONSTRAINT thoughts_derived_from_is_array_check
-  CHECK (derived_from IS NULL OR jsonb_typeof(derived_from) = 'array');
+-- (This fork: the array CHECK is migration 025's thoughts_derived_from_is_array,
+--  the same expression; upstream's copy of it is not added again.)
 
 -- Drop the legacy element-level check if it exists from an older install —
 -- PostgreSQL rejects its subquery predicate and the migration would fail.

@@ -11,10 +11,10 @@ Open Brain captures atomic thoughts, but as soon as you start synthesizing — w
 - `derivation_layer` (TEXT): `'primary'` (atomic capture) or `'derived'` (regenerable artifact). Defaults to `'primary'` so all existing rows keep working.
 - `supersedes` (UUID): optional pointer to a prior thought this one replaces — e.g., a regenerated digest replacing yesterday's.
 
-Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — same names, same signatures, so the calls below work unchanged — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why):
+Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — the same names and argument lists, so the calls below run, but they return the fork's columns (no `derivation_layer`, `sensitivity_tier` or `restricted` flag), are `SECURITY INVOKER` and ungranted, and redact nothing by tier (025's header, departures 1 and 2) — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why):
 
-- `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction.
-- `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Restricted rows are always filtered out; there is no client-visible override.
+- `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — upstream's walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction; the fork's (026) is a bounded walk-global BFS with the same depth and cycle columns and no redaction.
+- `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Upstream's always filters restricted rows out; the fork's (025) returns every derivative.
 - `merge_thought_provenance_metadata(thought_id UUID, provenance JSONB)` — atomically merges a provenance subtree into `metadata.provenance` server-side. The recipe uses this to avoid read-modify-write races with other writers (e.g., `eval.mjs`) that update the same `metadata` blob.
 - `merge_thought_eval_metadata(thought_id UUID, eval JSONB)` — is the race-free sibling for `eval.mjs`, avoiding stale-write conflicts with backfill's provenance merge. It performs a flat top-level `||` concat so eval's flat keys (`eval_score`, `eval_dimensions`, `eval_rationale`, `eval_graded_at`, `eval_grader`) replace their own values while preserving everything else (including `metadata.provenance`).
 
@@ -35,14 +35,14 @@ The helpers `trace_provenance` and `find_derivatives` surface three fields — `
 
 ### RLS compatibility
 
-The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. The helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design.
+The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. Upstream's helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design; on this fork that describes the two merge helpers this file installs, while `trace_provenance` and `find_derivatives` are 025's — `SECURITY INVOKER`, callable by the connecting role.
 
 ### `derived_from` validation
 
 The migration only enforces that `derived_from` is NULL or a JSON array (`thoughts_derived_from_is_array_check`). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
 
 - **Write time:** `recipes/provenance-chains/backfill.mjs` rejects any non-UUID ref (e.g., legacy `#123` integer references) with a clear error before it calls PATCH, so nothing malformed reaches PostgREST.
-- **Read time:** `trace_provenance` casts each element to `::uuid` inside its recursive CTE and `find_derivatives` compares against a UUID-typed needle, so any non-UUID element that slips in surfaces as a `22P02 invalid_text_representation` error instead of silent bad output.
+- **Read time:** `trace_provenance` casts each element to `::uuid` inside its walk (upstream's recursive CTE; the fork's 026 keeps only UUID-shaped elements before the cast) and `find_derivatives` compares against a UUID-typed needle, so any non-UUID element that slips in surfaces as a `22P02 invalid_text_representation` error instead of silent bad output.
 
 If you write to `derived_from` from code outside this recipe, mirror the UUID check before the PATCH.
 
@@ -104,10 +104,10 @@ SELECT * FROM public.trace_provenance(
 );
 
 -- Should return 0 rows on a fresh install (nothing has been marked derived yet).
--- Note: both helpers are service_role-only, so run these in the Supabase SQL
--- Editor (which uses the service role) or via an edge function. PostgREST
--- calls as `authenticated` will return 42501 permission denied, which is the
--- intended behaviour.
+-- Note: upstream's helpers are service_role-only, so run these in the Supabase
+-- SQL Editor (which uses the service role) or via an edge function; PostgREST
+-- calls as `authenticated` return 42501 permission denied there. On this fork
+-- the two are 025's and run as the connecting role.
 SELECT * FROM public.find_derivatives(
   (SELECT id FROM public.thoughts LIMIT 1),
   50
@@ -142,12 +142,11 @@ If you need to remove everything this migration added, run the block below. The 
 ```sql
 -- This fork: trace_provenance and find_derivatives are migrations 025/026's
 -- here and are not dropped — nor are the derived_from and supersedes columns,
--- which 025 owns and upsert_thought writes (SMD-1250).
+-- which 025 owns and upsert_thought writes, nor 025's two indexes on them,
+-- idx_thoughts_derived_from and idx_thoughts_supersedes (SMD-1250).
 
--- Drop indexes
-DROP INDEX IF EXISTS public.idx_thoughts_supersedes;
+-- Drop the index this file added
 DROP INDEX IF EXISTS public.idx_thoughts_derivation_layer;
-DROP INDEX IF EXISTS public.idx_thoughts_derived_from;
 
 -- Drop constraints
 ALTER TABLE public.thoughts DROP CONSTRAINT IF EXISTS thoughts_derived_from_uuid_elements_check;

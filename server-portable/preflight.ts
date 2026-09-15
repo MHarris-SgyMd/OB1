@@ -584,9 +584,9 @@ if (configFailed) {
         // returns NULL where `vector` is out of the path on PG16, and raises
         // on PG15 — into the catch below, taking every later check with it).
         const forms = (await sql`
-          SELECT p.pronargs::int AS n, p.prosrc AS src FROM pg_proc p
+          SELECT p.oid::regprocedure::text AS sig, p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
+          WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { sig: string; src: string }[];
         const { UPSERT_TWO_ARG_SHIPPED_RE, UPSERT_THREE_ARG_SHIPPED_RE } = await import("../db/config.mjs");
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
@@ -623,8 +623,18 @@ if (configFailed) {
             : ledgerRead || Number(applied[0].c) === 0
               ? apply
               : `${apply} — or, if the ledger already records ${migration} (this role cannot read schema_migrations): ${REAPPLY.charAt(0).toLowerCase()}${REAPPLY.slice(1)}`;
-        const three = forms.find((f) => f.n === 3);
-        const two = forms.find((f) => f.n === 2);
+        // By signature, not arity: a vendored bootstrap's upsert_thought(text,
+        // vector, jsonb) is a third 3-argument form, and reading whichever the
+        // catalog returned first judged a healthy brain by the wrong body
+        // (first review pass; SMD-1245's arity-alone finding).
+        const three = forms.find((f) => f.sig === "upsert_thought(text,jsonb,vector)");
+        const two = forms.find((f) => f.sig === "upsert_thought(text,jsonb)");
+        // 007/013's 4-argument form — the windowed capture the servers call —
+        // is the third form the migrations define; anything else is a
+        // vendored file's, and is named.
+        const FOUR = "upsert_thought(text,jsonb,vector,jsonb)";
+        const others = forms.filter((f) => f !== three && f !== two && f.sig !== FOUR).map((f) => f.sig);
+        const andOthers = others.length ? `; ${others.length} other overload(s) beside them (${others.join(", ")}), which no migration defines and the servers never call` : "";
         // The 3-arg body's semantics are declared by a sentinel in the body
         // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
         // windows stay while the label vouches for them and go otherwise. 025
@@ -638,29 +648,39 @@ if (configFailed) {
         // body with no error when the signature matches; this is where the
         // operator learns which body is there, and which migration owns it.
         const THREE_LAST = "025_thought_provenance.sql";
+        // 005 is the 2-argument form's last definer and redefines the
+        // 3-argument form too, with a body from before 008, 021, 022 and 025 —
+        // so the remedy for a stale 2-argument body is 005 and then 025.
+        const FIVE_THEN_LAST = `Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`;
+        // The 2-argument body is judged on its own and said beside whichever
+        // 3-argument state fires, so a brain with both replaced hears it once
+        // rather than on the run after the first remedy (first review pass).
+        const twoStale = two !== undefined && !UPSERT_TWO_ARG_SHIPPED_RE.test(two.src);
+        const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
+        const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : "";
+        const remedyThree = (alone: string) => (twoStale ? ledgerRemedy("005", FIVE_THEN_LAST) : ledgerRemedy("025", alone));
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
               ledgerRemedy("025", `Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
-          // name and the two-step fallback do. A warning, and the remedy says
-          // "then 025": 005 redefines the 3-argument form too, with its body.
-          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do`,
-              `Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`);
+          // name and the two-step fallback do. A warning.
+          add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do${andOthers}`,
+              ledgerRemedy("005", FIVE_THEN_LAST));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
-              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021, 005, 008 or 013 re-applied by hand without 025 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has${andTwo}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",
-              "the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell",
-              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST}.`));
-        } else if (!UPSERT_TWO_ARG_SHIPPED_RE.test(two.src)) {
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell${andTwo}${andOthers}`,
+              remedyThree(`Apply db/migrations/${THREE_LAST}.`));
+        } else if (twoStale) {
           add("atomic capture", "warn",
-              "the 2- and 3-argument upsert_thought present and the 3-argument body is 025's, but the 2-argument body is not 005's — it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again",
-              ledgerRemedy("005", `Apply db/migrations/005_reject_non_object_payload.sql, then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`));
+              `the 2- and 3-argument upsert_thought present and the 3-argument body is 025's, but the 2-argument body is not 005's — ${TWO_STALE_WHY}${andOthers}`,
+              ledgerRemedy("005", FIVE_THEN_LAST));
         } else {
-          add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's");
+          add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's${andOthers}`);
         }
 
         // A fact of its own, with its own remedy: every writer that replaces a

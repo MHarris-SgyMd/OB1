@@ -230,6 +230,8 @@ export const UPDATE_THOUGHT_SIGNATURE: string;
 export const SUPERSEDED_SIGNATURES: readonly string[];
 /** Function name → the migration file that last defines it, from the migrations as [name, text] pairs (SMD-1250). */
 export function ownedFunctionsIn(files: Iterable<readonly [string, string]>): Map<string, string>;
+/** The CREATE/DROP/ALTER FUNCTION|PROCEDURE|ROUTINE or COMMENT ON shapes naming `fn` at the start of a line, quoted or schema-qualified or not (SMD-1250). */
+export function coreFunctionStatement(fn: string): RegExp;
 /** The clause 005 added to the 2-argument upsert_thought and no earlier body has: preflight's recogniser for the shipped body. */
 export const UPSERT_TWO_ARG_SHIPPED_RE: RegExp;
 /** The clause 025 added to the 3-argument upsert_thought and 022's body lacks: preflight's recogniser for the shipped body. */

@@ -43,6 +43,7 @@ import {
   REEMBED_OWN_KEY_SQL_RE,
   UPSERT_THREE_ARG_SHIPPED_RE,
   UPSERT_TWO_ARG_SHIPPED_RE,
+  coreFunctionStatement,
   ownedFunctionsIn,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
@@ -3035,8 +3036,11 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // check 7 reads it. Three names preflight's remedies spell as the last
   // definer are pinned here: when one moves, so must the remedy.
   const owned = ownedFunctionsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
-  assert(owned.size >= 30 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
-    `the owned set is read from the migrations: ${owned.size} functions, names only — no word from a header comment quoting a statement`);
+  // 36 at migration 031; the set can only grow, so a smaller one means the
+  // reader lost definitions (a comment or body it failed to strip), not that
+  // a migration went away.
+  assert(owned.size >= 36 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
+    `the owned set is read from the migrations: ${owned.size} functions (36 at 031, never fewer), names only — no word from a header comment quoting a statement`);
   assert(owned.get("upsert_thought") === "025_thought_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
     "…and the last definers preflight's remedies name: upsert_thought 025, trace_provenance 026, release_thought 015");
   const bodies = async (): Promise<Record<string, string>> => Object.fromEntries((await db.query<{ sig: string; h: string }>(
@@ -3056,7 +3060,7 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // The vendored file as fixed — its section 6 gone — applied whole. The
   // Supabase roles its GRANTs name do not exist in PGlite.
   const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
-  assert(!/^\s*CREATE(?: OR REPLACE)? FUNCTION (?:public\.)?upsert_thought\s*\(/im.test(vendored), "schemas/enhanced-thoughts/schema.sql no longer redefines upsert_thought");
+  assert(!vendored.split("\n").some((line) => [...owned.keys()].some((fn) => coreFunctionStatement(fn).test(line))), "schemas/enhanced-thoughts/schema.sql names no owned function in a statement, by check 7's own rule");
   for (const role of ["authenticated", "service_role", "anon"]) {
     await db.exec(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
   }

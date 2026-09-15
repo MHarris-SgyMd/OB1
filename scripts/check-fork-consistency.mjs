@@ -21,7 +21,8 @@
  *      directories, with counted per-(file, hazard) exceptions
  *   7. vendored SQL never redefines or drops a function the core migrations
  *      own — no CREATE [OR REPLACE] FUNCTION, DROP FUNCTION, ALTER FUNCTION or
- *      COMMENT ON FUNCTION naming one, in the same files plus docs/, the owned set read from
+ *      COMMENT ON FUNCTION naming one, in every non-binary file under the seven
+ *      category directories whole and docs/, the owned set read from
  *      db/migrations/, with counted per-(file, function) exceptions for the
  *      files that create a brain rather than add to one
  *
@@ -33,7 +34,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ownedFunctionsIn } from "../db/config.mjs";
+import { coreFunctionStatement, ownedFunctionsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -501,9 +502,11 @@ function textFilesUnder(dirs) {
 // begins with `--`; prose naming one is not a statement) — COMMENT because 028
 // and 031 carry a data contract in a function's comment, which a vendored
 // COMMENT ON overwrites as silently as CREATE OR REPLACE overwrites the body —
-// in every non-binary, non-ignored file under
-// the seven contribution directories AND docs/, where two of the three
-// original files lived. By NAME, not signature: a matching signature is the
+// in every non-binary, non-ignored file under the seven category directories
+// WHOLE (a category's README and its `_template` included, which
+// contributionDirs() skips) AND docs/, where two of the three original files
+// lived. The rule itself is db/config.mjs's coreFunctionStatement, which
+// test-schema [31] applies too. By NAME, not signature: a matching signature is the
 // silent replacement, and a new overload beside an owned function is the
 // ambiguity 004's header names and the arity split SMD-1245 describes.
 //
@@ -519,9 +522,6 @@ function textFilesUnder(dirs) {
 const OWNED_FUNCTIONS = ownedFunctionsIn(
   readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
     .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]));
-/** The statement shapes that redefine, remove or re-comment `fn`, at the start of a line, any case. */
-const coreFunctionStatement = (fn) =>
-  new RegExp(String.raw`^\s*(?:(?:CREATE(?:\s+OR\s+REPLACE)?|DROP|ALTER)\s+FUNCTION|COMMENT\s+ON\s+FUNCTION)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:public\.)?${fn}\s*(?:\(|;|\bIS\b|$)`, "i");
 /** Strings the rule must catch — the check's own negative tests, run through the scan's machinery every time. */
 const CORE_FUNCTION_PROBES = [
   ["upsert_thought", "CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')"],
@@ -534,6 +534,11 @@ const CORE_FUNCTION_PROBES = [
   ["update_updated_at", "CREATE OR REPLACE FUNCTION update_updated_at()"],
   ["release_thought", "COMMENT ON FUNCTION public.release_thought IS"],
   ["claim_thoughts", "comment on function claim_thoughts(text, text, int, int) is 'x';"],
+  // The quoting a Supabase dashboard export or `supabase db diff` emits.
+  ["upsert_thought", 'CREATE OR REPLACE FUNCTION "public"."upsert_thought"("p_content" "text", "p_payload" "jsonb" DEFAULT \'{}\'::"jsonb")'],
+  ["match_thoughts", '  DROP FUNCTION IF EXISTS public."match_thoughts"(vector, float, int, jsonb);'],
+  ["update_thought", "> CREATE PROCEDURE update_thought(p_id uuid)"],
+  ["renew_claims", "DROP ROUTINE renew_claims;"],
 ];
 /** Ordinary lines the rule must not catch. */
 const CORE_FUNCTION_NON_PROBES = [
@@ -548,6 +553,8 @@ const CORE_FUNCTION_NON_PROBES = [
   "REVOKE EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT) FROM PUBLIC;",
   "calls `upsert_thought` through PostgREST, then match_thoughts",
   "The `CREATE OR REPLACE FUNCTION upsert_thought` in upstream's file is cut here.",
+  '-- > CREATE OR REPLACE FUNCTION "public"."upsert_thought"(',
+  "CREATE OR REPLACE FUNCTION public.upsert_thought_v2(",
 ];
 const CORE_FUNCTION_EXCEPTIONS = new Map([
   // Files that create a brain from the getting-started shape, not sidecars
@@ -591,7 +598,7 @@ function coreStatementsIn(text) {
   return names;
 }
 
-function checkCoreFunctions(dirs) {
+function checkCoreFunctions() {
   const SELF = "scripts/check-fork-consistency.mjs";
   if (OWNED_FUNCTIONS.size === 0) return fail(SELF, "no migration under db/migrations defines a function — the owned set is empty and check 7 would pass everything");
   for (const [fn, probe] of CORE_FUNCTION_PROBES) {
@@ -602,9 +609,11 @@ function checkCoreFunctions(dirs) {
     const [fn] = coreStatementsIn(text);
     if (fn) fail(SELF, `core-function rule for '${fn}' catches ordinary text it must not: ${text}`);
   }
-  // The seven directories, and docs/ — upstream's guide and drafts, where two
-  // of the three files this check was written for lived.
-  const scanned = [...dirs, { dir: join(ROOT, "docs"), rel: "docs" }];
+  // The seven category directories whole — not contributionDirs(), which
+  // yields one entry per contribution and so skips each category's README and
+  // its `_template` — and docs/, upstream's guide and drafts, where two of the
+  // three files this check was written for lived.
+  const scanned = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
   const counts = scanLines(textFilesUnder(scanned), [...OWNED_FUNCTIONS].map(([fn, file]) => ({
     name: fn,
     re: coreFunctionStatement(fn),
@@ -633,7 +642,7 @@ for (const d of dirs) {
 }
 checkSqlGuards();
 checkShellHazards(dirs);
-checkCoreFunctions(dirs);
+checkCoreFunctions();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
