@@ -614,12 +614,17 @@ function checkCoreFunctions() {
   // its `_template` — and docs/, upstream's guide and drafts, where two of the
   // three files this check was written for lived.
   const scanned = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
+  const before = violations.length;
   const counts = scanLines(textFilesUnder(scanned), [...OWNED_FUNCTIONS].map(([fn, file]) => ({
     name: fn,
     re: coreFunctionStatement(fn),
-    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}) — a CREATE OR REPLACE on a matching signature replaces that body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there; vendored SQL must not touch a function a migration owns (SMD-1250). Cut the statement and say in the file's header which migration owns the function (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason`,
+    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}); vendored SQL must not touch a function a migration owns (SMD-1250)`,
     suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
   })));
+  // Why, and what to do — once per run, not once per matching line.
+  if (violations.length > before) {
+    fail("check 7", "a CREATE OR REPLACE on a matching signature replaces the migration's body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there. Cut the statement and say in the file's header which migration owns the function (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason (FORK.md, change 58)");
+  }
   for (const [rel, byFn] of CORE_FUNCTION_EXCEPTIONS) {
     for (const [fn, { why, lines }] of Object.entries(byFn)) {
       const seen = counts.get(`${rel} ${fn}`) ?? 0;

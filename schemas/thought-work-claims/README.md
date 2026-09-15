@@ -271,7 +271,7 @@ ORDER BY claimed_at DESC;
 -- Re-run a batch: clear terminal rows so those thoughts become claimable again.
 -- (This fork: do not run this against a re-embed work_type — the succeeded
 --  rows are the evidence migrations 021 and 030 and reembed.ts --accept-failed
---  read; db/README.md has the re-run path.)
+--  read; reembed.ts --retry-fallbacks is the re-run path, db/README.md.)
 DELETE FROM public.thought_work_claims
 WHERE work_type = 'enrichment' AND status IN ('succeeded', 'failed');
 ```

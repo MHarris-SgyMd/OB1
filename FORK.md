@@ -6454,7 +6454,9 @@ names rather than `regprocedure`'s text, which schema-qualifies `vector` when
 pgvector is off the search path (the shape change 43's check already fails)
 and would have called a present form missing; any other overload is named in
 the detail. The 2-argument verdict rides every 3-argument state, the refusal
-included. The 2-argument body is judged on its own and said beside
+included. `test-search-path` [4] holds the signature pick to the off-path
+shape — the refusal it would otherwise have raised there is what the second
+review pass found. The 2-argument body is judged on its own and said beside
 whichever 3-argument state fires, with 005-then-025 as the remedy, so a brain
 with both replaced hears it once rather than on the run after the first
 remedy. Over PostgREST none of this is reachable, and the skip says so as

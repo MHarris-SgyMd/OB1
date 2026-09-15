@@ -35,14 +35,14 @@ Upstream's helpers `trace_provenance` and `find_derivatives` surfaced three fiel
 
 ### RLS compatibility
 
-The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. Upstream's helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design; on this fork that describes the two merge helpers this file installs, while `trace_provenance` and `find_derivatives` are 025's — `SECURITY INVOKER`, callable by the connecting role.
+The four new columns (`derived_from`, `derivation_method`, `derivation_layer`, `supersedes`) are plain columns on `public.thoughts`. Row-level security operates at the row granularity, not the column granularity, so any policies you already have on `public.thoughts` continue to apply unchanged — the new columns are simply returned or withheld alongside the rest of the row. If you need to hide specific columns from certain roles, use PostgREST's `select` column grants or a dedicated view. Upstream's helper functions are `SECURITY DEFINER` and granted to `service_role` only, so they run outside the caller's RLS context by design; on this fork that describes the two merge helpers this file installs, while `trace_provenance` and `find_derivatives` are 025 and 026's — `SECURITY INVOKER`, callable by the connecting role.
 
 ### `derived_from` validation
 
 The migration only enforces that `derived_from` is NULL or a JSON array (on this fork that is 025's `thoughts_derived_from_is_array`; upstream's file added the same check as `thoughts_derived_from_is_array_check`, which is not added here). Element-level UUID validation is **not** a database constraint — PostgreSQL forbids subqueries in `CHECK` predicates, so a per-element type/format check cannot live on the table. Validation is split across two application-layer choke points instead:
 
 - **Write time:** `recipes/provenance-chains/backfill.mjs` rejects any non-UUID ref (e.g., legacy `#123` integer references) with a clear error before it calls PATCH, so nothing malformed reaches PostgREST.
-- **Read time:** `trace_provenance` casts each element to `::uuid` inside its walk (upstream's recursive CTE; the fork's 026 keeps only UUID-shaped elements before the cast) and `find_derivatives` compares against a UUID-typed needle, so any non-UUID element that slips in surfaces as a `22P02 invalid_text_representation` error instead of silent bad output.
+- **Read time:** upstream's `trace_provenance` casts each element to `::uuid` inside its recursive CTE and its `find_derivatives` compares against a UUID-typed needle, so a non-UUID element surfaces as a `22P02 invalid_text_representation` error. **On this fork the opposite holds:** 025 and 026 keep only UUID-shaped elements before the cast, so a malformed element is dropped from the walk without an error — the write-time check is the only guard here.
 
 If you write to `derived_from` from code outside this recipe, mirror the UUID check before the PATCH.
 
@@ -118,8 +118,8 @@ SELECT * FROM public.find_derivatives(
 
 After running the migration:
 
-- `public.thoughts` has four new columns: `derived_from JSONB`, `derivation_method TEXT`, `derivation_layer TEXT NOT NULL DEFAULT 'primary'`, `supersedes UUID`.
-- Every existing row has `derivation_layer = 'primary'` and the three other columns NULL — no data loss, no behavior change for existing MCP tools.
+- `public.thoughts` has four columns for this: `derived_from JSONB` and `supersedes UUID`, migration 025's on this fork and possibly already set by 025's capture, beside the two this file adds, `derivation_method TEXT` and `derivation_layer TEXT NOT NULL DEFAULT 'primary'`.
+- Every existing row has `derivation_layer = 'primary'` and `derivation_method` NULL — no data loss, no behavior change for existing MCP tools.
 - Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER`, **granted to `service_role` only** (clients must reach them via the open-brain edge function, not PostgREST as `authenticated`).
 - Three indexes exist: `idx_thoughts_derived_from` (GIN), `idx_thoughts_derivation_layer` (btree), and `idx_thoughts_supersedes` (partial btree).
 - PostgREST schema cache has been reloaded (`NOTIFY pgrst, 'reload schema'`).
@@ -132,6 +132,8 @@ This migration assumes `public.thoughts.id` is a `UUID` — the canonical Open B
 - Function parameter types (`p_thought_id UUID` → `BIGINT`)
 - Inside `trace_provenance`, `jsonb_array_elements_text(...)::uuid` → `::bigint`
 - Inside `find_derivatives`, `jsonb_build_array(p_thought_id::text)` → `jsonb_build_array(p_thought_id)` (so GIN containment matches a JSON number instead of a JSON string)
+
+On this fork the two query functions are migrations 025 and 026's and `thoughts.id` is UUID by 001; the note applies to this file's two merge helpers and their `thought_id UUID` parameters only.
 
 `derived_from` stays JSONB in either case, but element storage format changes (string UUIDs vs JSON numbers).
 
@@ -167,17 +169,17 @@ NOTIFY pgrst, 'reload schema';
 
 ## Next Steps
 
-Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function. On this fork those handlers read `restricted`, `derivation_layer` and `sensitivity_tier` from rows the fork's two functions do not return, and `find_derivatives` filters nothing — expect those fields undefined and every derivative listed (SMD-1250).
+Once the schema is installed, apply the companion [Provenance Chains Pipeline](../../recipes/provenance-chains/) recipe to get the backfill script, nightly quality evaluator, and MCP tool handlers (`trace_provenance`, `find_derivatives`) for your `open-brain-mcp` Edge Function. On this fork those handlers read `restricted`, `derivation_layer` and `sensitivity_tier` from rows the fork's two functions do not return, `derivation_method` comes back from `metadata->>'derivation_method'` rather than the column this file adds (the backfill's rows show NULL there), and `find_derivatives` filters nothing — expect those fields undefined and every derivative listed (SMD-1250).
 
 ## Troubleshooting
 
 **Issue: "column already exists" error on re-run**
 Solution: Expected — the migration uses `ADD COLUMN IF NOT EXISTS`. The message is informational only. No harm done.
 
-**Issue: "operator does not exist: uuid = text" inside `trace_provenance`**
+**Issue: "operator does not exist: uuid = text" inside `trace_provenance`** (upstream's function; the fork's is 026's over a UUID id)
 Solution: Your `thoughts.id` is not a UUID. See the [ID Type Note](#id-type-note) above — you need to change function parameter types to match your schema.
 
-**Issue: `find_derivatives` returns zero rows even when derivatives exist**
+**Issue: `find_derivatives` returns zero rows even when derivatives exist** (upstream's function; the fork's 025 canonicalises `derived_from` elements to lowercase UUID strings on write)
 Solution: The function builds its GIN needle as a JSON **string** (`["<uuid>"]`). If you populated `derived_from` with JSON numbers (e.g., BIGINT IDs serialized as numbers), containment will not match. Either store UUIDs as JSON strings consistently, or modify the function per the [ID Type Note](#id-type-note).
 
 **Issue: PostgREST still returns old schema after migration**

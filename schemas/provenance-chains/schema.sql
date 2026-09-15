@@ -30,6 +30,9 @@
 --   departures 1 and 2. Section 2's CHECK on derived_from is removed as well:
 --   025's thoughts_derived_from_is_array is the same expression, and a second
 --   copy under another name is two constraints to fire on every write.
+--   Section 3's indexes on derived_from and supersedes are removed as well:
+--   idx_thoughts_derived_from and idx_thoughts_supersedes are 025's, under
+--   those names, and IF NOT EXISTS would only have made the claim quietly.
 --   Section 4's comments on derived_from and
 --   supersedes are removed too — 025 writes those columns' comments, and a
 --   COMMENT ON here would overwrite them as silently. The metadata-merge
@@ -90,18 +93,13 @@ ALTER TABLE public.thoughts
 -- 3. INDEXES
 -- ============================================================
 
--- GIN index for "find_derivatives" containment queries (derived_from @> '["<uuid>"]')
-CREATE INDEX IF NOT EXISTS idx_thoughts_derived_from
-  ON public.thoughts USING gin (derived_from);
+-- (This fork: the GIN index on derived_from and the partial index on
+--  supersedes are migration 025's, idx_thoughts_derived_from and
+--  idx_thoughts_supersedes; not created here.)
 
 -- Btree on layer for "give me all derived artifacts" browse queries
 CREATE INDEX IF NOT EXISTS idx_thoughts_derivation_layer
   ON public.thoughts (derivation_layer);
-
--- Partial index on supersedes — most rows are NULL, only track the active ones
-CREATE INDEX IF NOT EXISTS idx_thoughts_supersedes
-  ON public.thoughts (supersedes)
-  WHERE supersedes IS NOT NULL;
 
 -- ============================================================
 -- 4. COLUMN COMMENTS (discoverable via \d+ thoughts)

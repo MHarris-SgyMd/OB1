@@ -114,7 +114,7 @@ const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
  * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
-const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
+const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -669,7 +669,7 @@ if (configFailed) {
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : "";
         const remedyThree = (alone: string) => (twoStale ? ledgerRemedy("005", FIVE_THEN_LAST) : ledgerRemedy("025", alone));
         if (!three) {
-          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${andTwo}${andOthers}`,
+          add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : ""}${andOthers}`,
               remedyThree(`Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
