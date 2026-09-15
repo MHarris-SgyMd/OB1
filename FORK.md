@@ -5884,7 +5884,14 @@ the lease and heartbeat a run would use; `--status` in all three names each
 holder, its rows, its earliest deadline and the remedy for a dead one
 (`release_claims_for_worker`), which only `reembed.ts` did before. A row whose
 lease is found gone at release is counted with the rows the worker lost, not
-the ones it finished, so two workers' summaries add up to the pass. `--ttl` now means one thing: how long a dead
+the ones it finished, so two workers' summaries add up to the pass, and the
+provider's answer for it is printed marked unrecorded rather than dropped.
+Every line about a lease found gone states what the worker observed and the
+causes it cannot tell apart — a lapse, a hand release, an edit's requeue —
+rather than asserting one; `release_claims_for_worker` issued against a live
+holder is the case that made the first wording false. A worker id is text any
+claimant wrote, and is cleaned before it reaches a terminal, as change 54's
+rule for database text requires. `--ttl` now means one thing: how long a dead
 worker's rows stay out of the pool. Nothing about the batch, the timeout or the
 calls a thought costs sizes it, and the three refusals that did —
 `reembed.ts`'s derived floor with its long-lease warning,
@@ -5907,6 +5914,10 @@ no-op, so the batch is sized to outlast it), no row reaches a second worker, no
 release finds its lease gone, none is lost, every claim row succeeded on its
 first attempt — the ticket's first Verify bullet, which no arithmetic could
 pass; its summary counts the beats, and the test holds them at ten or more.
+[9] then takes a one-worker run's batch from under it by hand: the row in hand
+learns it at release, the rest at a beat or their release, every stolen row is
+counted lost and none finished, the worker finishes the rest and exits 1
+naming the rows still leased, and `--status` names the thief.
 [10] and [16] run their first pass under a 6 s lease beating every second, with
 answers slowed to 400 and 700 ms, so the beats fire in the other two workers —
 the count in each summary says they did — and assert the old refusals are gone

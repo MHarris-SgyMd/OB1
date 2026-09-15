@@ -1602,7 +1602,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   slowMs = 0;
   assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /16 per claim, 6 s leases renewed every 1 s/.test(slow.out),
     `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
-  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/no longer this worker's when checked/.test(slow.out) && !/heartbeat failed/.test(slow.out),
+  assert(!/attempt 2/.test(slow.out) && !/no longer this worker's at release/.test(slow.out) && !/no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
   assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fifteen seconds (${slowBeats})`);
@@ -1610,6 +1610,36 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   assert(slowRows.length === 42 && slowRows.every((r) => r.status === "succeeded" && r.attempts === 1),
     `…and every claim row succeeded on its first attempt (${slowRows.filter((r) => r.attempts !== 1 || r.status !== "succeeded").length} otherwise)`);
   await sql`DELETE FROM thought_work_claims WHERE work_type = ${SLOW_KEY}`;
+
+  // A lease taken from under a running worker: the batch a one-worker run
+  // holds is re-assigned by hand to a holder whose lease is far ahead — what
+  // another worker's claim after a reap does to it. The row in hand learns it at
+  // release; the rest at a beat or at their release (which, depends on the
+  // 1 s beat against 610 ms rows, and is not asserted). Every stolen row is
+  // counted lost and none finished, the worker finishes the rest, and the run
+  // says the rows are still leased; --status names the thief.
+  slowMs = 600;
+  const THIEF_KEY = `reembed:stub-embed@${DIM}:thief`;
+  const thiefRun = reembed("--job", THIEF_KEY, "--workers", "1", "--batch", "4", "--ttl", "6", "--heartbeat", "1");
+  let stolen: { thought_id: string }[] = [];
+  for (let i = 0; i < 100 && stolen.length === 0; i++) {
+    await Bun.sleep(100);
+    // The thief beats too, in effect: a deadline far ahead, or the worker's own
+    // next claim would reap the rows back after 6 s and finish them itself.
+    stolen = (await sql`UPDATE thought_work_claims SET worker_id = 'thief', ttl_expires_at = now() + interval '10 minutes' WHERE work_type = ${THIEF_KEY} AND status = 'claimed' RETURNING thought_id`) as { thought_id: string }[];
+  }
+  const theft = await thiefRun;
+  slowMs = 0;
+  assert(stolen.length >= 1 && stolen.length <= 4, `the thief takes the batch a running worker holds (${stolen.length} rows)`);
+  assert(theft.code === 1 && new RegExp(`${42 - stolen.length} re-embedded, 0 failed, 0 deleted mid-pass, ${stolen.length} no longer this worker's when checked`).test(theft.out) && new RegExp(`${stolen.length} row\\(s\\) are still leased`).test(theft.out),
+    `…the worker finishes the rest, counts exactly the stolen rows as no longer its own, none as finished, and exits 1 naming them as still leased (exit ${theft.code}: ${theft.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+  assert(/no longer this worker's at release — its lease lapsed/.test(theft.out), "…the row in hand learns it at release, and the line names what it can know");
+  const thiefStatus = await reembed("--status", "--job", THIEF_KEY);
+  assert(new RegExp(`held by thief: ${stolen.length} rows`).test(thiefStatus.out), "…and --status names the thief");
+  const [{ thiefRows }] = await sql`SELECT count(*)::int AS "thiefRows" FROM thought_work_claims WHERE work_type = ${THIEF_KEY} AND status = 'claimed' AND worker_id = 'thief'`;
+  assert(Number(thiefRows) === stolen.length, `…whose rows stay claimed under its name, untouched by the worker's finally (${thiefRows})`);
+  await sql`SELECT release_claims_for_worker(${THIEF_KEY}, 'thief')`;
+  await sql`DELETE FROM thought_work_claims WHERE work_type = ${THIEF_KEY}`;
 
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
@@ -2282,7 +2312,7 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
     `the heartbeat beats through the first pass without error, and no row reaches a second worker (${firstBeats} beat(s))`);
   assert(first.code === 1 && /10 thought\(s\) judged, 1 failed/.test(first.out),
          `the first run judges ten thoughts and fails the one whose pair drew prose (exit ${first.code}: ${first.out.split("\n").find((l) => /judged,/.test(l))?.trim()})`);
-  assert(/5 pair\(s\) judged — 0\.50 per thought, 500 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
+  assert(/5 pair\(s\) judged — 0\.45 per thought judged, 455 calls per thousand thoughts; 6 thought\(s\) had no candidate; verdicts: 1 agree, 0 unrelated, 3 conflict/.test(first.out) && /1 answer\(s\) not JSON of the expected shape/.test(first.out),
          `…five pairs (one per newer thought with an older neighbour), one malformed, and the six older thoughts with nothing older to compare against (${first.out.split("\n").find((l) => /pair\(s\) judged/.test(l))?.trim()})`);
   assert(/2 proposal\(s\) recorded \(1 without a direction\), 1 conflict\(s\) under confidence 0\.5 not recorded/.test(first.out),
          `…two proposals recorded, one undirected, one conflict too weak to record (${first.out.split("\n").find((l) => /proposal\(s\) recorded/.test(l))?.trim()})`);

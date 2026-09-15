@@ -47,6 +47,7 @@
  */
 
 import type { SQL } from "bun";
+import { cleanForDisplay } from "../server-portable/consolidate.ts";
 
 /** The lease when --ttl is not given: 015's default for claim_thoughts. */
 export const DEFAULT_TTL_S = 900;
@@ -93,9 +94,13 @@ export async function leaseHolders(sql: SQL, job: string): Promise<LeaseHolder[]
      GROUP BY worker_id ORDER BY worker_id`) as LeaseHolder[];
 }
 
-/** The --status line for one holder. The deadline moves on every beat while the holder lives; a dead holder's stands until the reaper. */
+/**
+ * The --status line for one holder. The deadline moves on every beat while the
+ * holder lives; a dead holder's stands until the reaper. worker_id is text any
+ * claimant wrote, so it is cleaned before it reaches a terminal.
+ */
 export function describeHolder(h: LeaseHolder): string {
-  return `    held by ${h.worker_id}: ${h.rows} rows, earliest lease deadline ${h.deadline} (renewed on each heartbeat while the holder lives; a dead holder's rows return when it passes, or at once with SELECT release_claims_for_worker(job, worker_id))`;
+  return `    held by ${cleanForDisplay(h.worker_id)}: ${h.rows} rows, earliest lease deadline ${h.deadline} — moved forward on each heartbeat while the holder lives, so a deadline still ahead means it was alive at its last beat; a dead holder's rows return when it passes, or at once with SELECT release_claims_for_worker(job, worker_id), which a live holder would read as a lost lease`;
 }
 
 /**
@@ -128,10 +133,10 @@ export async function lostReason(sql: SQL, job: string, workerId: string, id: st
 export function describeLoss(why: LostReason | null): string {
   if (why === null) return "no longer this worker's, and the row could not be read; skipping";
   switch (why.kind) {
-    case "pending": return "back in the pool — reaped, or requeued by an edit — for a later claim, this run's or the next's; skipping";
-    case "claimed": return `another worker (${why.worker}) holds it now; skipping`;
+    case "pending": return "back in the pool — reaped after a missed lease, requeued by an edit, or returned by hand with release_claims_for_worker — for a later claim, this run's or the next's; skipping";
+    case "claimed": return `another worker (${cleanForDisplay(why.worker)}) holds it now; skipping`;
     case "reaped": return "marked failed by the reaper while this worker held it — its lease had expired for the last allowed time (last_error says so); --retry-failed returns it; skipping";
-    case "finished": return `already ${why.status} under ${why.worker}; skipping`;
+    case "finished": return `already ${why.status} under ${cleanForDisplay(why.worker)}; skipping`;
     case "deleted": return "deleted while it was leased";
   }
 }

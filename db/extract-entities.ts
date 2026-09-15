@@ -546,12 +546,20 @@ async function worker(n: number): Promise<void> {
           if (stopAfter) console.error(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
           if (stopAfter && outcome.outcome === "failed") {
             hb.held.delete(b.thought_id);
+            let recorded = false;
             try {
-              await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`;
+              const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
+              recorded = rows[0]?.ok === true;
             } catch (e) {
               console.error(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
             }
-            failed++;
+            if (recorded) failed++;
+            else {
+              // Not ours to record: the lease lapsed during the pauses, or the
+              // row was returned by hand. Counted with the rows this worker lost.
+              lost++;
+              console.error(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
+            }
             console.error(`  ${b.thought_id}: ${outcome.error}`);
             return;
           }
@@ -594,7 +602,8 @@ async function worker(n: number): Promise<void> {
           // 016's trigger put the row back in the pool to be extracted from the
           // new text. Not ours to finish either way: counted with the rows this
           // worker lost, not the ones it finished.
-          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile, or the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — an edit requeued it, its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
+          if (outcome.outcome === "failed") console.error(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
           lost++;
           progress();
           continue;

@@ -1608,7 +1608,9 @@ async function worker(n: number): Promise<void> {
           // `thoughts`, if we made one, stands — the same vector twice at
           // worst, harmless. Counted with the rows this worker lost, not the
           // ones it finished, so the workers' summaries add up across a pass.
-          console.error(`  ${b.thought_id}: lease expired before release — the heartbeat did not reach the database for ${TTL} s; the row is the pool's or another worker's now, or failed at its last allowed expiry`);
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — its lease lapsed (no beat reached the database for ${TTL} s), it was returned by hand with release_claims_for_worker, or it failed at its last allowed expiry; the row is the pool's, another worker's, or failed now`);
+          if (outcome.outcome === "failed") console.error(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
+          else if (outcome.caveat) console.error(`  ${b.thought_id}: ${outcome.caveat} (not recorded — the row was not this worker's)`);
           lost++;
           progress();
           continue;

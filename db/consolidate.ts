@@ -432,6 +432,8 @@ let failed = 0;
 let vanished = 0;
 let lost = 0;
 let beats = 0;
+/** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
+let judged = 0;
 let llmMs = 0;
 const totals = { pairs: 0, agree: 0, unrelated: 0, conflict: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0 };
 const activeWorkers = new Set<string>();
@@ -628,15 +630,24 @@ async function worker(n: number): Promise<void> {
               }
             }
           }
+          judged++;
           if (stopAfter) console.error(`  ${workerId}: provider still failing — this worker stops after recording this thought; re-run when it is back`);
           if (stopAfter && outcome.outcome === "failed") {
             hb.held.delete(b.thought_id);
+            let recorded = false;
             try {
-              await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`;
+              const rows = (await sql`SELECT release_thought(${b.thought_id}::uuid, ${JOB}, ${workerId}, 'failed', ${outcome.error}) AS ok`) as { ok: boolean }[];
+              recorded = rows[0]?.ok === true;
             } catch (e) {
               console.error(`  ${b.thought_id}: could not record the failure (${(e as Error).message})`);
             }
-            failed++;
+            if (recorded) failed++;
+            else {
+              // Not ours to record: the lease lapsed during the pauses, or the
+              // row was returned by hand. Counted with the rows this worker lost.
+              lost++;
+              console.error(`  ${b.thought_id}: the claim was no longer this worker's at release; the failure below was not recorded`);
+            }
             console.error(`  ${b.thought_id}: ${outcome.error}`);
             return;
           }
@@ -670,7 +681,8 @@ async function worker(n: number): Promise<void> {
         if (!ok) {
           // Not ours to finish: counted with the rows this worker lost, not
           // the ones it finished, so the workers' summaries add up.
-          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — its lease lapsed (no beat reached the database for ${TTL} s) or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`);
+          if (outcome.outcome === "failed") console.error(`  ${b.thought_id}: ${outcome.error} (not recorded — the row was not this worker's)`);
           lost++;
           progress();
           continue;
@@ -748,7 +760,7 @@ console.log(
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(
-  `  ${totals.pairs} pair(s) judged${done ? ` — ${(totals.pairs / done).toFixed(2)} per thought, ${Math.round((totals.pairs / done) * 1000)} calls per thousand thoughts` : ""}; ` +
+  `  ${totals.pairs} pair(s) judged${judged ? ` — ${(totals.pairs / judged).toFixed(2)} per thought judged, ${Math.round((totals.pairs / judged) * 1000)} calls per thousand thoughts` : ""}; ` +
     `${totals.noCandidates} thought(s) had no candidate; verdicts: ${totals.agree} agree, ${totals.unrelated} unrelated, ${totals.conflict} conflict`
 );
 console.log(
