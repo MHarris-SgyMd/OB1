@@ -449,11 +449,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // is pending, and a PLAIN run — the compose stack's, which gates the server
   // on it — must not fail with a bare "does not exist".
   // 030 by name, not "the last file": 031 (renew_claims, SMD-1023), 032 (the
-  // provenance envelope, SMD-1323) and 033 (the capture's fingerprint lock,
-  // SMD-1043) follow it and need only 015, 021, 025 and 032, so none is the
-  // one a plain run must fail at.
+  // provenance envelope, SMD-1323), 033 (the capture's fingerprint lock,
+  // SMD-1043) and 034 (the opt-in query log, SMD-1295) follow it and need only
+  // 015, 021, 025, 032 and (034) 001/010 — all present in a through-020 schema
+  // baselined past them — so none is the one a plain run must fail at.
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 4, `030 is among the last four migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 5, `030 is among the last five migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
