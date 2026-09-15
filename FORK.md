@@ -6192,24 +6192,24 @@ sixth and seventh passes proposed the same higher altitude: the migrator holds
 the one fact 030, hashed and applied, cannot — the labels *before* 021's replay.
 
 **What this does.** One helper, `applyBracketed`, runs every file, and around
-021 brackets its block. Before the file, the ids of the thoughts unlabelled —
-every id with a vector, where the column does not yet exist — go into a temp
-table on the migrator's connection (`ON COMMIT DROP`, analysed); after it, one
-UPDATE sets each of them by 030's rule: the latest succeeded row that is not an
-acceptance, when `updated_at <= finished_at` as 021 and 030 spell the bound,
-else NULL — `IS DISTINCT FROM` the label the row holds, so a label from a plain
-latest row is not rewritten, and the statement's row count is the number of
-labels 021's block wrote from an acceptance (or its unnamed pick of a tie). The
-`updated_at` trigger is held as the two files hold it. The same transaction as
-the file — the whole re-run's under `--reapply`, the file's own on a plain run
-— so the snapshot can neither predate nor outlive what it brackets; whenever
-021 runs, 030 following in the same run or recorded and skipped (a ledger hole
-at 021 alone), since the correction is the migrator's and not 030's. The rule
-is 030's own text: `LATEST_UNACCEPTED_CLAIM_SQL` in `config.mjs` is the
-subquery 030's second statement labels from, byte for byte once substituted,
-and `test-schema` [29] pins that — one spelling of "the evidence, accepted rows
-excluded", so the migrator's correction and 030's cannot disagree. The run
-says, beside 021's line, how many labels it set back.
+021 brackets its block. It takes 021's lock on `thoughts` first, then the
+claim table's against writers; the ids of the thoughts unlabelled before the
+file that have a claim row 021 could label from — every such id with a vector,
+where the column does not yet exist — go into a temp table on the migrator's
+connection (`ON COMMIT DROP`, analysed); the file runs; the snapshot rows now
+labelled are what 021 wrote, and they are set aside — back to NULL, the
+`updated_at` trigger held as 021 holds it — and **030's own substituted text
+runs**, there, in the same transaction: its second statement labels them again
+by its rule, the latest row that is not an acceptance, or leaves them unknown.
+One spelling of the rule, 030's, and the migrator adds none. The same
+transaction as the file — the whole re-run's under `--reapply`, the file's own
+on a plain run — so the snapshot can neither predate nor outlive what it
+brackets; whenever 021 runs, 030 following in the same run (where it runs
+again, idempotent, at its own place) or recorded and skipped (a ledger hole at
+021 alone, where the bracket is the only time it runs), since the correction is
+the migrator's and not 030's. The run says, beside 021's line, how many
+thoughts 021 labelled and how many 030's rule decided otherwise, and lists
+those rows with both labels — nothing else records them.
 
 **What went.** The hazards query, both arms of the way back, the `has_edit`
 and signature probe, the claim-table probe, the "030 recorded" branch, the
@@ -6262,6 +6262,33 @@ siblings (a ledger hole) with no judgement, and 021's body over 022's and
 025's `upsert_thought` is only the case this ticket's fixture happens to show;
 the loop can refuse, or warn under `--dry-run`, and name `--reapply`.
 
+**Review, second pass (high), triaged.** The bracket locked `thoughts` and not
+the claim table, so a claim row committed between the snapshot and 021's block
+— `--accept-failed`'s UPDATE is a separate autocommit statement needing only
+ROW EXCLUSIVE — was evidence the block read and the snapshot never saw, and
+its label stood; the claim table is locked SHARE after `thoughts` (reembed.ts's
+start takes them the other way round, and the banner says to stop the workers
+first). The first pass's 10 s applied to 021 alone, overriding a role's
+default for one file while every other plain-run file had none; every
+transaction the migrator opens now sets one `LOCK_TIMEOUT_S`, quoted by every
+message that names it, and the plain arm of the lock message says so. The
+first pass's `LATEST_UNACCEPTED_CLAIM_SQL` was a second executable spelling of
+030's second statement, held equal to the file only by an indentation-sensitive
+pin; the bracket now sets 021's labels aside and runs 030's own substituted
+text, so the rule has one spelling and the constant, its declaration and the
+pin are gone (the reviewer's measured cost of the join it replaced — the claim
+table read whole under the exclusive lock — is now 030's own, stated in the
+comment). The count line became a report: how many thoughts 021 labelled, how
+many 030's rule changed, and the first fifty rows with both labels, since the
+label is not an edit and nothing else records them. `reembed.ts`'s "Saying I
+know" still credited the re-run's correction to 030 alone, and README §5 said
+030 corrects "what a paste left" when it corrects the own-key labels only.
+The docblock claimed the bracket's evidence test was 030's early-return test,
+which differs (`finished_at IS NOT NULL`); it is 021's. The tri-state return,
+its cast and `Number()` went (`Promise<Bracket>`, empty for other files). [7]
+hoists `labels()`, adds `recorded021()`, and splits the hole assertion so a
+failing regex prints the run.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6273,19 +6300,20 @@ literal change 56 left is now spelled twice.
 Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
 acceptance over a thought written since its enqueue *before* the re-run, and
 asserts the run goes with no refusal, the six labels (`stub-embed`, NULL,
-`earlier-model`, NULL, NULL, NULL), every acceptance standing, and the line
-beside 021 counting four; that an exclusive lock on `ob1_config` fails the
+`earlier-model`, NULL, NULL, NULL), every acceptance standing, and the report
+beside 021 — five labelled, four changed, each changed row listed with both
+labels and the agreed row absent; that an exclusive lock on `ob1_config` fails the
 checks before the run within their own timeout; then deletes 021's ledger row
 with 030 recorded, plants a fifth acceptance under a suffixed key, and asserts
-a held lock on `thoughts` fails the plain run's 021 within the bracket's 10 s
+a held lock on `thoughts` fails the plain run's 021 within the run's 10 s
 with nothing recorded, that the plain run then applies 021 bracketed — exit 0,
-030 skipped, four set, every other label as the re-run left it, 021 recorded,
-the trigger enabled — and that a second `--reapply` over the same corpus sets
+030 skipped as recorded yet its text run inside the bracket, four labelled and
+four changed, every other label as the re-run left it, 021 recorded, the
+trigger enabled — and that a second `--reapply` over the same corpus reports
 the same four and changes no label. The hazard refusals went with the gate;
-the rest of [7] and all of [8] are unchanged. `test-schema` [29] pins
-`LATEST_UNACCEPTED_CLAIM_SQL` against 030's substituted text. `test-upgrade`
-110/110, `test-schema` 645/645, `test-preflight` 174/174, `test-live` 419/419,
-`tsc` clean, fork checker PASS. Upstream status: **not applicable** — the
+the rest of [7] and all of [8] are unchanged. `test-upgrade` 112/112,
+`test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
+clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).
 
 ## Detached from the fork network

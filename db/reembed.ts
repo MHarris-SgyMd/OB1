@@ -299,9 +299,12 @@
  * does the same to an accepted row whose thought is unlabelled, and a paste of
  * the file alone did, for anyone who followed the remedy this tool printed
  * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
- * re-runs every recorded migration in one transaction — and migration 030
- * carries the corrected rule, reached after 021 in the same run and applied
- * once to every brain at upgrade: a label whose only evidence is an acceptance
+ * re-runs every recorded migration in one transaction, and brackets 021's
+ * block whenever it runs: the labels the block writes are set aside and 030's
+ * text decides them again, so a label from an acceptance alone never leaves
+ * the transaction, 030 following in the run or not (SMD-1421) — and migration
+ * 030 carries the corrected rule, applied once to every brain at upgrade and
+ * run again inside that bracket: a label whose only evidence is an acceptance
  * under the model's own key goes back to unknown, and the evidence rule labels
  * with accepted rows excluded, so the latest succeeded row BEFORE an
  * acceptance decides. Any successor that labels from claim rows carries the

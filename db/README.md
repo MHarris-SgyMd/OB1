@@ -114,19 +114,23 @@ operator's *acceptance* of a failure (`reembed.ts --accept-failed`) — a though
 that kept the vector it had, by decision not at that key's model. 030 takes
 such a label back where it can tell it from the server's own and labels with
 accepted rows excluded, but 030 cannot know which labels 021's block wrote a
-moment ago; the migrator can. It takes 021's own lock on `thoughts` first,
-within 10 s (so a held lock fails the file rather than the snapshot waiting
-behind it), notes the thoughts unlabelled before 021 that have a claim row
-naming a model (every such thought with a vector, where the column does not
-yet exist) in a temp table on its connection, and after the file sets each of
-them by 030's rule — the latest row that is not an acceptance, when nothing has
-written the thought since it finished, else unknown — in the same transaction
-as the file, with the `updated_at` trigger held as 021 and 030 hold it. Where
-no succeeded claim row names a model there is nothing to snapshot, and the file
-runs bare. A label from a plain latest row is written again unchanged; a label
-from an acceptance goes back to unknown, or to the earlier pass that did write
-the vector; the acceptance stands, spent by nobody. The run says how many
-labels it set, beside 021's line.
+moment ago; the migrator can. It takes 021's own lock on `thoughts` first, and
+then the claim table's against writers (so a label or a claim row committed
+while the file runs is neither set back nor read as evidence the snapshot never
+saw), notes the thoughts unlabelled before 021 that have a claim row naming a
+model (every such thought with a vector, where the column does not yet exist)
+in a temp table on its connection, runs the file, sets aside the labels it
+wrote — back to unknown, the `updated_at` trigger held as 021 holds it — and
+runs **030's own text** in the same transaction, so 030's rule decides those
+labels again: the latest row that is not an acceptance, when nothing has
+written the thought since it finished, else unknown. One spelling of the rule,
+030's. Where no succeeded claim row names a model, or 021 wrote nothing, the
+file runs bare. A label from a plain latest row is written again unchanged; a
+label from an acceptance goes to the earlier pass that did write the vector, or
+to unknown; the acceptance stands, spent by nobody. The run says, beside 021's
+line, how many thoughts 021 labelled and how many 030's rule decided otherwise,
+listing those rows — nothing else records them, since the label is not an
+edit.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
@@ -134,14 +138,17 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed. `--baseline` runs no
 SQL and brackets nothing.
 
-**Stop the server and any re-embed or extraction worker first.** 001 and 003
+**Stop the server and any re-embed or extraction worker first.** Every
+transaction the migrator opens — the re-run's, and each file's on a plain run —
+sets the same 10 s lock timeout, so a held lock fails the run rather than
+freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
 evidence backfill runs as written and bracketed (above); 030, reached after it
-in the same transaction, finds nothing of 021's to take back and corrects what
-an earlier paste of the body left (SMD-1193, SMD-1421).
+in the same transaction, finds nothing of 021's to take back and corrects the
+own-key labels an earlier paste of the body left (SMD-1193, SMD-1421).
 
 ## Expected outcome
 
@@ -1143,7 +1150,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 645 properties (at migration 030), including:
+asserts 644 properties (at migration 030), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

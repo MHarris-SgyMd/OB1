@@ -832,8 +832,8 @@ export function reembedKey(model, dim) {
  * the migrator; the sixth review pass), so `reembed:m@08` names a model on
  * both sides and is nobody's own key on both. 030 takes the first as a
  * template value ({{REEMBED_KEY_MODEL_RE}}) and the rows below as another;
- * migrate.ts's bracket around 021 reads them through
- * LATEST_UNACCEPTED_CLAIM_SQL (SMD-1193, SMD-1421).
+ * migrate.ts's bracket around 021 bounds its snapshot by the rows and then
+ * runs 030's own text (SMD-1193, SMD-1421).
  *
  * These, and ACCEPTED_CAVEAT_PREFIX, are substituted into migration 030 —
  * whose file the migrator hashes as a TEMPLATE. Changing any of them changes
@@ -972,11 +972,11 @@ export const ACCEPTED_BY_MODEL_SQL =
  * so 030's first statement evaluated the regexes over every succeeded row (55×
  * slower at 100k rows, measured in the sixth review pass); a reader that wants
  * "latest" wraps this text. Spelled once: migration 030 takes it as the
- * template value {{CLAIM_EVIDENCE_ROWS}}, and LATEST_UNACCEPTED_CLAIM_SQL below
- * — which migrate.ts's bracket around 021 relabels by — is built on it, so the
- * rows 030 corrects and the rows the migrator relabels from are decided by one
- * text. The caveat prefix is inlined as a literal, so it may hold no quote —
- * asserted below.
+ * template value {{CLAIM_EVIDENCE_ROWS}}, and migrate.ts's bracket around 021
+ * bounds its snapshot by it — the thoughts 021 could label from — and then
+ * runs 030's own text, so the rows the migrator re-decides and the rows 030
+ * corrects are decided by one text. The caveat prefix is inlined as a
+ * literal, so it may hold no quote — asserted below.
  */
 /**
  * What returning a claim row to its pool sets — reembed.ts's requeue() for
@@ -1003,24 +1003,6 @@ export const CLAIM_EVIDENCE_ROWS_SQL =
   `(c.last_error IS NOT NULL AND starts_with(c.last_error, '${ACCEPTED_CAVEAT_PREFIX}')) AS accepted ` +
   `FROM thought_work_claims c WHERE c.status = 'succeeded' AND c.finished_at IS NOT NULL AND c.work_type ~ '${REEMBED_KEY_MODEL_SQL_RE}'`;
 if (ACCEPTED_CAVEAT_PREFIX.includes("'")) throw new Error("ACCEPTED_CAVEAT_PREFIX is inlined into SQL as a literal and may not contain a quote");
-
-/**
- * The row 030's second statement labels from: per thought, the latest
- * succeeded claim row under a key naming a model that is NOT the operator's
- * acceptance, the key breaking a tie on finished_at so the choice is the same
- * on every run — a subquery over CLAIM_EVIDENCE_ROWS_SQL, byte for byte the
- * text 030 carries once substituted (db/test-schema.ts pins it, and the same
- * warning applies: changing it is a data migration). migrate.ts relabels by
- * it every thought 021's evidence backfill could have written, whenever that
- * file runs — the bracket, SMD-1421 — so "the evidence, accepted rows
- * excluded" has one spelling and the migrator's correction and 030's cannot
- * disagree. Columns: thought_id, model, finished_at.
- */
-export const LATEST_UNACCEPTED_CLAIM_SQL =
-  "SELECT DISTINCT ON (k.thought_id) k.thought_id, k.model, k.finished_at\n" +
-  `        FROM (${CLAIM_EVIDENCE_ROWS_SQL}) k\n` +
-  "       WHERE NOT k.accepted\n" +
-  "       ORDER BY k.thought_id, k.finished_at DESC, k.work_type";
 
 /**
  * Version floor for "major.minor[.patch]" strings such as pg_extension's
