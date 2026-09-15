@@ -99,7 +99,7 @@ export async function lostReason(sql: SQL, job: string, workerId: string, id: st
 export function describeLoss(why: LostReason | null): string {
   if (why === null) return "no longer this worker's, and the row could not be read; skipping";
   switch (why.kind) {
-    case "pending": return "back in the pool — reaped, or requeued by an edit — and the next claim takes it; skipping";
+    case "pending": return "back in the pool — reaped, or requeued by an edit — for a later claim, this run's or the next's; skipping";
     case "claimed": return `another worker (${why.worker}) holds it now; skipping`;
     case "reaped": return "marked failed by the reaper while this worker held it — its lease had expired for the last allowed time (last_error says so); --retry-failed returns it; skipping";
     case "finished": return `already ${why.status} under ${why.worker}; skipping`;
@@ -112,7 +112,7 @@ export type Heartbeat = {
   held: Set<string>;
   /** A batch the claim returned: into `held`, out of `lost` (the claim is proof the lease is ours again), and any beat in flight is voided. */
   claimed(ids: string[]): void;
-  /** Ids a beat found no longer this worker's — reaped and re-leased. The loop skips them. */
+  /** Ids a beat found no longer this worker's — reaped, requeued by an edit, or deleted; `lostReason` says which. The loop skips them. */
   lost: Set<string>;
   /** Beats sent, and the current run of consecutive errors (0 after a beat that answered). */
   beats: number;

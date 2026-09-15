@@ -2996,7 +2996,7 @@ console.log("\n[29] Migration 030: renew_claims moves every lease the worker hol
   const late = (await db.query<{ ok: boolean }>(`SELECT release_thought($1, $2, 'A', 'succeeded') AS ok`, [a[1], JOB])).rows[0].ok;
   assert(late === false, "…and A, finishing late, cannot release a row C holds, as 015 says");
   assert(/check constraint/.test(await raises(`UPDATE thought_work_claims SET ttl_expires_at = NULL WHERE thought_id = $1 AND work_type = $2`, [c[0], JOB])),
-    "015's CHECK still keeps status and lease in step under the new writer");
+    "015's CHECK still keeps status and lease in step — asserted here so a later writer of ttl_expires_at is held to it");
   // The two comments 030 writes, and the literal shape [10] requires of them.
   const colComment = (await db.query<{ c: string | null }>(
     `SELECT col_description('thought_work_claims'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'thought_work_claims'::regclass AND attname = 'ttl_expires_at'`)).rows[0].c ?? "";

@@ -27,7 +27,7 @@
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (120, per model call; this flag, as extract-entities.ts's, not OB1_LLM_TIMEOUT)
  *
  * ── The cost ────────────────────────────────────────────────────────────────
  * One LLM call per candidate PAIR, so up to --k per thought, recurring: every
@@ -195,6 +195,10 @@ const JOB = consolidateKey(cfg.metadataModel);
 console.log(`  job:    ${JOB}`);
 if (!REVIEW_ONLY) console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}, conflicts recorded at confidence >= ${MIN_CONFIDENCE}`);
 
+// One connection per worker and one spare: the heartbeat (db/lease.ts) beats
+// through the pool, and a worker parked on a lock or a long statement holds
+// its own connection, so the spare is what keeps every worker's leases alive
+// then. Tightening this to WORKERS would recreate the lapse 030 removed.
 const sql = new SQL({ url, max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
@@ -662,7 +666,7 @@ async function worker(n: number): Promise<void> {
           console.error(`  ${b.thought_id}: deleted while it was being judged`);
           continue;
         }
-        if (!ok) console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — the heartbeat did not reach the database for ${TTL} s and the lease expired; it is pending again`);
+        if (!ok) console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
         if (outcome.outcome === "failed") {
           failed++;
           console.error(`  ${b.thought_id}: ${outcome.error}`);

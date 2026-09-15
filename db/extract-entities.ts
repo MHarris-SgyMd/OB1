@@ -19,7 +19,7 @@
  *   bun db/extract-entities.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (300, per model call)
+ *   --workers N (2)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call)
  *
  * ── The cost, and the switch ────────────────────────────────────────────────
  * One LLM call per thought, recurring: every new capture is extracted too. On
@@ -160,6 +160,10 @@ const JOB = flag("job") ?? extractionKey(cfg.metadataModel);
 console.log(`  job:    ${JOB}`);
 console.log(`  model:  ${cfg.metadataModel} via ${cfg.llmBase}, temperature ${cfg.metadataTemperature}`);
 
+// One connection per worker and one spare: the heartbeat (db/lease.ts) beats
+// through the pool, and a worker parked on a lock or a long statement holds
+// its own connection, so the spare is what keeps every worker's leases alive
+// then. Tightening this to WORKERS would recreate the lapse 030 removed.
 const sql = new SQL({ url, max: WORKERS + 1 });
 
 // ── The database's side ─────────────────────────────────────────────────────
@@ -588,7 +592,7 @@ async function worker(n: number): Promise<void> {
           // Either the lease expired, or the content was edited and migration
           // 016's trigger put the row back in the pool: it is pending again and
           // will be extracted from the new text.
-          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile, or the heartbeat did not reach the database for ${TTL} s and the lease expired; it is pending again`);
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile, or the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
         }
         if (outcome.outcome === "failed") {
           failed++;

@@ -30,7 +30,7 @@
  *   bun db/reembed.ts --url … --accept-failed <thought-id…>   # a row the provider refuses permanently keeps its vector, and the row says so (see Saying "I know")
  *   bun db/reembed.ts --url … --accept-failed --all           # …every failed row under the job — said explicitly, since it hides an outage as well
  *   bun db/reembed.ts --url … --retire reembed:B@1024         # remove the record of a superseded pass (a switch abandoned or reverted)
- *   --workers N (2)   --batch N (8)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter)
+ *   --workers N (2)   --batch N (8)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
  *
  * The model, width and provider come from the same variables the server reads —
  * OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_EMBEDDING_DIMENSIONS,
@@ -541,6 +541,10 @@ console.log(`  job:       ${JOB}`);
 console.log(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${embedConfig.llmBase}, ${embedConfig.timeoutMs / 1000} s per call`);
 console.log(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? "on" : "off"}`);
 
+// One connection per worker and one spare: the heartbeat (db/lease.ts) beats
+// through the pool, and a worker parked on a lock or a long statement holds
+// its own connection, so the spare is what keeps every worker's leases alive
+// then. Tightening this to WORKERS would recreate the lapse 030 removed.
 const sql = new SQL({ url, max: WORKERS + 1 });
 
 // ── The database's side of the contract ─────────────────────────────────────
@@ -1608,7 +1612,7 @@ async function worker(n: number): Promise<void> {
         if (!ok) {
           // The lease expired and another worker holds the row now; its write
           // will stand and ours already did — the same vector twice, harmless.
-          console.error(`  ${b.thought_id}: lease expired before release — the heartbeat did not reach the database for ${TTL} s; another worker will repeat it`);
+          console.error(`  ${b.thought_id}: lease expired before release — the heartbeat did not reach the database for ${TTL} s; the row is the pool's or another worker's now, or failed at its last allowed expiry`);
         }
         if (outcome.outcome === "failed") {
           failed++;

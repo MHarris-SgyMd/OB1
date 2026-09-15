@@ -58,8 +58,9 @@
 --   header, also applied and so not editable (migrate.ts hashes the file),
 --   advises stopping both 015 consumers before its backfill because a worker
 --   parked on its lock would wait out a lease stamped once per batch; since
---   030 a parked worker keeps beating on its own connection and its leases
---   hold — the advice survives as throughput advice only.
+--   030 a parked worker keeps beating through its pool''s spare connection
+--   (each worker opens WORKERS + 1, and says why beside the number) and its
+--   leases hold — the advice survives as throughput advice only.
 --   Upstream (schemas/thought-work-claims) left mid-batch renewal out to keep
 --   the claim a single atomic statement; a separate function keeps that.
 --
@@ -143,7 +144,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION renew_claims(text, text, int) IS
-  'The heartbeat: move the deadline of every lease this worker holds under the work_type to now() plus p_ttl_seconds, never backward, and return the ids renewed. Only claimed rows whose worker_id is p_worker_id; a row of the caller''s batch not returned was reaped by a claim and is another worker''s now. Does not touch the claim statement (claim_thoughts is 015''s as applied).';
+  'The heartbeat: move the deadline of every lease this worker holds under the work_type to now() plus p_ttl_seconds, never backward, and return the ids renewed. Only claimed rows whose worker_id is p_worker_id. A row of the caller''s batch not returned is no longer this worker''s: reaped by a claim (and, at its last allowed expiry, marked failed still naming this worker), requeued by an edit, or deleted; the caller reads the row to learn which. Does not touch the claim statement (claim_thoughts is 015''s as applied).';
 
 COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS
   'The lease''s deadline while status is claimed, NULL otherwise (the CHECK keeps the two in step). Stamped by claim_thoughts at now() plus its p_ttl_seconds and moved forward by renew_claims on each heartbeat; a claim_thoughts call by any worker returns a row past it to the pool, or marks it failed at p_max_attempts. Since 030 the lease has to outlast a missed heartbeat, not a batch: it is how long a dead worker''s rows stay out of the pool.';

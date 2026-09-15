@@ -5825,8 +5825,9 @@ no claim has yet reaped is still the holder's — the reaper runs at the start o
 reaching the row together contend on its lock, and the loser re-evaluates its
 predicate on the winner's version under READ COMMITTED, so the row ends
 renewed-and-held or pending-and-unrenewed, never both. The ids returned are the
-rows still held: one of the batch not among them was reaped and is another
-worker's now. One column comment beside it, on `ttl_expires_at`, says what the
+rows still held: one of the batch not among them is no longer this worker's —
+reaped, requeued by an edit, or deleted — and the caller reads the row to learn
+which. One column comment beside it, on `ttl_expires_at`, says what the
 lease means since 030; neither literal spells a flag with its dashes, which
 `test-schema` [10] requires and [29] asserts of the live text.
 
@@ -5838,28 +5839,27 @@ fills after each claim and the loop removes each row from BEFORE its release
 goes out, so a beat in flight across a release does not read the released row
 as lost; a `lost` set for the ids a beat found no longer the worker's, which
 the loop skips rather than repeating the provider's work and the summary
-counts. Two guards the first review pass added keep that verdict honest: a
-claim bumps a generation the beat compares on return, so an id released and won
-back inside one round trip is not read as lost, and `claimed()` takes its ids
-out of `lost` — a claim returning an id is proof the lease is this worker's
-again (016's edit trigger requeues a row mid-extraction and a near-empty pool
-hands it straight back), and an id lost for ever would have been skipped while
-held, returned by the `finally` and reported pending. `stop()` voids a beat
-still in flight, so the `finally`'s return of the leases is not read as a loss
-of every one of them. And a row a beat finds gone is not assumed reaped — the
-second pass found the message said "reaped while the heartbeat was not reaching
-the database" of a row 016's edit trigger had requeued, and of a deleted one —
-so the loop asks the row (`lostReason`): deleted is counted with the deleted,
-back in the pool is said so, another worker's names the worker, and a row the
-reaper marked failed while this worker held it — 015's reaper leaves
-`worker_id` as it was, so the row still names this worker — says so and names
-`--retry-failed`, which the third pass found the second's text had called
-"finished under another worker". Beats never overlap — a tick that finds one
-in flight is skipped — and the timer is unref'd, so it holds no process open.
-The three
+counts. Three guards keep that verdict honest. A claim bumps a generation the
+beat compares on return, so an id released and won back inside one round trip
+is not read as lost. `claimed()` takes its ids out of `lost`, since a claim
+returning an id is proof the lease is this worker's again (016's edit trigger
+requeues a row mid-extraction and a near-empty pool hands it straight back),
+and an id lost for ever would be skipped while held, returned by the `finally`
+and reported pending. `stop()` voids a beat still in flight, so the `finally`'s
+return of the leases is not read as the loss of every one of them. And a row a
+beat finds gone is not assumed reaped: the loop asks the row (`lostReason`) —
+deleted is counted with the deleted; back in the pool (reaped, or requeued by
+an edit) is said so; another worker's names the worker; and a row the reaper
+marked failed while this worker held it — 015's reaper leaves `worker_id` as
+it was, so the row still names this worker — says so and names
+`--retry-failed`. Beats never overlap (a tick that finds one in flight is
+skipped) and the timer is unref'd, so it holds no process open. The three
 workers wire it identically: started beside the worker id, `claimed()` after
 the claim, each row removed before its release, stopped in the `finally` that
-returns the leases, and the beats summed into the run's summary. A beat that
+returns the leases, and the beats summed into the run's summary. Each opens a
+pool of one connection per worker and one spare, and says beside the number
+that the spare is what keeps the leases alive while every worker is parked on
+a lock or a long statement (the case 023's header warned of). A beat that
 fails is reported once per run of failures and the leases hold from the last
 one that answered; a process that cannot reach the database cannot beat, and
 its rows return to the pool as a dead worker's would, which is the right
@@ -5891,15 +5891,15 @@ second attempt, every row ending succeeded and none failed. [8a] and [8b] hold
 as they were: the claim is untouched. [9] runs `reembed.ts` end to end with
 every embedding taking 600 ms, sixteen per claim, a 6 s lease and a 1 s
 heartbeat: two workers re-embed all forty-two thoughts in batches near ten
-seconds long — eight per claim fit inside the lease, the third pass noticed,
-and would have passed with renewal a no-op — no row reaches a second worker, no release finds its
-lease gone, none is lost, every claim row succeeded on its first attempt — the
-ticket's first Verify bullet, which no arithmetic could pass; its summary
-counts the beats, and the test holds them at ten or more. [10] and [16] run
-their first pass under a 6 s lease beating every second, with answers slowed
-to 400 and 700 ms, so the
-beats fire in the other two workers — the count in each summary says they did —
-and assert the old refusals are gone (a batch of four at a 300 s timeout is a
+seconds long (a batch that fit inside the lease would pass with renewal a
+no-op, so the batch is sized to outlast it), no row reaches a second worker, no
+release finds its lease gone, none is lost, every claim row succeeded on its
+first attempt — the ticket's first Verify bullet, which no arithmetic could
+pass; its summary counts the beats, and the test holds them at ten or more.
+[10] and [16] run their first pass under a 6 s lease beating every second, with
+answers slowed to 400 and 700 ms, so the beats fire in the other two workers —
+the count in each summary says they did — and assert the old refusals are gone
+(a batch of four at a 300 s timeout is a
 `--dry-run` that exits 0) and the new one holds. `test-schema` [29] owns the
 state machine on one connection: the holder's rows and no others, never
 backward, expired-not-reaped is still held, reaped is not, 015's CHECK still in
