@@ -2708,10 +2708,12 @@ on to open. This loop captures it and gates PRs on it.
    score the same. The live corpus stays out of CI.
 
 **Why two fixtures.** The export fixture (query text + ids) drives the local,
-model-backed `eval-replay.ts` against your own brain. The gate fixture (ids +
-vectors, no text) drives the offline PGlite gate with no model. In production the
-gate's corpus comes from the export's redaction; in this repo it is generated so
-the repo can gate itself.
+model-backed `eval-replay.ts` against your own brain — no vectors, because the
+live corpus supplies them. The gate fixture (ids + vectors, no text) drives the
+offline PGlite gate with no model. The two are not the same artifact: the gate
+needs vectors the export does not carry. The gate fixture here is generated
+(seeded, synthetic) so the repo can gate itself; a deployment that wanted the
+gate over its own corpus would redact its thoughts to id+embedding.
 
 ## Related
 

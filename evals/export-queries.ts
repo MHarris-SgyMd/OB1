@@ -108,7 +108,7 @@ const queries = [...relevant.entries()]
 
 const fixture = {
   generated: new Date().toISOString(),
-  source: "query_log",
+  origin: "query_log",
   windowMinutes: WINDOW_MIN,
   note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
   queries,

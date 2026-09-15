@@ -3419,6 +3419,26 @@ console.log("\n[33] Migration 034: query_log shape + CHECKs, the export join, an
       FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG2}'::uuid`)).rows[0];
   assert(windowed.from_query === null, "a search older than the export window does not attribute a later touch");
 
+  // Positive control (a clean bucket): a search INSIDE the window does attribute,
+  // so the null above is the window bound excluding, not the whole clause failing.
+  const D = "44444444-4444-4444-8444-444444444444";
+  const AG3 = "77777777-7777-4777-8777-777777777777";
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, logged_at)
+      VALUES ('search', 'search_thoughts', '${AG3}'::uuid, 'a fresh search', 10, 0, 0, '{}'::jsonb,
+              ARRAY['${D}']::uuid[], ARRAY[0.9]::real[], now() - interval '5 minutes');
+    INSERT INTO query_log (kind, tool, agent_id, target_id) VALUES ('action', 'fetch', '${AG3}'::uuid, '${D}'::uuid);`);
+  const inWindow = (await db.query<{ from_query: string | null }>(`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.query IS NOT NULL
+               AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at
+               AND s.logged_at >= act.logged_at - make_interval(mins => 30)
+               AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
+  assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
+
   // prune_query_log: default arg, bounded delete, and a refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
   const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;

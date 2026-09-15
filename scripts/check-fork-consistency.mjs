@@ -851,11 +851,13 @@ checkComposeForwardsDocumentedEnv();
  * so the rule is an ALLOWLIST, not a denylist of field names: every STRING value
  * anywhere in the tree — including array elements and nested objects — must be
  * one of a thought id (a uuid), or text under a key the fixture format defines
- * as free text (`query` — what the caller typed; `note`/`source`/`generated` —
- * tool-authored labels). Any other string is a possible leak: a thought body
- * under `content`, an array of `chunks`, a `title` derived from content, a field
- * a future export added. A denylist would miss all of those; the allowlist fails
- * closed. A self-test on every run keeps it honest in both directions.
+ * as free text (`query` — what the caller typed; `note`/`origin`/`generated` —
+ * tool-authored labels, deliberately NOT content-adjacent names like `source`).
+ * Any other string is a possible leak — a thought body under `content`, an array
+ * of `chunks`, a `title` derived from content, or any newly-added key that is not
+ * one of the four free-text ones — and fails closed. The only way to hide content
+ * is to put it under those four keys; the fixture format never does, so a future
+ * export must not either. A self-test on every run keeps it honest both ways.
  *
  * Note this guards THOUGHT content, not query text: the export fixture's `query`
  * strings are the searcher's own words — personal data — and are allowed here
@@ -865,7 +867,7 @@ checkComposeForwardsDocumentedEnv();
  */
 function checkFixtureRedaction() {
   const SELF = "scripts/check-fork-consistency.mjs";
-  const FREE_TEXT_KEYS = new Set(["query", "note", "source", "generated"]);
+  const FREE_TEXT_KEYS = new Set(["query", "note", "origin", "generated"]);
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   // Recurse carrying the nearest object key that governs a value; an array's
   // elements are governed by the array's own key, so `relevant: [uuid]` passes
@@ -889,7 +891,7 @@ function checkFixtureRedaction() {
     if (bad.length === 0) fail(SELF, `fixture redaction check no longer catches ${why} (its own probe)`);
   }
   const good = []; scan(
-    { generated: "2026-01-01T00:00:00Z", source: "query_log", note: "a description",
+    { generated: "2026-01-01T00:00:00Z", origin: "query_log", note: "a description",
       queries: [{ query: "how many projects have I led", relevant: ["10000000-0000-4000-8000-000000000001"], baseline: ["10000000-0000-4000-8000-000000000002"] }],
       thoughts: [{ id: "10000000-0000-4000-8000-000000000003", embedding: [0.1, -0.2] }] }, "$", "$", good);
   if (good.length) fail(SELF, `fixture redaction check false-positives on a query/ids/vectors fixture (${good.join(", ")})`);
