@@ -2459,13 +2459,15 @@ console.log("\n[25] Migration 025: derived_from / supersedes, their constraints,
   // ob1:provenance-walk-bounded sentinel a successor has to keep.
   assert(lastDefinerOf("trace_provenance").startsWith("026"),
     `026 is the last definer of trace_provenance (it bounds the walk's work) (${lastDefinerOf("trace_provenance")})`);
-  // An earlier section's restoreShipped("upsert_thought") re-ran the whole 025
-  // file (025 is upsert_thought's last definer), and 025 still carries the OLD
-  // trace_provenance body — so re-applying it reverted 026's here. Restore the
-  // shipped (026) body before inspecting it. This is the fork's own trap in
-  // miniature: CREATE OR REPLACE takes the whole file, so re-applying an earlier
-  // migration out of order clobbers a later redefinition (production applies
-  // 001→026 in order and is unaffected).
+  // Until 033, an earlier section's restoreShipped("upsert_thought") re-ran
+  // the whole 025 file (025 was upsert_thought's last definer), and 025 still
+  // carries the OLD trace_provenance body — so re-applying it reverted 026's
+  // here. 033 is the last definer now and touches no trace_provenance, but the
+  // restore stays: it is cheap, and the trap comes back the day 025 is the
+  // last definer of anything a section restores. The fork's own trap in
+  // miniature: CREATE OR REPLACE takes the whole file, so re-applying an
+  // earlier migration out of order clobbers a later redefinition (production
+  // applies 001→026 in order and is unaffected).
   await restoreShipped("trace_provenance");
   const tpBody = (await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'trace_provenance(uuid, int, int)'::regprocedure`)).rows[0].s;
   assert(/ob1:provenance-walk-bounded/.test(tpBody), "trace_provenance carries the ob1:provenance-walk-bounded sentinel");
@@ -3325,7 +3327,10 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM ob1_test_editor32`);
   await db.exec(`DROP ROLE ob1_test_editor32`);
-  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(restoring upsert_thought re-ran its last definer; [25]'s note applies if that is ever 025 again)");
+  // Read from the catalog, not the files: whether restoring upsert_thought
+  // above put 025's per-path trace_provenance back (it did while 025 was the
+  // last definer; 033 touches no trace_provenance). Restored either way.
+  assert(/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "(restoring upsert_thought left 026's trace_provenance in place — its last definer touches no trace_provenance)");
   await restoreShipped("trace_provenance");
   await db.exec(`DELETE FROM supersession_proposals`);
   await db.exec(`DELETE FROM thoughts`);
