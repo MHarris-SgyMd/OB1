@@ -597,7 +597,10 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
 
   // Arm 2 — B is update_thought itself, whose row lock is FOR NO KEY UPDATE
   // since 032: A's KEY SHARE on Z is granted under it, A commits, B follows
-  // and edits Z cleanly.
+  // and edits Z cleanly. Since 033 B takes the fingerprint lock BEFORE its
+  // row read, so while it waits on A it holds nothing on Z at all — A's KEY
+  // SHARE is granted either way; the assertion below reads the wait, not
+  // the row.
   {
     const connA = new SQL({ url: URL_, max: 1 });
     const connB = new SQL({ url: URL_, max: 1 });
@@ -614,10 +617,10 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
       return ((await tx`SELECT update_thought(${zId}::uuid, ${T}, NULL::jsonb, ${unit(2)}::vector) AS r`) as { r: R }[])[0].r;
     }).catch((e: Error) => { bError = e.message; return undefined; });
     await waitFor(async () => bPid > 0 && (await advisoryWaiters(bPid)) === 1);
-    assert((await advisoryWaiters(bPid)) === 1, "update_thought on Z holds Z's row and waits on the fingerprint lock A holds");
+    assert((await advisoryWaiters(bPid)) === 1, "update_thought on Z waits on the fingerprint lock A holds (before its row read, since 033)");
     go();
     await waitFor(() => a.wrote === true || a.error !== undefined);
-    assert(a.wrote === true && a.error === undefined, `A's pointer write is granted its KEY SHARE on Z while update_thought holds Z (${a.error ?? "wrote"})`);
+    assert(a.wrote === true && a.error === undefined, `A's pointer write is granted its KEY SHARE on Z while update_thought on Z is in flight (${a.error ?? "wrote"})`);
     done();
     await aDone;
     const bResult = await bDone;
@@ -736,6 +739,96 @@ console.log("\n[6e] A capture and an edit of one text: the edit waits on the adv
     const bResult = await bDone;
     assert(bResult?.id !== undefined && b.error === undefined && (await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${bResult!.id}::uuid`)[0].s === rId, `…and completes with its pointer once the lock is released (${b.error ?? "ok"})`);
     await connA.close(); await connB.close(); await connC.close();
+  }
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 018 wrote deadlocks, the one order every writer takes since 033 does not (migration 033)");
+{
+  await sql`DELETE FROM thoughts`;
+  // R owns Y and R' owns X. Two edits swap the rows' texts — edit(R → X),
+  // edit(R' → Y) — while both texts are re-captured. Found by the first
+  // review pass of this change: with the edit at row → fingerprint lock and
+  // the capture at fingerprint lock → row, each edit holds its row and waits
+  // on the lock a capture holds, and each capture holds its lock and waits
+  // on the row the other edit holds. A cycle of four, which Postgres breaks
+  // with 40P01 in one of them.
+  type R = { ok: boolean; error?: string; duplicate_of?: string };
+  const X = "text x, swapped and re-captured", Y = "text y, swapped and re-captured";
+  const rPrime = ((await sql`SELECT upsert_thought(${X}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+  const r = ((await sql`SELECT upsert_thought(${Y}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+  const fpX = (await sql`SELECT content_fingerprint_of(${X}) AS f`)[0].f as string;
+  const fpY = (await sql`SELECT content_fingerprint_of(${Y}) AS f`)[0].f as string;
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const waiters = async (pid: number) => Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${pid}`)[0].n);
+  type Out = { pid: number; first?: boolean; done?: boolean; error?: string; result?: unknown };
+  /** One transaction: `first` at once, `rest` once `go` resolves, held until `hold` resolves. */
+  const run = (conn: SQL, out: Out, first: (t: SQL) => Promise<unknown>, go: Promise<void>, rest: (t: SQL) => Promise<unknown>, hold: Promise<void>) =>
+    conn.begin(async (t: SQL) => {
+      await t`SET LOCAL statement_timeout = '15s'`;
+      out.pid = Number((await t`SELECT pg_backend_pid() AS pid`)[0].pid);
+      await first(t); out.first = true;
+      await go;
+      out.result = await rest(t); out.done = true;
+      await hold;
+    }).catch((e: Error) => { out.error = e.message; });
+
+  // Arm 1 — 018's order, by hand: each edit locks its row first, then the
+  // fingerprint lock for its new text; each capture is the shipped function
+  // after a hand-taken fingerprint lock (which it re-enters).
+  {
+    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const [e1, e2, c1, c2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
+    const hold = gate(); const gE1 = gate(), gE2 = gate(), gC1 = gate(), gC2 = gate();
+    const pE1 = run(conns[0], e1, (t) => t`SELECT 1 FROM thoughts WHERE id = ${r}::uuid FOR NO KEY UPDATE`, gE1.p, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpX}, 0))`, hold.p);
+    const pE2 = run(conns[1], e2, (t) => t`SELECT 1 FROM thoughts WHERE id = ${rPrime}::uuid FOR NO KEY UPDATE`, gE2.p, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpY}, 0))`, hold.p);
+    await waitFor(() => e1.first === true && e2.first === true);
+    const pC1 = run(conns[2], c1, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpX}, 0))`, gC1.p, (t) => t`SELECT upsert_thought(${X}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(2)}::vector) AS r`, hold.p);
+    const pC2 = run(conns[3], c2, (t) => t`SELECT pg_advisory_xact_lock(hashtextextended(${fpY}, 0))`, gC2.p, (t) => t`SELECT upsert_thought(${Y}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(3)}::vector) AS r`, hold.p);
+    await waitFor(() => c1.first === true && c2.first === true);
+    assert(e1.first && e2.first && c1.first && c2.first, "two edits hold their rows, two captures hold the fingerprint locks for the rows' texts");
+    gC1.open(); gC2.open();
+    await waitFor(async () => c1.pid > 0 && c2.pid > 0 && (await waiters(c1.pid)) === 1 && (await waiters(c2.pid)) === 1);
+    assert((await waiters(c1.pid)) === 1 && (await waiters(c2.pid)) === 1, "…each capture's label read waits on the row the other edit holds");
+    gE2.open();
+    await waitFor(async () => (await waiters(e2.pid)) === 1);
+    gE1.open();
+    await waitFor(() => [e1, e2, c1, c2].some((o) => o.error !== undefined), 600);
+    const errors = [e1, e2, c1, c2].map((o) => o.error ?? "");
+    assert(errors.some((m) => /deadlock detected/.test(m)), `…and the edits' wait on the captures' locks closes a cycle of four Postgres has to break (${errors.filter(Boolean).map((m) => m.slice(0, 30)).join(" | ") || "no error"})`);
+    hold.open();
+    await Promise.all([pE1, pE2, pC1, pC2]);
+    await Promise.all(conns.map((c) => c.close()));
+  }
+
+  // Arm 2 — the shipped functions: the captures held open (each holding its
+  // fingerprint lock and its row), then the two edits through update_thought,
+  // which since 033 takes the fingerprint lock before its row. Each edit
+  // waits on a capture holding nothing; when the captures commit, the edits
+  // find the rows that own their new texts and are told, not deadlocked.
+  {
+    const conns = [0, 1, 2, 3].map(() => new SQL({ url: URL_, max: 1 }));
+    const [c1, c2, e1, e2]: Out[] = [{ pid: -1 }, { pid: -1 }, { pid: -1 }, { pid: -1 }];
+    const holdC = gate(); const never = gate();
+    const pC1 = run(conns[0], c1, (t) => t`SELECT upsert_thought(${X}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(4)}::vector) AS r`, Promise.resolve(), (t) => t`SELECT 1`, holdC.p);
+    const pC2 = run(conns[1], c2, (t) => t`SELECT upsert_thought(${Y}, '{"metadata":{},"embedding_model":"m"}'::jsonb, ${unit(5)}::vector) AS r`, Promise.resolve(), (t) => t`SELECT 1`, holdC.p);
+    await waitFor(() => c1.done === true && c2.done === true);
+    assert(c1.done && c2.done && c1.error === undefined && c2.error === undefined, "both re-captures ran and are held open, each holding its text's lock and row");
+    const pE1 = run(conns[2], e1, (t) => t`SELECT 1`, Promise.resolve(), async (t) => ((await t`SELECT update_thought(${r}::uuid, ${X}, NULL::jsonb, ${unit(6)}::vector) AS r`)[0].r as R), never.p);
+    const pE2 = run(conns[3], e2, (t) => t`SELECT 1`, Promise.resolve(), async (t) => ((await t`SELECT update_thought(${rPrime}::uuid, ${Y}, NULL::jsonb, ${unit(7)}::vector) AS r`)[0].r as R), never.p);
+    await waitFor(async () => e1.pid > 0 && e2.pid > 0 && (await waiters(e1.pid)) === 1 && (await waiters(e2.pid)) === 1);
+    const [held] = await sql`SELECT count(*)::int AS n FROM pg_locks WHERE granted AND locktype IN ('tuple', 'transactionid', 'advisory') AND pid IN (${e1.pid}, ${e2.pid})`;
+    assert((await waiters(e1.pid)) === 1 && (await waiters(e2.pid)) === 1 && Number(held.n) === 0, `both edits wait on the fingerprint locks the captures hold and hold no lock of their own meanwhile (${held.n} granted)`);
+    holdC.open();
+    await Promise.all([pC1, pC2]);
+    await waitFor(() => (e1.done === true || e1.error !== undefined) && (e2.done === true || e2.error !== undefined));
+    never.open();
+    await Promise.all([pE1, pE2]);
+    const results = [e1.result as R | undefined, e2.result as R | undefined];
+    assert(e1.error === undefined && e2.error === undefined && results.every((x) => x?.ok === false && x.error === "DUPLICATE_CONTENT"),
+      `…and once the captures commit both edits complete — told DUPLICATE_CONTENT, since each text's row is the other's — with no deadlock (${e1.error ?? JSON.stringify(results[0])}; ${e2.error ?? JSON.stringify(results[1])})`);
+    await Promise.all(conns.map((c) => c.close()));
   }
   await sql`DELETE FROM thoughts`;
 }

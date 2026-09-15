@@ -6653,7 +6653,8 @@ of `pg_proc` by name, as [19] and [22] do). Three things the redefinition adds:
   `WOULD_CYCLE` when the target is the thought itself or the chain of pointers
   from the target reaches it, bounded at 1000 steps. A supersedes write takes
   029's advisory lock **before** the row lock, so every path acquires in one
-  order — supersession lock, row, fingerprint lock — and a hand edit and an
+  order — supersession lock, row, fingerprint lock (change 62 moves the
+  fingerprint lock before the row, for every writer) — and a hand edit and an
   acceptance are serialised with each other; the header states the order and
   why no pair crosses.
 - **`review_supersession_proposal` redefined** (029's body) to call
@@ -7138,9 +7139,17 @@ not redefined — take `pg_advisory_xact_lock(hashtextextended(v_fingerprint,
 both. Spelled exactly as 018 spells it, so the same key is the same lock —
 `test-schema` [33] holds the three bodies to one string rather than a
 `lock_fingerprint(text)` helper, which the ticket floated and which would have
-meant redefining `update_thought` a third time to call it. Three more things
-ride the redefinition, each a rule that already had one owner elsewhere:
+meant redefining `update_thought` a third time to call it. Four more things
+ride the redefinition, three of them a rule that already had one owner
+elsewhere:
 
+- **`update_thought` takes the fingerprint lock before its row.** Whenever
+  content arrives, not after the row read and only when the row does not
+  already own the key, as 018 wrote — the first review pass's finding, below.
+  018's shortcut stays for the second hash and the lookup; only the lock is
+  unconditional and early. 032's body otherwise verbatim under 032's
+  signature, with 032's DROP-and-replay of the 8- and 7-argument forms
+  carried so a hand re-apply of 021 or 018 is undone by the last definer.
 - **The supersession lock, first.** When the envelope names `supersedes`, the
   3-argument form takes 029's `hashtext('ob1:supersession-review')` before the
   fingerprint lock, so a re-capture filling a NULL pointer is ordered against
@@ -7158,24 +7167,49 @@ ride the redefinition, each a rule that already had one owner elsewhere:
   NULL actor at 032 and the name at 033.
 
 **Lock order.** Every writer of `thoughts` now acquires in one order —
-supersession lock, fingerprint lock, row — or a suffix of it. A capture naming
-`supersedes`: supersession → fingerprint → the row the text lands on. A capture
-without: fingerprint → row. `update_thought`: supersession (when named) → the
-edited row → fingerprint (when the row does not already own the key). The edit
-takes its row before the fingerprint lock and the capture the other way round,
-and the two cannot cross: the row a capture waits for under the lock for X is
-the row that *owns* X, and an edit of that row into X skips the lock (018's
-rule — the unique index says nobody else can hold it), while an edit of it into
-any other text takes the lock for that text. An edit of another row into X
-waits on the lock the capture holds and, once the capture commits, finds its
-row and answers `DUPLICATE_CONTENT`. The capture's row lock is `FOR NO KEY
-UPDATE` (022), so the foreign keys' `KEY SHARE` never enters the cycle change 60
-found for `FOR UPDATE`. 023's `LOCK TABLE … IN EXCLUSIVE MODE` is a table lock,
+supersession lock, fingerprint lock, row — or a suffix of it, and takes at most
+one lock of each class. A capture naming `supersedes`: supersession →
+fingerprint → the row the text lands on. A capture without: fingerprint → row.
+`update_thought` with content: supersession (when named) → fingerprint → the
+edited row; without content: supersession → row. The review path: supersession
+→ row → `update_thought` without content, re-entrant on both. The FK check a
+`supersedes` write makes takes `KEY SHARE` on the target last, which does not
+conflict with `FOR NO KEY UPDATE` (change 60), and the capture's row lock is
+`FOR NO KEY UPDATE` (022), so the foreign keys never enter a cycle. One total
+order, one lock per class per transaction: no two writers can each hold what
+the other waits for. 023's `LOCK TABLE … IN EXCLUSIVE MODE` is a table lock,
 ordered against every INSERT and row lock and not against an advisory lock,
-and the backfill takes none, so the two cannot deadlock either. READ COMMITTED
-throughout, as 018 and 023 already require: the waiter's read runs after the
-holder's commit and sees its row, which is exactly where 022 said the lock was
-needed for its rule to apply.
+and the backfill takes none, so the two cannot deadlock either — the review
+pass ran that three-way as well. READ COMMITTED throughout, as 018 and 023
+already require: the waiter's read runs after the holder's commit and sees its
+row, which is exactly where 022 said the lock was needed for its rule to
+apply.
+
+**A first review pass, triaged: two fixes, three tidy-ups.** The first version
+of this change left `update_thought` at 018's order — row, then the fingerprint
+lock, and only when the row did not own the key — and argued the capture's
+fingerprint → row could not cross it: the row a capture waits for under the
+lock for X is the row that *owns* X, and an edit of that row into X skips the
+lock. True of any two transactions, and the pass reproduced a cycle of four
+against a real server: R owns Y and R′ owns X; edit(R → X) holds R and waits on
+the lock for X; capture(X) holds that lock and waits on R′ for its label read;
+edit(R′ → Y) holds R′ and waits on the lock for Y; capture(Y) holds that lock
+and waits on R. Two edits swapping two rows' texts while both texts are
+re-captured, all inside one statement's duration — rare, but a hard cycle
+Postgres breaks with 40P01 in one of the four, and before this change nothing
+could deadlock at all, since the captures held no lock. Rather than state a
+residue, the edit's order moved: `update_thought` takes the fingerprint lock
+first whenever content arrives, so every writer's order is the same and there
+is nothing left to cross; `test-live` [6f] runs the four by hand in 018's order
+and gets the deadlock, then through the shipped functions and does not. The
+other fix was numbering: PR #40 had merged meanwhile and taken change 61 and
+`test-upgrade` [11], so this is 62 and [12]. The tidy-ups: 032's
+`COMMENT ON FUNCTION validate_derived_from` still said `upsert_thought` carried
+the rule inline, and is re-issued here; preflight's "025 re-applied by hand puts
+it back" is the wrong cause on the brain every operator has the morning of the
+upgrade — 033 pending, not re-applied — so the parenthetical follows the
+ledger; and a [33] assertion that read the last definer from the *files* to
+"prove" a catalog state now reads `pg_proc`.
 
 **Closed, and not.** Closed: a capture racing an edit to the same text (the edit
 is told, not refused); two first captures of one text (the second finds the
@@ -7224,24 +7258,29 @@ and 5.7 ms at 033 (the HNSW insert is the cost); re-capture without a vector
 label 2.2–2.6 ms at 032, 2.2–3.4 ms at 033. Inside the run-to-run spread on
 every line, on either side of it.
 
-**Verified.** `test-schema` [33] (785): three overloads, the lock spelled once
-across both capture bodies and `update_thought`, the acquisition order read by
-position in the source (supersession, fingerprint, the label read, the INSERT),
-no inline copy of either rule left, every earlier piece by name, a 2-argument
-capture attributed, no advisory lock held after a call, the residue loop
-written and seen by the walk, and the trap — 025 re-applied puts an unlocked
-3-argument body back, 005 both, 033 restores both; [22], [23], [31] follow the
-last definer. `test-live` [6e] (473): a 2-argument capture of X held open
+**Verified.** `test-schema` [33] (791): three overloads and one
+`update_thought`, the lock spelled once across the three bodies, the
+acquisition order read by position in the source (supersession, fingerprint,
+the label read, the INSERT; supersession, fingerprint, the row in
+`update_thought`), no inline copy of either rule left, every earlier piece by
+name, a 2-argument capture attributed, no advisory lock held after a call, the
+residue loop written and seen by the walk, and the trap — 025 re-applied puts
+an unlocked 3-argument body back, 005 both, 032 puts 018's order back in
+`update_thought`, 033 restores all three; [22], [23], [31] follow the last
+definer. `test-live` [6f] (479): the four-way, by hand in 018's order to the
+deadlock, then through the shipped functions to two `DUPLICATE_CONTENT`s with
+both edits holding nothing while they wait. [6e]: a 2-argument capture of X held open
 while an edit of another row into X waits on the *advisory* lock in `pg_locks`
 and is told `DUPLICATE_CONTENT` when the capture commits, one row holding X; a
 first 4-argument capture with a window held open while a chunkless re-capture
 waits on the same lock, the window kept at the same label and gone at another;
 a capture naming `supersedes` waiting on the supersession lock while one
-naming none is not. `test-upgrade` [12] (131): 033 onto a populated 032 — no
+naming none is not. `test-upgrade` [12] (147): 033 onto a populated 032 — no
 column, signature, row, window or audit row moves, the 3-argument form's
-hardened ACL is kept across `CREATE OR REPLACE`, a same-model re-capture keeps
-its window and pointer, the 2-argument form resolves and attributes, a re-run
-is a no-op. `test-preflight` (192), both store suites, `test-e2e-sql`,
+hardened ACL is kept across `CREATE OR REPLACE`, `update_thought` one function
+with the lock before its row where 032's had it after, a same-model re-capture
+keeps its window and pointer, the 2-argument form resolves and attributes, a
+re-run is a no-op. `test-preflight` (192), both store suites, `test-e2e-sql`,
 `test-update-delete`, `test-audit`, `tsc`, the consistency checker.
 
 Upstream status: **not applicable** — upstream's `upsert_thought` (the

@@ -2177,8 +2177,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
-         `032 is the last definer of update_thought (it carries 021's body and adds the provenance envelope), 033 of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, and takes the fingerprint lock) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
+         `033 is the last definer of update_thought (it carries 032's body — 021's and the provenance envelope — with the fingerprint lock before the row) and of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, and takes the fingerprint lock), 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // current one, and a 7-argument call is ambiguous. The last definer (032)
@@ -3170,8 +3170,8 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 9,
     "one update_thought, of nine parameters");
   assert(!(await exists(UT_8)) && !(await exists(UT_7)), "…neither the 8- nor the 7-argument form beside it");
-  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("review_supersession_proposal").startsWith("032") && lastDefinerOf("validate_derived_from").startsWith("032"),
-    `032 is the last definer of update_thought, review_supersession_proposal and validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
+  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("032") && lastDefinerOf("validate_derived_from").startsWith("032"),
+    `032 is the last definer of review_supersession_proposal and validate_derived_from, 033 of update_thought — 032's body with the fingerprint lock before the row ([33]) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
   const src = await srcOf(UT);
   for (const [re, what] of [
     [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
@@ -3299,9 +3299,10 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   // The trap this migration's DROP exists for: 021 re-applied by hand puts
   // the 8-argument form back BESIDE 032's (021 drops only the 7-argument
   // one), and every call with eight arguments or fewer — reembed.ts's, every
-  // PostgREST caller by name from before this change — is ambiguous. 032
-  // re-applied drops it again. And the ACL crosses the DROP from the
-  // 8-argument form, as 021 carried it from the 7-argument one.
+  // PostgREST caller by name from before this change — is ambiguous. The
+  // last definer (033, carrying 032's DROP block) re-applied drops it again.
+  // And the ACL crosses the DROP from the 8-argument form, as 021 carried it
+  // from the 7-argument one.
   await reapply("021");
   assert((await functionsNamed("update_thought")) === 2 && (await exists(UT_8)), "021 re-applied over 032 leaves its 8-argument form beside the 9-argument one");
   let ambiguous = "";
@@ -3309,7 +3310,7 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   catch (e) { ambiguous = (e as Error).message; }
   assert(/not unique/.test(ambiguous), `…after which an 8-argument call — reembed.ts's — is "function is not unique" (${ambiguous.slice(0, 40)})`);
   await restoreShipped("update_thought", "upsert_thought");
-  assert((await functionsNamed("update_thought")) === 1 && !(await exists(UT_8)), "…and 032 re-applied drops it");
+  assert((await functionsNamed("update_thought")) === 1 && !(await exists(UT_8)), "…and the last definer re-applied drops it (032's DROP block, carried by 033)");
   const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
   const hasPublic = (s: string) => /(^\{|,)=X\//.test(s);
   await db.exec(`CREATE ROLE ob1_test_editor32`);
@@ -3352,9 +3353,22 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   const LOCK = "PERFORM pg_advisory_xact_lock(hashtextextended(v_fingerprint, 0));";
   const two = await srcOf(TWO), three = await srcOf(THREE), four = await srcOf(FOUR), edit = await srcOf(UPDATE_THOUGHT_SIGNATURE);
 
-  // The shape: three overloads, 033 the last definer, the lock spelled once.
-  assert((await functionsNamed("upsert_thought")) === 3 && lastDefinerOf("upsert_thought").startsWith("033"), `three upsert_thought overloads, 033 the last definer (${lastDefinerOf("upsert_thought")})`);
+  // The shape: three overloads and one update_thought, 033 the last definer
+  // of both names, the lock spelled once.
+  assert((await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("update_thought").startsWith("033"),
+    `three upsert_thought overloads and one update_thought, 033 the last definer of both (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
   assert(two.includes(LOCK) && three.includes(LOCK) && edit.includes(LOCK), "the 2- and 3-argument bodies and update_thought spell the fingerprint lock identically — the same key is the same lock");
+  // update_thought's order since 033: the fingerprint lock BEFORE the row
+  // read, whenever content arrives — one order for every writer, so the
+  // four-transaction cycle the first review pass reproduced (two edits
+  // swapping two rows' texts while both are re-captured; db/test-live.ts
+  // [6f]) has no crossing left. 018's shortcut — no second hash, no lookup,
+  // when the row owns the key — stays; 018's sentinel stays.
+  const iEditFp = edit.indexOf(LOCK), iEditRow = edit.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE"), iEditSup = edit.indexOf("hashtext('ob1:supersession-review')");
+  assert(iEditSup > 0 && iEditSup < iEditFp && iEditFp < iEditRow, `update_thought acquires supersession lock, then fingerprint lock, then its row (${iEditSup} < ${iEditFp} < ${iEditRow})`);
+  assert((edit.match(/pg_advisory_xact_lock\(hashtextextended/g) ?? []).length === 1 && /IF p_content IS NOT NULL THEN\s+v_fingerprint := content_fingerprint_of\(p_content\);\s+PERFORM pg_advisory_xact_lock/.test(edit),
+    "…the one fingerprint lock in the body, taken whenever content arrives rather than only when the row does not own the key");
+  assert(/ob1:unchanged-edit-not-duplicate/.test(edit) && /v_existing\.content_fingerprint = v_fingerprint THEN/.test(edit), "…keeping 018's sentinel and its owns-the-key shortcut for the lookup");
   assert(/ob1:capture-takes-fingerprint-lock/.test(two) && /ob1:capture-takes-fingerprint-lock/.test(three), "…and both capture bodies carry the ob1:capture-takes-fingerprint-lock sentinel preflight reads");
   assert(!/ob1:capture-takes-fingerprint-lock/.test(four) && !/pg_advisory_xact_lock/.test(four) && /elem->>'context'/.test(four), "the 4-argument form is 013's, untouched: it delegates to the 3-argument body and takes its lock there");
   // Order in the 3-argument body: supersession lock, fingerprint lock, the
@@ -3422,9 +3436,21 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   assert(!/ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)), "025 re-applied over 033 puts an unlocked 3-argument body back and leaves the 2-argument one locked");
   await reapply("005");
   assert(!/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && !/set_config\('ob1\.actor'/.test(await srcOf(TWO)), "005 re-applied puts 005's 2-argument body back: no lock, no actor");
-  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(025 re-applied also put its trace_provenance back; restored with the rest)");
+  // 025 re-applied also put its per-path trace_provenance back over 026's —
+  // read from the catalog, not the files ([25]'s note): restored with the rest.
+  assert(!/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "(025 re-applied put its unbounded trace_provenance back too — 026's sentinel is gone)");
   await restoreShipped("upsert_thought", "trace_provenance");
   assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "033 re-applied: both bodies locked again, three overloads");
+  assert(/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "…and 026 re-applied: the bounded walk's sentinel is back");
+  // 032 re-applied by hand over 033 puts 032's update_thought back — the
+  // row → fingerprint order, no sentinel to say so (the header states it);
+  // 033 re-applied restores the order.
+  await reapply("032");
+  const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
+  assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied over 033 puts the row-then-fingerprint order back, one function still");
+  await restoreShipped("update_thought");
+  const edit033 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
+  assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
   await db.exec(`DELETE FROM thoughts`);
 }
 

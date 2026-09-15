@@ -897,8 +897,8 @@ else {
   // it here and below, so no later "healthy" run carries the provenance warn.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   const reapplied025 = await run(SQL_ENV);
-  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(025 re-applied by hand puts it back\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/033_upsert_thought_fingerprint_lock\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
-         "025 re-applied over 033 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 033 — with the 2-argument body, still 033's, not mentioned");
+  assert(reapplied025.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 \(migration 033 is not yet applied, or 025 was re-applied by hand\): it takes no fingerprint lock/.test(reapplied025.out) && /Apply db\/migrations\/033_upsert_thought_fingerprint_lock\.sql\./.test(reapplied025.out) && !/either/.test(reapplied025.out),
+         "025 re-applied over 033 keeps 022's rule and 025's envelope and loses the lock, and the start warns naming 033 — the cause hedged, since this schema has no ledger to say whether 033 was ever applied — with the 2-argument body, still 033's, not mentioned");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("033") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 033's — the 3-argument body carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, and the fingerprint lock, so a capture and an edit of one text are serialised; the 2-argument body refuses a non-object payload \(005\) and takes the lock\s*$/m.test((await run(SQL_ENV)).out),
          "…and 033 re-applied is the shipped pair again, said as such");
@@ -922,7 +922,7 @@ else {
   // states the 2-argument body is in.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("005") });
   const fiveAlone = await run(SQL_ENV);
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 033's either — it is from before migration 033 \(005 re-applied by hand puts it back\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/033_upsert_thought_fingerprint_lock\.sql — the last definer/.test(fiveAlone.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 033's either — it is from before migration 033 \(migration 033 is not yet applied, or 005 was re-applied by hand\): it takes no fingerprint lock/.test(fiveAlone.out) && /Apply db\/migrations\/033_upsert_thought_fingerprint_lock\.sql — the last definer/.test(fiveAlone.out),
          "…and 005 re-applied alone leaves a pre-022 3-argument body and a 2-argument body with the guard and no lock, said as such");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("033") });
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 033's/.test((await run(SQL_ENV)).out), "…and 033 after it is the shipped pair again");

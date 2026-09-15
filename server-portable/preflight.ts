@@ -680,7 +680,15 @@ if (configFailed) {
         const twoStale = two !== undefined && !UPSERT_TWO_ARG_SHIPPED_RE.test(two.src);
         const twoUnlocked = two !== undefined && !twoStale && !LOCKED.test(two.src);
         const TWO_STALE_WHY = "it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again";
-        const TWO_UNLOCKED_WHY = "it is from before migration 033 (005 re-applied by hand puts it back): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation";
+        // Why a body is from before 033: the ordinary state on a brain whose
+        // ledger stops at 032 — the run before `migrate.ts` — is not a hand
+        // re-apply, and the cause must not say it is (first review pass).
+        // With the ledger recording 033, a hand re-apply is the only way.
+        const pre033 = (earlier: string) =>
+          ledger.has("033") ? `${earlier} re-applied by hand puts it back`
+            : ledgerRead ? "migration 033 is not yet applied"
+              : `migration 033 is not yet applied, or ${earlier} was re-applied by hand`;
+        const TWO_UNLOCKED_WHY = `it is from before migration 033 (${pre033("005")}): it takes no fingerprint lock, so a capture through it racing an edit of the same text raises the unique violation`;
         const andTwo = twoStale ? `; and the 2-argument body is not 005's either — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body is not 033's either — ${TWO_UNLOCKED_WHY}` : "";
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing${twoStale ? `; and the 2-argument body present is not 005's — ${TWO_STALE_WHY}` : twoUnlocked ? `; and the 2-argument body present is not 033's — ${TWO_UNLOCKED_WHY}` : ""}${andOthers}`,
@@ -700,7 +708,7 @@ if (configFailed) {
               applyLast("."));
         } else if (!LOCKED.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 (025 re-applied by hand puts it back): it takes no fingerprint lock, so a capture racing an edit of the same text raises the unique violation 018 removed for edits, and a re-capture racing a first capture leaves windows nothing vouches for${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule and 025's envelope, but it is from before migration 033 (${pre033("025")}): it takes no fingerprint lock, so a capture racing an edit of the same text raises the unique violation 018 removed for edits, and a re-capture racing a first capture leaves windows nothing vouches for${andTwo}${andOthers}`,
               applyLast("."));
         } else if (twoStale || twoUnlocked) {
           add("atomic capture", "warn",
