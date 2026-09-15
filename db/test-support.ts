@@ -420,7 +420,7 @@ export async function matchThoughtsOid(sql: SQL): Promise<number> {
   return Number(rows[0].oid);
 }
 
-export async function extractBody(sql: SQL, branch: Branch, dim: number): Promise<string> {
+export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: { overrides?: Record<string, string> } = {}): Promise<string> {
   const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
   let block: string | undefined;
   if (branch === "route") {
@@ -445,24 +445,29 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
   }
   let body = block;
   // The exact branch reads `v_ids`, which the routing statement fills; splice
-  // that statement in as a scalar subquery so the explained text stands alone —
-  // before the locals are substituted, since that statement uses v_exact.
+  // that statement in so the explained text stands alone — before the locals
+  // are substituted, since that statement uses v_exact. As ONE materialized
+  // CTE at the head of the branch's WITH, not a scalar subquery per reference:
+  // the branch reads v_ids twice (direct and chunked), and two spliced
+  // subqueries became two InitPlans that each ran the GIN collection, where
+  // the function runs `SELECT … INTO v_ids` once (SMD-1018 review pass).
   const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
-  if (route) body = body.replace(/\bv_ids\b/g, () => `((SELECT array_agg(s.id) ${route[1]})::uuid[])`);
-  const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
-  const locals: [string, string][] = [];
-  for (const line of declared.split("\n")) {
-    // `name  type words  := expr;` — the type may be several words
-    // (`double precision`, `timestamp with time zone`).
-    const d = /^\s*(\w+)\s+[\w ]+?\s*:=\s*(.+);\s*$/.exec(line);
-    if (d) locals.push([d[1], d[2]]);
+  if (route && /\bv_ids\b/.test(body)) {
+    if (!/^\s*WITH\s/.test(body)) throw new Error("the branch that reads v_ids no longer opens with WITH; the bench's rewrite does not apply");
+    body = body.replace(/^\s*WITH\s/, () => `WITH ob1_ids AS MATERIALIZED (SELECT array_agg(s.id) AS ids ${route[1]}), `);
+    body = body.replace(/\bv_ids\b/g, () => `((SELECT ids FROM ob1_ids)::uuid[])`);
   }
+  const locals = declaredLocals(def);
   // Replacer FUNCTIONS throughout: a replacement string would interpret `$1`,
   // `$&` or `$$` inside an expression as a pattern, and 014's SQL is one `$$`
   // away from that. Locals may reference earlier locals (v_fetch is built from
-  // v_count), so substitute until none remain rather than in one pass.
-  for (let pass = 0; pass < locals.length + 1; pass++) {
-    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${expr})`);
+  // v_count), so substitute until none remain rather than in one pass. A
+  // caller may override a local's expression — bench-hnsw.ts section E lifts
+  // `v_exact` to route a broader tier to the exact branch — and the override
+  // is substituted where the local was, so nothing downstream is split on a
+  // literal.
+  for (let pass = 0; pass < locals.size + 1; pass++) {
+    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${opts.overrides?.[name] ?? expr})`);
   }
   // 020's two parameters are $5 and $6; a body from before 020 (a bench's
   // "before" arm) reads neither, and a PREPARE that declares them is still
@@ -489,6 +494,48 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
  * the function. A plan mode is skipped: the callers exist to show both plans,
  * and a successor that forced one would otherwise hide the other.
  */
+/**
+ * The DECLARE block's locals, name → expression text: `name  type words  :=
+ * expr;` — the type may be several words (`double precision`, `timestamp with
+ * time zone`).
+ */
+function declaredLocals(def: string): Map<string, string> {
+  const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
+  const locals = new Map<string, string>();
+  for (const line of declared.split("\n")) {
+    const d = /^\s*(\w+)\s+[\w ]+?\s*:=\s*(.+);\s*$/.exec(line);
+    if (d) locals.set(d[1], d[2]);
+  }
+  return locals;
+}
+
+/**
+ * `v_fetch` and `v_exact` as the deployed match_thoughts computes them for a
+ * call with this match_count and no recency weight — its own DECLARE
+ * expressions, resolved through the locals they read and evaluated by the
+ * server. The benches route their tiers by these rather than by a copy of
+ * the arithmetic kept in each file: 014 wrote GREATEST(v_fetch * 4, 1000),
+ * 020 re-based it on v_base, and a redefinition that raises the floor
+ * (SMD-1464) moves every consumer at once (SMD-1018 review pass).
+ */
+export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number }> {
+  const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
+  const locals = declaredLocals(def);
+  if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
+  const resolve = (name: string): string => {
+    let expr = `(${locals.get(name)!})`;
+    for (let pass = 0; pass < locals.size + 1; pass++) {
+      for (const [n, e] of locals) expr = expr.replace(new RegExp(`\\b${n}\\b`, "g"), () => `(${e})`);
+    }
+    return expr
+      .replace(/\bmatch_count\b/g, () => `${matchCount}::int`)
+      .replace(/\brecency_weight\b/g, () => "0.0::float")
+      .replace(/\bhalf_life_days\b/g, () => "90.0::float");
+  };
+  const [row] = await sql.unsafe(`SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact`);
+  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact) };
+}
+
 export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transaction" | "session" } = {}): Promise<string[]> {
   const entries = await tx.unsafe(`SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(tx)]);
   const applied: string[] = [];
@@ -516,6 +563,15 @@ export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transactio
  * function's six arguments as SQL text — `query, threshold, count, filter,
  * recency_weight, half_life_days` (020); a pre-020 body simply reads the last
  * two of them nowhere.
+ *
+ * COSTS stays ON. It was OFF for legibility until SMD-1018 found every generic
+ * plan at ten million rows carrying 30–130 ms of startup the custom plan of
+ * the same shape did not, and could not say why: EXPLAIN prints its JIT
+ * summary only when costs are printed, so the one line that would have named
+ * the cost was suppressed with them. The estimated cost is also what decides
+ * whether JIT fires, so a reader of the plan text needs it. The shape regexes
+ * in the explainers match on the node's name and alias, which precede the
+ * `(cost=…)` annotation on the line.
  */
 export async function explainPrepared(
   tx: SQL,
@@ -524,7 +580,7 @@ export async function explainPrepared(
   await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
   await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb, float, float) AS ${opts.body}`);
   if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
-  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE ob1_explain(${opts.args})`);
+  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS) EXECUTE ob1_explain(${opts.args})`);
   await tx.unsafe(`DEALLOCATE ob1_explain`);
   const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
   return { text, ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN), buffers: buffersOf(text) };
@@ -574,8 +630,14 @@ export function seededRandom(seed: number): {
   rnd: () => number;
   gauss: () => number;
   unitVector: (dim: number) => number[];
+  /** Advance the stream by k draws without producing them — the Weyl step is additive, so this is one multiply. */
+  skip: (k: number) => void;
 } {
   let a = seed >>> 0;
+  const skip = (k: number) => {
+    // a += k * 0x6d2b79f5 (mod 2^32); k may exceed 2^32 at a hundred million rows.
+    a = (a + Math.imul(Number(BigInt(k) % 4294967296n), 0x6d2b79f5)) >>> 0;
+  };
   const rnd = () => {
     a = (a + 0x6d2b79f5) >>> 0;
     let t = a;
@@ -593,5 +655,5 @@ export function seededRandom(seed: number): {
     const n = Math.hypot(...v);
     return v.map((x) => x / n);
   };
-  return { rnd, gauss, unitVector };
+  return { rnd, gauss, unitVector, skip };
 }
