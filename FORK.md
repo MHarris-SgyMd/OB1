@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-six numbered changes on top of the pin. Seven fix defects found in an
+Fifty-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Three (changes 31, 53, and 55) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–56 are the numbered `###` sections** further down, which is
+sections. Changes **18–57 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -5985,8 +5985,8 @@ rows are picked first and "latest" is a `NOT EXISTS`, the review's measured
 **Ticketed: SMD-1421** — the reviewers' higher altitude, proposed twice: a
 snapshot of the labels around 021's replay that makes 030's rule the only
 rule and removes the gate, the way back and the plain-run refusal; a redesign
-this late was not this PR's. Left as a tidy-up: the `startsWith("021_")`
-literal.
+this late was not this PR's (done in change 57). Left as a tidy-up: the
+`startsWith("021_")` literal.
 
 A boyscout commit took what the passes cut for space, no behaviour change:
 `reembed.ts` spelled the run's refusal (`refusalJob ?? refusalTtl ??
@@ -6170,6 +6170,94 @@ clean, fork checker PASS (on the tree with SMD-1304's and SMD-1294's changes
 merged in). Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
+
+### 57. The migrator brackets 021's evidence backfill — the labels before the file are noted, 030's rule is applied after it, and no gate refuses the run (SMD-1421)
+
+`db/migrate.ts`, `db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts`,
+`db/test-schema.ts` and `db/README.md` (Linear SMD-1421, filed by change 56's
+sixth and seventh review passes). No migration: 030 stands as it is, and the
+correction it cannot make becomes the migrator's.
+
+**The finding.** Change 56 gave `migrate.ts` a gate: before 021's evidence
+backfill ran — under `--reapply`, or on a plain run with 021 pending — it
+refused when an accepted claim row stood that the block would label an
+unlabelled thought from and 030 would not take back, listed the rows, and
+printed a way back that spent the acceptance (`reembed.ts --job <key>
+--retry-fallbacks`, `--retire <key>`, or the statement `--retry-fallbacks`
+runs, on a schema `reembed.ts` refuses). Seven review passes found a seam in it
+each — the bound, the grammar, the tie, the plain path, 030 not following, the
+lock — because the gate was the *difference* of two rules, 021's and 030's, and
+every case either rule had was a cell the gate had to enumerate by hand. The
+sixth and seventh passes proposed the same higher altitude: the migrator holds
+the one fact 030, hashed and applied, cannot — the labels *before* 021's replay.
+
+**What this does.** One helper, `applyBracketed`, runs every file, and around
+021 brackets its block. Before the file, the ids of the thoughts unlabelled —
+every id with a vector, where the column does not yet exist — go into a temp
+table on the migrator's connection (`ON COMMIT DROP`, analysed); after it, one
+UPDATE sets each of them by 030's rule: the latest succeeded row that is not an
+acceptance, when `updated_at <= finished_at` as 021 and 030 spell the bound,
+else NULL — `IS DISTINCT FROM` the label the row holds, so a label from a plain
+latest row is not rewritten, and the statement's row count is the number of
+labels 021's block wrote from an acceptance (or its unnamed pick of a tie). The
+`updated_at` trigger is held as the two files hold it. The same transaction as
+the file — the whole re-run's under `--reapply`, the file's own on a plain run
+— so the snapshot can neither predate nor outlive what it brackets; whenever
+021 runs, 030 following in the same run or recorded and skipped (a ledger hole
+at 021 alone), since the correction is the migrator's and not 030's. The rule
+is 030's own text: `LATEST_UNACCEPTED_CLAIM_SQL` in `config.mjs` is the
+subquery 030's second statement labels from, byte for byte once substituted,
+and `test-schema` [29] pins that — one spelling of "the evidence, accepted rows
+excluded", so the migrator's correction and 030's cannot disagree. The run
+says, beside 021's line, how many labels it set back.
+
+**What went.** The hazards query, both arms of the way back, the `has_edit`
+and signature probe, the claim-table probe, the "030 recorded" branch, the
+plain-run refusal and `runs021`/`runs030` — about a hundred lines of
+`migrate.ts` — and `REQUEUE_SET_SQL`'s second reader (`reembed.ts` keeps the
+constant). The re-run keeps its four judgements before `BEGIN` — drift, the
+pgvector floor, the column's width, `ob1_config`'s model against the shell —
+and the checks' own lock timeout now guards the `ob1_config` read alone. The
+operator never spends an acceptance to re-apply: the suffixed-key acceptance,
+the own-key acceptance over a thought written since its enqueue, and the hole
+at 021 with 030 recorded — the three cases change 56 refused — end with the
+thought unknown and the acceptance standing. `reembed.ts`'s ledgered remedy and
+`db/README.md` §5 say so.
+
+**Why a snapshot and not a fourth rule.** 021 writes only rows that were NULL,
+so "what 021 wrote" is exactly "the snapshot rows now labelled", and 030's rule
+over those rows is 021's rule minus accepted rows — every case the gate
+enumerated, and the ones it missed, fall out of one UPDATE. The ticket's own
+sketch kept a label whenever *any* non-accepted row at that model supported it
+under the bound; that keeps a wrong label where a real pass at another model
+wrote the vector later and the acceptance came after (plain rows at M then E,
+then an acceptance at M: 021 writes M, the sketch keeps it, E is right).
+Setting the snapshot rows to the latest non-accepted row's model, as 030 does,
+has no such case and costs the same statement.
+
+**Not done here.** 030's header describes the gate it was written beside; the
+file is applied and hashed, so the description stands as history, and this
+section and README §5 carry the current shape. A plain run applying 021 alone
+over a later schema (a ledger hole) still puts 021's `upsert_thought` body over
+022's and 025's — preflight's `atomic capture` names that state and
+`--reapply`, and [7] now shows the re-run restoring it. The `startsWith("021_")`
+literal change 56 left is now spelled twice.
+
+Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
+acceptance over a thought written since its enqueue *before* the re-run, and
+asserts the run goes with no refusal, the six labels (`stub-embed`, NULL,
+`earlier-model`, NULL, NULL, NULL), every acceptance standing, and the line
+beside 021 counting four; then deletes 021's ledger row with 030 recorded,
+plants a fifth acceptance under a suffixed key, and asserts a plain run applies
+021 bracketed — exit 0, 030 skipped, four set back, every other label as the
+re-run left it, 021 recorded, the trigger enabled — and that a second
+`--reapply` over the same corpus sets the same four back and changes no label.
+The hazard refusals and the checks-lock case went with the gate; the rest of
+[7] and all of [8] are unchanged. `test-schema` [29] pins
+`LATEST_UNACCEPTED_CLAIM_SQL` against 030's substituted text. `test-upgrade`
+106/106, `test-schema` 645/645, `test-preflight` 174/174, `test-live` 419/419,
+`tsc` clean, fork checker PASS. Upstream status: **not applicable** — the
+migrator and `reembed.ts` are the fork's (changes 11 and 29).
 
 ## Detached from the fork network
 

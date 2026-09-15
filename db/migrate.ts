@@ -37,6 +37,14 @@
  * silently: 006 and 013 re-record ob1_config (refused when the record differs
  * from the shell), 011 builds the trigram index when OB1_TRGM_INDEX is on and
  * it is absent, 023 runs its backfill call under OB1_BACKFILL_LIMIT (SMD-1193).
+ *
+ * 021's evidence backfill — the one statement in the set that writes DATA from
+ * a rule over other data, hashed and applied as written before SMD-1067 made an
+ * operator's ACCEPTANCE of a failure a succeeded claim row — is bracketed
+ * whenever it runs here, on a plain run or a re-run: the thoughts unlabelled
+ * before the file are noted, and after it each is set by 030's rule (the latest
+ * claim row that is not an acceptance, or unknown), so a label written from an
+ * acceptance alone never leaves the transaction. See applyBracketed (SMD-1421).
  */
 
 import { SQL } from "bun";
@@ -45,9 +53,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
-  CLAIM_EVIDENCE_ROWS_SQL,
-  REQUEUE_SET_SQL,
-  UPDATE_THOUGHT_SIGNATURE,
+  LATEST_UNACCEPTED_CLAIM_SQL,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
@@ -293,7 +299,8 @@ let floorBlocked: Migration | null = null;
  * (insufficient_privilege) on an hnsw.* setting is a non-superuser in a session
  * that has not loaded pgvector — 014 loads it first, so this is reachable only
  * from a hand-run statement, but say what it means. 55P03 (lock_not_available)
- * is a lock_timeout: the re-run's 10 s, or on a plain run the session's — 023's
+ * is a lock_timeout: the re-run's 10 s, the checks' own before it, or on a
+ * plain run the session's — 023's
  * call sets 10 s for its own transaction, a role or provider default may set
  * one for every statement. What follows a failure differs by mode: a plain run
  * has applied and recorded the files before it; a re-run rolled back whole. A
@@ -319,7 +326,7 @@ function explainFailure(err: unknown, m: Migration | null, mode: "plain" | "reap
       mode === "reapply"
         ? "  A lock was not granted within the re-run's 10 s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first."
         : mode === "checks"
-          ? "  A lock was not granted within the 10 s the checks before the run set for their reads: a session holds an exclusive lock on thoughts or the claim table — the server mid-ALTER, or an idle transaction. End it first."
+          ? "  A lock was not granted within the 10 s the checks before the run set for their reads: a session holds an exclusive lock on ob1_config — an idle transaction that altered it. End it first."
           : "  A lock was not granted within the session's lock_timeout (023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
     );
   }
@@ -372,6 +379,81 @@ async function reportSeeds(m: Migration): Promise<void> {
   }
 }
 
+/**
+ * Run one migration's SQL in the caller's transaction — and around 021's,
+ * bracket its evidence backfill (SMD-1421). 021 labels an unlabelled thought
+ * from its latest succeeded claim row under a key naming a model, when nothing
+ * has written the thought since the row finished; the file is hashed and
+ * applied as written, from before SMD-1067 made an operator's ACCEPTANCE of a
+ * failure a succeeded row — a thought that kept the vector it had, by decision
+ * NOT at that key's model. Migration 030 takes such a label back where it can
+ * tell it from the server's own (an acceptance under the model's own key, and
+ * nothing written since the row's enqueue) and labels the rest with accepted
+ * rows excluded — but 030 is a file too, applied once and hashed, and cannot
+ * know which labels 021's block wrote a moment ago. The migrator can: it holds
+ * the one fact 030 does not, the labels BEFORE the block ran.
+ *
+ * The thoughts unlabelled before 021 — every one with a vector, where the
+ * column does not yet exist — go into a temp table on this connection; after
+ * the file, each is set by 030's rule (LATEST_UNACCEPTED_CLAIM_SQL, 030's own
+ * text): the latest row that is not an acceptance, when nothing has written
+ * the thought since it finished, else unknown. 021's block writes only rows
+ * that were NULL, so what it wrote from a plain latest row the rule writes
+ * again unchanged, and what it wrote from an acceptance goes back to unknown,
+ * or to the earlier pass that did write the vector — with the acceptance
+ * standing, spent by nobody. A row labelled before the file is not in the
+ * snapshot and is not touched. The same transaction as the file — under
+ * --reapply the whole re-run's, on a plain run the file's own — so the snapshot
+ * can neither predate nor outlive what it brackets; the trigger held as 021 and
+ * 030 hold it, the label being a fact about a vector and not an edit; the temp
+ * table dropped at commit. Whenever 021 runs — 030 following in the same run,
+ * or recorded and skipped (a ledger hole at 021 alone) — because the correction
+ * is the migrator's, not 030's. Needs TEMP on the database, which PUBLIC has
+ * unless revoked.
+ *
+ * This replaced a gate that refused the run on the rows 021 would label and 030
+ * would leave, and printed a way back that spent the acceptance; SMD-1193's
+ * seven review passes each found a seam in it, since it was the difference of
+ * two rules — 030's header, hashed, still describes it. Returns how many labels
+ * the rule changed (each one 021's block wrote from an acceptance, or its pick
+ * of a tie), null for any other file.
+ */
+async function applyBracketed(tx: SQL, m: Migration): Promise<number | null> {
+  if (!m.name.startsWith("021_")) {
+    await tx.unsafe(m.sql);
+    return null;
+  }
+  const [{ has_label }] = (await tx`
+    SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label`) as { has_label: boolean }[];
+  await tx.unsafe(
+    "CREATE TEMP TABLE ob1_unlabelled_before_021 ON COMMIT DROP AS SELECT id FROM thoughts WHERE embedding IS NOT NULL" + (has_label ? " AND embedding_model IS NULL" : "")
+  );
+  await tx.unsafe("ANALYZE pg_temp.ob1_unlabelled_before_021");
+  await tx.unsafe(m.sql);
+  await tx.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
+  // 021's bound, `t.updated_at <= finished_at`, spelled as 021 and 030 spell
+  // it: a NULL updated_at is never labelled by either, and is not here.
+  const set = await tx.unsafe(
+    "UPDATE thoughts t\n" +
+      "   SET embedding_model = CASE WHEN t.updated_at <= e.finished_at THEN e.model END\n" +
+      "  FROM pg_temp.ob1_unlabelled_before_021 s\n" +
+      `  LEFT JOIN (${LATEST_UNACCEPTED_CLAIM_SQL}) e ON e.thought_id = s.id\n` +
+      " WHERE t.id = s.id\n" +
+      "   AND t.embedding_model IS DISTINCT FROM CASE WHEN t.updated_at <= e.finished_at THEN e.model END"
+  );
+  await tx.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
+  return Number((set as unknown as { count: number }).count);
+}
+
+/** What the bracket set back, when anything — beside 021's line, so the operator can tell it from 030's own work. */
+function reportBracket(corrected: number | null): void {
+  if (corrected) {
+    console.log(
+      `  ·  021's evidence backfill wrote ${corrected} label(s) from an acceptance; set back — to the pass that did write the vector, or unknown — with the acceptance standing`
+    );
+  }
+}
+
 // ── The re-run, one transaction ─────────────────────────────────────────────
 // Every migration — recorded or pending — in order, in ONE transaction: a
 // failure part-way would otherwise leave the files before it at their own
@@ -380,36 +462,21 @@ async function reportSeeds(m: Migration): Promise<void> {
 // that 014 and 019 recreate — was not yet restored, with nothing in the catalog
 // to say so; and a pending file left for the loop would apply AFTER the re-run,
 // over what it restored. All or nothing, and the output says which. Judged
-// before BEGIN: the drift (above), the pgvector floor, the two things a re-run
-// must not do quietly — re-record ob1_config from a shell configured
-// differently from the brain (006 and 013 write INSERT … ON CONFLICT DO UPDATE
-// again), and let 021's block, run as written, label an unlabelled thought from
-// an acceptance under a SUFFIXED key, which 030 cannot tell from the server's
-// own label (030's header, "What it leaves"). A 10 s lock_timeout from the first
-// statement, so an idle session holding a lock on thoughts fails the re-run at
-// once rather than freezing every reader behind 001's ACCESS EXCLUSIVE for ever
-// — the banner says to stop the writers first. The seeds check runs after the
-// commit for every file that seeds, as on a first apply.
-// 021's evidence backfill runs whenever 021 runs: under --reapply, and on a
-// plain run where 021 is pending — a brain built by hand through 021 and later
-// adopted by "just run them", or a ledger hole. Never under --baseline, which
-// executes no SQL. The gate below reads the rows 021 would label from that 030
-// would then leave — and whether 030 runs in THIS invocation decides what
-// "leave" means: after 021 in the same run it takes an own-key acceptance's
-// label back, so only the rest is refused; recorded and skipped (a hole at 021
-// alone), nothing follows 021, and every acceptance it would read is refused.
-// The other judgements are the re-run's own. The two filenames in this loop,
-// because the hazard is one file's block and the correction the other's, and
-// no header line could carry it (021 is hashed).
-const pending = (prefix: string) => migrations.some((m) => m.name.startsWith(prefix) && !applied.has(m.name));
-const runs021 = !baseline && (reapply || pending("021_"));
-const runs030 = reapply || pending("030_");
-if (runs021) {
-  // Judged whole, before anything runs, and the same under --dry-run — which
-  // says "would refuse" where the run says "refusing", so a green dry run is
-  // never followed by a red run. Every refusal is reported, not the first.
+// before BEGIN, and the same under --dry-run — which says "would refuse" where
+// the run says "refusing", so a green dry run is never followed by a red run;
+// every refusal is reported, not the first: the drift (above), the pgvector
+// floor, and the two things 006 would do inside the transaction from a shell
+// configured differently from the brain — refuse the column's width, or
+// re-record ob1_config's model (its INSERT … ON CONFLICT DO UPDATE, run again).
+// A 10 s lock_timeout from the first statement, so an idle session holding a
+// lock on thoughts fails the re-run at once rather than freezing every reader
+// behind 001's ACCESS EXCLUSIVE for ever — the banner says to stop the writers
+// first. The seeds check runs after the commit for every file that seeds, as on
+// a first apply. 021's evidence backfill runs as written, bracketed by
+// applyBracketed as on a plain run; nothing here reads the claim table.
+if (reapply) {
   const refusals: { code: number; text: string }[] = [];
-  const changed = reapply ? migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha) : [];
+  const changed = migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha);
   if (changed.length > 0) {
     refusals.push({
       code: 1,
@@ -418,72 +485,40 @@ if (runs021) {
         "  Migrations are append-only. If the edit was intentional and the database already reflects it, update schema_migrations.sha256 by hand, then re-run.",
     });
   }
-  const floor = reapply ? migrations.find((m) => tooOldFor(m)) : undefined;
+  const floor = migrations.find((m) => tooOldFor(m));
   if (floor) refusals.push({ code: 1, text: `${floor.name} would fail on the pgvector floor.` + floorMessage(floor, true) });
   // The catalog, read by relation (to_regclass) rather than by name in
   // information_schema, which sees a `thoughts` in any schema the role can
-  // read; and the eight-argument signature names the vector type, which
-  // to_regprocedure cannot parse before pgvector is installed — asked only
-  // where the type resolves. Every read here is guarded: a role without
-  // SELECT on the claim table, or a row the query cannot evaluate, is a
+  // read. Both reads are guarded: a role without SELECT on ob1_config is a
   // refusal that names the error, not a stack trace with the connection open.
-  let probe: { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null };
-  let hazards: { id: string; work_type: string }[] = [];
+  let probe: { has_config: boolean; width: number | null };
   let record: Record<string, string> = {};
   try {
-    // The reads take ACCESS SHARE on thoughts and the claim table; behind a
-    // session holding ACCESS EXCLUSIVE they would wait for ever, before the
-    // transaction's own lock_timeout exists. Ten seconds here too, then reset.
+    // The read of ob1_config takes ACCESS SHARE; behind a session holding
+    // ACCESS EXCLUSIVE on it, it would wait for ever, before the transaction's
+    // own lock_timeout exists. Ten seconds here too, then reset.
     await sql.unsafe("SET lock_timeout = '10s'");
     [probe] = (await sql`
       SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
-             to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
-             EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
-             CASE WHEN to_regtype('vector') IS NULL THEN false
-                  ELSE EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure(${"public." + UPDATE_THOUGHT_SIGNATURE})
-                                 AND prosrc LIKE '%ob1:unchanged-edit-not-duplicate%') END AS has_edit,
              (SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding' AND NOT attisdropped) AS width`) as
-      { has_config: boolean; has_claims: boolean; has_label: boolean; has_edit: boolean; width: number | null }[];
-    if (probe.has_config && reapply) {
+      { has_config: boolean; width: number | null }[];
+    if (probe.has_config) {
       const rows = (await sql`SELECT key, value::text AS value FROM ob1_config WHERE key IN ('embedding_model')`) as { key: string; value: string }[];
       record = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     }
-    if (probe.has_claims) {
-      // The rows 021's block, run as written, would label from an acceptance and
-      // 030 would then leave: the difference of the two rules, not a case
-      // encoded by hand. 021 labels an unlabelled thought with a vector from a
-      // row at its latest finished_at when `updated_at <= finished_at` — one
-      // row of a tie, unnamed, so every accepted row at that time counts here.
-      // 030 takes the label back only for an own-key acceptance over a thought
-      // not written since the row's enqueue. Whatever 021 labels that 030 does
-      // not revert is refused — when 030 runs in this invocation; when it does
-      // not, nothing takes any label back, and every acceptance counts. The
-      // rows are config.mjs's, as 030 reads them. The accepted rows are picked
-      // before "latest" is asked (a window over every row was the planner
-      // barrier the shared text lost); one row per (thought, key) already, so
-      // no DISTINCT.
-      hazards = (await sql.unsafe(
-        `SELECT t.id::text AS id, e.work_type FROM thoughts t JOIN (SELECT r.* FROM (${CLAIM_EVIDENCE_ROWS_SQL}) r WHERE r.accepted) e ON e.thought_id = t.id ` +
-          `WHERE NOT EXISTS (SELECT 1 FROM (${CLAIM_EVIDENCE_ROWS_SQL}) l WHERE l.thought_id = e.thought_id AND l.finished_at > e.finished_at)` +
-          " AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
-          (probe.has_label ? " AND t.embedding_model IS NULL" : "") +
-          (runs030 ? " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" : "") +
-          " ORDER BY 2, 1"
-      )) as { id: string; work_type: string }[];
-    }
     await sql.unsafe("RESET lock_timeout");
   } catch (err) {
-    console.error(`  ✗  ${reapply ? "--reapply" : "021_embedding_model_per_row.sql"}  could not be judged: ${(err as Error).message}`);
+    console.error(`  ✗  --reapply  could not be judged: ${(err as Error).message}`);
     for (const line of explainFailure(err, null, "checks")) console.error(line);
-    console.error("  The checks before the run read pg_attribute, pg_proc, ob1_config and thought_work_claims; this role could not, or was made to wait. Nothing was written.");
+    console.error("  The checks before the run read pg_attribute and ob1_config; this role could not, or was made to wait. Nothing was written.");
     await sql.close();
     process.exit(1);
   }
-  const { has_config, has_label, has_edit, width } = probe;
+  const { has_config, width } = probe;
   // The column is the width's authority (ob1_config's copy can be edited by
   // hand); 006 refuses a shell whose width differs from it — inside the
   // transaction, after a dry run had said green. Judged here, both modes.
-  if (reapply && width !== null && Number(width) <= 0) {
+  if (width !== null && Number(width) <= 0) {
     // pgvector allows a bare `vector` column (atttypmod -1); 006 requires the
     // declared width, so the re-run would refuse inside the transaction.
     refusals.push({
@@ -493,7 +528,7 @@ if (runs021) {
         `  refuse inside the transaction. Declare it first — ALTER TABLE thoughts ALTER COLUMN embedding TYPE vector(${SUBSTITUTIONS.EMBEDDING_DIM}); — with\n` +
         "  every stored vector at that width.",
     });
-  } else if (reapply && width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
+  } else if (width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
     refusals.push({
       code: 2,
       text:
@@ -506,7 +541,7 @@ if (runs021) {
   // configured when the schema was last migrated" — a flag the operator may
   // flip between runs by 013's own header, so re-recording it is the update,
   // not a change to refuse.
-  if (reapply && has_config && "embedding_model" in record && record.embedding_model !== SUBSTITUTIONS.EMBEDDING_MODEL) {
+  if (has_config && "embedding_model" in record && record.embedding_model !== SUBSTITUTIONS.EMBEDDING_MODEL) {
     refusals.push({
       code: 2,
       text:
@@ -516,40 +551,8 @@ if (runs021) {
         "  reembed.ts --switch-model, which moves the corpus with it.",
     });
   }
-  {
-    if (hazards.length) {
-      const keys = [...new Set(hazards.map((h) => h.work_type))];
-      const shown = hazards.slice(0, 50);
-      const again = reapply ? "--reapply" : "the migrator";
-      // The way back depends on the schema: reembed.ts runs only against 021's
-      // whole (the column and the eight-argument update_thought), so on an
-      // older schema — where such a row can only have been written by hand,
-      // since --accept-failed refuses it too — the remedy is the statement
-      // --retry-fallbacks would run, or the tool loops the operator between
-      // two refusals. One statement per key, every row of it.
-      const wayBack = has_label && has_edit
-        ? "  Return them to their pool first — bun reembed.ts --url … --job <key> --retry-fallbacks, which spends the acceptance — or retire\n" +
-          `  the key if it is superseded (--retire <key>), then run ${again} again.`
-        : `  reembed.ts refuses to run against this schema (${has_label ? "021's update_thought is not installed" : "it predates 021"}) and cannot return them; --accept-failed refuses it too, so\n` +
-          `  these rows were written by hand. Return them as --retry-fallbacks would, then run ${again} again:\n` +
-          // requeue()'s statement in reembed.ts, per key: the caveat gone, the
-          // attempts reset, the lease cleared; claimed_at stays, as there.
-          keys.map((k) => `    UPDATE thought_work_claims SET ${REQUEUE_SET_SQL} WHERE work_type = '${k.replace(/'/g, "''")}' AND thought_id IN (${hazards.filter((h) => h.work_type === k).map((h) => `'${h.id}'`).join(", ")});`).join("\n");
-      refusals.push({
-        code: 2,
-        text:
-          `021's evidence backfill, ${reapply ? "re-run" : "run"} as written, would label ${hazards.length} unlabelled thought(s) from an acceptance that\n` +
-          (runs030
-            ? `  migration 030 would not take back — under a suffixed key, or written since the row was enqueued (${keys.join(", ")}):\n`
-            : `  nothing would take back — 030 is recorded, so it does not run after 021 here (${keys.join(", ")}):\n`) +
-          shown.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
-          (hazards.length > shown.length ? `\n    … and ${hazards.length - shown.length} more` : "") +
-          "\n" + wayBack,
-      });
-    }
-  }
   if (refusals.length) {
-    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} ${reapply ? "--reapply" : "to apply 021"}: ${r.text}`);
+    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} --reapply: ${r.text}`);
     console.error(`\n  Nothing was written.`);
     await sql.close();
     process.exit(Math.max(...refusals.map((r) => r.code)));
@@ -557,26 +560,25 @@ if (runs021) {
   // Announced only once nothing refuses: a banner before a refusal read as a
   // run that never began.
   const recorded = migrations.filter(reapplies).length;
-  if (reapply) {
-    console.log(
-      `  ${dryRun ? "would re-apply" : "re-applying"} every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a 10 s lock timeout —\n` +
-        "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
-        "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
-        "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
-    );
-  }
+  console.log(
+    `  ${dryRun ? "would re-apply" : "re-applying"} every migration (${recorded} recorded, ${migrations.length - recorded} pending), in order, in one transaction with a 10 s lock timeout —\n` +
+      "  recorded rows stay as they are, pending ones are recorded. Stop the server and any re-embed or extraction worker first:\n" +
+      "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
+      "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
+  );
 }
 
 if (reapply && !dryRun) {
   // An object, not a `let`: an assignment inside the callback is invisible to
   // the type checker's flow analysis, which would narrow a `let` to null.
-  const progress: { current: Migration | null } = { current: null };
+  const progress: { current: Migration | null; corrected: number | null } = { current: null, corrected: null };
   try {
-    await sql.begin(async (tx) => {
+    await sql.begin(async (tx: SQL) => {
       await tx.unsafe("SET LOCAL lock_timeout = '10s'");
       for (const m of migrations) {
         progress.current = m;
-        await tx.unsafe(m.sql);
+        const corrected = await applyBracketed(tx, m);
+        if (corrected !== null) progress.corrected = corrected;
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
@@ -593,6 +595,7 @@ if (reapply && !dryRun) {
   for (const m of migrations) {
     const again = applied.has(m.name);
     console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
+    if (m.name.startsWith("021_")) reportBracket(progress.corrected);
     if (again) reapplied++;
     else ran++;
   }
@@ -653,11 +656,13 @@ for (const m of reapply && !dryRun ? [] : migrations) {
   // Each migration runs in its own transaction: a failure leaves earlier ones
   // applied and recorded, so a rerun resumes rather than starting over.
   try {
-    await sql.begin(async (tx) => {
-      await tx.unsafe(m.sql);
+    const bracket: { corrected: number | null } = { corrected: null };
+    await sql.begin(async (tx: SQL) => {
+      bracket.corrected = await applyBracketed(tx, m);
       await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
     });
     console.log(`  ✓  ${m.name}  applied`);
+    reportBracket(bracket.corrected);
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);

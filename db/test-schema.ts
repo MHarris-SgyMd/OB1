@@ -39,6 +39,7 @@ import {
   resolveBackfillLimit,
   ACCEPTED_CAVEAT_PREFIX,
   CLAIM_EVIDENCE_ROWS_SQL,
+  LATEST_UNACCEPTED_CLAIM_SQL,
   REEMBED_KEY_MODEL_SQL_RE,
   REEMBED_OWN_KEY_SQL_RE,
 } from "./config.mjs";
@@ -2929,7 +2930,7 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
   await db.exec(`DELETE FROM ob1_entities`);
 }
 
-console.log("\n[29] Migration 030's substituted literals are pinned — 021's grammar, the caveat prefix, the own-key spelling, the evidence rows (SMD-1193)");
+console.log("\n[29] Migration 030's substituted literals are pinned — 021's grammar, the caveat prefix, the own-key spelling, the evidence rows (SMD-1193), and the row it labels from is the migrator's bracket's (SMD-1421)");
 {
   // 030 is hashed as a template: what it DOES on a brain where it is still
   // pending, and what every --reapply does, comes from these config.mjs values
@@ -2942,6 +2943,10 @@ console.log("\n[29] Migration 030's substituted literals are pinned — 021's gr
   const substituted030 = subst(readFileSync(join(MIGRATIONS, "030_label_from_claims_excludes_accepted.sql"), "utf8"));
   // Twice in the statements, once more where the header names the template.
   assert(substituted030.split(CLAIM_EVIDENCE_ROWS_SQL).length >= 3 && !/\{\{/.test(substituted030), "030's substituted text carries the shared evidence rows in both statements and no unresolved template");
+  // The migrator relabels the thoughts 021's block could have written by this
+  // text whenever 021 runs (SMD-1421); 030 labels the unlabelled by it. One
+  // spelling, so the two cannot disagree about which row is the evidence.
+  assert(substituted030.includes(LATEST_UNACCEPTED_CLAIM_SQL), "LATEST_UNACCEPTED_CLAIM_SQL is 030's second statement's choice of row, byte for byte — what the bracket around 021 relabels by");
 }
 
 report();
