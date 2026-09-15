@@ -105,48 +105,33 @@ rather than a bare "does not exist"; preflight's `edit signature`, `vector
 models` and `atomic capture` remedies name it where the ledger records the
 migration they find absent.
 
-**021's evidence backfill is bracketed whenever it runs** — on the re-run, and
-on a plain run where 021 is pending (a brain built by hand through 021 and
-adopted by "just run them", or a ledger hole). 021 labels an unlabelled thought
-from its latest succeeded claim row under a key naming a model, and the file is
-hashed and applied as written, from before a succeeded row could be the
-operator's *acceptance* of a failure (`reembed.ts --accept-failed`) — a thought
-that kept the vector it had, by decision not at that key's model. 030 takes
-such a label back where it can tell it from the server's own and labels with
-accepted rows excluded, but 030 cannot know which labels 021's block wrote a
-moment ago; the migrator can. It takes 021's own lock on `thoughts` first, and
-then the claim table's against writers (so a label or a claim row committed
-while the file runs is neither set back nor read as evidence the snapshot never
-saw), notes the thoughts unlabelled before 021 that have a succeeded, finished
-claim row naming a model (every such thought with a vector, where the column
-does not yet exist) in a temp table on its connection, runs the file, and sets
-aside the labels it wrote — back to unknown, the `updated_at` trigger held as
-021 holds it — for **030's own text** to decide: the latest row that is not an
-acceptance, when nothing has written the thought since it finished, else
-unknown. One spelling of the rule, 030's. On a plain run 030's text runs inside
-021's transaction, so no label 021 wrote commits unknown across the files
-between (where 030 is pending it runs again at its own place, idempotent; where
-the ledger records it, this is the only time), and the labels from before 021
-that its first statement could re-decide — labelled, with an acceptance under
-the model's own key — are noted first and reported apart. On the re-run, one
-transaction, the labels wait for 030's own place and the report is printed
-beside 030's line. Where no such claim row exists, or 021 wrote nothing, the
-file runs bare.
-A label from a plain latest row is written again unchanged; a label from an
-acceptance goes to the earlier pass that did write the vector, or to unknown;
-the acceptance stands, spent by nobody, and no claim row is touched. The run
-says how many thoughts 021 labelled, how many 030's rule decided otherwise, and
-lists every such row with both labels — nothing else records them, since the
-label is not an edit. Judged before anything runs, in both modes, whenever 021
+**021's evidence backfill runs with the operator's acceptances out of its
+sight** — on the re-run, and on a plain run where 021 is pending (a brain built
+by hand through 021 and adopted by "just run them", or a ledger hole). 021
+labels an unlabelled thought from its latest succeeded claim row under a key
+naming a model, and the file is hashed and applied as written, from before a
+succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
+--accept-failed`) — a thought that kept the vector it had, by decision not at
+that key's model. 030 takes such a label back where it can tell it from the
+server's own and labels with accepted rows excluded, but 030 cannot know which
+labels 021's block wrote a moment ago; the migrator need not know either.
+Before 021 runs it creates a temp table named `thought_work_claims` from the
+real one without the accepted rows, and since an unqualified name resolves in
+`pg_temp` before any schema on the search path, 021's block reads the copy and
+labels from the latest row that is not an acceptance, or not at all — 030's
+rule by 021's own text, nothing wrong ever written, the acceptance standing
+and no claim row touched. The copy is dropped right after the file, in the
+same transaction, so 022 onward read the real table; a search path that lists
+`pg_temp` — which is searched first for tables exactly when it is *not* listed
+— has it removed for the transaction, and that the name resolves to the copy
+is checked before the file runs. The run says beside 021's line how many thoughts
+the block labelled. A label 021's block wrote from an acceptance on an earlier
+run, or a paste of the body left, is 030's to take back at its own place — the
+re-run reaches it. Judged before anything runs, in both modes, whenever 021
 will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
-otherwise; 023's call needs one too), and on a plain run 030 is as it was
-applied — its current text would run inside the bracket before the loop
-reached 030's own drift check. A set carrying 021 without 030 is refused at
-load, and two files sharing a number are refused at load. Every refusal is
-collected and reported together, the re-run's included. A plain run applying
-021 says so first, and says to stop the server and the workers: the bracket
-locks the claim table against writers, which 021 alone never did, and a
-worker's enqueue takes the two tables the other way round.
+otherwise; 023's call needs one too). Two files sharing a number are refused
+at load. Every refusal is collected and reported together, the re-run's
+included.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
@@ -158,14 +143,14 @@ SQL and brackets nothing.
 transaction the migrator opens — the re-run's, and each file's on a plain run —
 sets the same 10 s lock timeout, so a held lock fails the run rather than
 freezing it and every reader behind it. 001 and 003
-take ACCESS EXCLUSIVE locks on `thoughts`; 021's bracket locks the claim table
-against writers; 011 builds the trigram index if
+take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written and bracketed (above); 030, reached after it
-in the same transaction, finds nothing of 021's to take back and corrects the
-own-key labels an earlier paste of the body left (SMD-1193, SMD-1421).
+evidence backfill runs as written, the acceptances out of its sight (above);
+030, reached after it in the same transaction, finds nothing of 021's to take
+back and corrects the own-key labels an earlier paste of the body left
+(SMD-1193, SMD-1421).
 
 ## Expected outcome
 

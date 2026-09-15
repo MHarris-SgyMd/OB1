@@ -45,6 +45,44 @@ function migratorEnv(): Record<string, string> {
   return env;
 }
 
+/** A script's exit for an assertion label, with its output when it failed. */
+const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code === 0 ? "" : `:\n${x.out}`}`;
+
+/**
+ * The corpus every case of 021's evidence backfill reads (SMD-1193, SMD-1421):
+ * helpers over one connection, and the three thoughts with their claim rows —
+ * a plain succeeded row under the model's own key; an ACCEPTED row (SMD-1067:
+ * succeeded, the caveat prefix, the failure's own timestamps), so 021's block,
+ * run as written, labels the thought at a model whose pass never wrote its
+ * vector; and a thought with both, an earlier pass's plain row under its key
+ * then the acceptance under the new key — the latest row, which 021 as
+ * written trusts. Written two hours ago, the earlier pass an hour ago, the
+ * acceptances now, so 021's bound (updated_at <= finished_at) holds for every
+ * row and only the rule decides.
+ */
+function evidenceFixture(sql: SQL) {
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
+  const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
+  const plant = async (content: string) =>
+    (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, now() - interval '2 hours') RETURNING id`)[0].id as string;
+  const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
+  const labels = async () => Object.fromEntries(((await sql`SELECT id, embedding_model AS m FROM thoughts ORDER BY id`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m]));
+  const corpus = async () => {
+    const vouched = await plant("a finished pass wrote this vector");
+    const accepted = await plant("the provider refused this; the operator accepted the failure");
+    const earlierThenAccepted = await plant("an earlier pass wrote this; the pass to the new model was refused and accepted");
+    await enqueue(EARLIER, [earlierThenAccepted]);
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${EARLIER}`;
+    await enqueue(KEY, [vouched, accepted, earlierThenAccepted]);
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${vouched}::uuid`;
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "the provider refused the content on every attempt"}
+               WHERE work_type = ${KEY} AND thought_id IN (${accepted}::uuid, ${earlierThenAccepted}::uuid)`;
+    return { vouched, accepted, earlierThenAccepted };
+  };
+  return { vec, KEY, EARLIER, plant, enqueue, labels, corpus };
+}
+
 /** The schema's shape, as a comparable string: every column, and every function signature. */
 async function shape(sql: SQL): Promise<{ columns: string; functions: string }> {
   const cols = await sql`
@@ -374,7 +412,7 @@ console.log("\n[6] Migration 023 onto a populated 022 — the legacy rows take t
   await sql.close();
 }
 
-console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one transaction, 021's backfill bracketed by the migrator, and what the re-run refuses (SMD-1193, SMD-1421)");
+console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one transaction, 021's backfill with the acceptances out of its sight, and what the re-run refuses (SMD-1193, SMD-1421)");
 {
   await dropSchema(URL_);
   // A brain adopted with --baseline: the schema as far as 020, by hand as it
@@ -405,32 +443,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plainRun.out);
   assert(plainOk, `a plain run on the baselined brain fails at 030 naming what is missing and --reapply, not with a bare error (exit ${plainRun.code})${plainOk ? "" : `:\n${plainRun.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${last}`)[0].c) === 0, "…and records nothing");
-  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
-  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
-  const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
-  // Written two hours ago, so every pass below — the earlier one an hour ago,
-  // the acceptances now — finished after the thought was written: 021's bound
-  // (updated_at <= finished_at) holds for each row, and only the rule decides.
-  const plant = async (content: string) =>
-    (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, now() - interval '2 hours') RETURNING id`)[0].id as string;
-  const vouched = await plant("a finished pass wrote this vector");
-  const accepted = await plant("the provider refused this; the operator accepted the failure");
-  const earlierThenAccepted = await plant("an earlier pass wrote this; the pass to the new model was refused and accepted");
+  const { vec, KEY, EARLIER, plant, enqueue, labels, corpus } = evidenceFixture(sql);
+  const { vouched, accepted, earlierThenAccepted } = await corpus();
   const noEvidence = await plant("nothing ever re-embedded this");
-  // The claim rows as the tool leaves them. A plain succeeded row under the
-  // model's own key. An ACCEPTED row (SMD-1067): succeeded, the caveat prefix,
-  // and the failure's own timestamps — so 021's block, run as written, labels
-  // the thought at a model whose pass never wrote its vector, and 030 must
-  // take that back. And a thought with both: an earlier pass's plain row under
-  // its key, then the acceptance under the new key — the latest row, which 021
-  // trusts and 030 excludes.
-  const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
-  await enqueue(EARLIER, [earlierThenAccepted]);
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${EARLIER}`;
-  await enqueue(KEY, [vouched, accepted, earlierThenAccepted]);
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${vouched}::uuid`;
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "the provider refused the content on every attempt"}
-             WHERE work_type = ${KEY} AND thought_id IN (${accepted}::uuid, ${earlierThenAccepted}::uuid)`;
   const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
   assert(absent.c === 0, "the schema stands at 020 — no embedding_model column — whatever the ledger says");
 
@@ -439,7 +454,6 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: statusEnv, cwd: HERE });
   const column = async () => Number((await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`)[0].c);
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
-  const labels = async () => Object.fromEntries(((await sql`SELECT id, embedding_model AS m FROM thoughts ORDER BY id`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m]));
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
            /schema_migrations records 021 as\n\s+applied \(--baseline\?\) but the schema installed is older\. Re-apply the recorded migrations with the migrator/.test(status.out) &&
@@ -478,8 +492,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // the server's own), and an own-key acceptance over a thought written after
   // the row was enqueued (021's bound is the release, 030's the enqueue), here
   // written between the claim and the release. Until SMD-1421 the run was
-  // refused on both and the operator sent to spend the acceptances; the
-  // migrator's bracket around 021 sets both back itself.
+  // refused on both and the operator sent to spend the acceptances; now the
+  // block never sees them.
   const SUFFIXED = `${KEY}:ctx`;
   const suffixedHazard = await plant("unlabelled; a backfill under a suffixed key was refused and accepted");
   await enqueue(SUFFIXED, [suffixedHazard]);
@@ -531,17 +545,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
          "…says what it ran: every file in order, the pending ones (021, the hole at 022, and 030) applied in their place, none skipped, and the operator's precondition");
   const models = await labels();
   assert(models[vouched] === OPTS.model, `a thought a finished pass vouches for is labelled from its plain succeeded row (${models[vouched]})`);
-  assert(models[accepted] === null, `a thought whose only row is the operator's acceptance ends NULL — 021's block labelled it, the bracket set it back before 030 could (${models[accepted]})`);
+  assert(models[accepted] === null, `a thought whose only row is the operator's acceptance ends NULL — 021's block never saw the acceptance (${models[accepted]})`);
   assert(models[earlierThenAccepted] === "earlier-model", `with the acceptance excluded the latest row before it decides: the earlier pass that did write the vector (${models[earlierThenAccepted]})`);
   assert(models[noEvidence] === null, "a thought no pass touched stays NULL");
-  assert(models[suffixedHazard] === null && models[writtenSince] === null, "the acceptance under a suffixed key and the own-key acceptance over a thought written since its enqueue — both labels 021's block wrote and 030 leaves — end NULL: the bracket set them back");
+  assert(models[suffixedHazard] === null && models[writtenSince] === null, "the acceptance under a suffixed key and the own-key acceptance over a thought written since its enqueue — both rows 021's block as written labels from and 030 leaves — end NULL: the block never saw them");
   const standing = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE status = 'succeeded' AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`)[0].c);
   assert((await standing()) === 4, "…and every acceptance stands, spent by nobody");
-  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 5 thought\(s\); set aside for 030's rule, which decides them at 030's line/.test(run.out),
-         "…and the run says, beside 021's line, what the bracket saw: five labels 021's block wrote, set aside for 030 — which this run reaches");
-  assert(/030_label_from_claims_excludes_accepted\.sql\s+applied\n\s+·\s+030 decided the 5 label\(s\) 021's block wrote: 4 changed:/.test(run.out) &&
-           new RegExp(`\\n\\s+${accepted}  stub-embed → unknown\\n`).test(run.out) && new RegExp(`\\n\\s+${earlierThenAccepted}  stub-embed → earlier-model\\n`).test(run.out) && !new RegExp(`\\n\\s+${vouched}  `).test(run.out),
-         "…and beside 030's line, what 030 decided: four changed, each listed with the label 021 wrote and the one 030's rule decided — not the row the two agreed on");
+  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(run.out) && !/030 decided/.test(run.out),
+         "…and the run says, beside 021's line, what the block wrote with the acceptances out of its sight: the plain row's thought and the earlier pass's, and nothing beside 030");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );
@@ -554,39 +565,26 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
            ["021", "022", "030"].every((n) => ledgerAfter.some((r) => r.name.startsWith(n))),
          "the recorded rows are not touched — every row, sha and applied_at as before — and the pending files are recorded");
 
-  // A hole at 021 ALONE, 030 recorded: nothing follows 021 to take a label
-  // back, so the bracket is the only correction, and it runs whenever 021
-  // does. Here: the `accepted` thought — NULL, its own-key acceptance
-  // standing, so 021's block labels it again — and a thought unlabelled since
-  // the upgrade whose only row is an acceptance under a suffixed key. Until
-  // SMD-1421 this run was refused on the own-key acceptance.
+  // A hole at 021 ALONE, 030 recorded: nothing follows 021, so what its block
+  // does not see it never writes. Here: the `accepted` thought — NULL, its
+  // own-key acceptance standing, which 021's block as written labels from —
+  // and a thought unlabelled since the upgrade whose only row is an acceptance
+  // under a suffixed key. Until SMD-1421 this run was refused on the own-key
+  // acceptance.
   await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const lateSuffixed = await plant("unlabelled since the upgrade; a backfill under a suffixed key was refused and accepted");
   await enqueue(SUFFIXED, [lateSuffixed]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${SUFFIXED} AND thought_id = ${lateSuffixed}::uuid`;
-  // …and a label from BEFORE 021 that 030's first statement takes back when
-  // its text runs inside the bracket: labelled at the model by a paste, with
-  // an own-key acceptance and nothing written since its enqueue. Not in the
-  // snapshot (labelled), so reported apart from what 021 wrote.
+  // …and a label from BEFORE 021 — labelled at the model by a paste of the
+  // body over an own-key acceptance, nothing written since its enqueue: 030's
+  // first statement's to take back, at 030's own run, which the plain run
+  // skips and the re-run reaches.
   const pasteMislabel = (await sql`INSERT INTO thoughts (content, metadata, embedding, embedding_model, updated_at) VALUES ('labelled at the model by a paste of 021 over an own-key acceptance', '{}'::jsonb, ${vec}::vector, ${OPTS.model}, now() - interval '2 hours') RETURNING id`)[0].id as string;
   await enqueue(KEY, [pasteMislabel]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${pasteMislabel}::uuid`;
-  // 030 edited after it was applied: the bracket would run its current text
-  // before the loop reached 030's own drift check. Refused before anything
-  // runs, in both modes; then the ledger is put back.
-  const sha030 = ledgerAfter.find((r) => r.name.startsWith("030"))!;
-  await sql`UPDATE schema_migrations SET sha256 = 'edited-after-apply' WHERE name = ${sha030.name}`;
-  const drift030 = await migrate();
-  assert(drift030.code === 1 && /refusing to apply 021_embedding_model_per_row\.sql: 030_label_from_claims_excludes_accepted\.sql \(was edited-after-apply, now [0-9a-f]{12}\) changed after being applied, and the bracket around 021 would run its current text/.test(drift030.out),
-         `a plain run with 021 pending is refused when 030 has drifted — the bracket would run its current text (exit ${drift030.code})`);
-  const drift030Dry = await migrate("--dry-run");
-  assert(drift030Dry.code === 1 && /would refuse to apply 021_embedding_model_per_row\.sql: 030_label_from_claims_excludes_accepted\.sql \(was edited-after-apply/.test(drift030Dry.out) && !/would apply/.test(drift030Dry.out),
-         `…and --dry-run says it would refuse, before it says what would apply (exit ${drift030Dry.code})`);
-  assert((await recorded021()) === 0 && (await labels())[pasteMislabel] === OPTS.model, "…and nothing was written");
-  await sql`UPDATE schema_migrations SET sha256 = ${sha030.sha256} WHERE name = ${sha030.name}`;
   // A session holding a lock on thoughts while the plain run reaches 021: the
-  // bracket takes 021's ACCESS EXCLUSIVE lock first, within 10 s, so the file
-  // fails in its own transaction rather than the snapshot waiting for ever
+  // file's own ADD COLUMN wants ACCESS EXCLUSIVE, and the run's 10 s
+  // lock_timeout fails it in its own transaction rather than waiting for ever
   // behind the holder — and nothing is written or recorded.
   const heldPlain = new SQL({ url: URL_, max: 1 });
   await heldPlain.unsafe("BEGIN");
@@ -599,30 +597,26 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert((await recorded021()) === 0 && (await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${lateSuffixed}::uuid`)[0].m === null,
          "…and 021 is not recorded, nothing labelled");
   const holeAt021 = await migrate();
-  assert(holeAt021.code === 0, `with 030 recorded and skipped, a plain run with a hole at 021 applies it bracketed (exit ${holeAt021.code})${holeAt021.code === 0 ? "" : `:\n${holeAt021.out}`}`);
+  assert(holeAt021.code === 0, `with 030 recorded and skipped, a plain run with a hole at 021 applies it ${shown(holeAt021)}`);
   assert(/021_embedding_model_per_row\.sql\s+applied/.test(holeAt021.out) && /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(holeAt021.out) &&
-           /021's evidence backfill labelled 4 thought\(s\); 030's text ran here to decide them: 4 changed:/.test(holeAt021.out) &&
-           /applying 021_embedding_model_per_row\.sql bracketed: [^\n]*\n[^\n]*Stop the server and any re-embed or extraction worker first/.test(holeAt021.out) &&
-           new RegExp(`\\n\\s+${lateSuffixed}  stub-embed → unknown\\n`).test(holeAt021.out) && !/refus/.test(holeAt021.out),
-         "…no refusal, 030 skipped as recorded, and the four labels its block wrote from acceptances decided by 030's text run inside the bracket");
-  assert(new RegExp(`…and 030's first statement re-decided 1 label\\(s\\) from before 021:\\n\\s+${pasteMislabel}  stub-embed → unknown`).test(holeAt021.out),
-         "…and the label from before 021 that 030's first statement took back is reported apart, since nothing else records it");
+           !/evidence backfill labelled/.test(holeAt021.out) && !/refus/.test(holeAt021.out),
+         "…no refusal, 030 skipped as recorded, and nothing labelled: every unlabelled thought's rows are acceptances, out of the block's sight");
   const afterHole = await labels();
-  assert(afterHole[accepted] === null && afterHole[lateSuffixed] === null && afterHole[suffixedHazard] === null && afterHole[writtenSince] === null && afterHole[pasteMislabel] === null,
-         "…the thoughts whose only evidence is an acceptance end NULL, the new one and the paste's mislabel included");
+  assert(afterHole[accepted] === null && afterHole[lateSuffixed] === null && afterHole[suffixedHazard] === null && afterHole[writtenSince] === null,
+         "…the thoughts whose only evidence is an acceptance stay NULL, the new one included");
+  assert(afterHole[pasteMislabel] === OPTS.model, "…and the paste's label from before 021 stands: 030's to take back, and 030 did not run");
   assert(afterHole[vouched] === OPTS.model && afterHole[earlierThenAccepted] === "earlier-model" && afterHole[noEvidence] === null,
          "…every other label is as the re-run left it — a labelled row is not in the snapshot");
   assert((await standing()) === 6 && (await updatedAtTriggerState(sql)) === "O" && (await recorded021()) === 1,
          "…every acceptance stands, the trigger is enabled again, and 021 is recorded");
-  // The re-run over the same corpus: 021's block labels the same rows again
-  // and the bracket sets them back again — and 022's and 025's redefinitions
-  // of upsert_thought, which the plain run of 021 alone put 021's body over,
-  // are restored (the state preflight's `atomic capture` names, with this
-  // remedy).
+  // The re-run over the same corpus: 021's block sees no acceptance and labels
+  // nothing; 030 at its own place takes the paste's label back — and 022's
+  // and 025's redefinitions of upsert_thought, which the plain run of 021
+  // alone put 021's body over, are restored (the state preflight's `atomic
+  // capture` names, with this remedy).
   const again = await migrate("--reapply");
-  assert(again.code === 0 && /021's evidence backfill labelled 5 thought\(s\); set aside for 030's rule/.test(again.out) && /030 decided the 5 label\(s\) 021's block wrote: 5 changed:/.test(again.out),
-         `a second --reapply brackets 021 the same way — the paste's thought, unknown now, in the snapshot too (exit ${again.code})`);
-  assert(JSON.stringify(await labels()) === JSON.stringify(afterHole), "…and every label is as before: the bracket is idempotent");
+  assert(again.code === 0 && !/evidence backfill labelled/.test(again.out), `a second --reapply labels nothing at 021 — the acceptances out of its sight ${shown(again)}`);
+  assert(JSON.stringify(await labels()) === JSON.stringify({ ...afterHole, [pasteMislabel]: null }), "…and 030, at its own place, takes the paste's label back; every other label as before");
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument
   // upsert_thought, and a re-run of 021 by itself would have put 021's body
@@ -762,59 +756,40 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   await sql.close();
 }
 
-console.log("\n[9] The bracket on a plain run — 030's text inside 021's transaction, the column absent, then both files pending (SMD-1421)");
+console.log("\n[9] 021 with the acceptances out of its sight on a plain run — the column absent, then both files pending (SMD-1421)");
 {
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
   const sql = new SQL({ url: URL_, max: 1 });
   const env = migratorEnv();
   const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
-  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
-  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
-  const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
-  const plant = async (content: string) =>
-    (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, now() - interval '2 hours') RETURNING id`)[0].id as string;
-  const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
-  const labels = async () => Object.fromEntries(((await sql`SELECT id, embedding_model AS m FROM thoughts ORDER BY id`) as { id: string; m: string | null }[]).map((r) => [r.id, r.m]));
-  // [7]'s three thoughts: a plain row, an acceptance alone, an earlier pass
-  // then an acceptance.
-  const vouched = await plant("a finished pass wrote this vector");
-  const accepted = await plant("the provider refused this; the operator accepted the failure");
-  const earlierThenAccepted = await plant("an earlier pass wrote this; the pass to the new model was refused and accepted");
-  await enqueue(EARLIER, [earlierThenAccepted]);
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() - interval '1 hour' WHERE work_type = ${EARLIER}`;
-  await enqueue(KEY, [vouched, accepted, earlierThenAccepted]);
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${KEY} AND thought_id = ${vouched}::uuid`;
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"}
-             WHERE work_type = ${KEY} AND thought_id IN (${accepted}::uuid, ${earlierThenAccepted}::uuid)`;
+  const { KEY, plant, enqueue, labels, corpus } = evidenceFixture(sql);
+  const { vouched, accepted, earlierThenAccepted } = await corpus();
 
   // The column absent and 030 recorded — a --baseline'd brain with a hole at
-  // 021: 030's text runs inside 021's transaction, and there is no label from
-  // before 021 to note (the fourth review pass found the note naming the
-  // column that did not exist yet).
+  // 021: the block labels from the plain rows alone.
   await migrate("--baseline");
   await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const absent = await migrate();
-  assert(absent.code === 0, `a plain run with a hole at 021 on a schema without the column applies it bracketed (exit ${absent.code})${absent.code === 0 ? "" : `:\n${absent.out}`}`);
-  assert(/021's evidence backfill labelled 3 thought\(s\); 030's text ran here to decide them: 2 changed:/.test(absent.out) && !/from before 021/.test(absent.out) && /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(absent.out),
-         "…three labelled, two decided otherwise, no label from before 021 to report, 030 skipped as recorded");
+  assert(absent.code === 0, `a plain run with a hole at 021 on a schema without the column applies it ${shown(absent)}`);
+  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(absent.out) &&
+           /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(absent.out),
+         "…two labelled — the plain row's thought and the earlier pass's — 030 skipped as recorded");
   let now = await labels();
-  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model", "…and the labels are 030's rule's");
+  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model", "…and the labels are the rule's: the acceptance-only thought unknown, the earlier pass's at its model");
 
-  // Both files pending — the ordinary upgrade, by ledger hole: 030's text runs
-  // inside 021's transaction, so no label 021 wrote commits unknown across
-  // 022–029, and again at its own place, idempotent; the report is 021's.
+  // Both files pending — the ordinary upgrade, by ledger hole — with a fresh
+  // acceptance over an unlabelled thought: nothing to label from, no line.
   await sql`DELETE FROM schema_migrations WHERE name LIKE '021%' OR name LIKE '030%'`;
   const late = await plant("unlabelled since; a pass to the model was refused and accepted");
   await enqueue(KEY, [late]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${late}::uuid`;
   const both = await migrate();
-  assert(both.code === 0, `a plain run with 021 and 030 pending applies both (exit ${both.code})${both.code === 0 ? "" : `:\n${both.out}`}`);
-  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\); 030's text ran here to decide them: 2 changed:/.test(both.out) &&
-           new RegExp(`\\n\\s+${late}  stub-embed → unknown\\n`).test(both.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied\n/.test(both.out) && !/030 decided the/.test(both.out) && !/set aside/.test(both.out),
-         "…021's labels decided in 021's transaction, 030 applied at its own place with nothing to report there");
+  assert(both.code === 0, `a plain run with 021 and 030 pending applies both ${shown(both)}`);
+  assert(/021_embedding_model_per_row\.sql\s+applied\n/.test(both.out) && !/evidence backfill labelled/.test(both.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied\n/.test(both.out),
+         "…021 labels nothing — the one unlabelled thought's row is an acceptance, out of its sight — and 030 applies at its own place");
   now = await labels();
-  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model" && now[late] === null, "…and every label is 030's rule's, the new acceptance's thought unknown");
+  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model" && now[late] === null, "…and every label is as before, the new acceptance's thought unknown");
   assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
   await sql.close();
 }

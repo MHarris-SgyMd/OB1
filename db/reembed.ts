@@ -299,12 +299,12 @@
  * does the same to an accepted row whose thought is unlabelled, and a paste of
  * the file alone did, for anyone who followed the remedy this tool printed
  * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
- * re-runs every recorded migration in one transaction, and brackets 021's
- * block whenever it runs: the labels the block writes are set aside and 030's
- * text decides them again, so a label from an acceptance alone never leaves
- * the transaction, 030 following in the run or not (SMD-1421) — and migration
- * 030 carries the corrected rule, applied once to every brain at upgrade and
- * run again inside that bracket: a label whose only evidence is an acceptance
+ * re-runs every recorded migration in one transaction, and runs 021's block
+ * with the acceptances out of its sight: a copy of the claim table without
+ * them shadows the real one for that file, so the block labels from the
+ * latest row that is not an acceptance, or not at all (SMD-1421) — and
+ * migration 030 carries the corrected rule, applied once to every brain at
+ * upgrade: a label whose only evidence is an acceptance
  * under the model's own key goes back to unknown, and the evidence rule labels
  * with accepted rows excluded, so the latest succeeded row BEFORE an
  * acceptance decides. Any successor that labels from claim rows carries the
@@ -667,7 +667,7 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? `schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and brackets 021's backfill so a label it writes from an\n  operator's acceptance alone goes back to unknown (a paste of 021's body alone leaves it labelled at that key's model).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
+      ? `schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
 /**
  * What a run would refuse on, in the order a run judges them — the job, the

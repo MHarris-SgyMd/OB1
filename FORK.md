@@ -6191,28 +6191,26 @@ every case either rule had was a cell the gate had to enumerate by hand. The
 sixth and seventh passes proposed the same higher altitude: the migrator holds
 the one fact 030, hashed and applied, cannot — the labels *before* 021's replay.
 
-**What this does.** One helper, `applyBracketed`, runs every file, and around
-021 brackets its block. It takes 021's lock on `thoughts` first, then the
-claim table's against writers; the ids of the thoughts unlabelled before the
-file that have a claim row 021 could label from — every such id with a vector,
-where the column does not yet exist — go into a temp table on the migrator's
-connection (`ON COMMIT DROP`, analysed); the file runs; the snapshot rows now
-labelled are what 021 wrote, and they are set aside — back to NULL, the
-`updated_at` trigger held as 021 holds it — for **030's own substituted text**
-to decide: its second statement labels them again by its rule, the latest row
-that is not an acceptance, or leaves them unknown. One spelling of the rule,
-030's, and the migrator adds none. On a plain run 030's text runs inside 021's
-transaction, so no label 021 wrote commits unknown across 022–029 (where 030
-is pending it runs again at its own place, idempotent, once in a brain's life;
-where the ledger records it, this is the only time), and the labels from
-before 021 that its first statement could re-decide — labelled, with an
-acceptance under the model's own key — are noted first and reported apart. On
-the re-run, one transaction, the labels wait for 030's own place, and the
-helper, called for 030, reads the delta from the temp table it finds. The
-snapshot can neither predate nor outlive what it brackets, and the correction
-is the migrator's, not 030's. The run says how many thoughts 021 labelled, how
-many 030's rule decided otherwise, and lists every such row with both labels —
-nothing else records them.
+**What this does.** One helper, `applyShadowed`, runs every file, and runs
+021 with the operator's acceptances out of its sight. Before the file, a temp
+table named `thought_work_claims` is created from the real one without the
+accepted rows — `ACCEPTED_CLAIM_SQL`, the predicate 030's evidence rows carry,
+spelled once. An unqualified name resolves in `pg_temp` before any schema on
+the search path, and 021's block is a `DO` block, resolved when it runs, so it
+reads the copy and labels from the latest row that is *not* an acceptance, or
+not at all: 030's rule, by 021's own text, with no second spelling and nothing
+wrong ever written. The copy is dropped right after the file in the same
+transaction, so 022 onward read the real table. `pg_temp` is searched first
+for relations exactly when the path does *not* list it — listed first, it is
+also where `CREATE` puts things, functions included — so a role's path that
+lists it has it removed for the transaction, the path is otherwise left alone,
+and that the name resolves to the copy is checked before the file runs.
+Creation targets are then unaffected. The copy takes ACCESS SHARE on the claim table, as 021's
+block did, and nothing on `thoughts` before 021's own ADD COLUMN: no lock the
+file alone never took. The run says beside 021's line how many thoughts the
+block labelled. Judged before any SQL, both modes: the role may create a temp
+table. The loader refuses two files sharing a number, since the file is named
+whole.
 
 **What went.** The hazards query, both arms of the way back, the `has_edit`
 and signature probe, the claim-table probe, the "030 recorded" branch, the
@@ -6227,16 +6225,27 @@ at 021 with 030 recorded — the three cases change 56 refused — end with the
 thought unknown and the acceptance standing. `reembed.ts`'s ledgered remedy and
 `db/README.md` §5 say so.
 
-**Why a snapshot and not a fourth rule.** 021 writes only rows that were NULL,
-so "what 021 wrote" is exactly "the snapshot rows now labelled", and 030's rule
-over those rows is 021's rule minus accepted rows — every case the gate
-enumerated, and the ones it missed, fall out of one UPDATE. The ticket's own
-sketch kept a label whenever *any* non-accepted row at that model supported it
-under the bound; that keeps a wrong label where a real pass at another model
-wrote the vector later and the acceptance came after (plain rows at M then E,
-then an acceptance at M: 021 writes M, the sketch keeps it, E is right).
-Setting the snapshot rows to the latest non-accepted row's model, as 030 does,
-has no such case and costs the same statement.
+**Why the input and not the output.** Four review passes bracketed 021's
+*output* instead — a snapshot of the unlabelled ids before the file, a
+set-back under a held trigger after it, and 030's rule applied to the rows set
+back: first as a copied constant, then as 030's own text run inline, then
+deferred to 030's own place, then inline on plain runs only — and each pass
+found a seam in the bracket: the lock upgrade from the snapshot's read to the
+file's ALTER; the claim row committed between snapshot and block; 030's
+current text run past its drift check; a `WHERE false` that still named an
+absent column; an early return that skipped 030's first statement; a SHARE
+lock that needed UPDATE where the file needed SELECT. The fifth pass proposed
+the shadow and verified it against 021's actual block on a throwaway Postgres:
+nothing to set back, nothing to report but a count, no lock the file did not
+take, no second code path. What it costs: a tie on `finished_at` between two
+plain rows is 021's unnamed pick rather than 030's `work_type` tie-break, and a
+label from before 021 that 030's first statement would take back — a paste of
+the body over an acceptance — waits for 030's own run, which on a hole at 021
+alone is the re-run. The ticket's sketch, which kept a label whenever *any*
+non-accepted row at that model supported it, is wrong in one shape (plain rows
+at M then E, then an acceptance at M: 021 writes M from the acceptance, the
+sketch keeps it, E is right); the shadow has no such case, since 021 reads the
+latest non-accepted row.
 
 **Review, first pass (high), triaged.** The snapshot's read took ACCESS SHARE
 on `thoughts` before 021's ADD COLUMN asked for ACCESS EXCLUSIVE — a lock
@@ -6343,6 +6352,32 @@ acceptance, the only rows 030's first statement can change. [9] is new: the
 plain run with the column absent, then with both files pending — the ordinary
 upgrade path, which no test had run through the bracket.
 
+**Review, fifth pass (high), at the user's call, triaged.** The fourth pass's
+`wrote === 0` early return sat before the inline run of 030's text, so the
+labels from before 021 it promised to re-decide were re-decided only when 021
+had labelled something else — and the same return left an empty temp table
+for the re-run's 030 to report "decided 0 labels" from. `LOCK TABLE … IN SHARE
+MODE` needs UPDATE on the claim table where 021's block needed SELECT: a
+read-only migrator role would have failed 021 with a bare 42501. The pre-021
+note was itemised on a plain run and swallowed on the re-run. A deadlock's
+victim is whichever waiter's timer fires first — the worker, most likely — so
+the 40P01 line held for one of two victims. The per-row list had lost its
+cap. Every one of these was the bracket's, and the reviewer proposed the
+altitude above them, verified: shadow the claim table for 021's block with a
+copy that carries no acceptance. Taken — the bracket, its types, its report,
+its three temp tables, the claim-table lock, the plain-run note, the 030-drift
+pre-check and the both-files check are gone; kept are the TEMP refusal (the
+copy needs it), the loader's duplicate-number refusal, `LOCK_TIMEOUT_S`, one
+list of refusals, the lock messages, a deadlock line that names no order.
+`ACCEPTED_CLAIM_SQL` is the acceptance predicate spelled once, for 030's
+evidence rows and the copy alike. [7] and [9] share one fixture and one
+exit-tail helper; [7]'s 030-drift case went with the pre-check. Running the
+suite found one more: named *first* in the search path, `pg_temp` is also
+where `CREATE` puts things, functions included, and 021's `update_thought`
+landed there and vanished with the transaction — so the path is left alone,
+or stripped of `pg_temp` where a role lists it, and the shadow is checked
+rather than arranged.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6354,31 +6389,30 @@ literal change 56 left is now spelled twice.
 Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
 acceptance over a thought written since its enqueue *before* the re-run, and
 asserts the run goes with no refusal, the six labels (`stub-embed`, NULL,
-`earlier-model`, NULL, NULL, NULL), every acceptance standing, and the report
-— five labelled and set aside beside 021, four changed beside 030 where the
-re-run decides them, each changed row listed with both labels and the agreed
-row absent; that an exclusive lock on `ob1_config` fails the
-checks before the run within their own timeout; then deletes 021's ledger row
-with 030 recorded, plants a fifth acceptance under a suffixed key, and asserts
-a held lock on `thoughts` fails the plain run's 021 within the run's 10 s
-with nothing recorded, that a drifted 030 refuses the plain run before anything
-runs (dry run too), that the plain run then applies 021 bracketed — exit 0,
-030 skipped as recorded yet its text run inside the bracket, four labelled and
-four changed, a paste's mislabel from before 021 taken back by 030's first
-statement and reported apart, every other label as the re-run left it, 021
-recorded, the trigger enabled — and that a second `--reapply` over the same
-corpus sets five aside and 030 changes five, every label as before. [9] builds
-a brain through 020 with [7]'s three thoughts, baselines it, opens a hole at
-021 and asserts the plain run applies 021 bracketed with the column absent —
-three labelled, two decided otherwise, nothing from before 021 to report —
-then opens holes at 021 and 030 both and asserts the ordinary upgrade decides
-021's labels inside 021's transaction, applies 030 at its place with nothing
-to report there, and leaves 030's rule's labels. The hazard refusals went
-with the gate; the rest of [7] and all of [8] are unchanged. Not exercised:
-the TEMP refusal (a superuser holds the privilege whatever is revoked), the
-loader's duplicate-number refusal, the 40P01 line. `test-upgrade` 123/123,
-`test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
-clean, fork checker PASS. Upstream status: **not applicable** — the
+`earlier-model`, NULL, NULL, NULL), every acceptance standing, and the line
+beside 021 — two thoughts labelled, the acceptances out of its sight, nothing
+beside 030; that an exclusive lock on `ob1_config` fails the checks before the
+run within their own timeout; then deletes 021's ledger row with 030 recorded,
+plants a fifth acceptance under a suffixed key and a paste's mislabel from
+before 021 over an own-key acceptance, and asserts a held lock on `thoughts`
+fails the plain run's 021 within the run's 10 s with nothing recorded, that
+the plain run then applies 021 — exit 0, 030 skipped as recorded, nothing
+labelled since every unlabelled thought's rows are acceptances, the paste's
+label standing since 030 did not run, every other label as the re-run left it,
+021 recorded, the trigger enabled — and that a second `--reapply` labels
+nothing at 021 while 030 at its own place takes the paste's label back. [9]
+builds a brain through 020 with the same fixture, baselines it, opens a hole at
+021 and asserts the plain run applies 021 with the column absent — two
+labelled, the acceptance-only thought unknown — then opens holes at 021 and
+030 both, plants a fresh acceptance over an unlabelled thought, and asserts
+the ordinary upgrade applies both, labels nothing new, and leaves the rule's
+labels. The hazard refusals went with the gate; the rest of [7] and all of
+[8] are unchanged. Not exercised: the TEMP refusal (a superuser holds the
+privilege whatever is revoked), the loader's duplicate-number refusal, the
+40P01 line, and the shadow refusal (the copy always shadows on the test role's
+path). `test-upgrade` 119/119, `test-schema` 644/644,
+`test-preflight` 174/174, `test-live` 419/419, `tsc` clean, fork checker PASS.
+Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).
 
 ## Detached from the fork network

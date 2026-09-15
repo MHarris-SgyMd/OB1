@@ -195,7 +195,9 @@ export const ACCEPTED_BY_MODEL_SQL: string;
 /** 021's claim-key grammar as a Postgres regex (the model up to the last "@"), and the model's OWN key — the canonical spelling, no suffix. */
 export const REEMBED_KEY_MODEL_SQL_RE: string;
 export const REEMBED_OWN_KEY_SQL_RE: string;
-/** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 reads and migrate.ts's bracket around 021 bounds its snapshot by. Substituted into 030: changing it is a data migration. Needs 015. */
+/** Whether claim row `c` is the operator's acceptance — the predicate CLAIM_EVIDENCE_ROWS_SQL carries and migrate.ts shadows 021's backfill by (SMD-1421). */
+export const ACCEPTED_CLAIM_SQL: string;
+/** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 reads. Substituted into 030: changing it is a data migration. Needs 015. */
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
 /** The migrator's re-run, as every remedy that names it prints it. */
 export const REAPPLY_COMMAND: string;
