@@ -62,12 +62,12 @@ curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent
 
 The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it:
 
-> Two extensions deploy this way today: **Family Calendar** and **Job Hunt**. The other four import this repository's SQL shim (`compat/supabase-sql`, which runs on Bun) and are run from a checkout of this repository rather than deployed as Edge Functions — see `FORK.md`, fix 13.
-
 ```bash
 mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
+
+> **Two extensions deploy this way today: Family Calendar and Job Hunt.** The other four import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so as they stand they neither bundle as an Edge Function nor run under Bun — SMD-1480 holds the fix; `extensions/test-auth.ts` exercises their access-key behaviour under a stand-in for Deno. Their READMEs say the same above their deployment tables.
 
 🟦 **Windows (PowerShell):**
 
@@ -148,18 +148,22 @@ Save this in your credential tracker, then follow the [Remote MCP Connection](..
 
 ## Updating a Deployed Function
 
-When the extension code is updated in the repo, pull the latest version and redeploy:
+When the extension code is updated in the repo, pull the latest version of all three files — the server, its pins, and the shared access-key module (a server may start using something the module gained) — and redeploy:
 
 🟩 **Mac/Linux:**
 
 ```bash
 curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts
+curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
+curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
 🟦 **Windows (PowerShell):**
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/index.ts -OutFile supabase\functions\FUNCTION_NAME\index.ts
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
 ```
 
 Then deploy:
@@ -193,9 +197,9 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2)
+- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1) — not deployable as it stands (SMD-1480)
+- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2) — not deployable as it stands (SMD-1480)
 - [Family Calendar](../../extensions/family-calendar/) (Extension 3)
-- [Meal Planning](../../extensions/meal-planning/) (Extension 4)
-- [Professional CRM](../../extensions/professional-crm/) (Extension 5)
+- [Meal Planning](../../extensions/meal-planning/) (Extension 4) — not deployable as it stands (SMD-1480)
+- [Professional CRM](../../extensions/professional-crm/) (Extension 5) — not deployable as it stands (SMD-1480)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

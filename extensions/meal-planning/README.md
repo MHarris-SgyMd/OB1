@@ -126,6 +126,8 @@ supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
 
 ### 3. Deploy the Primary MCP Server
 
+> **Not deployable as it stands.** Both of this extension's servers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`.
+
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
 
 | Setting | Value |
@@ -185,6 +187,8 @@ WHERE email = 'spouse@example.com';
 For this guide, we'll use Option B (shared service account).
 
 ### 2. Deploy the Shared Edge Function
+
+> Not deployable as it stands either — see the note above the primary server's table (SMD-1480).
 
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide with these differences:
 

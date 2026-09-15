@@ -204,9 +204,15 @@ console.log("\n[where the key may travel]");
 
 /** Stored functions a tool may call and still be a read; any other `.rpc(` is a write. */
 const RPC_READS = ["crm_search_contacts_fts"];
-/** Whether a tool body (or its handler) writes: a table verb, or an RPC not known to read. */
+/** Whether a tool body (or its handler) writes: a table verb, or an RPC not named by a literal in RPC_READS (a variable name is a write). */
 const writes = (reach: string) => /\.(insert|update|upsert|delete)\(/.test(reach)
-  || [...reach.matchAll(/\.rpc\(\s*"([^"]+)"/g)].some((m) => !RPC_READS.includes(m[1]));
+  || [...reach.matchAll(/\.rpc\(\s*(?:(["'`])([^"'`]+)\1)?/g)].some((m) => !m[2] || !RPC_READS.includes(m[2]));
+/** A tool's registration block, from `server.tool(` naming it to its closing `);` — not the first place its name is quoted. */
+const blockOf = (text: string, name: string) => {
+  const at = text.indexOf(`server.tool(\n    "${name}"`);
+  assert(at >= 0, `…${name} is registered as server.tool(\\n    "${name}"`);
+  return text.slice(at, text.indexOf("\n  );", at));
+};
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -217,13 +223,13 @@ for (const s of SERVERS) {
     `${s.file}: every registered tool is classified above (${registered.length})`);
   assert(gated.join() === [...s.writes].sort().join(), `…and exactly the writes are gated (${gated.length})`);
   for (const w of s.writes) {
-    const body = text.slice(text.indexOf(`"${w}"`), text.indexOf("\n  );", text.indexOf(`"${w}"`)));
+    const body = blockOf(text, w);
     const handler = body.match(/handle\w+/)?.[0];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
     assert(writes(reach), `…${w} does write (its body or handler inserts, updates, upserts, deletes, or calls an RPC not listed as a read)`);
   }
   for (const r of s.reads) {
-    const body = text.slice(text.indexOf(`"${r}"`), text.indexOf("\n  );", text.indexOf(`"${r}"`)));
+    const body = blockOf(text, r);
     const handler = body.match(/handle\w+/)?.[0];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
     assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);

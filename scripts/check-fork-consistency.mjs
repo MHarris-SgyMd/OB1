@@ -716,11 +716,16 @@ function checkCoreFunctions() {
 // compare guards its lengths first), a call or an index on it, `typeof`, or a
 // literal on the other side — nullish or empty (`if (KEY === undefined)` is a
 // presence check) or a string (`if (KEY === "your-key-here")` is a placeholder
-// check, a different smell). A name re-declared between its binding and a
-// compare — a loop variable, a parameter, a destructure, a catch clause — is
-// another variable, and that compare is not flagged; `key`, `token` and
-// `secret` are common names, and a whole-file rule that did not say so would
-// fail an ordinary loop. Outside the rule, and said so: `.includes`,
+// check, a different smell). A name declared again — a loop variable, a
+// parameter, a destructure, a catch clause — between the nearest preceding
+// binding of that name from the environment and a compare, while the block
+// that declaration opened is still open (brace depth from the declaration to
+// the compare never drops below where it started), is another variable, and
+// that compare is not flagged; `key`, `token` and `secret` are common names,
+// and a whole-file rule that did not say so would fail an ordinary loop. A
+// declaration whose block has closed, one in another function above, or one
+// that precedes the binding, governs nothing: the third review pass showed
+// each of those silencing a real compare. Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
 // an object property, a helper that returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable — each a
@@ -742,7 +747,23 @@ const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
 /** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare. */
 const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*[.(\[?]))`;
 /** Where `N` is declared again — a loop variable, a parameter, a destructure, a catch clause — so a later use is another variable. */
-const redeclared = (N) => new RegExp(String.raw`\b(?:const|let|var)\s+(?:\[[^\]\n]*\b)?${N}\b|\bcatch\s*\(\s*${N}\b|\bfunction\b[^(\n]*\([^)\n]*\b${N}\b[^)\n]*\)|\(([^()\n]*)\)\s*(?::[^=\n]*)?=>|(?<![\w$.])${N}\s*=>`, "g");
+const redeclared = (N) => new RegExp(String.raw`\b(?:const|let|var)\s+(?:[\[{][^\]}\n]*\b${N}\b[^\]}\n]*[\]}]|${N}\b)|\bcatch\s*\(\s*${N}\b\s*\)?|\bfunction\b[^(\n]*\([^)\n]*\b${N}\b[^)\n]*\)|\(([^()\n]*)\)\s*(?::[^=\n]*)?=>|(?<![\w$.])${N}\s*=>`, "g");
+/**
+ * Whether a declaration ending at `from` still scopes position `to`: walking the
+ * braces between them, the block enclosing the declaration has not closed
+ * (depth never below 0), and a block that opened after it — a function body, a
+ * loop body — has not closed again (depth back to 0 after being above it). A
+ * braceless form (`for (…) if (…)`, `(x) => x === y`) scopes what follows it.
+ */
+function scopeOpen(text, from, to) {
+  let depth = 0, opened = false;
+  for (let i = from; i < to; i++) {
+    const ch = text[i];
+    if (ch === "{") { depth++; opened = true; }
+    else if (ch === "}" && (--depth < 0 || (opened && depth === 0))) return false;
+  }
+  return true;
+}
 const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
 
 /**
@@ -751,18 +772,21 @@ const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
  * text first, so a compare may sit above or below the read it compares.
  */
 function credentialComparesIn(text) {
-  const names = new Set();
+  /** name → positions of the name in each statement that binds it from a credential read. */
+  const names = new Map();
+  const bind = (name, at) => names.set(name, [...(names.get(name) ?? []), at]);
   // `x = <anything on the statement containing a credential read>` — `=`, `??=`
   // and `||=`, a type annotation before it, a wrapper (`String(…)`, `(… ?? "")`,
   // `.trim()`) around the read.
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])[^;\n]*?${ENV_READ}`, "g"))) {
-    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
+    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) bind(m[1], m.index);
   }
   // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
   for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env)\b/g)) {
     for (const part of m[1].split(",")) {
       const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
-      if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
+      const name = local || envName;
+      if (envName && CREDENTIAL_ENV_NAME.test(envName)) bind(name, m.index + m[0].indexOf(name));
     }
   }
   const lines = new Set();
@@ -770,20 +794,27 @@ function credentialComparesIn(text) {
   const flag = (re, keep = () => true) => {
     for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
   };
-  /** Positions of `N` where it is declared again; an arrow's parameter list counts only if it names N. */
-  const shadowsOf = (N) => [...text.matchAll(redeclared(N))]
+  /** Spans where `N` is declared again, its own credential bindings excepted; an arrow's parameter list counts only if it names N. */
+  const shadowsOf = (N, bindings) => [...text.matchAll(redeclared(N))]
     .filter((m) => m[1] === undefined || new RegExp(String.raw`(?<![\w$.])${N}\b`).test(m[1]))
-    .map((m) => m.index + m[0].search(new RegExp(String.raw`(?<![\w$.])${N}\b`)));
-  /** True when N is declared again between its binding and position `at` — that use is another variable. */
+    .map((m) => ({ start: m.index, end: m.index + m[0].length }))
+    .filter((r) => !bindings.some((b) => b >= r.start && b <= r.end));
+  /**
+   * True when a use of N at `at` is another variable: N is declared again between
+   * the nearest credential binding before `at` and `at`, and the block that
+   * declaration opened is still open at `at`. A compare textually before every
+   * binding (a function hoisted above the const) is the credential's.
+   */
   const shadowed = (N, at) => {
-    const binding = text.search(new RegExp(String.raw`(?<![\w$.])${N}\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])`));
-    const [lo, hi] = binding < at ? [binding, at] : [at, binding];
-    return shadowsOf(N).some((r) => r > lo && r < hi && r !== binding);
+    const bindings = names.get(N) ?? [];
+    const binding = Math.max(...bindings.filter((b) => b < at));
+    if (!Number.isFinite(binding)) return false;
+    return shadowsOf(N, bindings).some((r) => r.start > binding && r.end <= at && scopeOpen(text, r.end, at));
   };
   const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
   flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
   flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
-  for (const name of names) {
+  for (const name of names.keys()) {
     const N = name.replace(/\$/g, "\\$");
     const own = (m) => !shadowed(N, m.index);
     // The credential on the right: `key !== expected`, `!== expected.trim()`, `!== String(expected)`, `!== (expected ?? "")`
@@ -834,6 +865,15 @@ const CREDENTIAL_COMPARE_PROBES = [
   'if (import.meta.env.VITE_API_KEY === presented) {',
   'const expected = Deno.env.get("MCP_ACCESS_KEY_V2");\nif (key !== expected) {',
   'const token = process.env.API_TOKEN;\nif (presented === token) ok();\nfor (const token of list) use(token);',
+  // What the third review pass found the shadow rule silencing: a declaration
+  // whose block has closed, one in another function, one before the binding,
+  // and a second binding of the same name.
+  'const token = process.env.BOT_TOKEN;\nfunction lens() { return tokens.map((token) => token.length); }\nif (presented === token) ok();',
+  'const secret = Deno.env.get("WEBHOOK_SECRET");\nfunction other() { for (const secret of list) use(secret); }\nif (body.secret !== secret) deny();',
+  'const key = Deno.env.get("MCP_ACCESS_KEY");\nfunction lookup(key) { return map.get(key); }\nif (c.req.query("key") !== key) deny();',
+  'const token = process.env.API_TOKEN;\nfor (const token of tokens) { use(token); }\nif (presented === token) ok();',
+  'function a() { let expected = 0; return expected; }\nconst expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected) deny();',
+  'app.post("/mcp", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });\napp.post("/sse", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -862,6 +902,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nObject.entries(o).forEach(([key, v]) => { if (key === id) use(v); });',
   'const key = process.env.API_KEY;\nconst hit = list.some((key) => key === wanted);',
   'const secret = process.env.WEBHOOK_SECRET;\ntry { go(); } catch (secret) { if (secret === null) retry(); }',
+  'const key = process.env.API_KEY;\nfor (const { key } of rows) { if (key === wanted) hit(); }',
 ];
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry
@@ -890,7 +931,11 @@ const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
 function checkCredentialCompares() {
   const SELF = "scripts/check-fork-consistency.mjs";
   for (const probe of CREDENTIAL_COMPARE_PROBES) {
-    if (credentialComparesIn(probe).length === 0) fail(SELF, `credential-compare rule no longer catches its probe: ${JSON.stringify(probe)}`);
+    // Every line of a probe that carries a compare must be caught — a probe with
+    // two routes is two compares, and the second binding is not a shadow of the first.
+    const expected = probe.split("\n").map((l, i) => (/(?:!==|===|!=|==)/.test(l) ? i + 1 : 0)).filter(Boolean);
+    const got = credentialComparesIn(probe);
+    if (expected.some((l) => !got.includes(l))) fail(SELF, `credential-compare rule no longer catches its probe (lines ${expected.join(",")}, caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
   }
   for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);

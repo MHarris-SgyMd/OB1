@@ -7312,7 +7312,7 @@ the nine checks `main`'s ruleset requires, so a red run blocks a merge; a job
 of its own, as the first version had, would not have — and the `deno check`
 job now also checks the two extensions Deno can resolve (`family-calendar`
 and `job-hunt`, still on supabase-js) as deployed, through
-`../_shared/auth.ts`. 198 assertions.
+`../_shared/auth.ts`. 243 assertions.
 
 **Check 8 holds the line.** `scripts/check-fork-consistency.mjs` gains the
 third rule under "Vendored content" above: a value read from the environment
@@ -7326,25 +7326,32 @@ expected = Deno.env.get(…)`, `const KEY = String(process.env.KEY ?? "").trim()
 expected } = process.env`, Python's `os.environ`), the bound name bare or
 wrapped (`expected.trim()`, `String(expected)`, `(expected ?? "")`), the read
 spelled `Deno.env.get`, `process.env`, `Bun.env`, Hono's `c.env`,
-`import.meta.env`, a bare `env(…)` or `os.environ` — in every non-binary,
+`import.meta.env`, a bare `env(…)`/`env.X` or `os.environ` — in every non-binary,
 non-ignored file under the seven category
 directories and `docs/`, prose included, since a README's code block is what
 the next extension is copied from. Not a compare of the credential: `.length`
 (a timing-safe compare guards its lengths first), a call or an index on it,
 `typeof`, or a literal on the other side — nullish or empty (`if (KEY ===
 undefined)` is a presence check) or a string (`if (KEY === "your-key-here")` is
-a placeholder check, a different smell). A name declared again between its
-binding and a compare — a loop variable, a parameter, a destructure, a catch
-clause — is another variable and that compare is not flagged: `key`, `token`
-and `secret` are common names, and the vendored tree binds each of them from
-the environment somewhere, so a whole-file rule without this would fail the
-next ordinary loop an upstream rebase adds. Outside the rule, and the header
+a placeholder check, a different smell). A name declared again — a loop
+variable, a parameter, a destructure, a catch clause — between the nearest
+preceding credential binding of that name and a compare, while the block that
+declaration opened is still open, is another variable and that compare is not
+flagged: `key`, `token` and `secret` are common names, and the vendored tree
+binds each of them from the environment somewhere, so a whole-file rule
+without this would fail the next ordinary loop an upstream rebase adds. A
+declaration whose block has closed, one in another function, one before the
+binding, or a second binding of the same name governs nothing — the third
+pass showed each silencing a real compare under the second pass's rule, which
+took any redeclaration anywhere between the file's first `N =` and the compare.
+Outside the rule, and the header
 says so: `.includes`, `Object.is`, `switch`, `.localeCompare`, a compare
 through a class field or an object property, a helper that returns the key,
 several declarators on one statement, a read through `Deno.env.toObject()`
-into a variable. Thirty-two probes the rule must catch and twenty-four it must
-not run on every invocation, through the same function the scan uses. Its
-first run found the
+into a variable. Thirty-eight probes the rule must catch — every line of a
+probe that carries a compare, so a two-route probe is two catches — and
+twenty-five it must not run on every invocation, through the same function
+the scan uses. Its first run found the
 mechanism in **seventeen
 more vendored files** — ten MCP servers with the extensions' exact shape
 (`ob-graph`, `work-operating-model-activation`, `delete-thought-mcp`,
@@ -7375,13 +7382,17 @@ upstream. The deploy primitive still downloads `index.ts` from upstream's
 pointed there too, where the file does not exist (a 404 body would have been
 written over the module, and the `index.ts` fetched beside it was upstream's,
 reading a secret Step 3 now tells the user not to set). The primitive
-downloads from this fork's `main` now, all eight URLs, and says which two
-extensions deploy by it: `family-calendar` and `job-hunt`, still on
-supabase-js. The other four import the SQL shim, which imports `bun`, and run
-from a checkout — fix 13's consequence, which the primitive now states rather
-than leaving a reader to discover at `deno check`. The module is a `_shared/`
-copy the recipe downloads, not an import across the tree the bundle cannot
-follow, so those two stay deployable.
+downloads from this fork's `main` now, all twelve URLs — the update section
+refetches the pins and the shared module beside the server, since a server
+may start using something the module gained — and says which two extensions
+deploy by it: `family-calendar` and `job-hunt`, still on supabase-js. The
+other four import the SQL shim, which imports `bun`, while still reading
+`Deno.env`: as they stand they neither bundle as an Edge Function nor run
+under Bun, which is fix 13's consequence and now SMD-1480's ticket; the
+primitive's list, its Step 2 and the five READMEs' deployment tables say so
+rather than leaving a reader to discover it at `supabase functions deploy`.
+The module is a `_shared/` copy the recipe downloads, not an import across the
+tree the bundle cannot follow, so those two stay deployable.
 `server/index.ts`, upstream's Edge Function, keeps its own compare: it is
 outside the seven directories, outside the vendored-tree standard, and the
 fork's hardened server is `server-portable/`.
@@ -7418,7 +7429,8 @@ file-wide, so an upstream rebase adding `for (const token of tokens)` to a file
 that reads `GITHUB_TOKEN` would have failed CI with a message about a
 credential compare — a name declared again between binding and compare is
 another variable now, with the three shadow shapes as non-probes and a
-compare-before-shadow as a probe. The same pass probed wrappers the rule
+compare-before-shadow as a probe (the third pass then found that rule too
+broad — below). The same pass probed wrappers the rule
 accepted on an inline read but not on a bound name (`expected.trim()`,
 `String(expected)`, `(expected ?? "")`), template quotes in the read,
 `import.meta.env`, and a suffixed name (`MCP_ACCESS_KEY_V2`) — all caught now;
@@ -7441,22 +7453,58 @@ both forms set; `?key=` decoding unchanged from Hono's `query()`; all
 twenty-four writes gated and every read free of writes; env isolation between
 the six and the shared server; `.gitignore`, the lockfile and `--frozen-lockfile`.
 
-**Not done here.** SMD-1455 holds the seventeen excepted files. Five of the
-extensions cannot be type-checked under Deno from this tree — they import the
-shim, which imports `bun` — so CI's `deno check` covers `server/index.ts` and
-the two extensions on supabase-js; the runtime test is what exercises all
-seven. The three vendored files that already compare timing-safe on their own
+**Review, third pass** (triaged; ten findings, all taken, one ticket filed).
+Main had moved — SMD-1226 landed as change 62 — so this section is 63 after a
+merge, and the number is spelled in fourteen places outside this file (the
+seven server headers, both copies of the auth module — byte identity held —
+the checker, the test, the test's `package.json`). The second pass's shadow
+rule silenced real compares: it took any redeclaration anywhere between the
+file's *first* `N =` and the compare, so an arrow parameter in another
+function, a loop whose block had closed, a `let` above the credential binding
+and a second binding of the same name in a second route each hid the
+extensions' exact original shape. Bindings are recorded by position now, the
+nearest preceding one governs, a second binding is a binding and not a shadow,
+and a shadow governs only while its block is open (brace depth from the
+declaration to the compare never drops below its start) — six probes for the
+misses, one non-probe for an object destructure in a loop, and the probe
+check asks that every compare line be caught rather than any. The deploy
+primitive contradicted itself and five READMEs: its list and their tables
+still sent a reader to deploy servers that import `bun`, and "run from a
+checkout" described nothing that works — SMD-1480 filed; callouts above each
+table and in the primitive's list. Its update section refetched `index.ts`
+alone, so a module change or a pin bump never reached a deployed function —
+it fetches all three now. The CI `deno check` of the two extensions had never
+run anywhere: Deno 2.9.6 turned out reachable through the npm launcher under
+Bun (`bun ~/.bun/install/global/node_modules/deno/bin.cjs`), and both files
+check clean as CI runs them. The test's write detector saw only a
+double-quoted `.rpc("…")`; any `.rpc(` is a write now unless its literal is in
+`RPC_READS`, and a tool's block is sliced from its registration rather than
+the first place its name is quoted. Prose: the Step 2 callout split a sentence
+from its code block; "a destructure" as a shadow shape covered only array
+destructures (object ones count now); `server-portable/README.md`'s
+configuration block named only the legacy secret; FORK and the header
+disagreed on `env.X`. Verified sound by the pass and not reported: the copy
+byte-identical; `?key=` surviving the rebuilt request in all six; the shared
+server's env isolation; job-hunt's handler slicing; the workflow's step order.
+
+**Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
+five extensions that import the shim and read `Deno.env`, which as they stand
+neither deploy nor run — CI's `deno check` covers `server/index.ts` and the two
+extensions on supabase-js, and the runtime test is what exercises all seven.
+The three vendored files that already compare timing-safe on their own
 (`integrations/rest-api` by a hand-rolled XOR loop, `enhanced-mcp` by
 `crypto.subtle.timingSafeEqual` with that loop as its fallback,
 `recipes/vercel-neon-telegram/src/lib/auth.ts` by `node:crypto`'s) are neither
 hits nor consumers of the module.
 
-Verified: `extensions/test-auth.ts` 198/198; `server-portable/test-auth.ts`
+Verified: `extensions/test-auth.ts` 243/243; `server-portable/test-auth.ts`
 59/59 and `test-server.ts` 73/73 with `index.ts` reading through
 `authenticateRequest`; `tsc` clean; the Cloudflare Workers dry-run builds with
 the `node:buffer` import; fork checker PASS with check 8's probes, widened,
-and the seventeen counted exceptions unchanged. Not run here: the CI `deno
-check` of the two supabase-js extensions (no working Deno on this machine). Upstream status: **not applicable** — the auth
+and the seventeen counted exceptions unchanged; `deno check
+--node-modules-dir=none index.ts ../job-hunt/index.ts` from
+`extensions/family-calendar` clean under Deno 2.9.6, as CI runs it. Upstream
+status: **not applicable** — the auth
 module is fix 14's and the extensions are vendored; upstream's own
 `integrations/enhanced-mcp/README.md` already refuses the URL query form for
 its key.
