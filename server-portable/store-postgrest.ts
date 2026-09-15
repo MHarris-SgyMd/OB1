@@ -21,6 +21,8 @@ import type {
   ListFilters,
   MutationResult,
   ProvenanceNode,
+  QueryActionLog,
+  QuerySearchLog,
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
@@ -430,6 +432,35 @@ export class PostgrestStore implements ThoughtStore {
     } catch {
       return {};
     }
+  }
+
+  async logSearch(row: QuerySearchLog): Promise<void> {
+    // Migration 034. PostgREST inserts the row directly; arrays and jsonb pass
+    // through supabase-js untouched. Throws on error so the handler's swallow
+    // decides whether a log failure is worth surfacing — the store stays honest.
+    const { error } = await this.client.from("query_log").insert({
+      kind: "search",
+      tool: row.tool,
+      agent_id: row.agentId ?? null,
+      query: row.query,
+      match_count: row.matchCount,
+      threshold: row.threshold,
+      recency_weight: row.recencyWeight,
+      filter: row.filter,
+      result_ids: row.resultIds,
+      result_scores: row.resultScores,
+    });
+    if (error) throw new Error(error.message);
+  }
+
+  async logAction(row: QueryActionLog): Promise<void> {
+    const { error } = await this.client.from("query_log").insert({
+      kind: "action",
+      tool: row.tool,
+      agent_id: row.agentId ?? null,
+      target_id: row.targetId,
+    });
+    if (error) throw new Error(error.message);
   }
 
   async close(): Promise<void> {

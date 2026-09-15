@@ -611,6 +611,36 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
   };
 }
 
+/**
+ * A 'search' row for the opt-in query log (migration 034, SMD-1295): the query
+ * and its arguments, and the ids returned in rank order with their fused scores.
+ * `agentId` is 010's agent when a key was presented, else absent (NULL in the
+ * row). `resultScores` is aligned to `resultIds`; a null element is a returned
+ * id whose score the retrieval path did not carry.
+ */
+export type QuerySearchLog = {
+  tool: string;
+  agentId?: string;
+  query: string;
+  matchCount: number;
+  threshold: number;
+  recencyWeight: number;
+  filter: Record<string, unknown>;
+  resultIds: string[];
+  resultScores: (number | null)[];
+};
+
+/**
+ * An 'action' row for the query log: a fetch/edit/delete of a returned id.
+ * Carries only the acting tool, the agent, and the id touched — export links it
+ * back to the search that returned the id.
+ */
+export type QueryActionLog = {
+  tool: string;
+  agentId?: string;
+  targetId: string;
+};
+
 export interface ThoughtStore {
   readonly kind: "postgrest" | "sql";
 
@@ -794,6 +824,20 @@ export interface ThoughtStore {
    * the tool names the migration.
    */
   listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
+
+  /**
+   * The opt-in query log (migration 034, SMD-1295). The server calls these ONLY
+   * when OB1_QUERY_LOG=on, and the call is best-effort: the handler swallows any
+   * rejection so a log write can never fail a search, a fetch or a capture.
+   * Nothing reads them on the hot path — the export tool reads the table offline.
+   * `logSearch` records one search call and the ids it returned; `logAction`
+   * records a later fetch/edit/delete of a returned id. They are NOT joined at
+   * write time (there is no request token in the handlers); export links them by
+   * (agent, id, window). A store on a schema before 034 will reject — that is
+   * why the calls are guarded and swallowed, not why they are skipped.
+   */
+  logSearch(row: QuerySearchLog): Promise<void>;
+  logAction(row: QueryActionLog): Promise<void>;
 
   close(): Promise<void>;
 }

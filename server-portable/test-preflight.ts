@@ -1068,9 +1068,15 @@ else {
              /GRANT INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
              /GRANT SELECT, INSERT, UPDATE, DELETE ON thought_work_claims TO "ob1_pf_capture";/.test(grant.out),
              `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").slice(-1)[0]})`);
+      assert(/GRANT INSERT ON query_log TO "ob1_pf_capture";/.test(grant.out),
+             "…including the opt-in query log's INSERT (querylog group, SMD-1295)");
       const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out) && /entity extraction is enabled/.test(writeLine(okRun.out)),
              `…and granted, the role starts, the ok noting extraction is on (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+      // The query log check (034, SMD-1295): present after the migrations, and
+      // off by default with OB1_QUERY_LOG unset — reported, never a refusal.
+      assert(/query log\s+present; off by default/.test(okRun.out),
+             `…and the query log is named present and off by default (${(okRun.out.split("\n").find((l) => /query log/.test(l)) ?? "no query log line").trim().slice(0, 70)})`);
 
       // The real proof: a windowed capture and an edit with content run through
       // the role. The 4-argument upsert_thought DELETEs then INSERTs

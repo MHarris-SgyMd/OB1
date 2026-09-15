@@ -86,6 +86,11 @@ process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
+// The query log (034, SMD-1295) is read once at first request and frozen, as in
+// production (set at boot, not toggled per request). On for the whole suite so
+// [N] can exercise the real write+join path; the OFF guarantee — that the guard
+// writes nothing when unset — is a pure unit test in test-server.ts.
+process.env.OB1_QUERY_LOG = "on";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -410,6 +415,46 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   await sql`DELETE FROM supersession_proposals`;
   await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
   await sql.close();
+}
+
+// ── The opt-in query log (034, SMD-1295), through the real handlers ──────────
+// The flag is on for the suite (set at boot). A search records one row with the
+// query and the ids it returned; a fetch of a returned id records an action row
+// the export join ties back to that search.
+console.log("\n[10] query log: a search and its follow-up fetch, recorded and joined (SMD-1295)");
+{
+  const qlog = new SQL({ url: URL_, max: 1 });
+  await qlog`DELETE FROM query_log`;
+
+  await call("capture_thought", { content: "gamma note the query log should find" });
+  const searched = await call("search_thoughts", { query: "gamma", limit: 5, threshold: -1 });
+  const hitId = searched.match(/ID:\s*([0-9a-f-]{36})/i)?.[1];
+  assert(!!hitId, `search returned an id to follow (${searched.split("\n")[0].slice(0, 40)}…)`);
+  await call("fetch", { id: hitId! });
+
+  const rows = await qlog<{ kind: string; tool: string; query: string | null; target_id: string | null; contains: boolean | null }[]>`
+    SELECT kind, tool, query, target_id,
+           CASE WHEN kind='search' THEN result_ids @> ARRAY[${hitId}::uuid] END AS contains
+      FROM query_log ORDER BY logged_at, kind`;
+  const searchRow = rows.find((r) => r.kind === "search");
+  const actionRow = rows.find((r) => r.kind === "action");
+  assert(searchRow?.tool === "search_thoughts" && searchRow.query === "gamma" && searchRow.contains === true,
+    `the search row carries the query and the returned id (${JSON.stringify(searchRow)})`);
+  assert(actionRow?.tool === "fetch" && actionRow.target_id === hitId,
+    `the fetch of the returned id is recorded as an action (${JSON.stringify(actionRow)})`);
+
+  // The export join links the action to the search that returned its id.
+  const joined = await qlog<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action'`;
+  assert(joined[0]?.from_query === "gamma", `the export join ties the fetch back to its search (${JSON.stringify(joined[0])})`);
+
+  await qlog`DELETE FROM query_log`;
+  await qlog`DELETE FROM thoughts`;
+  await qlog.close();
 }
 
 server.stop();

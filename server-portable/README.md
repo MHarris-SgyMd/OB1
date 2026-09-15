@@ -96,8 +96,12 @@ missing one with its GRANT (`db/config.mjs`'s `ROLE_GRANTS`, the same list
 whose text no row holds is a capture doubled in waiting — a warning naming the
 migration, or after it the one statement `SELECT backfill_content_fingerprints();`
 as the table's owner; NULL rows that share their text with the row holding the
-key (twins, or a stale key) are ok. Over PostgREST all three are skips: none is
-reachable there.
+key (twins, or a stale key) are ok. `query log` (034, SMD-1295): the opt-in query
+log — reported, never a refusal, since it is off by default and its write is
+best-effort. When `query_log` is present the check names it and whether
+`OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
+retention, and points at `evals/export-queries.ts`; absent, it is a skip. Over
+PostgREST the direct-connection checks are skips: none is reachable there.
 
 ## Choosing a data layer
 

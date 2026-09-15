@@ -194,6 +194,28 @@ jobs:
           OB1_EMBEDDING_DIM: "768"
           OB1_EMBEDDING_MODEL: nomic-embed-text
 
+  replay-gate:
+    name: Retrieval replay gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # SMD-1295. Replays the committed, content-free fixture through the shipped
+      # retrieval on PGlite — no service container, no model, no key — and fails
+      # when recall@5 drops past the fixture's floor. The live corpus stays out
+      # of CI; the fixture is ids and vectors only (evals/build-replay-fixture.ts).
+      - name: Replay the query fixture and hold the recall floor
+        working-directory: db
+        run: bun test-replay.ts
+
   db-live:
     name: Schema against real Postgres
     runs-on: ubuntu-latest
