@@ -90,7 +90,7 @@ import {
   type Judgement,
 } from "../server-portable/consolidate.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, describeLoss, heartbeatFor, leaseHolders, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -396,6 +396,7 @@ async function printFailures(limit = 10): Promise<void> {
 if (STATUS_ONLY || DRY_RUN) {
   const c = await counts();
   printCounts(c, STATUS_ONLY ? "status" : "before");
+  if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) console.log(describeHolder(h));
   await printQueue();
   if (c.thoughts === 0) console.log("  no thought has extracted entities yet — run db/extract-entities.ts first; this pass pairs thoughts by the entities they share");
   if (c.failed > 0) {
@@ -666,7 +667,14 @@ async function worker(n: number): Promise<void> {
           console.error(`  ${b.thought_id}: deleted while it was being judged`);
           continue;
         }
-        if (!ok) console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
+        if (!ok) {
+          // Not ours to finish: counted with the rows this worker lost, not
+          // the ones it finished, so the workers' summaries add up.
+          console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
+          lost++;
+          progress();
+          continue;
+        }
         if (outcome.outcome === "failed") {
           failed++;
           console.error(`  ${b.thought_id}: ${outcome.error}`);
@@ -736,7 +744,7 @@ if (FOLLOW) {
 
 const elapsed = (Date.now() - started) / 1000;
 console.log(
-  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat (each named above)` : ""}, in ${elapsed.toFixed(1)}s ` +
+  `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed.toFixed(1)}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(
@@ -757,7 +765,7 @@ if (after.failed > 0) {
   await printFailures();
 }
 if (after.claimed > 0 && !stopping) {
-  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat.`);
+  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat; --status names each holder, and a dead one's rows return at once with SELECT release_claims_for_worker(job, worker_id).`);
 }
 if (after.pending > 0 && !stopping && !limitReached()) {
   console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);

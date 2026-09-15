@@ -16,7 +16,11 @@
  *
  * The rule: --ttl >= 2 × --heartbeat, so one delayed beat — the event loop
  * busy, a slow round trip — cannot let a lease lapse. A pair that breaks it is
- * refused before anything is claimed (`leaseRefusal`), and when no interval is
+ * refused before anything is claimed (`leaseRefusal`), as is either flag above
+ * what the runtime holds: claim_thoughts and renew_claims take an int, so a
+ * lease over 2,147,483,647 s would fail every claim on its signature, and a
+ * timer holds a 32-bit millisecond count, so a heartbeat over 2,147,483 s
+ * would overflow into a beat every millisecond. When no interval is
  * given it is derived from the lease (`heartbeatFor`): 60 s, or a third of the
  * lease when that is shorter, at least one second, so any lease of two seconds
  * or more has a heartbeat that fits and only a one-second lease is refused.
@@ -48,6 +52,10 @@ import type { SQL } from "bun";
 export const DEFAULT_TTL_S = 900;
 /** The heartbeat when --heartbeat is not given and the lease is long enough for it. */
 export const DEFAULT_HEARTBEAT_S = 60;
+/** The largest lease claim_thoughts and renew_claims take: their p_ttl_seconds is an int. */
+export const MAX_TTL_S = 2147483647;
+/** The longest interval a timer holds: a 32-bit signed millisecond count, whole seconds. */
+export const MAX_HEARTBEAT_S = 2147483;
 
 /** The heartbeat a lease implies when none is given: 60 s, or a third of the lease when that is shorter, whole seconds, at least one. */
 export function heartbeatFor(ttlS: number): number {
@@ -61,12 +69,33 @@ export function heartbeatFor(ttlS: number): number {
  * operator never passed.
  */
 export function leaseRefusal(ttlS: number, heartbeatS: number, derived = false): string | null {
+  if (ttlS > MAX_TTL_S) {
+    return `--ttl ${ttlS} s is more than claim_thoughts and renew_claims take (an int, at most ${MAX_TTL_S} s): every claim would fail on its signature. Lower --ttl.`;
+  }
+  if (heartbeatS > MAX_HEARTBEAT_S) {
+    return `--heartbeat ${heartbeatS} s is more than a timer can hold (at most ${MAX_HEARTBEAT_S} s, the 32-bit millisecond ceiling): the runtime would beat every millisecond instead. Lower --heartbeat.`;
+  }
   if (ttlS >= 2 * heartbeatS) return null;
   return (
     `--ttl ${ttlS} s cannot cover two ${derived ? `beats of the ${heartbeatS} s heartbeat derived from it` : `heartbeats of --heartbeat ${heartbeatS} s`}: one delayed beat would let the lease expire, and another worker\n` +
     `  would repeat rows this one is still working on. The lease is how long a dead worker's rows stay out of the pool, and nothing else\n` +
     `  since migration 030; it need not cover the batch. ${heartbeatS <= 1 ? "Raise --ttl." : "Raise --ttl or lower --heartbeat."}`
   );
+}
+
+/** Who holds leases under a key right now, and until when: one row per worker, for --status. */
+export type LeaseHolder = { worker_id: string; rows: number; deadline: string };
+
+export async function leaseHolders(sql: SQL, job: string): Promise<LeaseHolder[]> {
+  return (await sql`
+    SELECT worker_id, count(*)::int AS rows, min(ttl_expires_at)::text AS deadline
+      FROM thought_work_claims WHERE work_type = ${job} AND status = 'claimed'
+     GROUP BY worker_id ORDER BY worker_id`) as LeaseHolder[];
+}
+
+/** The --status line for one holder. The deadline moves on every beat while the holder lives; a dead holder's stands until the reaper. */
+export function describeHolder(h: LeaseHolder): string {
+  return `    held by ${h.worker_id}: ${h.rows} rows, earliest lease deadline ${h.deadline} (renewed on each heartbeat while the holder lives; a dead holder's rows return when it passes, or at once with SELECT release_claims_for_worker(job, worker_id))`;
 }
 
 /**

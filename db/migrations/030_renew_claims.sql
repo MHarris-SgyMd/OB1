@@ -58,9 +58,11 @@
 --   header, also applied and so not editable (migrate.ts hashes the file),
 --   advises stopping both 015 consumers before its backfill because a worker
 --   parked on its lock would wait out a lease stamped once per batch; since
---   030 a parked worker keeps beating through its pool''s spare connection
+--   030 a parked worker keeps beating through its pool's spare connection
 --   (each worker opens WORKERS + 1, and says why beside the number) and its
---   leases hold — the advice survives as throughput advice only.
+--   leases hold, so long as each beat reaches a row before a claim's reaper
+--   does — the row-lock race above — so the advice survives as throughput
+--   advice only.
 --   Upstream (schemas/thought-work-claims) left mid-batch renewal out to keep
 --   the claim a single atomic statement; a separate function keeps that.
 --

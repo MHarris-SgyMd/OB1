@@ -388,7 +388,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { UUID_RE } from "../server-portable/store.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, describeLoss, heartbeatFor, leaseHolders, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -1221,13 +1221,7 @@ if (STATUS_ONLY || DRY_RUN) {
   printCounts(c, STATUS_ONLY ? "status" : "before");
   const corpus = await printCorpusByModel();
   if (STATUS_ONLY) printPreflightNote(c, corpus, judgedAsPreflight(false));
-  if (c.claimed > 0) {
-    const leases = (await sql`
-      SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
-      FROM thought_work_claims WHERE work_type = ${JOB} AND status = 'claimed' GROUP BY worker_id`) as
-      { worker_id: string; c: number; first_expiry: string }[];
-    for (const l of leases) console.log(`    held by ${l.worker_id}: ${l.c} rows, earliest lease deadline ${l.first_expiry} (renewed on each heartbeat while the holder lives)`);
-  }
+  if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) console.log(describeHolder(h));
   if (c.failed > 0) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
     await printFailures();
@@ -1562,7 +1556,7 @@ async function worker(n: number): Promise<void> {
           continue;
         }
         const row = byId.get(b.thought_id);
-        if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier worker's lease expired on it`);
+        if (b.attempt > 1) console.error(`  ${b.thought_id}: attempt ${b.attempt} — an earlier lease on it expired`);
         let outcome: Outcome;
         if (!row) {
           outcome = { outcome: "vanished" };
@@ -1610,9 +1604,14 @@ async function worker(n: number): Promise<void> {
           continue;
         }
         if (!ok) {
-          // The lease expired and another worker holds the row now; its write
-          // will stand and ours already did — the same vector twice, harmless.
+          // The lease expired and the row is not ours to finish; our write to
+          // `thoughts`, if we made one, stands — the same vector twice at
+          // worst, harmless. Counted with the rows this worker lost, not the
+          // ones it finished, so the workers' summaries add up across a pass.
           console.error(`  ${b.thought_id}: lease expired before release — the heartbeat did not reach the database for ${TTL} s; the row is the pool's or another worker's now, or failed at its last allowed expiry`);
+          lost++;
+          progress();
+          continue;
         }
         if (outcome.outcome === "failed") {
           failed++;
@@ -1668,7 +1667,7 @@ progress(true);
 
 const after = await counts();
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat (each named above)` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
+console.log(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
 printCounts(after, "after");
 await printDuplicateGroups();
 if (after.fellBack > 0) await printFallbacks(after.fellBack);
@@ -1694,7 +1693,8 @@ printPreflightNote(after, corpusAfter, judgedAsPreflight(recordModel));
 if (after.claimed > 0) {
   console.error(
     `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +
-      `  They return to the pool when their leases expire (within ${TTL} s of the holder's last heartbeat); re-run then, or watch --status.`
+      `  They return to the pool when their leases expire (within ${TTL} s of the holder's last heartbeat); re-run then, or watch --status —\n` +
+      `  which names each holder; a holder that is dead can be returned at once: SELECT release_claims_for_worker(job, worker_id).`
   );
 }
 if (after.pending > 0 && !stopping) {

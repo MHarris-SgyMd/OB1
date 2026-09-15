@@ -83,7 +83,7 @@ import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, refusesLength, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { extractEntities, extractionKey, type Extraction } from "../server-portable/entities.ts";
 import { hashKey, parseKeyRecords } from "../server-portable/auth.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeLoss, heartbeatFor, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, describeLoss, heartbeatFor, leaseHolders, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -294,6 +294,7 @@ if (recordedKey && recordedKey !== JOB) {
 if (STATUS_ONLY || DRY_RUN) {
   const c = await counts();
   printCounts(c, STATUS_ONLY ? "status" : "before");
+  if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) console.log(describeHolder(h));
   await printGraph();
   if (c.failed > 0) {
     console.error(`  failed rows (${Math.min(c.failed, 10)} of ${c.failed}):`);
@@ -590,9 +591,13 @@ async function worker(n: number): Promise<void> {
         }
         if (!ok) {
           // Either the lease expired, or the content was edited and migration
-          // 016's trigger put the row back in the pool: it is pending again and
-          // will be extracted from the new text.
+          // 016's trigger put the row back in the pool to be extracted from the
+          // new text. Not ours to finish either way: counted with the rows this
+          // worker lost, not the ones it finished.
           console.error(`  ${b.thought_id}: the claim was no longer this worker's at release — edited meanwhile, or the heartbeat did not reach the database for ${TTL} s and the lease expired; the row is the pool's or another worker's now`);
+          lost++;
+          progress();
+          continue;
         }
         if (outcome.outcome === "failed") {
           failed++;
@@ -663,7 +668,7 @@ if (FOLLOW) {
 
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 console.log(
-  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} found no longer this worker's by a beat (each named above)` : ""}, in ${elapsed}s ` +
+  `\n  ${done} extracted, ${failed} failed, ${superseded} edited mid-extraction and re-queued, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s ` +
     `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
 );
 console.log(
@@ -678,7 +683,7 @@ if (after.failed > 0) {
   await printFailures();
 }
 if (after.claimed > 0 && !stopping) {
-  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat.`);
+  console.error(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat; --status names each holder, and a dead one's rows return at once with SELECT release_claims_for_worker(job, worker_id).`);
 }
 if (after.pending > 0 && !stopping && !limitReached()) {
   console.error(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);

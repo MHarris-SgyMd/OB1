@@ -821,6 +821,8 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
     "leaseRefusal: a lease of two heartbeats passes — two seconds at the one-second floor included — and one under is refused with the arithmetic");
   assert(/--ttl 1 s cannot cover two beats of the 1 s heartbeat derived from it/.test(leaseRefusal(1, 1, true) ?? "") && /Raise --ttl\.$/.test(leaseRefusal(1, 1, true) ?? ""),
     "…and at the heartbeat's floor, derived, the text quotes no flag the operator did not pass and the remedy is the lease alone");
+  assert(/more than claim_thoughts and renew_claims take \(an int, at most 2147483647 s\)/.test(leaseRefusal(2147483648, 60) ?? "") && /more than a timer can hold \(at most 2147483 s/.test(leaseRefusal(5000000, 2500000) ?? "") && leaseRefusal(2147483647, 2147483) === null,
+    "leaseRefusal: a lease above int4 and a heartbeat above the timer's 32-bit millisecond ceiling are refused with the reason; the largest pair that fits passes");
 
   await sql`DELETE FROM thoughts`;
 }
@@ -1058,6 +1060,13 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   const derived = await reembed("--dry-run", "--ttl", "10");
   assert(derived.code === 0 && /8 per claim, 10 s leases renewed every 3 s/.test(derived.out),
     `a lease given without a heartbeat derives one of a third of it (${derived.out.match(/\d+ s leases[^,]*/)?.[0]})`);
+  // The runtime's bounds, refused before a run rather than found by it: a
+  // lease above int4 failed every claim on its signature after --dry-run had
+  // accepted it; a heartbeat above the timer's ceiling beat every millisecond.
+  const hugeTtl = await reembed("--dry-run", "--ttl", "2147483648");
+  assert(hugeTtl.code === 2 && /--ttl 2147483648 s is more than claim_thoughts and renew_claims take/.test(hugeTtl.out), `a lease above int4 is refused by --dry-run too (exit ${hugeTtl.code})`);
+  const hugeBeat = await reembed("--dry-run", "--ttl", "5000000", "--heartbeat", "2500000");
+  assert(hugeBeat.code === 2 && /--heartbeat 2500000 s is more than a timer can hold/.test(hugeBeat.out), `a heartbeat above the timer's ceiling is refused (exit ${hugeBeat.code})`);
 
   const first = await reembed("--switch-model", "--workers", "2", "--batch", "3");
   assert(first.code === 1, `the run exits 1 because rows failed (exit ${first.code})`);
@@ -1305,8 +1314,12 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
     assert(PASS_LINE.exec(pf.out)?.[1] === "40 thoughts — 39 succeeded, 0 failed, 1 in flight, 0 pending, 0 not yet in the pool",
       `preflight reports the lease another process holds as unfinished work (${PASS_LINE.exec(pf.out)?.[1] ?? "no re-embed pass line"})`);
   }
+  const ghostStatus = await reembed("--status");
+  assert(/held by ghost: 1 rows, earliest lease deadline \d{4}-\d\d-\d\d [^\n]*release_claims_for_worker/.test(ghostStatus.out),
+    "--status names the holder, its rows, its deadline and the remedy for a dead one");
   const blocked = await reembed();
-  assert(blocked.code === 1 && /1 row\(s\) are still leased/.test(blocked.out), `a run that finds only another process's lease exits 1 and says so (exit ${blocked.code})`);
+  assert(blocked.code === 1 && /1 row\(s\) are still leased/.test(blocked.out) && /--status/.test(blocked.out) && /release_claims_for_worker/.test(blocked.out),
+    `a run that finds only another process's lease exits 1, says so, and names --status and the remedy (exit ${blocked.code})`);
   const [{ e: heldVec }] = await sql`SELECT embedding::text AS e FROM thoughts WHERE content = ${held}`;
   assert(axisOf(heldVec) === 0, "…and did not touch the held row");
   await sql`SELECT release_claims_for_worker(${REEMBED_JOB}, 'ghost')`;
@@ -1589,7 +1602,7 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
   slowMs = 0;
   assert(slow.code === 0 && /42 re-embedded, 0 failed/.test(slow.out) && /16 per claim, 6 s leases renewed every 1 s/.test(slow.out),
     `two workers re-embed every thought in batches that outlast the lease, and nothing is repeated (exit ${slow.code}: ${slow.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
-  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/found no longer this worker's/.test(slow.out) && !/heartbeat failed/.test(slow.out),
+  assert(!/attempt 2/.test(slow.out) && !/lease expired before release/.test(slow.out) && !/no longer this worker's when checked/.test(slow.out) && !/heartbeat failed/.test(slow.out),
     "…no row reached a second worker, no release found its lease gone, none was lost, every beat answered");
   const slowBeats = Number(/, (\d+) heartbeat\(s\)/.exec(slow.out)?.[1] ?? 0);
   assert(slowBeats >= 10, `…and the summary counts the beats that kept them — two workers, one a second, over some fifteen seconds (${slowBeats})`);

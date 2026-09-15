@@ -5859,7 +5859,9 @@ the claim, each row removed before its release, stopped in the `finally` that
 returns the leases, and the beats summed into the run's summary. Each opens a
 pool of one connection per worker and one spare, and says beside the number
 that the spare is what keeps the leases alive while every worker is parked on
-a lock or a long statement (the case 023's header warned of). A beat that
+a lock or a long statement (the case 023's header warned of), so long as each
+beat reaches a row before a claim's reaper does — the row-lock race above. A
+beat that
 fails is reported once per run of failures and the leases hold from the last
 one that answered; a process that cannot reach the database cannot beat, and
 its rows return to the pool as a dead worker's would, which is the right
@@ -5872,8 +5874,17 @@ refused before anything is claimed — exit 2, the arithmetic shown;
 a heartbeat derives one of a third of itself, at most 60 s and at least 1 s,
 so any lease of two seconds or more fits and only a one-second lease has no
 pair (its refusal names the lease alone, and says the heartbeat was derived
-rather than quoting a flag the operator never passed). `--dry-run` in all three
-workers prints the lease and heartbeat a run would use. `--ttl` now means one thing: how long a dead
+rather than quoting a flag the operator never passed). Both flags are bounded
+where the runtime bounds them, and refused above with the reason: a lease over
+2,147,483,647 s would fail every claim on its signature (`--dry-run` had
+accepted one and the run then failed on every claim), a heartbeat over
+2,147,483 s would overflow the timer into a beat every millisecond (measured:
+1,411 beats in a second and a half). `--dry-run` in all three workers prints
+the lease and heartbeat a run would use; `--status` in all three names each
+holder, its rows, its earliest deadline and the remedy for a dead one
+(`release_claims_for_worker`), which only `reembed.ts` did before. A row whose
+lease is found gone at release is counted with the rows the worker lost, not
+the ones it finished, so two workers' summaries add up to the pass. `--ttl` now means one thing: how long a dead
 worker's rows stay out of the pool. Nothing about the batch, the timeout or the
 calls a thought costs sizes it, and the three refusals that did —
 `reembed.ts`'s derived floor with its long-lease warning,
