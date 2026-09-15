@@ -92,6 +92,8 @@ const FUNCTIONS = [
   "list_supersession_proposals(text, int)",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
+  // 032 (SMD-1323)
+  "validate_derived_from(jsonb)",
 ];
 
 export type SchemaOptions = {
@@ -211,7 +213,14 @@ export async function dropSchema(url: string): Promise<void> {
   }
 }
 
-/** Apply the migrations, substituting the templates. */
+/**
+ * Apply the migrations, substituting the templates — bare: 021's evidence
+ * backfill reads the real claim table here, the operator's acceptances
+ * included, where migrate.ts runs it with a view without them (applyShadowed,
+ * SMD-1421). A fixture that plants an acceptance before 021 and applies 021
+ * through this gets 021's labels as written, not the migrator's; plant after,
+ * or run migrate.ts through runScript, as test-upgrade [7] and [11] do.
+ */
 export async function applyMigrations(url: string, opts: SchemaOptions): Promise<void> {
   const admin = new SQL({ url, max: 1 });
   try {

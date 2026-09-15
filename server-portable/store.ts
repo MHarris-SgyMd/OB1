@@ -423,7 +423,12 @@ export function normaliseProposal(r: Record<string, unknown>): SupersessionPropo
  * "that id does not exist" are things the caller should act on, and throwing
  * would make them indistinguishable from a fault at the tool boundary.
  */
-export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT";
+/**
+ * What update_thought / delete_thought refuse with. SUPERSEDES_NOT_FOUND and
+ * WOULD_CYCLE (migration 032): the provenance envelope named a thought that
+ * does not exist, or a pointer that would close a supersession loop.
+ */
+export type MutationError = "NOT_FOUND" | "STALE_READ" | "DUPLICATE_CONTENT" | "SUPERSEDES_NOT_FOUND" | "WOULD_CYCLE";
 export type MutationResult =
   | { ok: true; id: string }
   | { ok: false; error: MutationError; currentUpdatedAt?: string };
@@ -531,6 +536,29 @@ export function captureEnvelope(
     ...(provenance?.derivedFrom !== undefined ? { derived_from: provenance.derivedFrom } : {}),
     ...(provenance?.supersedes !== undefined ? { supersedes: provenance.supersedes } : {}),
   };
+}
+
+/**
+ * The provenance an edit names (migration 032). Each key is tri-state at the
+ * type level: absent (leave the column), null (clear it), a value (set it).
+ */
+export type UpdateProvenance = { derivedFrom?: string[] | null; supersedes?: string | null };
+
+/**
+ * update_thought's `p_provenance` (032) from an edit's `provenance`: the keys
+ * the caller named, and only those — an absent key must reach the function
+ * absent, not as null, since null means CLEAR there. NULL when nothing was
+ * named, so an edit without provenance sends what an 8-argument caller does.
+ * Built here for both stores, as captureEnvelope is, so the SQL positional
+ * call and the PostgREST named one cannot spell the envelope differently.
+ */
+export function provenanceEnvelope(p: UpdateProvenance | undefined): Record<string, unknown> | null {
+  if (!p) return null;
+  const env: Record<string, unknown> = {
+    ...(p.derivedFrom !== undefined ? { derived_from: p.derivedFrom } : {}),
+    ...(p.supersedes !== undefined ? { supersedes: p.supersedes } : {}),
+  };
+  return Object.keys(env).length ? env : null;
 }
 
 /**
@@ -706,6 +734,17 @@ export interface ThoughtStore {
     actor?: Actor;
     /** As on captureThought; read only when `content` is given, since the label follows the vector (021). */
     embeddingModel?: string;
+    /**
+     * Migration 032 (SMD-1323): set, change or clear a thought's provenance
+     * through the edit path. A key ABSENT leaves that column alone; `null`
+     * CLEARS it; a value sets it — `supersedes` an existing thought that
+     * closes no loop (else SUPERSEDES_NOT_FOUND / WOULD_CYCLE), `derivedFrom`
+     * an array of existing thought ids, replacing the array (the write throws
+     * on a malformed one, as capture does). Sent as update_thought's ninth
+     * argument, `p_provenance`, in the envelope shape capture uses; absent
+     * altogether sends NULL.
+     */
+    provenance?: UpdateProvenance;
   }): Promise<UpdateResult>;
 
   /** Hard delete. Chunks cascade; migration 008 preserves the prior content. */

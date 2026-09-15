@@ -98,31 +98,65 @@ refuse it inside the transaction); a shell whose `OB1_EMBEDDING_MODEL` differs
 from what `ob1_config` records (006 would re-record it — run from a shell
 configured as the brain is, or change the record on purpose with `reembed.ts
 --switch-model`; `chunk_context` is re-recorded from the shell, which by 013's
-own definition is the update); and an accepted claim row 021's backfill would
-label an unlabelled thought from and 030 would not take back — under a
-*suffixed* key (`reembed:<model>@<dim>:ctx`), or over a thought written since
-the row was enqueued — return it with `reembed.ts --job <key>
---retry-fallbacks`, or `--retire` the key, first; on a schema older than 021,
-where `reembed.ts` refuses to run, the refusal prints the statement
-`--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
-a **plain** run too whenever 021 is pending — a brain built by hand through 021
-and adopted by "just run them", or a ledger hole — since the block runs as
-written there as well; and where 030 is recorded and so will not run after 021,
-every acceptance 021 would read is refused, since nothing would take the label
-back. `--baseline` runs no SQL and is never refused on this. The checks read the
-catalog and the claim table under a 10 s lock timeout of their own. A plain run on the baselined brain, where 030 is pending,
-fails at 030 with what is missing and this command, rather than a bare "does
-not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
-remedies name it where the ledger records the migration they find absent.
+own definition is the update). The checks read the catalog and `ob1_config`
+under a 10 s lock timeout of their own. A plain run on the baselined brain,
+where 030 is pending, fails at 030 with what is missing and this command,
+rather than a bare "does not exist"; preflight's `edit signature`, `vector
+models` and `atomic capture` remedies name it where the ledger records the
+migration they find absent.
 
-**Stop the server and any re-embed or extraction worker first.** 001 and 003
+**021's evidence backfill runs with the operator's acceptances out of its
+sight** — on the re-run, and on a plain run where 021 is pending (a brain built
+by hand through 021 and adopted by "just run them", or a ledger hole). 021
+labels an unlabelled thought from its latest succeeded claim row under a key
+naming a model, and the file is hashed and applied as written, from before a
+succeeded row could be the operator's *acceptance* of a failure (`reembed.ts
+--accept-failed`) — a thought that kept the vector it had, by decision not at
+that key's model. 030 takes such a label back where it can tell it from the
+server's own and labels with accepted rows excluded, but 030 cannot know which
+labels 021's block wrote a moment ago; the migrator need not know either.
+Before 021 runs it creates a temp *view* named `thought_work_claims` over the
+real table without the accepted rows — no copy, so the block reads the rows as
+they stand when it runs — and since an unqualified name resolves in `pg_temp`
+before any schema on the search path, 021's block reads the view and labels
+from the latest row that is not an acceptance, or not at all — 030's rule by
+021's own text, nothing wrong ever written, the acceptance standing and no
+claim row touched. The view is dropped right after the file, in the same
+transaction, so 022 onward read the real table; a search path that lists
+`pg_temp` — which is searched first for tables exactly when it is *not* listed
+— has it removed for the transaction, and that the name resolves to the view
+is checked before the file runs; a temp relation of that name already on the
+connection refuses the file. The run says beside 021's line how many thoughts
+the block labelled — zero included, read from the transaction's own statistics
+(not counted where `track_counts` is off). A label 021's block wrote from an acceptance on an earlier
+run, or a paste of the body left, is 030's to take back at its own place — the
+re-run reaches it. Judged before anything runs, in both modes, whenever 021
+will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
+otherwise; 023's call needs one too). A file not named `NNN_name.sql`, or two
+sharing a number, is refused at load, and by the fork checker on every push; a
+set without 021 is refused at load, since the file is named whole. Every
+refusal is collected and reported together, the re-run's included.
+Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
+label and 030 would leave (an acceptance under a suffixed key; a thought
+written since the row's enqueue; with 030 recorded and skipped, any
+acceptance) and printed a way back that spent the acceptance — the refusal
+030's own header still describes, that file being hashed. `--baseline` runs no
+SQL and shadows nothing.
+
+**Stop the server and any re-embed or extraction worker first, and connect
+directly, not through a transaction-mode pooler:** the migrator sets session
+state (the lock timeout, the pgvector search path) and takes locks across
+statements. It sets a 10 s lock timeout for everything it does — for the
+session, and again inside every transaction — so a held lock fails the run
+rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
-evidence backfill runs as written, and 030, reached after it in the same
-transaction, returns a label whose only evidence is an operator's acceptance to
-unknown and labels with accepted rows excluded (SMD-1193).
+evidence backfill runs as written, the acceptances out of its sight (above);
+030, reached after it in the same transaction, finds nothing of 021's to take
+back and corrects the own-key labels an earlier paste of the body left
+(SMD-1193, SMD-1421).
 
 ## Expected outcome
 
@@ -158,11 +192,11 @@ thought_chunks` shows five columns since 013 added `context`.
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
 | `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
 | `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | This fork |
-| `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s `FOR UPDATE` wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
+| `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s row lock wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54, 030 change 56, 031 change 57).
+029 change 54, 030 change 56, 031 change 57, 032 change 60).
 
 ## What changed relative to the guide
 
@@ -446,7 +480,10 @@ vector is at the recorded model (unlabelled rows as detail), a warning naming
 each other model and its count with the pass as the remedy — whether or not any
 claim row remembers the pass that left them — and a failure when the column is
 missing under a server that writes it. `edit signature` beside it checks that
-the eight-argument `update_thought` is present and alone, and `updated_at
+the nine-argument `update_thought` (032) is present and alone — an earlier form
+re-created beside it by a hand re-apply of 018 or 021 makes every call with
+fewer arguments, this tool's positional eight among them, `function is not
+unique`, and the DROP is the remedy — and `updated_at
 trigger` that 001's trigger is still enabled after 021's backfill held it off. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
@@ -499,8 +536,8 @@ read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
 adopted with `--baseline` — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
-above; 030, reached after 021 in the same run, takes back what 021's backfill
-read from an accepted row).
+above; the migrator runs 021's backfill with the operator's acceptances out of
+its sight, so it labels from real passes alone).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;
@@ -727,12 +764,15 @@ nearby pairs, ask a model whether they conflict, surface the result for review
 025's column, the metadata model.
 
 **The one rule: the pass proposes, a person confirms.** The worker writes
-`supersession_proposals` and never `thoughts`. `thoughts.supersedes` is written
-only by `review_supersession_proposal(id, 'accept')`, one proposal at a time,
-under the audit trigger with the reviewer as actor — so the audit trail shows
-who confirmed what, and reversing a wrong one is one `--reject`. Nothing is
-applied because a model said so; both GBrain's docs and the review of 025
-arrive at the same rule.
+`supersession_proposals` and never `thoughts`. From this table
+`thoughts.supersedes` is written only by `review_supersession_proposal(id,
+'accept')`, one proposal at a time — through `update_thought`'s provenance
+envelope since migration 032 (SMD-1323), so the column has the one writer every
+edit has; before 032 the function wrote it in an UPDATE of its own — under the
+audit trigger with the reviewer as actor, so the audit trail shows who
+confirmed what, and reversing a wrong one is one `--reject`. Nothing is applied
+because a model said so; both GBrain's docs and the review of 025 arrive at the
+same rule.
 
 **Which pairs are judged.** `consolidation_candidates(thought)`: the older
 thoughts that share at least one extracted entity with it, captured at least a
@@ -1215,7 +1255,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 683 properties (at migration 031), including:
+asserts 749 properties (at migration 032), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1351,11 +1391,23 @@ asserts 683 properties (at migration 031), including:
   label, a metadata-only one too; `update_thought` relabels with a vector, blanks the label with
   content and no vector, leaves a metadata-only edit, and a 7-argument call
   resolves through the default; a re-embed and a label-only change write no
-  audit row; one `update_thought` of eight parameters carrying 018's body by
-  name, 021 the last definer of `update_thought`, 022 of `upsert_thought` and 010 still of the audit
+  audit row; one `update_thought` of nine parameters (032) carrying 018's body by
+  name, 032 the last definer of `update_thought`, 025 of `upsert_thought` and of the audit
   trigger; 018 re-applied puts a second form beside it and a 7-argument call is
-  `not unique` until 021 is re-applied; and the ACL replayed across the drop of
+  `not unique` until the last definer is re-applied; and the ACL replayed across the drop of
   the 7-argument form, the four cases above for this function
+- **provenance through the edit path** (migration 032): `update_thought`'s
+  ninth parameter sets, leaves, replaces and clears `supersedes` and
+  `derived_from` — one audit row per change with the actor and nothing else
+  moved — and refuses a ghost, a self-pointer and a loop direct or through a
+  chain with nothing written; the four exceptions and a double-encoded
+  envelope; `if_unchanged_since` guards a provenance edit;
+  `validate_derived_from` answers as `upsert_thought`'s inline copy does, input
+  by input; `review_supersession_proposal` writes through `update_thought`
+  (its acceptance is an `update_thought` audit row, its loop refusal names the
+  pair) and holds no `UPDATE` of `thoughts`; 021 re-applied leaves its
+  8-argument form beside the 9-argument one and an 8-argument call is `not
+  unique` until 032 is re-applied, and the ACL crosses that drop too
 - **the windows stay while the label vouches for them** (migration 022):
   through a window planted directly (see below), a re-capture through the
   3-argument `upsert_thought` at the same model moves the vector and keeps

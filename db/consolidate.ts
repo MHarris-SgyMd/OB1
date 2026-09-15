@@ -12,8 +12,9 @@
  * `supersession_proposals`. Nothing here writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
- * `review_supersession_proposal`, under the audit trigger, with the reviewer
- * as actor.
+ * `review_supersession_proposal` — which since migration 032 calls
+ * `update_thought`, the one edit path — under the audit trigger, with the
+ * reviewer as actor.
  *
  *   bun db/consolidate.ts --url postgres://…              # the backlog, then exit
  *   bun db/consolidate.ts --url … --follow [SECONDS]      # …then keep polling for newly extracted thoughts
@@ -341,6 +342,9 @@ if (REVIEW_ONLY) {
         EDITED_SINCE: `the ${res.older_edited && res.newer_edited ? "older and newer thoughts have" : res.older_edited ? "older thought has" : "newer thought has"} been edited since the pair was judged, so the verdict is about a text that is gone; read both with --list and pass --force if it still holds`,
         ALREADY_SUPERSEDES: `${res.superseding_id} already supersedes a third thought, ${res.current}; the column holds one predecessor, so decide which — edit that thought, or --reject this`,
         WOULD_CYCLE: `writing this pointer would close a loop through ${res.superseded_id}; refused`,
+        // 032: update_thought's answer when the thought to be superseded was
+        // deleted between the proposal and the acceptance.
+        SUPERSEDES_NOT_FOUND: `${res.superseded_id} no longer exists, so there is nothing to supersede; --reject this`,
       };
       console.error(`  ${decision} refused: ${why[res.error ?? ""] ?? res.error}`);
     }

@@ -293,8 +293,8 @@
  * --retry-failed tries that first (third review pass). A row whose thought IS
  * at the target — the worker wrote a head window or bare windows before the
  * row failed — is accepted whatever its timestamps: no reader needs the
- * acceptance to leave it, and the counts list it as a caveat. It needs 021's schema whole — the column and the
- * eight-argument update_thought, the same refusal a run makes: acceptance is
+ * acceptance to leave it, and the counts list it as a caveat. It needs 021's column and 032's
+ * nine-argument update_thought, the same refusal a run makes: acceptance is
  * read against the label, and 021's evidence backfill trusts every succeeded
  * row under a key naming a model — it predates acceptance and, applied, is
  * never edited — so a brain that accepted rows before 021 would have them
@@ -303,9 +303,12 @@
  * does the same to an accepted row whose thought is unlabelled, and a paste of
  * the file alone did, for anyone who followed the remedy this tool printed
  * until SMD-1193. So the re-run is the migrator's — `migrate.ts --reapply`
- * re-runs every recorded migration in one transaction — and migration 030
- * carries the corrected rule, reached after 021 in the same run and applied
- * once to every brain at upgrade: a label whose only evidence is an acceptance
+ * re-runs every recorded migration in one transaction, and runs 021's block
+ * with the acceptances out of its sight: a view of the claim table without
+ * them shadows the real one for that file, so the block labels from the
+ * latest row that is not an acceptance, or not at all (SMD-1421) — and
+ * migration 030 carries the corrected rule, applied once to every brain at
+ * upgrade: a label whose only evidence is an acceptance
  * under the model's own key goes back to unknown, and the evidence rule labels
  * with accepted rows excluded, so the latest succeeded row BEFORE an
  * acceptance decides. Any successor that labels from claim rows carries the
@@ -628,14 +631,15 @@ if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCE
 }
 
 // The schema the pass writes to. The body the pass will CALL — the exact
-// eight-argument signature (021), as preflight resolves match_thoughts, not any
-// function of that name — is asked for 018's contract sentinel: a marker in
-// pg_proc.prosrc, which every CREATE OR REPLACE rewrites, rather than a field
-// name a comment could carry (a pass against 013's update_thought fails every
-// legacy twin for ever — see the header). And the column the pass reads and
-// writes, thoughts.embedding_model (021). The ledger decides the remedy: a
-// brain adopted with --baseline records 021 as applied while the body is
-// older, and "apply 021" would be a no-op there. Read here so --dry-run can
+// nine-argument signature (032; this pass's positional eight resolve through
+// its default), as preflight resolves match_thoughts, not any function of that
+// name — is asked for 018's contract sentinel: a marker in pg_proc.prosrc,
+// which every CREATE OR REPLACE rewrites, rather than a field name a comment
+// could carry (a pass against 013's update_thought fails every legacy twin for
+// ever — see the header). And the column the pass reads and writes,
+// thoughts.embedding_model (021). The ledger decides the remedy: a brain
+// adopted with --baseline records the migration as applied while the body is
+// older, and "apply it" would be a no-op there. Read here so --dry-run can
 // report the refusal a run would make; --status is answered whatever the
 // schema, since it never calls update_thought.
 const [fn] = await sql`
@@ -649,22 +653,25 @@ const [fn] = await sql`
 // Asked separately: a relation named in a statement is resolved when the
 // statement is parsed, whatever the AND before it would have short-circuited,
 // so a schema applied by hand — no ledger — must not be asked about its ledger.
-fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE '021%') AS l`)[0].l : false;
+// Which migration the missing piece belongs to: the column is 021's, the
+// nine-argument body 032's. The ledger is asked about that one.
+const missingMigration = fn.labelled ? "032" : "021";
+fn.ledgered = fn.has_ledger ? (await sql`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name LIKE ${missingMigration + "%"}) AS l`)[0].l : false;
 /** Whether thoughts.embedding_model exists — the read-only modes answer without it. */
 const HAS_LABEL: boolean = Boolean(fn.labelled);
-const refusal021: string | null = fn.present && fn.labelled
+const refusalSchema: string | null = fn.present && fn.labelled
   ? null
-  : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration 021: this pass writes the model beside every vector it stores and builds\n` +
-    "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
-    "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
+  : ` ${fn.labelled ? "update_thought" : "the schema"} predates migration ${missingMigration}: this pass writes the model beside every vector it stores and builds\n` +
+    "  its pool from the rows not at that model, which needs thoughts.embedding_model (021) and the nine-argument update_thought\n" +
+    "  (032; it carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? `schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction — 021's backfill as written, then 030, which returns a label\n  whose only evidence is an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's\n  model). Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
-      : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
+      ? `schema_migrations records ${missingMigration} as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction, and runs 021's backfill with the operator's acceptances out of its sight, so it labels\n  from real passes alone (a paste of 021's body alone labels from the acceptances too).\n  Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
+      : `Apply the pending migrations first (through ${missingMigration}):\n    cd db && bun migrate.ts --url …`);
 /**
  * What a run would refuse on, in the order a run judges them — the job, the
  * lease, the schema — spelled once for --status, --dry-run and the run.
  */
-const refusalForRun: string | null = refusalJob ?? refusalTtl ?? refusal021;
+const refusalForRun: string | null = refusalJob ?? refusalTtl ?? refusalSchema;
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
@@ -1107,9 +1114,9 @@ if (ACCEPT_FAILED) {
   // 021's evidence backfill — which the remedy for an older body re-runs —
   // would read an accepted row as proof the thought is AT the key's model; see
   // "Saying I know" (first and second review passes).
-  if (refusal021) {
+  if (refusalSchema) {
     await refuse(
-      `${refusal021.trim()}\n` +
+      `${refusalSchema.trim()}\n` +
         `  --accept-failed needs the same: acceptance is read against the label, and 021's backfill reads a succeeded row — an accepted\n` +
         `  one included — as proof the thought is at the key's model.`
     );
