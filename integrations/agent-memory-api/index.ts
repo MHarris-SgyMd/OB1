@@ -3,7 +3,7 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is refused by the routes
 // that write. FORK.md change 65; extensions/test-auth.ts exercises it.
-// The import above is this file's first from outside its own directory: deploy
+// The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -345,9 +345,10 @@ app.use("*", async (c, next) => {
 });
 
 // Routes that change what is stored take a write-scoped key; a read-scoped key
-// is told so, not merely refused. A recall is a read even though
+// is told so, not merely refused. A recall is a read: under a write-scoped key
 // it records itself — a trace row and its items, later marked used or ignored
-// through the usage route, which is a write.
+// through the usage route, which is a write — and under a read-scoped key it
+// records nothing (see /recall).
 const requireWrite: MiddlewareHandler<{ Variables: { principal: Principal } }> = async (c, next) => {
   if (!canWrite(c.get("principal"))) return c.json({ error: "Forbidden: this key is read-scoped and this route writes" }, 403, corsHeaders);
   await next();
@@ -392,6 +393,18 @@ app.post("/recall", async (c) => {
     })
     .sort((a, b) => b.ranking_score - a.ranking_score)
     .slice(0, req.limits.max_items);
+
+  // A read-scoped key leaves no trace. The trace, its items and the audit row
+  // exist to be marked used or ignored through the usage route — a write this
+  // key cannot make — so nothing is stored for it, and it gets no request id;
+  // a leaked read key cannot fill the trace tables with its payloads either.
+  if (!canWrite(c.get("principal"))) {
+    return c.json({
+      schema_version: recallResponseSchema(req.schema_version),
+      request_id: null,
+      memories: ranked.map(responseMemory),
+    }, 200, corsHeaders);
+  }
 
   const { data: trace, error: traceError } = await supabase.from("agent_memory_recall_traces").insert({
     workspace_id: req.workspace_id,

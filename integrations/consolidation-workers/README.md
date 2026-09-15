@@ -204,7 +204,8 @@ Solution: Ensure the knowledge graph schema is applied. The `consolidation_log` 
 
 ```
 consolidation-workers/
-  _shared/           # Shared config and helpers (same as enhanced-mcp)
+  _shared/           # Shared config and helpers (config and helpers as in enhanced-mcp)
+    auth.ts          # Access keys — a copy of server-portable/auth.ts (this fork)
     config.ts        # Constants, models, prompt, patterns
     helpers.ts       # Type coercion, embedding, metadata extraction
   bio/

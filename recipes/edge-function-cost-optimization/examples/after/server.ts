@@ -3,7 +3,9 @@
 //
 // Each tool module exports a `register(server, principal)` function; a tool
 // that writes is registered only `if (canWrite(principal))`, so the server a
-// read-scoped key is handed never had those tools (ob1-fork, SMD-1455).
+// read-scoped key is handed never had those tools (ob1-fork, SMD-1455). The
+// server is cached per SCOPE, so `principal` is the first caller's for that
+// scope: use it for canWrite() and nothing else — never for attribution.
 // Adding a new extension means: drop a new file in `tools/`, add one import,
 // add one `register()` call. No per-request reconstruction — two servers at
 // most, not one per request.

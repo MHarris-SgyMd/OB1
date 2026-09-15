@@ -116,6 +116,7 @@ Create `supabase/functions/telegram-capture/index.ts` with the contents below:
 
 ```typescript
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -130,11 +131,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Whether the secret Telegram echoes is the configured one, compared timing-safe:
 // both sides hashed, so the digests are one length, then compared byte for byte
-// with the time taken independent of where they differ.
-async function secretMatches(presented: string | null, expected: string): Promise<boolean> {
+// with the time taken independent of where they differ. node:crypto resolves on
+// Supabase's Deno runtime; the Web Crypto timing-safe compare Deno 1 had is gone in Deno 2.
+function secretMatches(presented: string | null, expected: string): boolean {
   if (!presented) return false;
-  const digest = async (s: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
-  return crypto.subtle.timingSafeEqual(await digest(presented), await digest(expected));
+  const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
+  return timingSafeEqual(digest(presented), digest(expected));
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
@@ -210,7 +212,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // internet traffic from hitting the endpoint if anyone discovers the URL.
     if (TELEGRAM_WEBHOOK_SECRET) {
       const secret = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
-      if (!(await secretMatches(secret, TELEGRAM_WEBHOOK_SECRET))) {
+      if (!secretMatches(secret, TELEGRAM_WEBHOOK_SECRET)) {
         return new Response("unauthorized", { status: 401 });
       }
     }

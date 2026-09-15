@@ -27,7 +27,7 @@ This Edge Function exposes the v1 OB1 Agent Memory contract. OpenClaw is the fir
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
 - [`schemas/agent-memory`](../../schemas/agent-memory/) applied
 - Supabase CLI installed
-- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` configured as Supabase secrets — `name:scope:sha256` entries, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope.
+- `OPENROUTER_API_KEY` and `MCP_ACCESS_KEYS` configured as Supabase secrets — `name:scope:sha256` entries, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows (the older single `MCP_ACCESS_KEY` still works). The routes that write — `POST /writeback`, `POST /recall/:request_id/usage`, `PATCH /memories/:id/review` — answer 403 to a `read` key; recall and the listings serve either scope, but a recall under a `read` key stores no trace and returns `request_id: null`, so usage reporting needs a `write` key end to end.
 
 ## Credential Tracker
 

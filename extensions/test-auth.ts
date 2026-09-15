@@ -40,7 +40,7 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,12 +65,14 @@ const served: Handler[] = [];
 
 /** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk|@supabase\/supabase-js)(\/|$)/;
-const PG_STUB = join(tmpdir(), "ob1-test-auth-deno-postgres-stub.ts");
+const PG_STUB = join(tmpdir(), `ob1-test-auth-deno-postgres-stub-${process.pid}.ts`);
 await Bun.write(PG_STUB, "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
+/** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
+const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({
   name: "deno-specifiers-on-bun",
   setup(build) {
-    build.onLoad({ filter: /\/(recipes|integrations)\/.*\.ts$/ }, async (args) => {
+    build.onLoad({ filter: VENDORED }, async (args) => {
       let src = await Bun.file(args.path).text();
       src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
       src = src.replace(/(from\s+|import\s+)"([^"]+)"/g, (whole, lead, spec) => {
@@ -120,6 +122,8 @@ const PG = "postgres://ob1:stub@stub.invalid:5432/ob1";
 /** For a server whose handler queries before it can answer: refused at once, no name to resolve. */
 const PG_REFUSED = "postgres://ob1:stub@127.0.0.1:1/ob1";
 const HTTPS = "https://stub.invalid";
+/** supabase-js's shape of the same: a valid URL nothing answers, refused at once. */
+const HTTPS_REFUSED = "https://127.0.0.1:1";
 const ext = (file: string, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
   ({ file: `extensions/${file}`, kind: "mcp", keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, shared: "../_shared/auth.ts", reads, writes, ...o });
 const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
@@ -153,7 +157,7 @@ const SERVERS: Server[] = [
   vendored("integrations/kubernetes-deployment/index.ts", "mcp", ["search", "fetch", "search_thoughts", "list_thoughts", "thought_stats"], ["capture_thought"]),
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
-    ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: HTTPS, readProbe: "POST /recall" }),
+    ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: HTTPS_REFUSED, readProbe: "POST /recall" }),
   vendored("integrations/open-brain-rest/index.ts", "rest",
     ["GET /health", "GET /stats", "GET /thoughts", "GET /thought/:id", "POST /search", "GET /duplicates", "GET /thought/:id/connections",
      "GET /thought/:id/reflection", "GET /ingestion-jobs", "GET /ingestion-jobs/:id", "POST /ingestion-jobs/:id/execute"],
@@ -195,6 +199,7 @@ for (const s of SERVERS) {
 process.env.SUPABASE_URL = PG;
 await import(join(ROOT, WEBHOOK.file));
 assert(served.length === SERVERS.length + 1, `${WEBHOOK.file} imports as deployed and hands Deno.serve one handler`);
+unlinkSync(PG_STUB); // every import that wanted it has it
 
 // ── One request ──────────────────────────────────────────────────────────────
 
@@ -204,7 +209,7 @@ type Reply = { status: number; json: any; text: string };
 
 /** One request to server `s`; `also` carries further presented forms beside the one under test. */
 async function request(s: Server, key: string | null, via: Via, also: Partial<Record<Via, string>>,
-  init: { method: string; path: string; body?: unknown; accept?: boolean }): Promise<Reply> {
+  init: { method: string; path: string; body?: unknown; rawBody?: string; accept?: boolean }): Promise<Reply> {
   const handler = served[SERVERS.indexOf(s)];
   // Where createClient runs per request, the URL shape must be the one THIS server's client accepts.
   process.env.SUPABASE_URL = s.url;
@@ -220,7 +225,7 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const [path, own] = init.path.split("?");
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
-  const r = await handler(new Request(url, { method: init.method, headers, body: init.body === undefined ? undefined : JSON.stringify(init.body) }));
+  const r = await handler(new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
   const text = await r.text();
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
   let json: any = null;
@@ -230,18 +235,18 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
 /** An MCP request: JSON-RPC, POST /mcp. */
 const call = (s: Server, key: string | null, body: unknown, via: Via = "x-access-key", also: Partial<Record<Via, string>> = {}, accept = true) =>
   request(s, key, via, also, { method: "POST", path: "/mcp", body, accept });
-/** An HTTP API request, `route` as "METHOD /path" with any `:param` filled in; an empty JSON object as the body. */
-const http = (s: Server, key: string | null, route: string, via: Via = "x-access-key") => {
+/** An HTTP API request, `route` as "METHOD /path" with any `:param` filled in; an empty JSON object as the body unless `rawBody` says otherwise. */
+const http = (s: Server, key: string | null, route: string, via: Via = "x-access-key", rawBody?: string) => {
   const [method, path] = route.split(" ");
-  return request(s, key, via, {}, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {} });
+  return request(s, key, via, {}, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, rawBody });
 };
 /** A worker run, dry or not. */
 const run = (s: Server, key: string | null, dryRun: boolean, via: Via = "x-access-key") =>
   request(s, key, via, {}, s.dryRun === "body"
     ? { method: "POST", path: "/", body: { dry_run: dryRun } }
     : { method: "POST", path: dryRun ? "/?dry_run=true" : "/", body: undefined });
-/** Past the gate: whatever the handler answers once the key and the scope let it through. */
-const passed = (r: Reply) => r.status !== 401 && r.status !== 403;
+/** Past the gate: whatever the handler answers once the key and the scope let it through — not a refusal by another status. */
+const passed = (r: Reply) => r.status !== 401 && r.status !== 403 && !/access key|read-scoped/i.test(r.text);
 
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 const toolsOf = (r: { json: any }) => ((r.json?.result?.tools ?? []) as { name: string }[]).map((t) => t.name).sort();
@@ -269,8 +274,8 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   // A call, not only a listing: the tool is not registered for this principal,
   // so the server answers "not found" before any handler — or any query — runs.
   // A server with no tool at all for this principal (delete-thought-mcp,
-  // update-thought-mcp) declares no tools capability, so the SDK answers a call
-  // — or a listing — with "method not found" instead: nothing to call, either way.
+  // update-thought-mcp) lists an empty set but has no tools/call handler, so a
+  // call is told the method does not exist: nothing to call, either way.
   if (s.writes.length > 0) {
     const attempt = await call(s, READ_KEY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: s.writes[0], arguments: {} } });
     const err = attempt.json?.error ?? attempt.json?.result;
@@ -278,8 +283,8 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
     assert(attempt.status === 200 && (code === -32602 || attempt.json?.result?.isError === true || (s.reads.length === 0 && code === -32601))
       && /not found|unknown tool/i.test(JSON.stringify(err)),
       `a read-scoped key calling ${s.writes[0]} is told the tool does not exist (${JSON.stringify(err).slice(0, 80)})`);
-    if (s.reads.length === 0) assert(read.json?.error?.code === -32601 || Array.isArray(read.json?.result?.tools),
-      "…and its listing says there is nothing: no tools capability at all, or an empty list");
+    if (s.reads.length === 0) assert(Array.isArray(read.json?.result?.tools) && read.json.result.tools.length === 0,
+      "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
   assert((await call(s, "not-a-key", LIST)).status === 401, "a wrong key is refused with 401");
@@ -309,7 +314,8 @@ for (const s of SERVERS.filter((s) => s.kind === "rest")) {
 
   assert(passed(await http(s, READ_KEY, s.readProbe!)), `a read-scoped key passes the gate on ${s.readProbe}`);
   for (const w of s.writes) {
-    const r = await http(s, READ_KEY, w);
+    // A body no route could parse: the 403 has to come from the gate, before parsing.
+    const r = await http(s, READ_KEY, w, "x-access-key", "{not json");
     assert(r.status === 403 && /read-scoped/.test(r.text), `a read-scoped key is told ${w} writes (403), before the route parses anything`);
   }
   for (const w of s.writes) assert(passed(await http(s, WRITE_KEY, w)), `a write-scoped key passes the gate on ${w}`);
@@ -413,8 +419,9 @@ for (const s of SERVERS.filter((s) => s.health)) {
 
 /** Stored functions a tool or route may call and still be a read; any other `.rpc(` is a write. */
 const RPC_READS = ["crm_search_contacts_fts", "traverse_graph", "find_shortest_path", "match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
-/** Tables a READ may insert into: a recall records itself. An update or delete on them, or an insert anywhere else, is a write. */
+/** Tables a READ may insert into: a recall records itself (for a write-scoped key). An update or delete on them, or an insert anywhere else, is a write. */
 const LOG_TABLES = ["agent_memory_recall_traces", "agent_memory_recall_items", "agent_memory_audit_events"];
+const LOG_INSERT = new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)\s*\.insert\(`);
 /**
  * Whether a body writes: a table verb (not a read's own log insert; `.delete()`
  * with no argument or an options object — `searchParams.delete("page")` and a
@@ -477,9 +484,14 @@ for (const s of SERVERS) {
     const starts = mounted.map((m) => m.at).concat(text.indexOf("\nDeno.serve("));
     for (const m of mounted) {
       const end = Math.min(...starts.filter((a) => a > m.at));
-      const reach = withCallees(text, text.slice(m.at, end));
+      const block = text.slice(m.at, end);
+      const reach = withCallees(text, block);
       if (s.writes.includes(m.route)) assert(writes(reach), `…${m.route} does write (the route or a function it calls inserts, updates, upserts or deletes, or calls an RPC not listed as a read)`);
-      else assert(!writes(reach), `…${m.route} does not write (a read may insert its own trace; any RPC it calls is in RPC_READS)`);
+      else {
+        assert(!writes(reach), `…${m.route} does not write (a read may insert its own trace; any RPC it calls is in RPC_READS)`);
+        // A read that records itself does so only for a principal that could write anyway.
+        if (LOG_INSERT.test(reach)) assert(/if \(!canWrite\(c\.get\("principal"\)\)\)/.test(block), `…${m.route} records its trace only behind a canWrite check — a read-scoped key stores nothing`);
+      }
     }
     assert(text.includes("authenticateRequest(c.req.raw,") && text.includes('c.set("principal", principal)'),
       "…the key is read and resolved from the request in one middleware, the principal handed to the routes");
@@ -513,8 +525,9 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   { file: "recipes/vercel-neon-telegram/src/lib/auth.ts",
     must: [/export function secretMatches\(/, /createHash\("sha256"\)/, /timingSafeEqual\(digest\(presented\), digest\(expected\)\)/], mustNot: [] },
   { file: "integrations/telegram-capture/README.md",
-    must: [/async function secretMatches\(/, /crypto\.subtle\.timingSafeEqual\(/, /if \(!\(await secretMatches\(secret, TELEGRAM_WEBHOOK_SECRET\)\)\)/],
-    mustNot: [/secret !== TELEGRAM_WEBHOOK_SECRET/] },
+    must: [/import \{ createHash, timingSafeEqual \} from "node:crypto"/, /function secretMatches\(/, /timingSafeEqual\(digest\(presented\), digest\(expected\)\)/, /if \(!secretMatches\(secret, TELEGRAM_WEBHOOK_SECRET\)\)/],
+    // Deno 2 removed crypto.subtle.timingSafeEqual; a sample that calls it fails every webhook on Supabase.
+    mustNot: [/secret !== TELEGRAM_WEBHOOK_SECRET/, /crypto\.subtle\.timingSafeEqual/] },
   { file: "docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs",
     must: [/function secretMatches\(/, /timingSafeEqual\(digest\(presented\), digest\(expected\)\)/, /secretMatches\(provided, accessKey\)/],
     mustNot: [/provided === accessKey/] },
@@ -545,7 +558,8 @@ for (const t of TEXT_ONLY) {
     if (!existsSync(join(ROOT, file)) || seen.has(file)) continue;
     seen.add(file);
     const imports = JSON.parse(readFileSync(join(ROOT, file), "utf8")).imports as Record<string, string>;
-    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && /^npm:[^@]+(?:@[^@]+)?@\d/.test(spec) && spec !== `npm:${name}@${pkg[name]}`);
+    // Every npm pin of a package installed here — scoped names included — must be this exact version.
+    const drift = Object.entries(imports).filter(([name, spec]) => name in pkg && /^npm:@?[^@]+@/.test(spec) && spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${file} pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);
   }
 }

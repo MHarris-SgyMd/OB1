@@ -43,6 +43,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -129,6 +130,14 @@ function buildServer(principal: Principal): McpServer {
       }
     },
   );
+
+  if (!canWrite(principal)) {
+    // No tool for this principal — but a tools capability with an empty list,
+    // so a client sees a server with nothing to call, not a failed handshake.
+    // (The SDK wires tools/list only when a tool is registered.)
+    server.server.registerCapabilities({ tools: {} });
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [] }));
+  }
 
   return server;
 }

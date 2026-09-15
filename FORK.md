@@ -186,7 +186,7 @@ extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.
 extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 65 widened it to every vendored server
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
-<17 vendored files>              # change 65 (twelve servers onto _shared/auth.ts with scopes; five webhook receivers and samples onto a timing-safe compare)
+<17 vendored files>              # change 65 (thirteen servers and samples onto _shared/auth.ts with scopes; three webhook receivers and a stub onto a timing-safe compare)
 recipes/_shared/auth.ts          # change 65 (new file — server-portable/auth.ts byte for byte)
 integrations/_shared/auth.ts     # change 65 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 65 (new file — the same, beside the workers' existing _shared/)
@@ -7848,7 +7848,7 @@ its key.
 
 
 
-### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: twelve servers onto a `_shared/auth.ts` with scopes, five webhook receivers and samples onto a compare of digests, and check 8's exception list empty (SMD-1455)
+### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto a `_shared/auth.ts` with scopes, three webhook receivers and a stub onto a compare of digests, and check 8's exception list empty (SMD-1455)
 
 `server-portable/auth.ts` (one export added, the consumers paragraph), its four
 copies — `extensions/_shared/auth.ts`, and the new `recipes/_shared/auth.ts`,
@@ -7917,16 +7917,21 @@ sample) the principal is a parameter; where it was a module singleton
 `buildServer(principal)` runs once per key scope and `serverFor(principal)`
 hands back the cached one — two servers at most, not one per request, which is
 the property those files and the cost recipe care about. A server with no
-tool for a read-scoped principal (the two single-tool integrations) declares
-no tools capability; a client that lists anyway is told the method does not
-exist. The two HTTP APIs resolve the principal in one `app.use("*")` middleware
+tool for a read-scoped principal (the two single-tool integrations) still
+declares a tools capability and lists an empty set — the SDK wires `tools/list`
+only when a tool is registered, and a client whose listing fails shows a broken
+connector, not an empty one; a call is still told the method does not exist.
+The two HTTP APIs resolve the principal in one `app.use("*")` middleware
 and put a `requireWrite` middleware on the routes that write — for
 `agent-memory-api` write-back, usage reporting and review; for
 `open-brain-rest` the thought `PUT` and `DELETE`, capture, reflection and
 ingest — answering 403 with the reason before the route parses a body. A
-recall is a read even though it records itself: it inserts a trace row and its
-items, which the usage route later marks used or ignored — and that route is
-a write. The four workers keep their fail-closed 503 when no key is configured
+recall is a read: under a write-scoped key it records itself — a trace row and
+its items, which the usage route later marks used or ignored, and that route
+is a write — and under a read-scoped key it records nothing and returns no
+request id, so a leaked read key cannot fill the trace tables with its
+payloads either (the first review pass; the implementation had let it). The
+four workers keep their fail-closed 503 when no key is configured
 and let a read-scoped key do the one thing that writes nothing: a dry run
 (`?dry_run=true`, or the auditor's `dry_run` body flag); anything else is 403.
 The consolidation workers' undocumented `x-mcp-key` header went; the
@@ -7949,13 +7954,17 @@ payload field is refused rather than hashed. The Next.js recipe's route uses a
 `secretMatches` added to its own `src/lib/auth.ts`, beside the
 `timingSafeEqual` it already had for the access key — a Next.js app does not
 import this fork's server. The Telegram README's sample handler — pasted into
-a fresh Supabase project, where nothing else of this fork exists — carries a
-six-line Web Crypto version (`crypto.subtle.digest` and Deno's
-`crypto.subtle.timingSafeEqual`), and the dashboard walkthrough's Node stub a
-`node:crypto` one, because a stub is what gets copied.
+a fresh Supabase project, where nothing else of this fork exists — and the
+dashboard walkthrough's Node stub each carry a five-line `node:crypto` version:
+the two calls `_shared/auth.ts` makes, proven on the target runtime. (The
+implementation had given the sample a Web Crypto one on
+`crypto.subtle.timingSafeEqual`, a Deno 1 extension Deno 2 removed; on
+Supabase's runtime every webhook would have thrown inside the handler's `try`
+and answered 500. The first review pass ran it under Deno 2.9.6 and found it;
+`enhanced-mcp` feature-detects the same call, which is why it had never shown.)
 
 **The test.** `extensions/test-auth.ts` is now the one test for every vendored
-server under scoped keys: the seven extensions and the eleven recipes and
+server under scoped keys: the seven extensions and the twelve recipes and
 integrations it can import, plus the webhook receiver, run as deployed under
 the stand-in for Deno's two globals — `Deno.serve({ port }, handler)` now
 captured too — and, for the recipes and integrations, under a Bun loader that
@@ -7976,11 +7985,12 @@ exactly the writes take `requireWrite`, a route's reach including the
 file-level functions it calls; `.delete()` a table verb only with no argument
 (`searchParams.delete("page")` had made two reads writes); raw `INSERT INTO`
 counts for the Kubernetes server's SQL; the read's own trace inserts allowed
-by table name; the four copies identical; each deno.json's exact `npm:` pins
-matching what the test installs; and the five files it cannot run — the
-"after" sample whose tool modules are not in the repository, the Next.js
-route, the README, the stub — say the same thing in their text. 631
-assertions.
+by table name and only behind a `canWrite` check; the four copies identical;
+every `npm:` pin in a recipe's or integration's deno.json for a package the
+test installs matching it exactly, scoped names included; and the six files it
+cannot run — the "after" sample's two files, whose tool modules are not in the
+repository, the Next.js route and its lib, the README, the stub — say the
+same thing in their text. 634 assertions.
 
 **Check 8.** The exception list is empty; the shape stays, the header says why,
 and the failure message names both places a fix can go — the `_shared/auth.ts`
@@ -8009,7 +8019,44 @@ JSON-RPC envelope, for change 64's reason. The shim-importing files among the
 seventeen still neither bundle as an Edge Function nor run under Deno, fix
 13's consequence, unchanged here — SMD-1480 records it for five extensions and
 now carries a comment widening it to these. Read scope on the workers means a
-dry run, which still spends LLM calls; that is a cost, not a write.
+dry run, which still spends LLM calls; that is a cost, not a write. The three
+module-singleton MCP servers still `connect()` one cached `McpServer` to a
+fresh transport per request, as they did on main: the SDK overwrites the
+transport on connect and captures it when a message arrives, so two concurrent
+requests to one of them can cross responses — a pre-existing defect the
+per-scope cache neither causes nor cures (SMD-1497 holds it); the "after"
+sample's one transport per session is the shape that does.
+
+**Review, first pass** (triaged; two reviewers, nineteen findings — one HIGH,
+four MED, the rest low — twelve fixed, one filed, the rest noted or declined).
+The HIGH and one MED are above: the Telegram sample on an API Deno 2 removed,
+and a read-scoped recall that stored its payload. The two single-tool
+integrations declare an empty tools list rather than no capability (both
+reviewers). The test's pin guard had a regex that skipped every scoped package
+— `@hono/mcp`, `@modelcontextprotocol/sdk`, `@supabase/supabase-js` were
+never compared — and the corrected guard found the one drift it had hidden:
+the consolidation workers pinned `@supabase/supabase-js@2`, an unpinned major,
+and `metadata-norm` bypassed the import map with an inline `npm:` specifier;
+both pin 2.47.10 now, through the map. The test dialled the network once — a
+write probe on `agent-memory-api` passed its schema (both fields default) and
+queried supabase-js at `stub.invalid`, a resolver lookup the docblock said
+never happens; that server is pointed at a refused port like the other. The
+read-key write probes send a body no route could parse, so the 403 is proven
+to come from the gate; `passed()` no longer counts a refusal by another status;
+the postgres stub has a per-process name and is removed after the imports; the
+loader's filter is anchored to this checkout. Counts corrected: thirteen files
+import the module, four compare digests (both cost samples import it; the stub
+does not); twelve importable vendored servers, six text-only files. The "after"
+sample says its cached `principal` is the first caller's for that scope and is
+for `canWrite()` only; the header note that said "the import above" sat above
+the import; the Docker context gained a `.dockerignore` so the whole
+`integrations/` tree does not ship to the daemon; `ob-graph`'s `.env.example`
+led with the single key; the consolidation README's tree and change 64's prose
+in `extensions/package.json` and `extensions/README.md` name the widened test.
+Noted, not changed: `primitives/remote-mcp` and `docs/` do not mention
+`MCP_ACCESS_KEYS` (change 64's gap, carried — every converted README points at
+the deploy primitive's Step 3); the download URL for `integrations/_shared/auth.ts`
+answers 404 on `main` until this merges, as any doc pointing at `main` does.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the

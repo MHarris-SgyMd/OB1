@@ -27,9 +27,9 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 65; extensions/test-auth.ts exercises it.
-// The import above is this file's first from outside its own directory: deploy
+// The _shared import below is this file's first from outside its own directory: deploy
 // it with _shared/auth.ts beside it (supabase/functions/_shared/), as the README says.
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js"; // pinned by ../deno.json
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
   isRecord,
