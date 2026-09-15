@@ -71,11 +71,20 @@ left them — a vector the operator accepted, and has not written since, is
 detail; the column missing under this server is a failure, as is a database
 whose `update_thought` predates 021 or carries an older form beside it (`edit
 signature`) — the server sends the model on every capture and every edit.
-Over a direct connection `atomic capture` reads the 3-argument
-`upsert_thought`'s body as well: 021 re-applied by hand puts back the form
-from before migration 022, under which a re-capture that makes no windows at
-another model leaves the previous vector's chunk rows behind, and that is a
-warning naming 022. `chunk delete privilege`: a role that cannot DELETE from
+Over a direct connection `atomic capture` reads both `upsert_thought` bodies
+as well, since a `CREATE OR REPLACE` from outside the migrations — an earlier
+migration by hand, the getting-started guide pasted again, a vendored schema
+or recipe (SMD-1250) — replaces one with no error: a 3-argument body from
+before 022 leaves a re-capture's stale windows behind, one from before 025
+drops `derived_from` and `supersedes` silently, and a 2-argument body from
+before 005 empties a double-encoded payload silently; each is a warning
+naming the migration that owns the body. `provenance` reads
+`trace_provenance`'s body the same way and warns, naming 026, when the
+bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
+body is not 024's; and `work claims` fails when `release_thought`'s or
+`release_claims_for_worker`'s body is not 015's — every worker release would
+fail 015's CHECK — and names any overload of the claim names no migration
+defines. `chunk delete privilege`: a role that cannot DELETE from
 `thought_chunks` — every chunk writer runs as its caller — is a failure with the
 GRANT as the remedy. `fingerprint backfill` (023): a thought without a fingerprint
 whose text no row holds is a capture doubled in waiting — a warning naming the

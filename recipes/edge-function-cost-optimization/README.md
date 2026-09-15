@@ -52,7 +52,7 @@ Three things bloat per-call cost:
 |---|---|
 | `thought_stats` selects every row of `thoughts` to count metadata in JS | New `thought_stats_summary()` SQL RPC — single aggregation query |
 | Same query embedded multiple times during a search session | 10-min cache keyed by SHA-256 of query text |
-| `capture_thought` inserts content, then runs a separate `UPDATE` to set the embedding | New 3-arg `upsert_thought(text, jsonb, vector)` overload writes both in one round-trip |
+| `capture_thought` inserts content, then runs a separate `UPDATE` to set the embedding | New 3-arg `upsert_thought(text, jsonb, vector)` overload writes both in one round-trip (on this fork: migration 004's, redefined through 025) |
 
 Plus a moderate cache layer with tag-based invalidation: `thought_stats` (5 min, invalidated on `capture_thought`), `list_vendors` no-filter (5 min, invalidated on `add_vendor`), `get_follow_ups_due` (5 min, invalidated on `log_interaction` / `create_opportunity`).
 
@@ -76,12 +76,12 @@ Expected outcome: a 1.8M/month workload drops to roughly 440k invocations — co
 
 ## Step-by-Step Guide
 
-### Step 1 — Apply the SQL migrations
+### Step 1 — The SQL functions (already present on this fork)
 
-In the Supabase SQL Editor, paste and run [`migrations/20260417_edge_fn_optimizations.sql`](./migrations/20260417_edge_fn_optimizations.sql). It's additive (no schema changes) and creates two functions:
+Upstream's [`migrations/20260417_edge_fn_optimizations.sql`](./migrations/20260417_edge_fn_optimizations.sql) created two functions. On a brain built by `db/migrate.ts` both exist already — `thought_stats_summary()` is migration 024's, the 3-argument `upsert_thought(text, jsonb, vector)` is 004's through 025's — and upstream's bodies would have replaced theirs silently, so the file's statements are removed and it documents why (SMD-1250). Nothing to run; go to step 2.
 
-- `thought_stats_summary()` — single-query aggregation replacing the JS loop
-- `upsert_thought(text, jsonb, vector)` — 3-arg overload that stores embedding in one round-trip (the existing 2-arg signature continues to work)
+- `thought_stats_summary()` — single-query aggregation replacing the JS loop (migration 024)
+- `upsert_thought(text, jsonb, vector)` — stores content, metadata and embedding in one round-trip (migrations 004–025; the 2-argument form stays beside it)
 
 ### Step 2 — Restructure your edge function
 
@@ -195,7 +195,7 @@ Browser-based MCP clients (Claude Desktop, claude.ai web) treat `Mcp-Session-Id`
 
 ### Why we use a unique-content fingerprint, not the SHA-256 of the request
 
-The new `upsert_thought(text, jsonb, vector)` RPC computes the same `content_fingerprint` as the original 2-arg version (lower-trim-collapse-whitespace + SHA-256 hex). This keeps the fingerprint dedup behavior identical and means the new RPC is a drop-in replacement.
+The new `upsert_thought(text, jsonb, vector)` RPC computes the same `content_fingerprint` as the original 2-arg version (lower-trim-collapse-whitespace + SHA-256 hex). This keeps the fingerprint dedup behavior identical and means the new RPC is a drop-in replacement. (On this fork the 3-argument form is migration 004's through 025's, and `content_fingerprint_of` in 016 holds the rule.)
 
 ## Troubleshooting
 
@@ -213,7 +213,7 @@ Run `deno check` from inside `supabase/functions/<name>/` to validate. Common go
 
 ## Works Well With
 
-- **[Content Fingerprint Dedup](../content-fingerprint-dedup/)** — the new `upsert_thought(text, jsonb, vector)` overload preserves fingerprint behavior
+- **[Content Fingerprint Dedup](../content-fingerprint-dedup/)** — the `upsert_thought(text, jsonb, vector)` overload (this fork's 004–025) preserves fingerprint behavior
 - **[Fingerprint Dedup Backfill](../fingerprint-dedup-backfill/)** — run before this recipe to clean up duplicates
 - Any future extensions: add their tools to the unified server instead of deploying a separate function
 

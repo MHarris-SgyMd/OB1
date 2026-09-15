@@ -1,6 +1,6 @@
 {
   "name": "Thought Work Claims",
-  "description": "A blackboard claim table (public.thought_work_claims) plus RPCs (claim_thoughts, release_thought, release_claims_for_worker) that let many parallel workers process the same pool of thoughts without two of them grabbing the same one. Claims are made exclusive by a (thought_id, work_type) primary key with INSERT ... ON CONFLICT DO NOTHING, and a per-claim TTL with inline stale-claim reaping recovers work stranded by crashed workers. Thought ids are UUID, matching public.thoughts.id.",
+  "description": "A blackboard claim table (public.thought_work_claims) plus RPCs (claim_thoughts, release_thought, release_claims_for_worker) that let many parallel workers process the same pool of thoughts without two of them grabbing the same one. Claims are made exclusive by a (thought_id, work_type) primary key with INSERT ... ON CONFLICT DO NOTHING, and a per-claim TTL with inline stale-claim reaping recovers work stranded by crashed workers. Thought ids are UUID, matching public.thoughts.id. On this fork the file is a stub: migration 015 is this blackboard there (see the README's note).",
   "category": "schemas",
   "author": {
     "name": "Alan Shurafa",

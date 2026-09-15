@@ -74,6 +74,7 @@ const FUNCTIONS = [
   "claim_thoughts(text, text, int, int, int)",
   "release_thought(uuid, text, text, text, text)",
   "release_claims_for_worker(text, text)",
+  "renew_claims(text, text, int)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",

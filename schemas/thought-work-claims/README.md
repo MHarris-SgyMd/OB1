@@ -2,6 +2,8 @@
 
 > A blackboard so many workers can chew through the same pool of thoughts in parallel, and no two workers ever grab the same thought.
 
+> **This fork (SMD-1250):** migration 015 is this blackboard on a brain built by `db/migrate.ts` — a different table and a different `claim_thoughts` (the pool is the enqueued rows, not an id list), with `release_thought` and `release_claims_for_worker` under the same names and signatures. Upstream's `schema.sql` would have replaced two of 015's function bodies silently and added a third overload, so its statements are removed and the file is a stub. The text below is upstream's, describing upstream's schema; its worker example calls upstream's signatures. `db/README.md` documents the fork's functions and the workers that use them (`reembed.ts`, `extract-entities.ts`, `consolidate.ts`).
+
 ## What It Does
 
 When you want to process a large set of thoughts — enrich them, re-embed them, score them, consolidate duplicates — one process is slow. The obvious fix is to run several workers at once. The catch: if two workers both `SELECT` the next batch of unprocessed thoughts, they will pick overlapping rows and do the same work twice (or worse, write conflicting results).
@@ -38,7 +40,7 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
 ## Steps
 
 1. Open your **Supabase SQL Editor** (Dashboard → SQL Editor).
-2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. The script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe.
+2. Paste the full contents of [`schema.sql`](./schema.sql) and run it. Upstream's script is idempotent — it uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `CREATE OR REPLACE FUNCTION`, so re-running it is safe. **On this fork the file is a stub and installs nothing; skip steps 2–4** — the table and functions the checks in steps 3–4 would find are migration 015's.
 3. Confirm the table and RPCs exist:
 
    ```sql
@@ -58,7 +60,7 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
    WHERE table_name = 'thought_work_claims';
    ```
 
-Or, if you keep migrations in `supabase/migrations/`, apply via the CLI:
+Or, if you keep migrations in `supabase/migrations/`, apply via the CLI (upstream; on this fork the file is a stub and there is nothing to push):
 
 ```bash
 supabase db push
@@ -267,6 +269,9 @@ WHERE work_type = 'enrichment'
 ORDER BY claimed_at DESC;
 
 -- Re-run a batch: clear terminal rows so those thoughts become claimable again.
+-- (This fork: do not run this against a re-embed work_type — the succeeded
+--  rows are the evidence migrations 021 and 030 and reembed.ts --accept-failed
+--  read; reembed.ts --retry-fallbacks is the re-run path, db/README.md.)
 DELETE FROM public.thought_work_claims
 WHERE work_type = 'enrichment' AND status IN ('succeeded', 'failed');
 ```
@@ -289,18 +294,7 @@ This schema assumes `public.thoughts.id` is `UUID`, the canonical Open Brain typ
 
 ## Rollback
 
-To remove the claim system entirely:
-
-```sql
-DROP FUNCTION IF EXISTS public.claim_thoughts(UUID[], TEXT, TEXT, INT);
-DROP FUNCTION IF EXISTS public.release_thought(UUID, TEXT, TEXT, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.release_claims_for_worker(TEXT, TEXT);
-DROP TABLE IF EXISTS public.thought_work_claims;
-
-NOTIFY pgrst, 'reload schema';
-```
-
-Dropping the table removes all in-flight and historical claim records. It does not touch `public.thoughts`.
+On this fork there is nothing to remove: the file installs nothing (see the note at the top). Upstream's rollback dropped the three functions and the `thought_work_claims` table — on a migrated brain those are migration 015's, and dropping them takes the re-embed, extraction and consolidation workers' state with them. Do not run it here (SMD-1250).
 
 ## Troubleshooting
 

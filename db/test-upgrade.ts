@@ -438,8 +438,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // The brain as it stood before this change: baselined through 029, so 030
   // is pending, and a PLAIN run — the compose stack's, which gates the server
   // on it — must not fail with a bare "does not exist".
-  const last = MIGRATIONS[MIGRATIONS.length - 1];
-  assert(last.startsWith("030_"), `the last migration is 030 (${last})`);
+  // 030 by name, not "the last file": 031 (renew_claims, SMD-1023) follows it
+  // and needs only 015, so it is not the one a plain run must fail at.
+  const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 2, `030 is among the last two migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -557,8 +559,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const standing = async () => Number(((await sql.unsafe(`SELECT count(*)::int AS c FROM thought_work_claims c WHERE c.status = 'succeeded' AND ${ACCEPTED_CLAIM_SQL}`)) as { c: number }[])[0].c);
   assert((await standing()) === 4, "…and every acceptance stands, spent by nobody");
   assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(run.out) &&
-           /030_label_from_claims_excludes_accepted\.sql\s+applied\n\s*applied 3, re-applied/.test(run.out),
-         "…and the run says, beside 021's line, what the block wrote with the acceptances out of its sight: the plain row's thought and the earlier pass's — and nothing beside 030, whose line the summary follows");
+           /030_label_from_claims_excludes_accepted\.sql\s+applied\n(?!\s+·)/.test(run.out),
+         "…and the run says, beside 021's line, what the block wrote with the acceptances out of its sight: the plain row's thought and the earlier pass's — and nothing beside 030: no note follows its line");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );
@@ -762,7 +764,32 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   await sql.close();
 }
 
-console.log("\n[9] 021 with the acceptances out of its sight on a plain run — the column absent, 030 recorded then pending, and a role without TEMP (SMD-1421)");
+console.log("\n[9] Migration 031 on a schema without 015 — refused up front, naming 015 and --reapply (SMD-1023)");
+{
+  // A brain adopted with --baseline at a ledger through 031 whose schema stops
+  // before 015. 031's CREATE FUNCTION would succeed there (plpgsql resolves
+  // the table at first run) and its column COMMENT would fail bare; the file
+  // opens with 030's guard instead, so a plain run — the compose stack's,
+  // gating the server — fails naming what is missing and the remedy.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
+  const env = migratorEnv();
+  const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-015 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the031 = MIGRATIONS.find((f) => f.startsWith("031_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the031}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 && /031_renew_claims\.sql\s+FAILED: migration 031 needs 015 \(thought_work_claims\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 031 naming 015 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the031}`)[0].c) === 0, "…records nothing");
+  assert((await sql`SELECT to_regprocedure('renew_claims(text, text, int)') IS NULL AS absent`)[0].absent === true, "…and defines nothing: the guard runs before the function");
+  await sql.close();
+}
+
+console.log("\n[10] 021 with the acceptances out of its sight on a plain run — the column absent, 030 recorded then pending, and a role without TEMP (SMD-1421)");
 {
   const env = migratorEnv();
   const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });

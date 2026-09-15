@@ -19,8 +19,14 @@
  *      Bash or a prefix of a network client or interpreter; no spawn through a
  *      shell in any spelling — in every non-binary file under the contribution
  *      directories, with counted per-(file, hazard) exceptions
+ *   7. vendored SQL never redefines, drops or re-comments a function the core
+ *      migrations own, nor re-comments a thoughts column whose comment a
+ *      migration writes — in every non-binary file under the seven category
+ *      directories whole and docs/, the owned sets read from db/migrations/,
+ *      with counted per-(file, function) exceptions for the files that create
+ *      a brain rather than add to one
  *
- * Run: node scripts/check-fork-consistency.mjs
+ * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
  */
 
@@ -28,6 +34,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -405,10 +412,10 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
   ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
   ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": { why: "the header note that documents the same removal", lines: 1 } }],
 ]);
-// Text is scanned by construction: only known binary shapes and lockfiles are
-// skipped, so an extensionless Dockerfile, Procfile or CNAME is read like
-// everything else.
-const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+// Text is scanned by construction (checks 6 and 7): only known binary shapes
+// and lockfiles are skipped, so an extensionless Dockerfile, Procfile or CNAME
+// is read like everything else.
+const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
 
 /**
  * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
@@ -458,10 +465,7 @@ function checkShellHazards(dirs) {
   // Only the contribution directories — not their `_template` placeholders,
   // which contributionDirs() already skips — so this never depends on the
   // display filter below to hide a placeholder's hits.
-  const ignored = gitIgnoredFiles(dirs);
-  const files = dirs.flatMap((d) => walk(d.dir, [], /./))
-    .filter((f) => !SHELL_HAZARD_BINARY.test(f) && !ignored.has(relOf(f)));
-  const counts = scanLines(files, SHELL_HAZARDS.map(({ name, re, fileRe, only, what }) => ({
+  const counts = scanLines(textFilesUnder(dirs), SHELL_HAZARDS.map(({ name, re, fileRe, only, what }) => ({
     name,
     re,
     fileRe,
@@ -481,6 +485,201 @@ function checkShellHazards(dirs) {
   }
 }
 
+/**
+ * Every non-binary, non-ignored file under these directories — what checks 6
+ * and 7 read. The ignored set is read once, over the seven category
+ * directories and docs/, which cover every directory either check walks.
+ */
+const SCANNED_ROOTS = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
+let ignoredFiles;
+function textFilesUnder(dirs) {
+  ignoredFiles ??= gitIgnoredFiles(SCANNED_ROOTS);
+  return dirs.flatMap((d) => walk(d.dir, [], /./))
+    .filter((f) => !BINARY_FILES.test(f) && !ignoredFiles.has(relOf(f)));
+}
+
+// ── 7: vendored SQL never redefines or drops a function a migration owns ─────
+//
+// SMD-1250. Three vendored files carried `CREATE OR REPLACE FUNCTION
+// public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')` and
+// presented themselves as additive sidecars. Against a brain built by
+// db/migrate.ts that statement REPLACES the body migration 005 installed — no
+// error, the signature matches — and the scan for the rest found worse:
+// thought-work-claims put its own `release_thought` over 015's (every worker
+// release then fails 015's CHECK, and its release_claims_for_worker deletes
+// the rows), a recipe's "additive" migration put a 2026-04 body over the
+// 3-argument `upsert_thought` every capture on the SQL path runs — 008's
+// actor, 021's label, 022's window rule and 025's provenance gone in one
+// paste — and over 024's `thought_stats_summary`, and the vendored
+// provenance-chains schema carried `trace_provenance`/`find_derivatives` under
+// 025/026's signatures (which fail on the return type, as it turned out, but
+// install after the DROP its own rollback shows) and a `COMMENT ON COLUMN
+// thoughts.derived_from` that silently overwrote 025's contract. The
+// vendored files were fixed on that ticket (FORK.md change 58: the statements
+// cut where the file adds to a brain, the file excepted where it creates one);
+// this is what keeps the next rebase from bringing them back.
+//
+// The owned set is READ from db/migrations/ — every `CREATE [OR REPLACE]
+// FUNCTION` at the start of a line, comments stripped, with the file that last
+// defines it — never typed, so it cannot lag the next migration. A hit is any
+// CREATE FUNCTION, DROP FUNCTION, ALTER FUNCTION or COMMENT ON FUNCTION naming
+// an owned function at the start of a line (a header comment quoting one
+// begins with `--`; prose naming one is not a statement) — COMMENT because 028
+// and 031 carry a data contract in a function's comment, which a vendored
+// COMMENT ON overwrites as silently as CREATE OR REPLACE overwrites the body —
+// in every non-binary, non-ignored file under the seven category directories
+// WHOLE (a category's README and its `_template` included, which
+// contributionDirs() skips) AND docs/, where two of the three original files
+// lived. The rule itself is db/config.mjs's coreFunctionStatement, which
+// test-schema [31] applies too. By NAME, not signature: a matching signature is the
+// silent replacement, and a new overload beside an owned function is the
+// ambiguity 004's header names and the arity split SMD-1245 describes.
+//
+// Exceptions are per (file, function) and COUNTED, as check 6's are: the
+// files that CREATE a brain from the getting-started shape — the guide the
+// migrations were extracted from, a recipe's own Neon database, a Kubernetes
+// init script — define these functions because they are building the
+// database the migrations would otherwise build, and are excepted for exactly
+// the lines they have today with the reason beside them; one more line fails,
+// one fewer fails as stale. A sidecar that adds to an existing brain gets no
+// exception: its statement was cut and a header says which migration owns the
+// function.
+const MIGRATION_TEXTS = readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
+  .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]);
+const OWNED_FUNCTIONS = ownedFunctionsIn(MIGRATION_TEXTS);
+const OWNED_COLUMN_COMMENTS = ownedColumnCommentsIn(MIGRATION_TEXTS);
+/** The whole-text rule as scanLines's `fileRe` (the g flag added; the line reported is the match's first). */
+const asFileRe = (re) => new RegExp(re.source, re.flags + "g");
+/** Strings the rule must catch — the check's own negative tests, run through the scan's machinery every time. */
+const CORE_FUNCTION_PROBES = [
+  ["upsert_thought", "CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')"],
+  ["upsert_thought", "create or replace function upsert_thought("],
+  ["upsert_thought", "  CREATE FUNCTION upsert_thought (p_content text)"],
+  ["match_thoughts", "create or replace function match_thoughts(\n  query_embedding vector(1536),"],
+  ["trace_provenance", "DROP FUNCTION IF EXISTS public.trace_provenance(UUID, INT, INT);"],
+  ["release_thought", "drop function release_thought;"],
+  ["update_thought", "ALTER FUNCTION update_thought(uuid, text, jsonb) OWNER TO postgres;"],
+  ["update_updated_at", "CREATE OR REPLACE FUNCTION update_updated_at()"],
+  ["upsert_thought", "CREATE OR REPLACE FUNCTION\n  upsert_thought(p_content text)"],
+  ["release_thought", "COMMENT ON FUNCTION public.release_thought IS"],
+  ["claim_thoughts", "comment on function claim_thoughts(text, text, int, int) is 'x';"],
+  // The quoting a Supabase dashboard export or `supabase db diff` emits.
+  ["upsert_thought", 'CREATE OR REPLACE FUNCTION "public"."upsert_thought"("p_content" "text", "p_payload" "jsonb" DEFAULT \'{}\'::"jsonb")'],
+  ["match_thoughts", '  DROP FUNCTION IF EXISTS public."match_thoughts"(vector, float, int, jsonb);'],
+  ["update_thought", "> CREATE PROCEDURE update_thought(p_id uuid)"],
+  ["renew_claims", "DROP ROUTINE renew_claims;"],
+];
+/** Ordinary lines the rule must not catch. */
+const CORE_FUNCTION_NON_PROBES = [
+  "CREATE OR REPLACE FUNCTION match_thoughts_recency(",
+  "CREATE OR REPLACE FUNCTION update_updated_at_column()",
+  "CREATE OR REPLACE FUNCTION upsert_thoughts_batch(",
+  "-- CREATE OR REPLACE FUNCTION upsert_thought(text, jsonb) is the statement 003 ran",
+  "SELECT upsert_thought('x', '{}'::jsonb);",
+  "GRANT EXECUTE ON FUNCTION public.upsert_thought(TEXT, JSONB) TO service_role;",
+  "COMMENT ON FUNCTION public.release_thought_legacy IS 'x';",
+  "COMMENT ON COLUMN public.thoughts.derived_from IS 'x';",
+  "REVOKE EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT) FROM PUBLIC;",
+  "calls `upsert_thought` through PostgREST, then match_thoughts",
+  "The `CREATE OR REPLACE FUNCTION upsert_thought` in upstream's file is cut here.",
+  '-- > CREATE OR REPLACE FUNCTION "public"."upsert_thought"(',
+  "CREATE OR REPLACE FUNCTION public.upsert_thought_v2(",
+];
+/** Column comments the rule must catch, and ordinary ones it must not. */
+const COLUMN_COMMENT_PROBES = [
+  ["derived_from", "COMMENT ON COLUMN public.thoughts.derived_from IS"],
+  ["supersedes", 'comment on column "thoughts"."supersedes" is \'x\';'],
+];
+const COLUMN_COMMENT_NON_PROBES = [
+  "COMMENT ON COLUMN public.thoughts.derivation_layer IS 'x';",
+  "COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS 'x';",
+  "-- COMMENT ON COLUMN thoughts.derived_from IS what 025 runs",
+];
+// Files that create a brain from the getting-started shape, not sidecars that
+// add to one. Exactly this many lines, for exactly these functions.
+const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
+const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
+const LOCAL_INIT = "the init script of the recipe's own Postgres container, run once on an empty database";
+const one = (why) => ({ why, lines: 1 });
+const CORE_FUNCTION_EXCEPTIONS = new Map([
+  ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
+  ["recipes/content-fingerprint-dedup/README.md", {
+    upsert_thought: one("the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it"),
+  }],
+  ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", { update_updated_at: one(NEON) }],
+  ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", { match_thoughts: one(NEON) }],
+  ["integrations/kubernetes-deployment/k8s/init.sql", {
+    match_thoughts: one("the init script of the deployment's own Postgres, run once on an empty database"),
+  }],
+  ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
+    match_thoughts: one("the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database"),
+  }],
+  ["recipes/local-brain-no-mcp/volumes/db/init/01-thoughts-schema.sh", { update_updated_at: one(LOCAL_INIT) }],
+  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", {
+    match_thoughts: one(LOCAL_INIT),
+    upsert_thought: one(`${LOCAL_INIT} (a third signature, text/vector/jsonb)`),
+  }],
+]);
+
+/** Which of `owned`'s names a text names in a statement, by the rule the scan applies to the whole text. */
+const namedIn = (owned, ruleFor, text) => new Set([...owned.keys()].filter((name) => ruleFor(name).test(text)));
+const coreStatementsIn = (text) => namedIn(OWNED_FUNCTIONS, coreFunctionStatement, text);
+const columnCommentsIn = (text) => namedIn(OWNED_COLUMN_COMMENTS, coreColumnCommentStatement, text);
+
+function checkCoreFunctions() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  if (OWNED_FUNCTIONS.size === 0) return fail(SELF, "no migration under db/migrations defines a function — the owned set is empty and check 7 would pass everything");
+  for (const [fn, probe] of CORE_FUNCTION_PROBES) {
+    if (!OWNED_FUNCTIONS.has(fn)) fail(SELF, `core-function probe names '${fn}', which no migration defines — the probe or the owned set is stale`);
+    else if (!coreStatementsIn(probe).has(fn)) fail(SELF, `core-function rule no longer catches its probe for '${fn}': ${probe}`);
+  }
+  for (const text of CORE_FUNCTION_NON_PROBES) {
+    const [fn] = coreStatementsIn(text);
+    if (fn) fail(SELF, `core-function rule for '${fn}' catches ordinary text it must not: ${text}`);
+  }
+  if (OWNED_COLUMN_COMMENTS.size === 0) fail(SELF, "no migration under db/migrations comments a thoughts column — the owned column set is empty and its rule would pass everything");
+  for (const [col, probe] of COLUMN_COMMENT_PROBES) {
+    if (!OWNED_COLUMN_COMMENTS.has(col)) fail(SELF, `column-comment probe names 'thoughts.${col}', which no migration comments — the probe or the owned set is stale`);
+    else if (!columnCommentsIn(probe).has(col)) fail(SELF, `column-comment rule no longer catches its probe for 'thoughts.${col}': ${probe}`);
+  }
+  for (const text of COLUMN_COMMENT_NON_PROBES) {
+    const [col] = columnCommentsIn(text);
+    if (col) fail(SELF, `column-comment rule for 'thoughts.${col}' catches ordinary text it must not: ${text}`);
+  }
+  // The seven category directories whole — not contributionDirs(), which
+  // yields one entry per contribution and so skips each category's README and
+  // its `_template` — and docs/, upstream's guide and drafts, where two of the
+  // three files this check was written for lived.
+  const before = violations.length;
+  const counts = scanLines(textFilesUnder(SCANNED_ROOTS), [
+    ...[...OWNED_FUNCTIONS].map(([fn, file]) => ({
+      name: fn,
+      fileRe: asFileRe(coreFunctionStatement(fn)),
+      msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}); vendored SQL must not touch a function a migration owns (SMD-1250)`,
+      suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
+    })),
+    ...[...OWNED_COLUMN_COMMENTS].map(([col, file]) => ({
+      name: `thoughts.${col}`,
+      fileRe: asFileRe(coreColumnCommentStatement(col)),
+      msg: `re-comments thoughts.${col}, whose comment db/migrations/${file} writes as a data contract; vendored SQL must not overwrite it (SMD-1250)`,
+    })),
+  ]);
+  // Why, and what to do — once per run, not once per matching line.
+  if (violations.length > before) {
+    fail("check 7", "a CREATE OR REPLACE on a matching signature replaces the migration's body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 021, 025, 028 or 031 wrote there. Cut the statement and say in the file's header which migration owns the object (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason (FORK.md, change 58)");
+  }
+  for (const [rel, byFn] of CORE_FUNCTION_EXCEPTIONS) {
+    for (const [fn, { why, lines }] of Object.entries(byFn)) {
+      const seen = counts.get(`${rel} ${fn}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a core-function exception for '${fn}' (${why}) but matches nothing — remove it from CORE_FUNCTION_EXCEPTIONS`
+          : `core-function exception for '${fn}' (${why}) covers ${lines} line(s) but ${seen} match — a new definition beside the documented one, or the exception's count is stale`);
+      }
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -492,6 +691,7 @@ for (const d of dirs) {
 checkSqlGuards();
 await checkMigrationNumbers();
 checkShellHazards(dirs);
+checkCoreFunctions();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them
