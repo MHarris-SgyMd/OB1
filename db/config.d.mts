@@ -197,6 +197,8 @@ export const REEMBED_KEY_MODEL_SQL_RE: string;
 export const REEMBED_OWN_KEY_SQL_RE: string;
 /** Every succeeded claim row under a key naming a model, with model, own_key, accepted and its timestamps — what 030 and migrate.ts's gate read. Substituted into 030: changing it is a data migration. Needs 015. */
 export const CLAIM_EVIDENCE_ROWS_SQL: string;
+/** The migrator's re-run, as every remedy that names it prints it. */
+export const REAPPLY_COMMAND: string;
 /** The SET list that returns a claim row to its pool — requeue()'s, and the statement migrate.ts prints. */
 export const REQUEUE_SET_SQL: string;
 

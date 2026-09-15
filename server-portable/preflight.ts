@@ -54,6 +54,7 @@ const {
   DEFAULT_METADATA_MODEL: DEF_META,
   DEFAULT_LLM_BASE_URL: DEF_BASE,
   isLocalHostname,
+  REAPPLY_COMMAND,
 } = await import("../db/config.mjs");
 
 const embModel = env.OB1_EMBEDDING_MODEL || DEF_EMB;
@@ -113,7 +114,7 @@ const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
  * loop: a plain run skips a recorded file. The migrator's re-run is the remedy
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
-const REAPPLY = "The ledger records that migration but the schema installed is older (adopted with --baseline?): re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — with the server and every worker stopped; a plain run skips a recorded file.";
+const REAPPLY = `The ledger records that migration but the schema installed is older (adopted with --baseline?): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
@@ -725,7 +726,7 @@ if (configFailed) {
               // Ledger-aware, as reembed.ts is for 021: a brain adopted with
               // --baseline says 023 while the function is absent, and "apply
               // 023" would be a loop — the migrator skips a ledgered file.
-              const byHand = "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which re-runs every migration in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).";
+              const byHand = `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — which re-runs every migration in one transaction (OB1_BACKFILL_LIMIT bounds 023's call as on a first apply; stop the server and any worker first).`;
               add("fingerprint backfill", "warn",
                   `${waiting}: a capture of that text inserts a second row, since 003's conflict target cannot see a NULL`,
                   ledger.has("023")
@@ -1131,7 +1132,7 @@ if (configFailed) {
           } else if (installedOld && !libraryNew) {
             add("filtered search", "warn",
                 `pgvector ${installed} predates iterative HNSW scans, so migration 014 cannot apply and ${EXPOSURE} — near zero for a filter matching under 1% of the corpus`,
-                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? "re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — since a plain run skips a recorded file (--baseline recorded it)" : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
+                `Upgrade the server's pgvector to 0.8.0 or later (deploy/compose.yaml pins 0.8.6), then ${ledgerHas014 ? `re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — since a plain run skips a recorded file (--baseline recorded it)` : "apply db/migrations/014_filtered_match_thoughts.sql"}.`);
           } else {
             // The body predates 014. Say what IS on the function accurately: a
             // SET clause an operator added by hand is present and useless here.
@@ -1152,7 +1153,7 @@ if (configFailed) {
             add("filtered search", "warn",
                 `match_thoughts ${setting}, and its body predates 014${dropped}${stale} — so ${EXPOSURE}`,
                 ledgerHas014
-                  ? "Re-apply the recorded migrations with the migrator — cd db && bun migrate.ts --url … --reapply — which restores the last definer's body (a plain run skips a recorded file), or carry the SET clause into the migration that redefined match_thoughts."
+                  ? `Re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — which restores the last definer's body (a plain run skips a recorded file), or carry the SET clause into the migration that redefined match_thoughts.`
                   : APPLY_014);
           }
         } catch (e) {

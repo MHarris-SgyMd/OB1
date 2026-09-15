@@ -5985,8 +5985,17 @@ rows are picked first and "latest" is a `NOT EXISTS`, the review's measured
 **Ticketed: SMD-1421** — the reviewers' higher altitude, proposed twice: a
 snapshot of the labels around 021's replay that makes 030's rule the only
 rule and removes the gate, the way back and the plain-run refusal; a redesign
-this late was not this PR's. Left as tidy-ups: the `startsWith("021_")`
-literal, the has-label-without-has-edit wording branch.
+this late was not this PR's. Left as a tidy-up: the `startsWith("021_")`
+literal.
+
+A boyscout commit took what the passes cut for space, no behaviour change:
+`reembed.ts` spelled the run's refusal (`refusalJob ?? refusalTtl ??
+refusal021`) three times, one `refusalForRun` now; the re-run command was
+spelled at five sites in `preflight.ts` and `reembed.ts`, `REAPPLY_COMMAND` in
+`config.mjs` now; the migrator's gate declared a `drifted` inside the scope of
+the loop's `drifted`; the loop's dry-run comment credited itself with a floor
+judgement the checks make first; the pre-021 way back said "predates 021" where
+only the eight-argument `update_thought` was missing, and names which.
 
 **Review, sixth pass (high), at the user's call, triaged.** The accepted-row
 gate ran only under `--reapply`, so a *plain* run applying a pending 021 over a

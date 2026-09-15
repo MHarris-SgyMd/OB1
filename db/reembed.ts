@@ -374,6 +374,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
   ACCEPTED_BY_MODEL_SQL,
+  REAPPLY_COMMAND,
   REQUEUE_SET_SQL,
   ACCEPTED_CAVEAT_PREFIX,
   CORPUS_BY_MODEL_SQL,
@@ -663,8 +664,13 @@ const refusal021: string | null = fn.present && fn.labelled
     "  its pool from the rows not at that model, which needs thoughts.embedding_model and the eight-argument update_thought\n" +
     "  (which carries 018's rule, without which a pair from before the fingerprint fails on every run). " +
     (fn.ledgered
-      ? "schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction — 021's backfill as written, then 030, which returns a label\n  whose only evidence is an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's\n  model). Run it from a shell configured as this brain is, with the server and every worker stopped:\n    cd db && bun migrate.ts --url … --reapply"
+      ? `schema_migrations records 021 as\n  applied (--baseline?) but the schema installed is older. Re-apply the recorded migrations with the migrator: it re-runs\n  every migration, pending ones included, in one transaction — 021's backfill as written, then 030, which returns a label\n  whose only evidence is an operator's acceptance to unknown (a paste of 021's body alone leaves it labelled at that key's\n  model). Run it from a shell configured as this brain is, with the server and every worker stopped:\n    ${REAPPLY_COMMAND}`
       : "Apply migration 021 first:\n    cd db && bun migrate.ts --url …");
+/**
+ * What a run would refuse on, in the order a run judges them — the job, the
+ * lease, the schema — spelled once for --status, --dry-run and the run.
+ */
+const refusalForRun: string | null = refusalJob ?? refusalTtl ?? refusal021;
 
 // ── Where the pass stands ───────────────────────────────────────────────────
 
@@ -1240,10 +1246,7 @@ if (STATUS_ONLY || DRY_RUN) {
   // operator reads first, and the 021 remedy is the migrator's (SMD-1193). The
   // same three a run judges; not beside --dry-run, whose "would: refuse" line
   // below is the same text.
-  {
-    const refusal = refusalJob ?? refusalTtl ?? refusal021;
-    if (STATUS_ONLY && !DRY_RUN && refusal) console.error(`\n  a run would refuse:${refusal}`);
-  }
+  if (STATUS_ONLY && !DRY_RUN && refusalForRun) console.error(`\n  a run would refuse:${refusalForRun}`);
   if (c.claimed > 0) {
     const leases = (await sql`
       SELECT worker_id, count(*)::int AS c, min(ttl_expires_at)::text AS first_expiry
@@ -1258,9 +1261,8 @@ if (STATUS_ONLY || DRY_RUN) {
   if (c.fellBack > 0) await printFallbacks(c.fellBack);
   await printDuplicateGroups();
   if (DRY_RUN) {
-    const refusal = refusalJob ?? refusalTtl ?? refusal021;
-    if (refusal) {
-      console.error(`\n  would: refuse.${refusal}`);
+    if (refusalForRun) {
+      console.error(`\n  would: refuse.${refusalForRun}`);
       await sql.close();
       process.exit(2);
     }
@@ -1300,13 +1302,10 @@ if (STATUS_ONLY || DRY_RUN) {
 
 // ── The run ─────────────────────────────────────────────────────────────────
 
-{
-  const refusal = refusalJob ?? refusalTtl ?? refusal021;
-  if (refusal) {
-    console.error(`\n ${refusal}`);
-    await sql.close();
-    process.exit(2);
-  }
+if (refusalForRun) {
+  console.error(`\n ${refusalForRun}`);
+  await sql.close();
+  process.exit(2);
 }
 
 // The provider first, so a wrong URL or a wrong width fails before any row is

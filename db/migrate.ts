@@ -409,12 +409,12 @@ if (runs021) {
   // says "would refuse" where the run says "refusing", so a green dry run is
   // never followed by a red run. Every refusal is reported, not the first.
   const refusals: { code: number; text: string }[] = [];
-  const drifted = reapply ? migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha) : [];
-  if (drifted.length > 0) {
+  const changed = reapply ? migrations.filter((m) => reapplies(m) && applied.get(m.name) !== m.sha) : [];
+  if (changed.length > 0) {
     refusals.push({
       code: 1,
       text:
-        `${drifted.map((m) => `${m.name} (was ${applied.get(m.name)}, now ${m.sha})`).join(", ")} changed after being applied.\n` +
+        `${changed.map((m) => `${m.name} (was ${applied.get(m.name)}, now ${m.sha})`).join(", ")} changed after being applied.\n` +
         "  Migrations are append-only. If the edit was intentional and the database already reflects it, update schema_migrations.sha256 by hand, then re-run.",
     });
   }
@@ -530,7 +530,7 @@ if (runs021) {
       const wayBack = has_label && has_edit
         ? "  Return them to their pool first — bun reembed.ts --url … --job <key> --retry-fallbacks, which spends the acceptance — or retire\n" +
           `  the key if it is superseded (--retire <key>), then run ${again} again.`
-        : "  This schema predates 021, so reembed.ts refuses to run against it and cannot return them; --accept-failed refuses it too, so\n" +
+        : `  reembed.ts refuses to run against this schema (${has_label ? "021's update_thought is not installed" : "it predates 021"}) and cannot return them; --accept-failed refuses it too, so\n` +
           `  these rows were written by hand. Return them as --retry-fallbacks would, then run ${again} again:\n` +
           // requeue()'s statement in reembed.ts, per key: the caveat gone, the
           // attempts reset, the lease cleared; claimed_at stays, as there.
@@ -616,9 +616,9 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     continue;
   }
   if (dryRun) {
-    // A recorded file under --reapply reaches here too, and is judged the same
-    // way: the live re-run refuses the whole transaction on a floor, so the dry
-    // run must not promise a re-apply the run cannot do.
+    // The plain run's judgement. A recorded file under --reapply reaches here
+    // too — as "would re-apply" — but never with a floor: the checks above
+    // refuse the whole re-run on one before this loop runs.
     if (tooOldFor(m)) {
       console.log(`  ✗  ${m.name}  would FAIL: pgvector ${pgvectorLibrary} < ${tooOldFor(m)}`);
       floorBlocked ??= m;

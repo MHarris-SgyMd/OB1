@@ -986,6 +986,14 @@ export const ACCEPTED_BY_MODEL_SQL =
  * counted four). claimed_at stays: 030's bound is the enqueue, and readers of
  * an acceptance read the claim — neither is this row's to move.
  */
+/**
+ * The migrator's re-run, as every remedy that names it prints it — reembed.ts's
+ * 021 refusal, preflight's ledger-aware remedies. One spelling (the fourth
+ * review pass of SMD-1193 counted seven). Migration 030's own HINT spells it
+ * with `<url>` instead, ASCII-only, for Bun's sake.
+ */
+export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
+
 export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
 
 export const CLAIM_EVIDENCE_ROWS_SQL =

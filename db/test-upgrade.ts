@@ -488,7 +488,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(hazard.code === 2 && /refusing --reapply: 021's evidence backfill, re-run as written, would label 2 unlabelled thought\(s\) from an acceptance that\n\s+migration 030 would not take back — under a suffixed key, or written since the row was enqueued \(reembed:stub-embed@8, reembed:stub-embed@8:ctx\)/.test(hazard.out) &&
            new RegExp(`    ${suffixedHazard}  reembed:stub-embed@8:ctx`).test(hazard.out) && new RegExp(`    ${writtenSince}  reembed:stub-embed@8`).test(hazard.out) &&
            // This schema predates 021, so the way back is not a reembed.ts command it would refuse but the statement --retry-fallbacks runs.
-           /This schema predates 021, so reembed\.ts refuses to run against it/.test(hazard.out) &&
+           /reembed\.ts refuses to run against this schema \(it predates 021\) and cannot return them/.test(hazard.out) &&
            // requeue()'s statement, as reembed.ts spells it, one per key with every row of it: the attempts reset too, claimed_at kept.
            new RegExp(`UPDATE thought_work_claims SET ${reEsc(REQUEUE_SET_SQL)} WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id IN \\('${suffixedHazard}'\\);`).test(hazard.out) &&
            new RegExp(`WHERE work_type = 'reembed:stub-embed@8' AND thought_id IN \\('${writtenSince}'\\);`).test(hazard.out) &&
