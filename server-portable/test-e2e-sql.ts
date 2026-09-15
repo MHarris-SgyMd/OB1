@@ -383,6 +383,8 @@ console.log("\n[7] Dedup through the tool surface");
   assert(/Refused: no thought with the id given as supersedes/.test(refused), `a first capture naming no thought is refused in the tool's words, not Postgres's (${refused.slice(0, 60)})`);
   try { await call("capture_thought", { content: "iota thought naming a bad source", derived_from: ["abc"] }); } catch (e) { refused = (e as Error).message; }
   assert(/Refused: every `derived_from` entry must be a thought id/.test(refused), `a derived_from element that is no id is refused before the model calls (${refused.slice(0, 60)})`);
+  try { await call("capture_thought", { content: "iota thought naming a ghost source", derived_from: ["00000000-0000-0000-0000-000000000000"] }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: a `derived_from` id names no thought — \(in \["00000000-0000-0000-0000-000000000000"\]\)\./.test(refused), `a well-formed derived_from id naming no thought is refused in the tool's words too (${refused.slice(0, 90)})`);
   assert(!/Note: this text was already captured/.test(await call("capture_thought", { content: "alpha thought about migrations", derived_from: [] })), "an empty derived_from names nothing, and no note fires for it");
   const self = await call("capture_thought", { content: "alpha thought about migrations", supersedes: alpha });
   assert(/names the thought itself; a thought cannot supersede itself\./.test(self) && !/call update_thought/.test(self), "…naming itself: refused in words, no edit advised");

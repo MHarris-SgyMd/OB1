@@ -70,8 +70,7 @@
 --      INSERT and make the merge report false; and a legacy row with a NULL
 --      one (from before 003, until 023's backfill reaches it) is not found,
 --      and the capture inserts a twin — 003/023's semantics, unchanged here.
---      013's
---      4-argument form returns v_result || {"chunks": n}, so the key passes
+--      013's 4-argument form returns v_result || {"chunks": n}, so the key passes
 --      through to both servers; the capture tool tells the caller what
 --      stands — the thought already supersedes what was named, currently
 --      supersedes another (an edit would replace it), was named as its own
@@ -141,8 +140,8 @@
 --   not have" is gone. A caller that captured a thought and later wants to
 --   record what it supersedes or derives from re-captures nothing: it calls
 --   update_thought with the envelope (the capture tool's reply names it).
---   Changed with it: a re-capture naming a supersedes that names NO thought,
---   or one whose chain reaches this thought, is not refused — the FK and the
+--   No longer refused, and stated: a re-capture naming a supersedes that
+--   names NO thought, or one whose chain reaches this thought — the FK and the
 --   walk ran only where the pointer is written, and a re-capture writes none
 --   (a first capture's FK still refuses a missing target, said in the tool's
 --   words since this change) — so `existed` is true and no provenance is
@@ -150,8 +149,6 @@
 --   update_thought, the path the reply names with that condition spelled out,
 --   refuses it by name (SUPERSEDES_NOT_FOUND, WOULD_CYCLE): the caller learns
 --   one step later, not never.
---   The shape checks (a UUID string; validate_derived_from's existence
---   check for derived_from) run on a dedup as before.
 --   Not closed, and not this file's: delete_thought outside the lock order
 --   (SMD-1462); the 2-argument form's silence on the envelope's provenance
 --   (PostgREST's two-step fallback drops it, as it has since 025); a walk
@@ -164,7 +161,9 @@
 --   CONTRACT SENTINEL in 014's convention, beside 022's and 033's: preflight's
 --   `atomic capture` reads it over a direct connection and warns without it —
 --   033 re-applied by hand puts the fill and the supersession lock back,
---   CREATE OR REPLACE and all, and nothing else would say so. A successor
+--   CREATE OR REPLACE and all, and nothing else would say so; the remedy is
+--   this file applied again (bun db/migrate.ts --reapply, or the file by
+--   hand — it is the last definer of both forms). A successor
 --   that keeps "a re-capture writes no provenance" keeps the sentinel; one
 --   that writes provenance onto an existing row again must drop it. Both
 --   bodies keep `ob1:capture-takes-fingerprint-lock` — the lock stays.
@@ -233,7 +232,12 @@
 --   `existed` and `supersedes`, both stores read both, and the capture tool's
 --   reply says what stands when provenance was sent and the text was already
 --   there — naming update_thought only where an edit would record or replace
---   a pointer. preflight's `atomic capture` names this file as the last
+--   a pointer, with the condition it will check ("if that thought exists and
+--   closes no loop"). Two things at the same boundary are older than this
+--   file and follow it: the tool pre-checks derived_from's shape as it did
+--   supersedes', before the model calls are paid; and a first capture naming
+--   a thought that does not exist is refused in the tool's words, not
+--   Postgres's FK text. preflight's `atomic capture` names this file as the last
 --   definer of both capture forms and reads the new sentinel beside the two
 --   before it; test-schema [35], test-live [6e] (arm 3: a capture naming
 --   supersedes is NOT held by the supersession lock now) and [13],

@@ -975,8 +975,8 @@ function buildServer(principal: Principal): McpServer {
         // derived_from's SHAPE likewise (fourth review pass): a non-id element
         // paid both model calls before validate_derived_from refused it.
         // Existence stays the write's.
-        const badDerived = derived_from?.find((d) => typeof d !== "string" || !UUID_RE.test(d));
-        if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${String(badDerived).slice(0, 40)}".`);
+        const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
+        if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),
@@ -1105,6 +1105,10 @@ function buildServer(principal: Principal): McpServer {
         // migration 035). Said as update_thought says it, not as Postgres does
         // (fourth review pass).
         if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.");
+        // Its sibling: validate_derived_from's existence refusal (032), the
+        // one provenance refusal that still reached the caller as a raw error
+        // (fifth review pass).
+        if (/derived_from references a thought that does not exist/.test(msg)) return toolError(`Refused: a \`derived_from\` id names no thought — ${msg.replace(/^.*?\(in /, "(in ").replace(/\.$/, "")}. Each must be an existing thought id (the ID: line of a search result).`);
         return {
           content: [{ type: "text" as const, text: `Error: ${msg}` }],
           isError: true,
