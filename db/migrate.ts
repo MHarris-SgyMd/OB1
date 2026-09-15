@@ -422,7 +422,7 @@ if (runs021) {
   if (floor) refusals.push({ code: 1, text: `${floor.name} would fail on the pgvector floor.` + floorMessage(floor, true) });
   // The catalog, read by relation (to_regclass) rather than by name in
   // information_schema, which sees a `thoughts` in any schema the role can
-  // read; and the eight-argument signature names the vector type, which
+  // read; and the nine-argument signature names the vector type, which
   // to_regprocedure cannot parse before pgvector is installed — asked only
   // where the type resolves. Every read here is guarded: a role without
   // SELECT on the claim table, or a row the query cannot evaluate, is a
@@ -522,7 +522,7 @@ if (runs021) {
       const shown = hazards.slice(0, 50);
       const again = reapply ? "--reapply" : "the migrator";
       // The way back depends on the schema: reembed.ts runs only against 021's
-      // whole (the column and the eight-argument update_thought), so on an
+      // whole (the column, and the nine-argument update_thought since 032), so on an
       // older schema — where such a row can only have been written by hand,
       // since --accept-failed refuses it too — the remedy is the statement
       // --retry-fallbacks would run, or the tool loops the operator between
@@ -530,7 +530,7 @@ if (runs021) {
       const wayBack = has_label && has_edit
         ? "  Return them to their pool first — bun reembed.ts --url … --job <key> --retry-fallbacks, which spends the acceptance — or retire\n" +
           `  the key if it is superseded (--retire <key>), then run ${again} again.`
-        : `  reembed.ts refuses to run against this schema (${has_label ? "021's update_thought is not installed" : "it predates 021"}) and cannot return them; --accept-failed refuses it too, so\n` +
+        : `  reembed.ts refuses to run against this schema (${has_label ? "032's update_thought is not installed" : "it predates 021"}) and cannot return them; --accept-failed refuses it too, so\n` +
           `  these rows were written by hand. Return them as --retry-fallbacks would, then run ${again} again:\n` +
           // requeue()'s statement in reembed.ts, per key: the caveat gone, the
           // attempts reset, the lease cleared; claimed_at stays, as there.

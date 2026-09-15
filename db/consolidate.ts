@@ -12,8 +12,9 @@
  * `supersession_proposals`. Nothing here writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
- * `review_supersession_proposal`, under the audit trigger, with the reviewer
- * as actor.
+ * `review_supersession_proposal` — which since migration 032 calls
+ * `update_thought`, the one edit path — under the audit trigger, with the
+ * reviewer as actor.
  *
  *   bun db/consolidate.ts --url postgres://…              # the backlog, then exit
  *   bun db/consolidate.ts --url … --follow [SECONDS]      # …then keep polling for newly extracted thoughts

@@ -1120,24 +1120,27 @@ export const MATCH_COUNT_CEILING = 500;
 export const MATCH_THOUGHTS_SIGNATURE = "match_thoughts(vector, float, int, jsonb, float, float)";
 export const SEARCH_THOUGHTS_HYBRID_SIGNATURE = "search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)";
 /**
- * update_thought's signature since migration 021 (SMD-1068): an eighth,
- * defaulted parameter, `p_embedding_model`, the model that produced the vector
- * being written. 021 dropped the 7-argument form first, for the reason above:
- * CREATE OR REPLACE with a new parameter leaves the old form beside it, and
- * every call with seven arguments or fewer is then "function is not unique".
- * reembed.ts resolves the body it will call by this text (for 018's sentinel),
- * and preflight's `edit signature` check reads the forms beside it.
+ * update_thought's signature since migration 032 (SMD-1323): a ninth,
+ * defaulted parameter, `p_provenance`, the envelope that sets or clears
+ * `supersedes` and `derived_from` — after 021's eighth, `p_embedding_model`,
+ * the model that produced the vector being written. Each dropped the form
+ * before it first, for the reason above: CREATE OR REPLACE with a new
+ * parameter leaves the old form beside it, and every call with fewer
+ * arguments is then "function is not unique". reembed.ts resolves the body it
+ * will call by this text (for 018's sentinel), and preflight's
+ * `edit signature` check reads the forms beside it.
  */
-export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)";
+export const UPDATE_THOUGHT_SIGNATURE = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb)";
 /**
- * The forms 020 and 021 dropped. Still owned: a bench's "before" arm re-applies
- * 014 or 017, and a test re-applies 018, re-creating them, so a schema reset
- * must drop them too.
+ * The forms 020, 021 and 032 dropped. Still owned: a bench's "before" arm
+ * re-applies 014 or 017, and a test re-applies 018 or 021, re-creating them,
+ * so a schema reset must drop them too.
  */
 export const SUPERSEDED_SIGNATURES = Object.freeze([
   "match_thoughts(vector, float, int, jsonb)",
   "search_thoughts_hybrid(vector, text, float, int, jsonb)",
   "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)",
+  "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)",
 ]);
 
 /**

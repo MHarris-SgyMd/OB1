@@ -162,7 +162,7 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54, 030 change 56, 031 change 57).
+029 change 54, 030 change 56, 031 change 57, 032 change 59).
 
 ## What changed relative to the guide
 
@@ -378,7 +378,10 @@ vector is at the recorded model (unlabelled rows as detail), a warning naming
 each other model and its count with the pass as the remedy — whether or not any
 claim row remembers the pass that left them — and a failure when the column is
 missing under a server that writes it. `edit signature` beside it checks that
-the eight-argument `update_thought` is present and alone, and `updated_at
+the nine-argument `update_thought` (032) is present and alone — an earlier form
+re-created beside it by a hand re-apply of 018 or 021 makes every call with
+fewer arguments, this tool's positional eight among them, `function is not
+unique`, and the DROP is the remedy — and `updated_at
 trigger` that 001's trigger is still enabled after 021's backfill held it off. `--status` and the end of a run print `preflight will
 warn until this finishes:` with the same counts, so the two never disagree. A
 `--job` key without the prefix is accepted and noted: preflight will not report
@@ -659,12 +662,15 @@ nearby pairs, ask a model whether they conflict, surface the result for review
 025's column, the metadata model.
 
 **The one rule: the pass proposes, a person confirms.** The worker writes
-`supersession_proposals` and never `thoughts`. `thoughts.supersedes` is written
-only by `review_supersession_proposal(id, 'accept')`, one proposal at a time,
-under the audit trigger with the reviewer as actor — so the audit trail shows
-who confirmed what, and reversing a wrong one is one `--reject`. Nothing is
-applied because a model said so; both GBrain's docs and the review of 025
-arrive at the same rule.
+`supersession_proposals` and never `thoughts`. From this table
+`thoughts.supersedes` is written only by `review_supersession_proposal(id,
+'accept')`, one proposal at a time — through `update_thought`'s provenance
+envelope since migration 032 (SMD-1323), so the column has the one writer every
+edit has; before 032 the function wrote it in an UPDATE of its own — under the
+audit trigger with the reviewer as actor, so the audit trail shows who
+confirmed what, and reversing a wrong one is one `--reject`. Nothing is applied
+because a model said so; both GBrain's docs and the review of 025 arrive at the
+same rule.
 
 **Which pairs are judged.** `consolidation_candidates(thought)`: the older
 thoughts that share at least one extracted entity with it, captured at least a
@@ -1147,7 +1153,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 683 properties (at migration 031), including:
+asserts 747 properties (at migration 032), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide
@@ -1283,11 +1289,23 @@ asserts 683 properties (at migration 031), including:
   label, a metadata-only one too; `update_thought` relabels with a vector, blanks the label with
   content and no vector, leaves a metadata-only edit, and a 7-argument call
   resolves through the default; a re-embed and a label-only change write no
-  audit row; one `update_thought` of eight parameters carrying 018's body by
-  name, 021 the last definer of `update_thought`, 022 of `upsert_thought` and 010 still of the audit
+  audit row; one `update_thought` of nine parameters (032) carrying 018's body by
+  name, 032 the last definer of `update_thought`, 025 of `upsert_thought` and of the audit
   trigger; 018 re-applied puts a second form beside it and a 7-argument call is
-  `not unique` until 021 is re-applied; and the ACL replayed across the drop of
+  `not unique` until the last definer is re-applied; and the ACL replayed across the drop of
   the 7-argument form, the four cases above for this function
+- **provenance through the edit path** (migration 032): `update_thought`'s
+  ninth parameter sets, leaves, replaces and clears `supersedes` and
+  `derived_from` — one audit row per change with the actor and nothing else
+  moved — and refuses a ghost, a self-pointer and a loop direct or through a
+  chain with nothing written; the four exceptions and a double-encoded
+  envelope; `if_unchanged_since` guards a provenance edit;
+  `validate_derived_from` answers as `upsert_thought`'s inline copy does, input
+  by input; `review_supersession_proposal` writes through `update_thought`
+  (its acceptance is an `update_thought` audit row, its loop refusal names the
+  pair) and holds no `UPDATE` of `thoughts`; 021 re-applied leaves its
+  8-argument form beside the 9-argument one and an 8-argument call is `not
+  unique` until 032 is re-applied, and the ACL crosses that drop too
 - **the windows stay while the label vouches for them** (migration 022):
   through a window planted directly (see below), a re-capture through the
   3-argument `upsert_thought` at the same model moves the vector and keeps
