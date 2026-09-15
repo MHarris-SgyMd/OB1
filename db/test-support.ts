@@ -436,10 +436,18 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number): Promis
   }
   let body = block;
   // The exact branch reads `v_ids`, which the routing statement fills; splice
-  // that statement in as a scalar subquery so the explained text stands alone —
-  // before the locals are substituted, since that statement uses v_exact.
+  // that statement in so the explained text stands alone — before the locals
+  // are substituted, since that statement uses v_exact. As ONE materialized
+  // CTE at the head of the branch's WITH, not a scalar subquery per reference:
+  // the branch reads v_ids twice (direct and chunked), and two spliced
+  // subqueries became two InitPlans that each ran the GIN collection, where
+  // the function runs `SELECT … INTO v_ids` once (SMD-1018 review pass).
   const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
-  if (route) body = body.replace(/\bv_ids\b/g, () => `((SELECT array_agg(s.id) ${route[1]})::uuid[])`);
+  if (route && /\bv_ids\b/.test(body)) {
+    if (!/^\s*WITH\s/.test(body)) throw new Error("the branch that reads v_ids no longer opens with WITH; the bench's rewrite does not apply");
+    body = body.replace(/^\s*WITH\s/, () => `WITH ob1_ids AS MATERIALIZED (SELECT array_agg(s.id) AS ids ${route[1]}), `);
+    body = body.replace(/\bv_ids\b/g, () => `((SELECT ids FROM ob1_ids)::uuid[])`);
+  }
   const declared = /DECLARE([\s\S]*?)BEGIN/.exec(def)?.[1] ?? "";
   const locals: [string, string][] = [];
   for (const line of declared.split("\n")) {
@@ -574,8 +582,14 @@ export function seededRandom(seed: number): {
   rnd: () => number;
   gauss: () => number;
   unitVector: (dim: number) => number[];
+  /** Advance the stream by k draws without producing them — the Weyl step is additive, so this is one multiply. */
+  skip: (k: number) => void;
 } {
   let a = seed >>> 0;
+  const skip = (k: number) => {
+    // a += k * 0x6d2b79f5 (mod 2^32); k may exceed 2^32 at a hundred million rows.
+    a = (a + Math.imul(Number(BigInt(k) % 4294967296n), 0x6d2b79f5)) >>> 0;
+  };
   const rnd = () => {
     a = (a + 0x6d2b79f5) >>> 0;
     let t = a;
@@ -593,5 +607,5 @@ export function seededRandom(seed: number): {
     const n = Math.hypot(...v);
     return v.map((x) => x / n);
   };
-  return { rnd, gauss, unitVector };
+  return { rnd, gauss, unitVector, skip };
 }

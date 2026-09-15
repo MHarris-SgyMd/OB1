@@ -20,9 +20,14 @@
  *
  * ── What is measured ─────────────────────────────────────────────────────────
  *
- *   L. The load itself, at every scale: rows per second into an unindexed
- *      table, the HNSW build time for each vector index once the rows are in,
- *      and the table and index sizes. 014's header argued the walk's bounds
+ *   L. The load itself, at every scale: rows per second into a table with
+ *      every secondary index dropped and its user triggers disabled (the
+ *      audit and entity-extraction triggers would otherwise write a row per
+ *      row, and the schema under the load differs between the arms), the HNSW
+ *      build time for each vector index once the rows are in, the other
+ *      indexes' rebuild, and the table and index sizes. Only the INSERT
+ *      round-trips are timed; the generator and the confound check run
+ *      between them, untimed. 014's header argued the walk's bounds
  *      past 2.5 million rows from arithmetic; SMD-1018 asked for the numbers,
  *      and the build's cost and the index's size are the first two a brain
  *      that large would meet.
@@ -62,7 +67,9 @@
  *      pgvector's default of 20,000 does not. Their shares shrink with the
  *      table, which is the point: the same filter, a growing brain. (A row
  *      count is a nominal size — membership is a coin per row — so the table
- *      prints the count actually planted.)
+ *      prints the count actually planted, and a tier goes to section D or E
+ *      by that count against the threshold, not by its name: the 0.1% tier at
+ *      a million rows plants about 1,000 and lands on either side.)
  *
  *      The thinnest tiers have fewer matching rows than the candidate budget,
  *      so a walk for them cannot stop early and must run until it exhausts the
@@ -155,18 +162,22 @@
  * after arm is the only arm.
  *
  * The rows are generated in two passes over one seeded stream — the first
- * only to reach the queries, which the stream yields after the rows, the
- * second to insert — so the corpus at 10,000 and 100,000 rows is byte for byte
- * the one the published tables came from while nothing holds N vectors in
- * memory. Bun's SQL driver has no COPY protocol (a `COPY ... FROM STDIN`
- * hangs), so the rows go in as multi-row INSERTs into a table whose vector
- * indexes have been dropped for the load; the indexes are rebuilt after it,
- * with `maintenance_work_mem` sized for the graph. That is also how a brain
- * that size would be bulk-loaded.
+ * only to reach the queries, which the stream yields after the rows (the
+ * generator's step is additive, so the skip is one multiply), the second to
+ * insert — so at 10,000 and 100,000 rows the vectors, the queries and the
+ * share tiers' membership are exactly the published corpus's while nothing
+ * holds N vectors in memory. Not byte for byte: each row's metadata now also
+ * carries whichever fixed-count tiers it fell into, so the heap and the GIN
+ * index are a little wider than the published run's. Bun's SQL driver has no
+ * COPY protocol (a `COPY ... FROM STDIN` hangs), so the rows go in as
+ * multi-row INSERTs into a table whose secondary indexes have been dropped
+ * and whose user triggers are disabled for the load; the indexes are rebuilt
+ * after it, with `maintenance_work_mem` sized for the graph. That is also how
+ * a brain that size would be bulk-loaded.
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
@@ -174,7 +185,9 @@ const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
 
 const DIM = 64;
-const OPTS = { dim: DIM, model: "stub-embed" };
+// No trigram index: nothing here reads content, and 011's GIN would otherwise
+// be maintained for every row of the load (review pass).
+const OPTS = { dim: DIM, model: "stub-embed", trgm: false };
 // The defaults are the run every published table came from, so the documented
 // command reproduces the documented numbers — with one caveat since 019: the
 // after arm applies every migration from 014 on, so the function it times and
@@ -261,14 +274,20 @@ type Tier = { key: string; share: number; label: string };
  */
 function tiersAt(n: number): Tier[] {
   const out: Tier[] = [];
+  // Membership is one draw against the share, so two tiers with the same
+  // share are the same rows under two names (5,000 rows at five million is
+  // the 0.1% tier); the first spelling in TIERS keeps the name.
+  const push = (t: Tier) => {
+    if (!out.some((o) => o.share === t.share)) out.push(t);
+  };
   for (const t of TIERS) {
     if ("rows" in t) {
       if (t.rows >= n / 2) continue;
-      out.push({ key: t.key, share: t.rows / n, label: `${t.rows.toLocaleString()} rows` });
+      push({ key: t.key, share: t.rows / n, label: `${t.rows.toLocaleString()} rows` });
     } else if (t.share === 0) {
-      out.push({ key: t.key, share: 0, label: "nothing" });
+      push({ key: t.key, share: 0, label: "nothing" });
     } else if (n * t.share >= 1) {
-      out.push({ key: t.key, share: t.share, label: `${t.share * 100}%` });
+      push({ key: t.key, share: t.share, label: `${t.share * 100}%` });
     }
   }
   return out.sort((a, b) => b.share - a.share);
@@ -296,10 +315,20 @@ function seedFor(n: number) {
 
 /** The Q queries the stream yields after n rows, without materialising the rows. */
 function queriesFor(n: number): number[][] {
-  const { rnd, unitVector } = seedFor(n);
-  const drawsPerRow = 1 + 2 * DIM;
-  for (let i = 0; i < n * drawsPerRow; i++) rnd();
+  const { skip, unitVector } = seedFor(n);
+  skip(n * (1 + 2 * DIM));
   return Array.from({ length: Q }, () => unitVector(DIM));
+}
+
+// The skip must equal the draws it stands in for, or the queries are not the
+// published ones: checked once against a thousand real draws before anything
+// loads.
+{
+  const a = seedFor(1);
+  const b = seedFor(1);
+  for (let i = 0; i < 1000; i++) a.rnd();
+  b.skip(1000);
+  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip does not reproduce the stream; the queries would not be the published ones");
 }
 
 type Row = { doc: number; v: number[]; tiers: string[] };
@@ -352,37 +381,51 @@ class Confound {
 
 type LoadStats = {
   scale: number;
+  schema: string;
   confound: number;
   insertS: number;
   chunkRows: number;
   chunkS: number;
   buildS: Record<string, number>;
+  otherIndexesS: number;
   sizes: Record<string, number>;
   maintenanceMem: string;
   workers: number;
 };
 
 /**
- * The load: vector indexes dropped, rows streamed in, chunk rows derived
- * server-side, the indexes rebuilt with `maintenance_work_mem` sized for the
- * graph, everything timed and measured. Returns the tier match counts too —
+ * The load: every secondary index on both tables dropped and the user
+ * triggers disabled, rows streamed in, chunk rows derived server-side, the
+ * indexes rebuilt with `maintenance_work_mem` sized for the graph (the HNSW
+ * ones timed each, the rest together), triggers re-enabled, everything
+ * measured. Only the INSERT round-trips count towards `insertS`: the
+ * generator, the JSON and the confound check run between them on the client
+ * and would otherwise scale the "load" with OB1_BENCH_QUERIES. The schema
+ * under the load differs between the arms (001–013 or the whole set), which
+ * is why the indexes and triggers come off: what remains per row is the heap
+ * and the primary key, the same in both. Returns the tier match counts too —
  * counted as the rows are generated, so no pass over the table is needed.
  */
-async function load(sql: SQL, n: number, tiers: Tier[], queries: number[][]): Promise<{ stats: LoadStats; matches: Map<string, number> }> {
+async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries: number[][]): Promise<{ stats: LoadStats; matches: Map<string, number> }> {
   const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"];
-  const defs = new Map<string, string>();
+  const secondary: { name: string; def: string }[] = await sql.unsafe(
+    `SELECT indexname AS name, indexdef AS def FROM pg_indexes
+     WHERE schemaname = 'public' AND tablename IN ('thoughts', 'thought_chunks') AND indexname NOT LIKE '%_pkey'
+     ORDER BY indexname`
+  );
   for (const name of HNSW_INDEXES) {
-    const [row] = await sql.unsafe(`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, [name]);
-    if (!row) throw new Error(`index ${name} is not defined; the load cannot rebuild it`);
-    defs.set(name, row.indexdef);
-    await sql.unsafe(`DROP INDEX ${name}`);
+    if (!secondary.some((i) => i.name === name)) throw new Error(`index ${name} is not defined; the load cannot rebuild it`);
   }
+  for (const i of secondary) await sql.unsafe(`DROP INDEX ${i.name}`);
+  // User triggers only (008's audit, 016's entity extraction, the updated_at
+  // trigger): ALL would take the FK triggers too and needs a superuser.
+  for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`ALTER TABLE ${rel} DISABLE TRIGGER USER`);
   // A bulk load's commit latency is not what is measured; the WAL is still written.
   await sql.unsafe(`SET synchronous_commit = off`);
 
   const confound = new Confound(queries);
   const matches = new Map<string, number>(tiers.map((t) => [t.key, 0]));
-  const t0 = performance.now();
+  let insertMs = 0;
   let done = 0;
   for (const batch of rowBatches(n, tiers)) {
     const values = batch
@@ -393,11 +436,16 @@ async function load(sql: SQL, n: number, tiers: Tier[], queries: number[][]): Pr
         return `('doc ${r.doc}', '${meta}'::jsonb, '${lit(r.v)}'::vector)`;
       })
       .join(",");
+    const t0 = performance.now();
     await sql.unsafe(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+    insertMs += performance.now() - t0;
     done += batch.length;
     if (done % 1_000_000 === 0) process.stdout.write(`${(done / 1e6).toFixed(0)}M `);
   }
-  const insertS = (performance.now() - t0) / 1000;
+  const insertS = insertMs / 1000;
+  // Refuse before the builds, not after them: a repeating generator should
+  // cost the load, not the load plus twenty minutes of index.
+  const nearest = confound.assert();
 
   // Chunk rows for a share of thoughts, carrying the parent's own vector: the
   // point is that the chunk CTE has rows to scan and the merge has duplicates
@@ -419,11 +467,15 @@ async function load(sql: SQL, n: number, tiers: Tier[], queries: number[][]): Pr
   await sql.unsafe(`SET log_min_messages = notice`).catch(() => undefined);
   await sql.unsafe(`SET max_parallel_maintenance_workers = ${BUILD_WORKERS}`);
   const buildS: Record<string, number> = {};
-  for (const [name, def] of defs) {
+  let otherIndexesS = 0;
+  for (const { name, def } of secondary) {
     const t2 = performance.now();
     await sql.unsafe(def);
-    buildS[name] = (performance.now() - t2) / 1000;
+    const s = (performance.now() - t2) / 1000;
+    if (HNSW_INDEXES.includes(name)) buildS[name] = s;
+    else otherIndexesS += s;
   }
+  for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`ALTER TABLE ${rel} ENABLE TRIGGER USER`);
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
   await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
   const sizes: Record<string, number> = {};
@@ -433,7 +485,7 @@ async function load(sql: SQL, n: number, tiers: Tier[], queries: number[][]): Pr
   await sql.unsafe(`RESET log_min_messages`).catch(() => undefined);
 
   return {
-    stats: { scale: n, confound: confound.assert(), insertS, chunkRows: Number(chunkRows), chunkS, buildS, sizes, maintenanceMem, workers: BUILD_WORKERS },
+    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS },
     matches,
   };
 }
@@ -490,32 +542,37 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
 }
 
 /**
- * Exact top-K within a filter, MAX over the thought's vector and its chunks.
- * The vector index is an Index Scan and nothing else, so `enable_indexscan =
- * off` keeps it out of the plan; the GIN index reaches the table through a
- * bitmap and stays available, because a filter's bitmap is exact by
- * construction and a thin filter at ten million rows should not cost a
- * sequential scan per query (an earlier draft disabled bitmap scans too, for
- * no reason exactness needed). Correct by construction, slow on purpose where
- * the filter is broad — which is why it runs once per (tier, query) and not
- * once per arm.
+ * Exact top-K within a filter. The function scores MAX over a thought's own
+ * vector and its chunks; here every chunk carries its parent's vector (see
+ * the load), so that MAX is the parent's score and the thoughts table alone
+ * is the exact answer — `chunksCarryParentVectors` holds the bench to that
+ * once per scale, loudly, so a future chunk-vector change cannot make this
+ * oracle quietly wrong (an earlier draft joined and aggregated the chunk
+ * table on every call for no answer it changed). The vector index is an
+ * Index Scan and nothing else, so `enable_indexscan = off` keeps it out of
+ * the plan; the GIN index reaches the table through a bitmap and stays
+ * available, because a filter's bitmap is exact by construction and a thin
+ * filter at ten million rows should not cost a sequential scan per query.
+ * A null filter is the whole table, with no predicate to evaluate on every
+ * row. Correct by construction, slow on purpose where the filter is broad —
+ * which is why it runs once per (tier, query) and not once per arm.
  */
-async function oracle(sql: SQL, q: number[], filter: string): Promise<Set<string>> {
+async function oracle(sql: SQL, q: number[], filter: string | null): Promise<Set<string>> {
   const rows = await sql.begin(async (tx: SQL) => {
     await tx.unsafe(`SET LOCAL enable_indexscan = off`);
     return tx.unsafe(`
-      WITH scored AS (
-        SELECT t.id, 1 - (t.embedding <=> '${lit(q)}'::vector) AS sim
-        FROM thoughts t WHERE t.embedding IS NOT NULL AND t.metadata @> '${filter}'::jsonb
-        UNION ALL
-        SELECT c.thought_id, 1 - (c.embedding <=> '${lit(q)}'::vector)
-        FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id
-        WHERE t.metadata @> '${filter}'::jsonb
-      )
-      SELECT id FROM (SELECT id, MAX(sim) AS sim FROM scored GROUP BY id) s
-      ORDER BY sim DESC LIMIT ${K}`);
+      SELECT t.id FROM thoughts t
+      WHERE t.embedding IS NOT NULL${filter === null ? "" : ` AND t.metadata @> '${filter}'::jsonb`}
+      ORDER BY t.embedding <=> '${lit(q)}'::vector LIMIT ${K}`);
   });
   return new Set(rows.map((r: { id: string }) => r.id));
+}
+
+async function chunksCarryParentVectors(sql: SQL): Promise<void> {
+  const [{ c }] = await sql.unsafe(
+    `SELECT count(*)::int AS c FROM thought_chunks c JOIN thoughts t ON t.id = c.thought_id WHERE c.embedding IS DISTINCT FROM t.embedding`
+  );
+  if (Number(c) !== 0) throw new Error(`${c} chunk rows carry a vector other than their parent's; the oracle would no longer be exact`);
 }
 
 type FilteredResult = { returned: number; overlap: number; empty: number; ms: number; exact: number };
@@ -598,20 +655,28 @@ function shapeOf(plan: string, ms: number): PlanShape {
   };
 }
 
-async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<{ custom: PlanShape; generic: PlanShape }> {
+type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
+
+async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
   const body = await extractBody(sql, branch, DIM);
   const out: Record<string, PlanShape> = {};
-  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+  // The generic plan twice: as the function would get it, and with JIT off.
+  // At ten million rows every generic plan carried 30–130 ms of startup its
+  // custom twin did not, and the flat estimate that makes a plan generic is
+  // also what carries its cost past jit_above_cost; the third arm reads that
+  // rather than inferring it (SMD-1018 review pass).
+  for (const [key, mode, jit] of [["custom", "force_custom_plan", true], ["generic", "force_generic_plan", true], ["genericNoJit", "force_generic_plan", false]] as const) {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets —
       // all but a plan mode, since this section exists to show both plans.
       await applyFunctionSettings(tx);
-      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode: mode as "force_custom_plan" | "force_generic_plan" });
+      if (!jit) await tx.unsafe(`SET LOCAL jit = off`);
+      return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode });
     });
-    out[mode === "force_custom_plan" ? "custom" : "generic"] = shapeOf(text, ms);
+    out[key] = shapeOf(text, ms);
   }
-  return out as { custom: PlanShape; generic: PlanShape };
+  return out as Plans;
 }
 
 /**
@@ -662,7 +727,7 @@ type Result = {
   ms10Raised: number;
   overlapRaised: number;
   cells: Cell[];
-  plan?: Record<string, { branch: Branch; tier: string; matches: number; custom: PlanShape; generic: PlanShape }>;
+  plan?: Record<string, { branch: Branch; tier: string; matches: number } & Plans>;
 };
 type WalkRow = FilteredResult & { scale: number; label: string; matches: number };
 type BoundsRow = { scale: number; label: string; matches: number; tuples: number; seeded: FilteredResult; defaults: FilteredResult; raised: FilteredResult; exact?: FilteredResult };
@@ -691,8 +756,15 @@ const V_FETCH = Math.max(K * 4, 20);
 const PGVECTOR_DEFAULTS: Record<string, string> = { "hnsw.max_scan_tuples": "20000", "hnsw.scan_mem_multiplier": "1" };
 /** The raised `hnsw.ef_search` for the recall controls in sections A and E; pgvector's default is 40, the function leaves it alone. */
 const EF_SEARCH_RAISED = 400;
-/** Section E measures the exact branch on a walk tier only up to this many matching rows. */
-const EXACT_CEILING = 50_000;
+/**
+ * Section E measures the exact branch on a walk tier up to this many matching
+ * rows: every tier to 1% of a ten-million-row table, so the tiers the walk
+ * actually walks at scale have the exact branch measured beside them — the
+ * first draft stopped at 50,000 and left the 1% tier at ten million as a
+ * dash, which is where the "exact would be faster" claim most needs a number
+ * (review pass). Scoring the 50% tier row by row is still not a candidate.
+ */
+const EXACT_CEILING = 100_000;
 
 let banner = false;
 for (const n of SCALES) {
@@ -712,10 +784,11 @@ for (const n of SCALES) {
   const tiers = tiersAt(n);
   const queries = queriesFor(n);
   process.stdout.write("  inserting         ");
-  const { stats, matches } = await load(sql, n, tiers, queries);
+  const { stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries);
+  await chunksCarryParentVectors(sql);
   loads.push(stats);
   console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
-  console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")} (maintenance_work_mem ${stats.maintenanceMem}, ${stats.workers} workers)`);
+  console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
 
   // The exact answer for each (tier, query) once — shared by both arms.
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
@@ -727,11 +800,10 @@ for (const n of SCALES) {
     wants.set(t.key, answers);
     process.stdout.write(".");
   }
-  // And over the whole table, for section A's recall control: `{}` is
-  // contained by every row, so the same oracle answers it.
+  // And over the whole table, for section A's recall control.
   {
     const answers: Set<string>[] = [];
-    for (const q of queries) answers.push(await oracle(sql, q, "{}"));
+    for (const q of queries) answers.push(await oracle(sql, q, null));
     wants.set("", answers);
     process.stdout.write(".");
   }
@@ -753,6 +825,13 @@ for (const n of SCALES) {
         throw new Error(`session did not pick up the database-level bounds (in force ${JSON.stringify(inForce)}; database has ${JSON.stringify(cfg)})`);
       }
       console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
+      // The threshold this bench routes tiers by is the deployed one, or the
+      // sections are mislabelled: a redefinition that raises the floor
+      // (SMD-1464) must move V_EXACT with it.
+      const [{ prosrc }] = await sql.unsafe(`SELECT prosrc FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(sql)]);
+      if (!/v_exact\s+int\s+:=\s*GREATEST\(v_base \* 4, 1000\);/.test(prosrc) || !/v_base\s+int\s+:=\s*GREATEST\(v_count \* 4, 20\);/.test(prosrc)) {
+        throw new Error(`the deployed match_thoughts no longer sizes its exact threshold as GREATEST(v_base * 4, 1000) from GREATEST(v_count * 4, 20); V_EXACT (${V_EXACT}) and V_FETCH (${V_FETCH}) must follow it`);
+      }
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get("")!);
@@ -847,7 +926,7 @@ for (const n of SCALES) {
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb, float, float) AS ${walkBody}`);
   const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
-  const thin = withCounts.filter((t) => t.matches <= V_EXACT && (t.share <= 0.001 || t.key === "none"));
+  const thin = withCounts.filter((t) => t.matches <= V_EXACT && t.share <= 0.001);
   for (const t of thin) {
     const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);
     walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
@@ -866,12 +945,12 @@ await sql.close();
 const mb = (b: number) => (b / 1048576).toFixed(0);
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
-console.log("Rows go in as multi-row INSERTs with the vector indexes dropped; the indexes are built afterwards with the maintenance_work_mem shown. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB.\n");
-console.log("| rows | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | maintenance_work_mem | workers |");
-console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
+console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched.\n");
+console.log("| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |");
+console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
 for (const l of loads) {
   console.log(
-    `| ${l.scale.toLocaleString()} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
+    `| ${l.scale.toLocaleString()} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
   );
 }
 
@@ -896,24 +975,24 @@ for (const r of results) {
 }
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
-console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown.\n");
+console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
 console.log("`route` is the capped id collection that runs on every filtered call and decides between the other two; it has no chunk side.\n");
-console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms |");
+console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
   if (!r.plan) continue;
-  for (const { branch, tier, matches, custom, generic } of Object.values(r.plan)) {
+  for (const { branch, tier, matches, custom, generic, genericNoJit } of Object.values(r.plan)) {
     const chunks = branch === "route" ? "—" : `${custom.chunks} / ${generic.chunks}`;
     console.log(
-      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} |`
+      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} / ${genericNoJit.ms.toFixed(2)} |`
     );
   }
 }
 if (PRINT_PLANS) {
   for (const r of results) {
     if (!r.plan) continue;
-    for (const [key, { branch, tier, custom, generic }] of Object.entries(r.plan)) {
-      for (const [mode, shape] of [["custom", custom], ["generic", generic]] as const) {
+    for (const [key, { branch, tier, custom, generic, genericNoJit }] of Object.entries(r.plan)) {
+      for (const [mode, shape] of [["custom", custom], ["generic", generic], ["generic, jit off", genericNoJit]] as const) {
         console.log(`\n#### ${r.scale.toLocaleString()} rows, ${branch} branch (${key}, ${tier}), ${mode} plan\n`);
         console.log(shape.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
       }
