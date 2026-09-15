@@ -315,8 +315,9 @@ function buildServer(principal: Principal): McpServer {
   // The opt-in query log (migration 034, SMD-1295). Off unless OB1_QUERY_LOG=on,
   // and best-effort either way: a log write is never allowed to fail a search, a
   // fetch or a capture, so every call is guarded and every rejection swallowed.
-  // The flag is read per call (not cached) so turning it off takes effect at
-  // once. Nothing here reads the log back — the export tool does, offline.
+  // The flag is read from the boot-time env snapshot (initEnv freezes it on the
+  // first request), so it is set at start-up, not toggled per request. Nothing
+  // here reads the log back — the export tool does, offline.
   const logSearchCall = async (
     tool: string,
     args: { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown> },

@@ -45,7 +45,13 @@ if (!URL_) {
   process.exit(2);
 }
 
-const WINDOW_MIN = Number(process.env.OB1_EXPORT_WINDOW_MIN ?? 30);
+// A positive integer or the default — a stray "abc"/"" must not become NaN in a
+// make_interval() bind (a cryptic mid-query error) or a zero-width window.
+const posInt = (raw: string | undefined, def: number): number => {
+  const n = Number.parseInt(String(raw ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+const WINDOW_MIN = posInt(process.env.OB1_EXPORT_WINDOW_MIN, 30);
 const OUT = process.argv[2] ?? process.env.OB1_EXPORT_OUT ?? "/tmp/ob1-query-fixture.json";
 
 const sql = new SQL({ url: URL_, max: 2 });

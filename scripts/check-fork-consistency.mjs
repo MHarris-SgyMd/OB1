@@ -853,6 +853,8 @@ checkComposeForwardsDocumentedEnv();
  * one of a thought id (a uuid), or text under a key the fixture format defines
  * as free text (`query` — what the caller typed; `note`/`origin`/`generated` —
  * tool-authored labels, deliberately NOT content-adjacent names like `source`).
+ * Object KEYS are checked too — a legitimate key is a plain field name or an id,
+ * so a thought body smuggled as a key (prose, spaces) fails closed like any value.
  * Any other string is a possible leak — a thought body under `content`, an array
  * of `chunks`, a `title` derived from content, or any newly-added key that is not
  * one of the four free-text ones — and fails closed. The only way to hide content
@@ -869,16 +871,24 @@ function checkFixtureRedaction() {
   const SELF = "scripts/check-fork-consistency.mjs";
   const FREE_TEXT_KEYS = new Set(["query", "note", "origin", "generated"]);
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  // A structural field name — the only shape an object key legitimately takes in
+  // a fixture. A thought body smuggled AS a key (prose, spaces) is not one, so
+  // keys are checked too, not just values.
+  const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
   // Recurse carrying the nearest object key that governs a value; an array's
   // elements are governed by the array's own key, so `relevant: [uuid]` passes
   // and `chunks: ["body"]` does not.
   const scan = (node, key, path, hits) => {
     if (typeof node === "string") {
-      if (node.trim() !== "" && !FREE_TEXT_KEYS.has(key) && !UUID.test(node.trim())) hits.push(`${path} (key "${key}")`);
+      if (node.trim() !== "" && !FREE_TEXT_KEYS.has(key) && !UUID.test(node.trim())) hits.push(`${path} (value under "${key}")`);
       return;
     }
     if (Array.isArray(node)) { node.forEach((v, i) => scan(v, key, `${path}[${i}]`, hits)); return; }
-    if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) scan(v, k, `${path}.${k}`, hits);
+    if (node && typeof node === "object") for (const [k, v] of Object.entries(node)) {
+      // A key that is neither a plain field name nor an id is content-shaped.
+      if (!IDENT.test(k) && !UUID.test(k)) hits.push(`${path}.${JSON.stringify(k.slice(0, 40))} (object key)`);
+      scan(v, k, `${path}.${k}`, hits);
+    }
   };
   // Self-test: thought content must be caught however it hides — a plain field,
   // an array of strings, or an off-list key; a query/ids/vectors fixture must not.
@@ -886,6 +896,7 @@ function checkFixtureRedaction() {
     [{ queries: [{ query: "q", content: "a leaked thought body" }] }, "a `content` field"],
     [{ thoughts: [{ id: "x", chunks: ["a leaked chunk body"] }] }, "content in an array of strings"],
     [{ title: "a leaked title derived from content" }, "content under an off-list key (`title`)"],
+    [{ thoughts: { "a leaked thought body used as a key": 1 } }, "content used as an object key"],
   ]) {
     const bad = []; scan(probe, "$", "$", bad);
     if (bad.length === 0) fail(SELF, `fixture redaction check no longer catches ${why} (its own probe)`);

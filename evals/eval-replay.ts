@@ -43,7 +43,9 @@ if (!FIXTURE) {
 
 const EMBED_MODEL = process.env.OB1_EVAL_EMBED ?? "qwen3-embedding:0.6b@1024";
 const spec = parseSpec(EMBED_MODEL);
-const SUBK = Number(process.env.OB1_REPLAY_SUBK ?? 20);
+// A positive integer or the default — a stray value must not become a `LIMIT NaN`.
+const rawSubk = Number.parseInt(String(process.env.OB1_REPLAY_SUBK ?? "").trim(), 10);
+const SUBK = Number.isFinite(rawSubk) && rawSubk > 0 ? rawSubk : 20;
 const KS = [1, 5, 10];
 
 type FixtureQuery = { query: string; relevant: string[]; baseline: string[] };

@@ -40,8 +40,10 @@ With it on, the server records one row per search — the query text, its argume
 and the ids returned — and one per follow-up fetch, edit or delete of a returned
 id, so a retrieval change can be replayed against what the brain was actually
 asked (`evals/eval-replay.ts`). It is **personal data at rest**: every query you
-typed. Nothing leaves your machine — this is a local table, not a provider call —
-and nothing reads it on the capture or search path; the write is best-effort and
+typed. It adds no new external destination and makes no model or provider call —
+the rows land in the same database your thoughts already live in, so on a hosted
+(Supabase) deployment they are in your cloud database, not on your machine. And
+nothing reads it on the capture or search path; the write is best-effort and
 never fails a search. `prune_query_log()` enforces a retention window
 (`OB1_QUERY_LOG_RETENTION_DAYS`, default 30), and `evals/export-queries.ts`
 redacts the log to ids and query text — no thought content — before it becomes a

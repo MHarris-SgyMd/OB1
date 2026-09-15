@@ -448,11 +448,15 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // The brain as it stood before this change: baselined through 029, so 030
   // is pending, and a PLAIN run — the compose stack's, which gates the server
   // on it — must not fail with a bare "does not exist".
-  // 030 by name, not "the last file": 031 (renew_claims, SMD-1023), 032 (the
-  // provenance envelope, SMD-1323), 033 (the capture's fingerprint lock,
-  // SMD-1043) and 034 (the opt-in query log, SMD-1295) follow it and need only
-  // 015, 021, 025, 032 and (034) 001/010 — all present in a through-020 schema
-  // baselined past them — so none is the one a plain run must fail at.
+  // 030 by name, not "the last file". The scenario deletes only 030 from the
+  // ledger, so a plain run attempts only 030 — 031 (renew_claims, SMD-1023),
+  // 032 (the provenance envelope, SMD-1323), 033 (the capture's fingerprint
+  // lock, SMD-1043) and 034 (the opt-in query log, SMD-1295) stay recorded and
+  // are never tried. 030 is the right one to make pending because its
+  // prerequisites — 015 and 021's embedding_model column — are exactly what a
+  // through-020 schema lacks, so it fails by name rather than with a bare error.
+  // The window guard trips whenever a migration lands past 030, to force this
+  // note to be re-read (034 was checked; it needs only 001/010, both present).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 5, `030 is among the last five migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
