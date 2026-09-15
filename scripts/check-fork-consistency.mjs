@@ -21,10 +21,11 @@
  *      directories, with counted per-(file, hazard) exceptions
  *   7. vendored SQL never redefines or drops a function the core migrations
  *      own — no CREATE [OR REPLACE] FUNCTION, DROP FUNCTION, ALTER FUNCTION or
- *      COMMENT ON FUNCTION naming one, in every non-binary file under the seven
- *      category directories whole and docs/, the owned set read from
- *      db/migrations/, with counted per-(file, function) exceptions for the
- *      files that create a brain rather than add to one
+ *      COMMENT ON FUNCTION naming one, and no COMMENT ON COLUMN of a thoughts
+ *      column whose comment a migration writes — in every non-binary file
+ *      under the seven category directories whole and docs/, the owned sets
+ *      read from db/migrations/, with counted per-(file, function) exceptions
+ *      for the files that create a brain rather than add to one
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
@@ -34,7 +35,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreFunctionStatement, ownedFunctionsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, ownedColumnCommentsIn, ownedFunctionsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -483,13 +484,17 @@ function textFilesUnder(dirs) {
 // public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')` and
 // presented themselves as additive sidecars. Against a brain built by
 // db/migrate.ts that statement REPLACES the body migration 005 installed — no
-// error, the signature matches — and the scan for the rest found worse: the
-// vendored provenance-chains schema put upstream's per-path recursive walk back
-// over 026's bounded `trace_provenance` (the 20-second timeout SMD-1288
-// removed), thought-work-claims put its own `release_thought` over 015's, and a
-// recipe's "additive" migration put a 2026-04 body over the 3-argument
-// `upsert_thought` every capture on the SQL path runs — 008's actor, 021's
-// label, 022's window rule and 025's provenance gone in one paste. The
+// error, the signature matches — and the scan for the rest found worse:
+// thought-work-claims put its own `release_thought` over 015's (every worker
+// release then fails 015's CHECK, and its release_claims_for_worker deletes
+// the rows), a recipe's "additive" migration put a 2026-04 body over the
+// 3-argument `upsert_thought` every capture on the SQL path runs — 008's
+// actor, 021's label, 022's window rule and 025's provenance gone in one
+// paste — and over 024's `thought_stats_summary`, and the vendored
+// provenance-chains schema carried `trace_provenance`/`find_derivatives` under
+// 025/026's signatures (which fail on the return type, as it turned out, but
+// install after the DROP its own rollback shows) and a `COMMENT ON COLUMN
+// thoughts.derived_from` that silently overwrote 025's contract. The
 // vendored files were fixed on that ticket (FORK.md change 58: the statements
 // cut where the file adds to a brain, the file excepted where it creates one);
 // this is what keeps the next rebase from bringing them back.
@@ -519,9 +524,12 @@ function textFilesUnder(dirs) {
 // one fewer fails as stale. A sidecar that adds to an existing brain gets no
 // exception: its statement was cut and a header says which migration owns the
 // function.
-const OWNED_FUNCTIONS = ownedFunctionsIn(
-  readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
-    .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]));
+const MIGRATION_TEXTS = readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
+  .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]);
+const OWNED_FUNCTIONS = ownedFunctionsIn(MIGRATION_TEXTS);
+const OWNED_COLUMN_COMMENTS = ownedColumnCommentsIn(MIGRATION_TEXTS);
+/** The whole-text rule as scanLines's `fileRe` (the g flag added; the line reported is the match's first). */
+const asFileRe = (re) => new RegExp(re.source, re.flags + "g");
 /** Strings the rule must catch — the check's own negative tests, run through the scan's machinery every time. */
 const CORE_FUNCTION_PROBES = [
   ["upsert_thought", "CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')"],
@@ -532,6 +540,7 @@ const CORE_FUNCTION_PROBES = [
   ["release_thought", "drop function release_thought;"],
   ["update_thought", "ALTER FUNCTION update_thought(uuid, text, jsonb) OWNER TO postgres;"],
   ["update_updated_at", "CREATE OR REPLACE FUNCTION update_updated_at()"],
+  ["upsert_thought", "CREATE OR REPLACE FUNCTION\n  upsert_thought(p_content text)"],
   ["release_thought", "COMMENT ON FUNCTION public.release_thought IS"],
   ["claim_thoughts", "comment on function claim_thoughts(text, text, int, int) is 'x';"],
   // The quoting a Supabase dashboard export or `supabase db diff` emits.
@@ -555,6 +564,16 @@ const CORE_FUNCTION_NON_PROBES = [
   "The `CREATE OR REPLACE FUNCTION upsert_thought` in upstream's file is cut here.",
   '-- > CREATE OR REPLACE FUNCTION "public"."upsert_thought"(',
   "CREATE OR REPLACE FUNCTION public.upsert_thought_v2(",
+];
+/** Column comments the rule must catch, and ordinary ones it must not. */
+const COLUMN_COMMENT_PROBES = [
+  ["derived_from", "COMMENT ON COLUMN public.thoughts.derived_from IS"],
+  ["supersedes", 'comment on column "thoughts"."supersedes" is \'x\';'],
+];
+const COLUMN_COMMENT_NON_PROBES = [
+  "COMMENT ON COLUMN public.thoughts.derivation_layer IS 'x';",
+  "COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS 'x';",
+  "-- COMMENT ON COLUMN thoughts.derived_from IS what 025 runs",
 ];
 const CORE_FUNCTION_EXCEPTIONS = new Map([
   // Files that create a brain from the getting-started shape, not sidecars
@@ -588,13 +607,16 @@ const CORE_FUNCTION_EXCEPTIONS = new Map([
   }],
 ]);
 
-/** Which owned functions a text redefines or drops, by the rule the scan applies per line. */
+/** Which owned functions a text redefines or drops, by the rule the scan applies to the whole text. */
 function coreStatementsIn(text) {
   const names = new Set();
-  for (const fn of OWNED_FUNCTIONS.keys()) {
-    const re = coreFunctionStatement(fn);
-    if (text.split("\n").some((line) => re.test(line))) names.add(fn);
-  }
+  for (const fn of OWNED_FUNCTIONS.keys()) if (coreFunctionStatement(fn).test(text)) names.add(fn);
+  return names;
+}
+/** Which owned column comments a text rewrites. */
+function columnCommentsIn(text) {
+  const names = new Set();
+  for (const col of OWNED_COLUMN_COMMENTS.keys()) if (coreColumnCommentStatement(col).test(text)) names.add(col);
   return names;
 }
 
@@ -609,21 +631,37 @@ function checkCoreFunctions() {
     const [fn] = coreStatementsIn(text);
     if (fn) fail(SELF, `core-function rule for '${fn}' catches ordinary text it must not: ${text}`);
   }
+  if (OWNED_COLUMN_COMMENTS.size === 0) fail(SELF, "no migration under db/migrations comments a thoughts column — the owned column set is empty and its rule would pass everything");
+  for (const [col, probe] of COLUMN_COMMENT_PROBES) {
+    if (!OWNED_COLUMN_COMMENTS.has(col)) fail(SELF, `column-comment probe names 'thoughts.${col}', which no migration comments — the probe or the owned set is stale`);
+    else if (!columnCommentsIn(probe).has(col)) fail(SELF, `column-comment rule no longer catches its probe for 'thoughts.${col}': ${probe}`);
+  }
+  for (const text of COLUMN_COMMENT_NON_PROBES) {
+    const [col] = columnCommentsIn(text);
+    if (col) fail(SELF, `column-comment rule for 'thoughts.${col}' catches ordinary text it must not: ${text}`);
+  }
   // The seven category directories whole — not contributionDirs(), which
   // yields one entry per contribution and so skips each category's README and
   // its `_template` — and docs/, upstream's guide and drafts, where two of the
   // three files this check was written for lived.
   const scanned = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
   const before = violations.length;
-  const counts = scanLines(textFilesUnder(scanned), [...OWNED_FUNCTIONS].map(([fn, file]) => ({
-    name: fn,
-    re: coreFunctionStatement(fn),
-    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}); vendored SQL must not touch a function a migration owns (SMD-1250)`,
-    suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
-  })));
+  const counts = scanLines(textFilesUnder(scanned), [
+    ...[...OWNED_FUNCTIONS].map(([fn, file]) => ({
+      name: fn,
+      fileRe: asFileRe(coreFunctionStatement(fn)),
+      msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}); vendored SQL must not touch a function a migration owns (SMD-1250)`,
+      suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
+    })),
+    ...[...OWNED_COLUMN_COMMENTS].map(([col, file]) => ({
+      name: `thoughts.${col}`,
+      fileRe: asFileRe(coreColumnCommentStatement(col)),
+      msg: `re-comments thoughts.${col}, whose comment db/migrations/${file} writes as a data contract; vendored SQL must not overwrite it (SMD-1250)`,
+    })),
+  ]);
   // Why, and what to do — once per run, not once per matching line.
   if (violations.length > before) {
-    fail("check 7", "a CREATE OR REPLACE on a matching signature replaces the migration's body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there. Cut the statement and say in the file's header which migration owns the function (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason (FORK.md, change 58)");
+    fail("check 7", "a CREATE OR REPLACE on a matching signature replaces the migration's body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 021, 025, 028 or 031 wrote there. Cut the statement and say in the file's header which migration owns the object (a sidecar that adds to a brain), or, if the file creates a brain rather than adds to one, list it in CORE_FUNCTION_EXCEPTIONS with its line count and the reason (FORK.md, change 58)");
   }
   for (const [rel, byFn] of CORE_FUNCTION_EXCEPTIONS) {
     for (const [fn, { why, lines }] of Object.entries(byFn)) {

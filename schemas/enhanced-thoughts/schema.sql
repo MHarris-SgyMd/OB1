@@ -8,7 +8,14 @@
 -- the body migration 005 installed — no error, the signature matches — and a
 -- double-encoded payload was emptied silently again. The section is removed
 -- here: the columns below are filled by backfill_thought_types() and the
--- UPDATE in section 5, and a capture does not update them.
+-- UPDATE in section 5, and a capture does not update them. Two things to know
+-- before running the rest on a migrated brain: section 5 moves updated_at on
+-- every row with a type or source in its metadata (001's trigger), and on
+-- this fork updated_at gates the accepted-vector caveat and the edited-since
+-- rules (FORK.md changes 39 and 40) — run it between re-embed passes, not
+-- during one; and the GRANTs to Supabase's roles fail on plain Postgres
+-- (role "authenticated" does not exist) — create authenticated, service_role
+-- and anon as NOLOGIN roles first, or delete those lines.
 -- scripts/check-fork-consistency.mjs check 7 fails the build if it returns.
 
 -- ============================================================
@@ -21,8 +28,9 @@ ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS importance SMALLINT DEFAULT 3;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS quality_score NUMERIC(5,2) DEFAULT 50;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS source_type TEXT;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS enriched BOOLEAN DEFAULT false;
--- status / status_updated_at are written by the upsert_thought RPC below.
--- They are also defined by schemas/workflow-status/migration.sql; both files
+-- status / status_updated_at were written by upstream's upsert_thought
+-- (removed here, see above). They are also defined by
+-- schemas/workflow-status/migration.sql; both files
 -- use ADD COLUMN IF NOT EXISTS so applying either (or both) is safe.
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status TEXT DEFAULT NULL;
 ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ DEFAULT now();

@@ -80,7 +80,11 @@ drops `derived_from` and `supersedes` silently, and a 2-argument body from
 before 005 empties a double-encoded payload silently; each is a warning
 naming the migration that owns the body. `provenance` reads
 `trace_provenance`'s body the same way and warns, naming 026, when the
-bounded walk is gone. `chunk delete privilege`: a role that cannot DELETE from
+bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
+body is not 024's; and `work claims` fails when `release_thought`'s or
+`release_claims_for_worker`'s body is not 015's — every worker release would
+fail 015's CHECK — and names any overload of the claim names no migration
+defines. `chunk delete privilege`: a role that cannot DELETE from
 `thought_chunks` — every chunk writer runs as its caller — is a failure with the
 GRANT as the remedy. `fingerprint backfill` (023): a thought without a fingerprint
 whose text no row holds is a capture doubled in waiting — a warning naming the

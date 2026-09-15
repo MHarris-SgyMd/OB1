@@ -1147,7 +1147,7 @@ container.
 ### What test-schema.ts asserts
 
 `bun test-schema.ts` applies every migration to a real PostgreSQL 17 in-process and
-asserts 681 properties (at migration 031), including:
+asserts 683 properties (at migration 031), including:
 
 - every migration applies, **and applies twice without error**
 - the table shape and every index access method match the guide

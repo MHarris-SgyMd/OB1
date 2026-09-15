@@ -41,8 +41,11 @@
 -- id list the caller hands in), with release_thought and
 -- release_claims_for_worker under the same names AND signatures. Upstream's
 -- statements, which followed this header, would therefore have replaced two
--- of 015's function bodies with no error, added a claim_thoughts overload
--- beside 015's, and rewritten 015's table and column comments; every one of
+-- of 015's function bodies with no error — after which every worker release
+-- fails 015's CHECK (upstream's release leaves the lease set) and a clean
+-- shutdown deletes the worker's rows instead of returning them to the pool —
+-- added a claim_thoughts overload beside 015's, and rewritten 015's table and
+-- column comments and 028's on release_thought; every one of
 -- them targets 015's table, so all are removed and this file is a stub.
 -- db/README.md documents the fork's functions and the three workers that use
 -- them. scripts/check-fork-consistency.mjs check 7 fails the build if the

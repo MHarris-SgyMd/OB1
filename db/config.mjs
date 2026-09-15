@@ -1167,14 +1167,36 @@ export function ownedFunctionsIn(files) {
  * The statement shapes that redefine, remove or re-comment the function `fn`,
  * at the start of a line (a blockquote prefix allowed, a `--` comment not),
  * any case, the name bare or schema-qualified, quoted or not — the quoting a
- * Supabase dashboard export or `supabase db diff` emits (first review pass).
- * PROCEDURE and ROUTINE too: a procedure shares pg_proc's namespace with a
- * function of the same name and argument types. check 7 tests every line of
- * every vendored file against this; test-schema [31] tests the fixed
- * enhanced-thoughts file against the same rule.
+ * Supabase dashboard export or `supabase db diff` emits (first review pass) —
+ * and the name on the line after the keyword (fourth pass), which is why the
+ * regex is multiline and tested against a whole text, not a line. PROCEDURE
+ * and ROUTINE too: a procedure shares pg_proc's namespace with a function of
+ * the same name and argument types. check 7 tests every vendored file against
+ * this; test-schema [31] tests the fixed enhanced-thoughts file against it.
  */
 export const coreFunctionStatement = (fn) =>
-  new RegExp(String.raw`^\s*(?:>\s*)*(?:(?:CREATE(?:\s+OR\s+REPLACE)?|DROP|ALTER)\s+(?:FUNCTION|PROCEDURE|ROUTINE)|COMMENT\s+ON\s+(?:FUNCTION|PROCEDURE|ROUTINE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:"?public"?\.)?"?${fn}"?\s*(?:\(|;|\bIS\b|$)`, "i");
+  new RegExp(String.raw`^[ \t]*(?:>[ \t]*)*(?:(?:CREATE(?:\s+OR\s+REPLACE)?|DROP|ALTER)\s+(?:FUNCTION|PROCEDURE|ROUTINE)|COMMENT\s+ON\s+(?:FUNCTION|PROCEDURE|ROUTINE))\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:"?public"?\.)?"?${fn}"?\s*(?:\(|;|\bIS\b|$)`, "im");
+
+/**
+ * The columns of `thoughts` whose COMMENT a core migration writes, each with
+ * the file that last writes it (SMD-1250, fourth review pass). 021 and 025
+ * put a data contract in a column comment (the SMD-1052 rule), and upstream's
+ * provenance-chains schema carried a `COMMENT ON COLUMN thoughts.derived_from`
+ * that would have overwritten 025's — the one thing that file did do
+ * silently, its function bodies having failed on the return type. Same
+ * reading as ownedFunctionsIn: bodies and comments stripped, start of line.
+ */
+export function ownedColumnCommentsIn(files) {
+  const owned = new Map();
+  for (const [name, text] of files) {
+    const sql = text.replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+    for (const m of sql.matchAll(/^\s*COMMENT\s+ON\s+COLUMN\s+(?:public\.)?thoughts\.([a-z_][a-z0-9_]*)\s+IS\b/gim)) owned.set(m[1].toLowerCase(), name);
+  }
+  return owned;
+}
+/** The statement that re-comments `thoughts.col`, at the start of a line, any case, quoted or schema-qualified or not. */
+export const coreColumnCommentStatement = (col) =>
+  new RegExp(String.raw`^[ \t]*(?:>[ \t]*)*COMMENT\s+ON\s+COLUMN\s+(?:"?public"?\.)?"?thoughts"?\."?${col}"?\s*(?:\bIS\b|$)`, "im");
 
 /**
  * How preflight recognises the shipped upsert_thought bodies where no sentinel
@@ -1189,6 +1211,17 @@ export const coreFunctionStatement = (fn) =>
  */
 export const UPSERT_TWO_ARG_SHIPPED_RE = /jsonb_typeof\(p_payload\)\s*<>\s*'object'/;
 export const UPSERT_THREE_ARG_SHIPPED_RE = /p_payload\s*->\s*'derived_from'/;
+/**
+ * Two more, from the fourth review pass, which installed upstream's files on
+ * a real brain: 015's release_thought and release_claims_for_worker clear the
+ * lease (`ttl_expires_at = NULL`) as 015's CHECK requires — upstream's
+ * release_thought leaves it set, so every worker release fails the
+ * constraint, and its release_claims_for_worker deletes the rows instead;
+ * 024's thought_stats_summary unnests topics only when they are an array —
+ * the recipe's body it came from raises on a null element.
+ */
+export const RELEASE_SHIPPED_RE = /ttl_expires_at\s*=\s*NULL/;
+export const THOUGHT_STATS_SHIPPED_RE = /jsonb_typeof\(metadata\s*->\s*'topics'\)/;
 
 /**
  * `pg_settings.source` values under which a setting reaches EVERY role in the

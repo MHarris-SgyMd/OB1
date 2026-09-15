@@ -41,9 +41,13 @@ import {
   CLAIM_EVIDENCE_ROWS_SQL,
   REEMBED_KEY_MODEL_SQL_RE,
   REEMBED_OWN_KEY_SQL_RE,
+  RELEASE_SHIPPED_RE,
+  THOUGHT_STATS_SHIPPED_RE,
   UPSERT_THREE_ARG_SHIPPED_RE,
   UPSERT_TWO_ARG_SHIPPED_RE,
+  coreColumnCommentStatement,
   coreFunctionStatement,
+  ownedColumnCommentsIn,
   ownedFunctionsIn,
 } from "./config.mjs";
 import { join, dirname } from "node:path";
@@ -3043,6 +3047,9 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
     `the owned set is read from the migrations: ${owned.size} functions (36 at 031, never fewer), names only — no word from a header comment quoting a statement`);
   assert(owned.get("upsert_thought") === "025_thought_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
     "…and the last definers preflight's remedies name: upsert_thought 025, trace_provenance 026, release_thought 015");
+  const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
+  assert(ownedCols.get("embedding_model") === "021_embedding_model_per_row.sql" && ownedCols.get("derived_from") === "025_thought_provenance.sql" && ownedCols.get("supersedes") === "025_thought_provenance.sql" && ownedCols.size >= 3,
+    `the thoughts columns whose comments a migration writes are read the same way (${ownedCols.size}): embedding_model 021, derived_from and supersedes 025`);
   const bodies = async (): Promise<Record<string, string>> => Object.fromEntries((await db.query<{ sig: string; h: string }>(
     `SELECT p.oid::regprocedure::text AS sig, md5(p.prosrc) AS h FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public' AND p.proname = ANY($1::text[]) ORDER BY 1`, [[...owned.keys()]])).rows.map((r) => [r.sig, r.h]));
@@ -3056,11 +3063,14 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(TWO in shipped && THREE in shipped, `the two capture forms are among the ${Object.keys(shipped).length} owned bodies`);
   assert(UPSERT_TWO_ARG_SHIPPED_RE.test(await srcOf(TWO)) && UPSERT_THREE_ARG_SHIPPED_RE.test(await srcOf(THREE)) && /ob1:vector-replaces-chunks/.test(await srcOf(THREE)),
     "preflight's recognisers hold for the shipped bodies: 005's guard in the 2-argument form, 025's envelope and 022's sentinel in the 3-argument form");
+  assert(RELEASE_SHIPPED_RE.test(await srcOf("release_thought(uuid,text,text,text,text)")) && RELEASE_SHIPPED_RE.test(await srcOf("release_claims_for_worker(text,text)")) && THOUGHT_STATS_SHIPPED_RE.test(await srcOf("thought_stats_summary()")),
+    "…and for 015's two release bodies (the lease cleared) and 024's thought_stats_summary (topics guarded by type)");
 
   // The vendored file as fixed — its section 6 gone — applied whole. The
   // Supabase roles its GRANTs name do not exist in PGlite.
   const vendored = readFileSync(join(HERE, "..", "schemas", "enhanced-thoughts", "schema.sql"), "utf8");
-  assert(!vendored.split("\n").some((line) => [...owned.keys()].some((fn) => coreFunctionStatement(fn).test(line))), "schemas/enhanced-thoughts/schema.sql names no owned function in a statement, by check 7's own rule");
+  assert(![...owned.keys()].some((fn) => coreFunctionStatement(fn).test(vendored)) && ![...ownedCols.keys()].some((col) => coreColumnCommentStatement(col).test(vendored)),
+    "schemas/enhanced-thoughts/schema.sql names no owned function or column comment in a statement, by check 7's own rules");
   for (const role of ["authenticated", "service_role", "anon"]) {
     await db.exec(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
   }

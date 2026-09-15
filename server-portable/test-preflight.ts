@@ -279,6 +279,40 @@ else {
          "…and 026 re-applied is the bounded walk again, said as such");
 
   /**
+   * Two more bodies a vendored file replaced on a real brain (SMD-1250, fourth
+   * review pass): the edge-function-cost-optimization recipe's
+   * thought_stats_summary over 024's — a warning, thought_stats raising on a
+   * null topic — and upstream's thought-work-claims release_thought over
+   * 015's — a failure, every worker release refused by 015's CHECK. Stand-ins
+   * with the same shape and none of the clause each recogniser reads; and a
+   * stray overload of an owned claim name, which is a warning naming it with
+   * its DROP.
+   */
+  const tamper = new SQL({ url: LIVE, max: 1 });
+  await tamper.unsafe("CREATE OR REPLACE FUNCTION thought_stats_summary() RETURNS jsonb LANGUAGE sql STABLE AS $$ SELECT '{}'::jsonb $$");
+  const statsStale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(statsStale.code === 0 && /stats summary\s+thought_stats_summary present, but its body is not 024's/.test(statsStale.out) && /024_thought_stats_summary\.sql/.test(statsStale.out),
+         "a thought_stats_summary body that is not 024's is a warning naming 024");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("024") });
+  assert(/stats summary\s+thought_stats_summary present, 024's body/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 024 re-applied is said to be 024's");
+  // 015's parameter names kept: CREATE OR REPLACE refuses to rename a
+  // parameter ("cannot change name of input parameter"), which is also why
+  // upstream's body, with the same names, goes over 015's unrefused.
+  await tamper.unsafe("CREATE OR REPLACE FUNCTION release_thought(p_thought_id uuid, p_work_type text, p_worker_id text, p_status text, p_error text DEFAULT NULL) RETURNS boolean LANGUAGE sql AS $$ SELECT true $$");
+  const releaseStale = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(releaseStale.code === 1 && /work claims\s+release_thought's or release_claims_for_worker's body is not 015's — it does not clear the lease/.test(releaseStale.out) && /015_thought_work_claims\.sql/.test(releaseStale.out),
+         "a release_thought body that is not 015's does not start, naming 015 and the CHECK every worker release would fail");
+  await tamper.unsafe("CREATE FUNCTION claim_thoughts(uuid[], text, text, int) RETURNS SETOF uuid LANGUAGE sql AS $$ SELECT NULL::uuid WHERE false $$");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
+  const stray = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(stray.code === 0 && /work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies; 1 overload\(s\) no migration defines: claim_thoughts\(_uuid,text,text,int4\)/.test(stray.out) && /DROP FUNCTION claim_thoughts\(_uuid,text,text,int4\);/.test(stray.out),
+         "015 re-applied puts the bodies back, and an overload no migration defines is a warning naming it with its DROP");
+  await tamper.unsafe("DROP FUNCTION claim_thoughts(uuid[], text, text, int)");
+  await tamper.close();
+  assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present with 015's and 031's bodies\s*$/m.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out),
+         "…and dropped, the claim functions are the shipped four, said as such");
+
+  /**
    * Migration 014 lives in a SET clause on match_thoughts, which a later
    * CREATE OR REPLACE drops without any error. Re-applying 007 is exactly that
    * event: same signature, no iterative scan. A warning, because every search
@@ -896,6 +930,8 @@ else {
   const pre015 = await run(SQL_ENV);
   assert(pre015.code === 0 && /re-embed pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "before migration 015 there is nothing to read, and the check says so rather than warning");
+  assert(/work claims\s+claim_thoughts, release_thought, release_claims_for_worker and renew_claims present/.test(pre015.out),
+         "…while the claim functions, which outlive the table, still read as 015's");
   assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "…and the consolidate pass check, which reads the same table, says so too");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });

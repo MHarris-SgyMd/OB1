@@ -6346,18 +6346,28 @@ in 8 sidecar files, and 11 statements in the 8 bootstrap files the exceptions
 cover (23 and 11 under its first draft, before `COMMENT ON FUNCTION` joined
 it). Beyond the ticket's three:
 `schemas/provenance-chains/schema.sql` defines `trace_provenance(uuid, int,
-int)` and `find_derivatives(uuid, int)` — the signatures 025 and 026 use — so
-applying it puts upstream's per-path recursive walk back over 026's bounded one
-(the twenty-second timeout change 47 removed) and upstream's `find_derivatives`
-over 025's, and its README's rollback drops both functions and 025's
-`derived_from` and `supersedes` columns. `schemas/thought-work-claims/schema.sql`
+int)` and `find_derivatives(uuid, int)` — the argument lists 025 and 026 use.
+Run against a migrated brain (the fourth review pass did), both `CREATE OR
+REPLACE`s fail on the return type — upstream's `RETURNS TABLE` differs — and
+the SQL editor rolls the paste back; statement by statement, what lands
+silently is its `COMMENT ON COLUMN thoughts.derived_from` and `supersedes`
+over 025's contract comments and a second copy of 025's array `CHECK`; after
+the `DROP FUNCTION`s its own README's rollback runs, the two bodies install —
+upstream's per-path recursive walk over 026's bounded one, the twenty-second
+timeout change 47 removed — and the migrator's `--reapply` then fails on the
+same return type until both are dropped again. `schemas/thought-work-claims/schema.sql`
 defines `release_thought` and `release_claims_for_worker` under 015's exact
-signatures, with bodies the three workers were not written against, adds a
-`claim_thoughts` overload beside 015's (an id list in, where 015's takes a pool
-name), and re-comments 015's table and columns. And
+signatures and replaces both bodies with no error (run: every worker release
+then fails 015's CHECK, since upstream's leaves the lease set, and a clean
+shutdown deletes the worker's rows instead of returning them to the pool),
+adds a `claim_thoughts` overload beside 015's (an id list in, where 015's
+takes a pool name), and re-comments 015's table and columns and 028's
+`release_thought`. And
 `recipes/edge-function-cost-optimization/migrations/20260417_edge_fn_optimizations.sql`
 — "additive (no schema changes)" by its README — defines `thought_stats_summary()`
-over 024's and `upsert_thought(text, jsonb, vector)`, the 3-argument capture
+over 024's (run: `thought_stats` then raises `field name must not be null`
+on the first thought whose topics hold a null element, which 024's body
+drops) and `upsert_thought(text, jsonb, vector)`, the 3-argument capture
 every write on the SQL path runs, with a body from 2026-04 that has none of
 005's guard, 008's actor, 021's label, 022's window rule or 025's provenance
 envelope: one paste, and every capture after it wrote a row missing all five.
@@ -6405,26 +6415,35 @@ more (a smaller set is a reader that lost definitions, not a migration gone) —
 and fails any `CREATE`, `DROP` or `ALTER` of a `FUNCTION`, `PROCEDURE` or
 `ROUTINE`, or a `COMMENT ON` one, naming an owned function at the start of a
 line, bare or schema-qualified, quoted or not (the quoting a Supabase dashboard
-export emits), in every non-binary, non-ignored file under the seven category
-directories whole — their root READMEs and `_template`s included, which the
-per-contribution walk the other checks use skips — and `docs/`. The rule is
-one regex, `coreFunctionStatement` in `db/config.mjs`, and `test-schema` [31]
-applies it to the fixed enhanced-thoughts file. By name, not signature: a
+export emits), the name on the line after the keyword allowed, in every
+non-binary, non-ignored file under the seven category directories whole —
+their root READMEs and `_template`s included, which the per-contribution walk
+the other checks use skips — and `docs/`. A second owned set, read the same
+way, is the `thoughts` columns whose `COMMENT` a migration writes (three: 021's
+`embedding_model`, 025's `derived_from` and `supersedes`), and a vendored
+`COMMENT ON COLUMN` of one fails too — the one statement upstream's
+provenance-chains file did land silently. The rules are two regexes,
+`coreFunctionStatement` and `coreColumnCommentStatement` in `db/config.mjs`,
+multiline and tested against a whole text, and `test-schema` [31] applies
+both to the fixed enhanced-thoughts file. By name, not signature: a
 matching signature is the silent replacement, and an overload beside an owned
 function is the ambiguity 004's header names. `COMMENT` because 028 and 031
 carry a data contract in a function's comment, which a vendored `COMMENT ON`
-overwrites as silently as `CREATE OR REPLACE` overwrites the body. Fourteen
-strings the rule must catch and thirteen it must not — a `GRANT`, a `REVOKE`, a
-`COMMENT ON COLUMN`, a `SELECT`, a header comment quoting a statement,
-`update_updated_at_column()`, `match_thoughts_recency(`, `upsert_thought_v2(`
-— run through the scan's own machinery on every invocation, and exceptions are
+overwrites as silently as `CREATE OR REPLACE` overwrites the body. Fifteen
+strings the function rule must catch and thirteen it must not — a `GRANT`, a
+`REVOKE`, a `COMMENT ON COLUMN` of an unowned column, a `SELECT`, a header
+comment quoting a statement, `update_updated_at_column()`,
+`match_thoughts_recency(`, `upsert_thought_v2(` — and two the column rule
+must catch and three it must not, run through the scan's own machinery on
+every invocation, and exceptions are
 counted as check 6's are. Proven: a probe file with a definition, a drop and a
 comment failed on three lines; one line appended beside the excepted statement
-in the fingerprint README failed as "covers 1 line(s) but 2 match"; the fixed
-tree passes, 118 contributions, no violations. Known and accepted: a statement
-whose name is on the line after `FUNCTION`, or a `DROP FUNCTION a(), b()` list,
-is not caught — no vendored file writes either, and a rebase that brought one
-would meet `test-schema` [31] only if it touched enhanced-thoughts.
+in the fingerprint README failed as "covers 1 line(s) but 2 match"; the fourth
+pass's probes — mixed case, a `.sql.example`, the deleted draft re-added, a
+README fence, CRLF, a BOM, the name on the next line — each failed; the fixed
+tree passes, 118 contributions, no violations. Known and accepted: a `DROP
+FUNCTION a(), b()` list and dynamic SQL (`EXECUTE 'CREATE …'` in a DO block)
+are not caught — no vendored file writes either.
 
 **Preflight names the body, and the migration that owns it.** `atomic capture`
 read the 3-argument body's sentinel and nothing else; two of its remedies named
@@ -6459,8 +6478,18 @@ shape — the refusal it would otherwise have raised there is what the second
 review pass found. The 2-argument body is judged on its own and said beside
 whichever 3-argument state fires, with 005-then-025 as the remedy, so a brain
 with both replaced hears it once rather than on the run after the first
-remedy. Over PostgREST none of this is reachable, and the skip says so as
-before.
+remedy. Two more bodies the fourth pass replaced on a real brain gained a
+recogniser and a check: `stats summary` warns when `thought_stats_summary`'s
+body lacks 024's type guard on the topics array (the recipe's body raises on a
+null element), and a new `work claims` check fails when `release_thought`'s or
+`release_claims_for_worker`'s body does not clear the lease as 015's CHECK
+requires (upstream's thought-work-claims paste; every worker release would
+fail), names any overload of the four claim names no migration defines with
+its `DROP`, and skips before 015. The `provenance` remedies are ledger-aware
+now and say to `DROP` both functions first when the body present returns
+other columns, since the migrator's re-run otherwise fails on the return type
+— the fourth pass ran that remedy and watched it fail. Over PostgREST none of
+this is reachable, and the skip says so as before.
 
 **Proof.** `test-schema` [31] reads the owned set as the checker does and pins
 the three last definers preflight's remedies spell (`upsert_thought` 025,
@@ -6479,7 +6508,7 @@ Postgres: 021 over 025, 022 over 025, 003 over 005, 003 and 021 together (one
 warning naming both bodies, remedy 005 then 025), 005 alone (a pre-022
 3-argument body with the 2-argument one right, which is why the remedy says
 "then 025 again"), the form dropped (remedy 025, not 004, not 022), 025 over
-026 for `provenance`; 681 and 182 assertions. `check-fork-consistency` passes
+026 for `provenance`; and, from the fourth pass, a stats body that is not 024's, a release body that is not 015's, a stray claim overload named with its `DROP`; 683 and 188 assertions. `check-fork-consistency` passes
 the fixed tree and failed the probes above.
 
 **Not done, and why.** Vendored `COMMENT ON COLUMN`, `DROP INDEX` and `ADD

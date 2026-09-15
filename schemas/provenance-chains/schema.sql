@@ -19,11 +19,14 @@
 -- Helper functions (this fork, SMD-1250): upstream's file defined
 --   trace_provenance(p_thought_id UUID, p_max_depth INT, p_node_cap INT) and
 --   find_derivatives(p_thought_id UUID, p_limit INT) here, under the same
---   signatures migrations 025 and 026 give them — so on a brain built by
---   db/migrate.ts the two CREATE OR REPLACEs put upstream's per-path recursive
---   walk back over 026's bounded one (the timeout SMD-1288 removed) and
---   upstream's find_derivatives over 025's, with no error. Sections 5 and 6
---   are removed; the two functions the README's examples call are 025's and
+--   argument lists migrations 025 and 026 give them. On a brain built by
+--   db/migrate.ts the two CREATE OR REPLACEs fail — "cannot change return
+--   type of existing function", upstream's RETURNS TABLE differs — and in the
+--   SQL editor the whole paste rolls back; after the DROP FUNCTIONs the
+--   README's rollback ran, they would install upstream's per-path recursive
+--   walk over 026's bounded one (the timeout SMD-1288 removed), and the
+--   migrator's re-run would then fail on the same return type. Sections 5 and
+--   6 are removed; the two functions the README's examples call are 025's and
 --   026's — the same argument lists, so the calls run, but the fork's columns
 --   (no derivation_layer, sensitivity_tier or restricted flag), SECURITY
 --   INVOKER and ungranted, with no redaction by tier: 025's header,
@@ -33,7 +36,10 @@
 --   Section 3's indexes on derived_from and supersedes are removed as well:
 --   idx_thoughts_derived_from and idx_thoughts_supersedes are 025's, under
 --   those names, and IF NOT EXISTS would only have made the claim quietly.
---   Section 4's comments on derived_from and
+--   Section 4's comments on derived_from and supersedes — the one thing this
+--   file did do silently on a migrated brain, statement by statement — are
+--   removed: 025 writes those comments as a data contract, and check 7 fails
+--   the build on a COMMENT ON either column. Section 4's comments on derived_from and
 --   supersedes are removed too — 025 writes those columns' comments, and a
 --   COMMENT ON here would overwrite them as silently. The metadata-merge
 --   helpers in sections 7 and 8 have no counterpart in the migrations and stay.
