@@ -11,7 +11,7 @@ Open Brain captures atomic thoughts, but as soon as you start synthesizing — w
 - `derivation_layer` (TEXT): `'primary'` (atomic capture) or `'derived'` (regenerable artifact). Defaults to `'primary'` so all existing rows keep working.
 - `supersedes` (UUID): optional pointer to a prior thought this one replaces — e.g., a regenerated digest replacing yesterday's.
 
-It also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code):
+Upstream's file also installs four helper functions (all `SECURITY DEFINER`, all **granted to `service_role` only** — call them from your edge function, not from client code). **On this fork the first two are migrations 025 and 026's** — same names, same signatures, so the calls below work unchanged — and the file installs only the last two (SMD-1250; the note at the top of `schema.sql` says why):
 
 - `trace_provenance(thought_id UUID, max_depth INT, node_cap INT)` — walks `derived_from` upward and returns a flat ancestor rowset with depth, cycle detection, and restricted-tier redaction.
 - `find_derivatives(thought_id UUID, limit INT)` — reverse lookup via the GIN index; "what derived artifacts cite this atomic thought?" Restricted rows are always filtered out; there is no client-visible override.
@@ -120,7 +120,7 @@ After running the migration:
 
 - `public.thoughts` has four new columns: `derived_from JSONB`, `derivation_method TEXT`, `derivation_layer TEXT NOT NULL DEFAULT 'primary'`, `supersedes UUID`.
 - Every existing row has `derivation_layer = 'primary'` and the three other columns NULL — no data loss, no behavior change for existing MCP tools.
-- Four helper SQL functions exist: `trace_provenance`, `find_derivatives`, `merge_thought_provenance_metadata`, and `merge_thought_eval_metadata`. They are `SECURITY DEFINER`, **granted to `service_role` only** (clients must reach them via the open-brain edge function, not PostgREST as `authenticated`), and the query helpers redact or filter restricted thoughts.
+- Four helper SQL functions exist: `trace_provenance` and `find_derivatives` are migrations 025 and 026's, already there on a migrated brain; `merge_thought_provenance_metadata` and `merge_thought_eval_metadata` come from this file, `SECURITY DEFINER`, **granted to `service_role` only** (clients must reach them via the open-brain edge function, not PostgREST as `authenticated`).
 - Three indexes exist: `idx_thoughts_derived_from` (GIN), `idx_thoughts_derivation_layer` (btree), and `idx_thoughts_supersedes` (partial btree).
 - PostgREST schema cache has been reloaded (`NOTIFY pgrst, 'reload schema'`).
 
@@ -140,11 +140,9 @@ This migration assumes `public.thoughts.id` is a `UUID` — the canonical Open B
 If you need to remove everything this migration added, run the block below. The rollback is lossy — any recorded provenance will be permanently dropped.
 
 ```sql
--- Drop helper functions (both the current 2-arg signature and any legacy
--- 3-arg find_derivatives from an earlier install)
-DROP FUNCTION IF EXISTS public.find_derivatives(UUID, INT);
-DROP FUNCTION IF EXISTS public.find_derivatives(UUID, INT, BOOLEAN);
-DROP FUNCTION IF EXISTS public.trace_provenance(UUID, INT, INT);
+-- This fork: trace_provenance and find_derivatives are migrations 025/026's
+-- here and are not dropped — nor are the derived_from and supersedes columns,
+-- which 025 owns and upsert_thought writes (SMD-1250).
 
 -- Drop indexes
 DROP INDEX IF EXISTS public.idx_thoughts_supersedes;
@@ -157,11 +155,10 @@ ALTER TABLE public.thoughts DROP CONSTRAINT IF EXISTS thoughts_derived_from_is_a
 ALTER TABLE public.thoughts DROP CONSTRAINT IF EXISTS thoughts_derivation_method_check;
 ALTER TABLE public.thoughts DROP CONSTRAINT IF EXISTS thoughts_derivation_layer_check;
 
--- Drop columns (IRREVERSIBLE — any recorded provenance is lost)
-ALTER TABLE public.thoughts DROP COLUMN IF EXISTS supersedes;
+-- Drop the two columns this file added (IRREVERSIBLE — any recorded layer or
+-- method is lost). derived_from and supersedes stay: they are migration 025's.
 ALTER TABLE public.thoughts DROP COLUMN IF EXISTS derivation_layer;
 ALTER TABLE public.thoughts DROP COLUMN IF EXISTS derivation_method;
-ALTER TABLE public.thoughts DROP COLUMN IF EXISTS derived_from;
 
 NOTIFY pgrst, 'reload schema';
 ```

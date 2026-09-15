@@ -67,6 +67,8 @@ The partial index (`WHERE content_fingerprint IS NOT NULL`) means existing rows 
 
 ### Step 2: Create the upsert RPC
 
+> **This fork (SMD-1250):** this statement is migration 003, and 005 hardened it — a payload that is not a JSON object is refused instead of silently emptied. On a brain built by `db/migrate.ts`, do not paste it: `CREATE OR REPLACE` would put this earlier body back over 005's with no error. It stays here as the recipe's record.
+
 ```sql
 CREATE OR REPLACE FUNCTION upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')
 RETURNS JSONB AS $$

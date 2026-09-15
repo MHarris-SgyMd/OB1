@@ -2,6 +2,8 @@
 
 > A blackboard so many workers can chew through the same pool of thoughts in parallel, and no two workers ever grab the same thought.
 
+> **This fork (SMD-1250):** migration 015 is this blackboard on a brain built by `db/migrate.ts` — a different table and a different `claim_thoughts` (the pool is the enqueued rows, not an id list), with `release_thought` and `release_claims_for_worker` under the same names and signatures. Upstream's `schema.sql` would have replaced two of 015's function bodies silently and added a third overload, so its statements are removed and the file is a stub. The text below is upstream's, describing upstream's schema; its worker example calls upstream's signatures. `db/README.md` documents the fork's functions and the workers that use them (`reembed.ts`, `extract-entities.ts`, `consolidate.ts`).
+
 ## What It Does
 
 When you want to process a large set of thoughts — enrich them, re-embed them, score them, consolidate duplicates — one process is slow. The obvious fix is to run several workers at once. The catch: if two workers both `SELECT` the next batch of unprocessed thoughts, they will pick overlapping rows and do the same work twice (or worse, write conflicting results).
@@ -289,18 +291,7 @@ This schema assumes `public.thoughts.id` is `UUID`, the canonical Open Brain typ
 
 ## Rollback
 
-To remove the claim system entirely:
-
-```sql
-DROP FUNCTION IF EXISTS public.claim_thoughts(UUID[], TEXT, TEXT, INT);
-DROP FUNCTION IF EXISTS public.release_thought(UUID, TEXT, TEXT, TEXT, TEXT);
-DROP FUNCTION IF EXISTS public.release_claims_for_worker(TEXT, TEXT);
-DROP TABLE IF EXISTS public.thought_work_claims;
-
-NOTIFY pgrst, 'reload schema';
-```
-
-Dropping the table removes all in-flight and historical claim records. It does not touch `public.thoughts`.
+On this fork there is nothing to remove: the file installs nothing (see the note at the top). Upstream's rollback dropped the three functions and the `thought_work_claims` table — on a migrated brain those are migration 015's, and dropping them takes the re-embed, extraction and consolidation workers' state with them. Do not run it here (SMD-1250).
 
 ## Troubleshooting
 

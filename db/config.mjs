@@ -1141,6 +1141,40 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
 ]);
 
 /**
+ * The functions the core migrations define, each with the file that last
+ * defines it (SMD-1250). `files` is the migrations as [name, text] pairs in
+ * apply order — read by the caller, since this module is imported by the
+ * Workers build and cannot touch the filesystem. A statement at the start of
+ * a line, comments stripped first so a header quoting one is not it
+ * (test-schema [10]'s rule). Read from the files, never typed: a list would
+ * lag the next migration. scripts/check-fork-consistency.mjs check 7 fails a
+ * vendored file that redefines or drops one of these; test-schema [31] holds
+ * the set to what preflight's remedies name.
+ */
+export function ownedFunctionsIn(files) {
+  const owned = new Map();
+  for (const [name, text] of files) {
+    const sql = text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+    for (const m of sql.matchAll(/^\s*CREATE(?:\s+OR\s+REPLACE)?\s+FUNCTION\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/gim)) owned.set(m[1].toLowerCase(), name);
+  }
+  return owned;
+}
+
+/**
+ * How preflight recognises the shipped upsert_thought bodies where no sentinel
+ * declares them (SMD-1250). A CREATE OR REPLACE from outside the migrations —
+ * a vendored schema, the getting-started guide pasted again, an earlier
+ * migration re-applied by hand — replaces a body without an error when the
+ * signature matches, and 005 predates the sentinel convention while 025 kept
+ * 022's sentinel rather than adding one. Each regex is the one clause that
+ * migration added and no earlier body has: 005 refuses a non-object payload;
+ * 025 writes the provenance envelope. test-schema [31] holds each against the
+ * body it names and against the body before it.
+ */
+export const UPSERT_TWO_ARG_SHIPPED_RE = /jsonb_typeof\(p_payload\)\s*<>\s*'object'/;
+export const UPSERT_THREE_ARG_SHIPPED_RE = /derived_from/;
+
+/**
  * `pg_settings.source` values under which a setting reaches EVERY role in the
  * database — the server's configuration (postgresql.conf and ALTER SYSTEM both
  * report 'configuration file'; a managed parameter group, the command line,

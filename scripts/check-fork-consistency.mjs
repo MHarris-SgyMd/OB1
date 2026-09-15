@@ -19,6 +19,11 @@
  *      Bash or a prefix of a network client or interpreter; no spawn through a
  *      shell in any spelling — in every non-binary file under the contribution
  *      directories, with counted per-(file, hazard) exceptions
+ *   7. vendored SQL never redefines or drops a function the core migrations
+ *      own — no CREATE [OR REPLACE] FUNCTION, DROP FUNCTION, ALTER FUNCTION or
+ *      COMMENT ON FUNCTION naming one, in the same files plus docs/, the owned set read from
+ *      db/migrations/, with counted per-(file, function) exceptions for the
+ *      files that create a brain rather than add to one
  *
  * Run: node scripts/check-fork-consistency.mjs
  * Exits non-zero on any violation.
@@ -28,6 +33,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ownedFunctionsIn } from "../db/config.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CATEGORIES = [
@@ -390,10 +396,10 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
   ["recipes/atomizer/README.md", { "codex-bypass": { why: "the warning that documents the codex provider's removal", lines: 1 } }],
   ["recipes/atomizer/lib/atomize-text.mjs", { "codex-bypass": { why: "the header note that documents the same removal", lines: 1 } }],
 ]);
-// Text is scanned by construction: only known binary shapes and lockfiles are
-// skipped, so an extensionless Dockerfile, Procfile or CNAME is read like
-// everything else.
-const SHELL_HAZARD_BINARY = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+// Text is scanned by construction (checks 6 and 7): only known binary shapes
+// and lockfiles are skipped, so an extensionless Dockerfile, Procfile or CNAME
+// is read like everything else.
+const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
 
 /**
  * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
@@ -443,10 +449,7 @@ function checkShellHazards(dirs) {
   // Only the contribution directories — not their `_template` placeholders,
   // which contributionDirs() already skips — so this never depends on the
   // display filter below to hide a placeholder's hits.
-  const ignored = gitIgnoredFiles(dirs);
-  const files = dirs.flatMap((d) => walk(d.dir, [], /./))
-    .filter((f) => !SHELL_HAZARD_BINARY.test(f) && !ignored.has(relOf(f)));
-  const counts = scanLines(files, SHELL_HAZARDS.map(({ name, re, fileRe, only, what }) => ({
+  const counts = scanLines(textFilesUnder(dirs), SHELL_HAZARDS.map(({ name, re, fileRe, only, what }) => ({
     name,
     re,
     fileRe,
@@ -466,6 +469,160 @@ function checkShellHazards(dirs) {
   }
 }
 
+/** Every non-binary, non-ignored file under these directories — what checks 6 and 7 read. */
+function textFilesUnder(dirs) {
+  const ignored = gitIgnoredFiles(dirs);
+  return dirs.flatMap((d) => walk(d.dir, [], /./))
+    .filter((f) => !BINARY_FILES.test(f) && !ignored.has(relOf(f)));
+}
+
+// ── 7: vendored SQL never redefines or drops a function a migration owns ─────
+//
+// SMD-1250. Three vendored files carried `CREATE OR REPLACE FUNCTION
+// public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')` and
+// presented themselves as additive sidecars. Against a brain built by
+// db/migrate.ts that statement REPLACES the body migration 005 installed — no
+// error, the signature matches — and the scan for the rest found worse: the
+// vendored provenance-chains schema put upstream's per-path recursive walk back
+// over 026's bounded `trace_provenance` (the 20-second timeout SMD-1288
+// removed), thought-work-claims put its own `release_thought` over 015's, and a
+// recipe's "additive" migration put a 2026-04 body over the 3-argument
+// `upsert_thought` every capture on the SQL path runs — 008's actor, 021's
+// label, 022's window rule and 025's provenance gone in one paste. The
+// vendored files were fixed on that ticket (FORK.md change 58: the statements
+// cut where the file adds to a brain, the file excepted where it creates one);
+// this is what keeps the next rebase from bringing them back.
+//
+// The owned set is READ from db/migrations/ — every `CREATE [OR REPLACE]
+// FUNCTION` at the start of a line, comments stripped, with the file that last
+// defines it — never typed, so it cannot lag the next migration. A hit is any
+// CREATE FUNCTION, DROP FUNCTION, ALTER FUNCTION or COMMENT ON FUNCTION naming
+// an owned function at the start of a line (a header comment quoting one
+// begins with `--`; prose naming one is not a statement) — COMMENT because 028
+// and 031 carry a data contract in a function's comment, which a vendored
+// COMMENT ON overwrites as silently as CREATE OR REPLACE overwrites the body —
+// in every non-binary, non-ignored file under
+// the seven contribution directories AND docs/, where two of the three
+// original files lived. By NAME, not signature: a matching signature is the
+// silent replacement, and a new overload beside an owned function is the
+// ambiguity 004's header names and the arity split SMD-1245 describes.
+//
+// Exceptions are per (file, function) and COUNTED, as check 6's are: the
+// files that CREATE a brain from the getting-started shape — the guide the
+// migrations were extracted from, a recipe's own Neon database, a Kubernetes
+// init script — define these functions because they are building the
+// database the migrations would otherwise build, and are excepted for exactly
+// the lines they have today with the reason beside them; one more line fails,
+// one fewer fails as stale. A sidecar that adds to an existing brain gets no
+// exception: its statement was cut and a header says which migration owns the
+// function.
+const OWNED_FUNCTIONS = ownedFunctionsIn(
+  readdirSync(join(ROOT, "db", "migrations")).filter((f) => f.endsWith(".sql")).sort()
+    .map((f) => [f, readFileSync(join(ROOT, "db", "migrations", f), "utf8")]));
+/** The statement shapes that redefine, remove or re-comment `fn`, at the start of a line, any case. */
+const coreFunctionStatement = (fn) =>
+  new RegExp(String.raw`^\s*(?:(?:CREATE(?:\s+OR\s+REPLACE)?|DROP|ALTER)\s+FUNCTION|COMMENT\s+ON\s+FUNCTION)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:public\.)?${fn}\s*(?:\(|;|\bIS\b|$)`, "i");
+/** Strings the rule must catch — the check's own negative tests, run through the scan's machinery every time. */
+const CORE_FUNCTION_PROBES = [
+  ["upsert_thought", "CREATE OR REPLACE FUNCTION public.upsert_thought(p_content TEXT, p_payload JSONB DEFAULT '{}')"],
+  ["upsert_thought", "create or replace function upsert_thought("],
+  ["upsert_thought", "  CREATE FUNCTION upsert_thought (p_content text)"],
+  ["match_thoughts", "create or replace function match_thoughts(\n  query_embedding vector(1536),"],
+  ["trace_provenance", "DROP FUNCTION IF EXISTS public.trace_provenance(UUID, INT, INT);"],
+  ["release_thought", "drop function release_thought;"],
+  ["update_thought", "ALTER FUNCTION update_thought(uuid, text, jsonb) OWNER TO postgres;"],
+  ["update_updated_at", "CREATE OR REPLACE FUNCTION update_updated_at()"],
+  ["release_thought", "COMMENT ON FUNCTION public.release_thought IS"],
+  ["claim_thoughts", "comment on function claim_thoughts(text, text, int, int) is 'x';"],
+];
+/** Ordinary lines the rule must not catch. */
+const CORE_FUNCTION_NON_PROBES = [
+  "CREATE OR REPLACE FUNCTION match_thoughts_recency(",
+  "CREATE OR REPLACE FUNCTION update_updated_at_column()",
+  "CREATE OR REPLACE FUNCTION upsert_thoughts_batch(",
+  "-- CREATE OR REPLACE FUNCTION upsert_thought(text, jsonb) is the statement 003 ran",
+  "SELECT upsert_thought('x', '{}'::jsonb);",
+  "GRANT EXECUTE ON FUNCTION public.upsert_thought(TEXT, JSONB) TO service_role;",
+  "COMMENT ON FUNCTION public.release_thought_legacy IS 'x';",
+  "COMMENT ON COLUMN public.thoughts.derived_from IS 'x';",
+  "REVOKE EXECUTE ON FUNCTION public.trace_provenance(UUID, INT, INT) FROM PUBLIC;",
+  "calls `upsert_thought` through PostgREST, then match_thoughts",
+  "The `CREATE OR REPLACE FUNCTION upsert_thought` in upstream's file is cut here.",
+];
+const CORE_FUNCTION_EXCEPTIONS = new Map([
+  // Files that create a brain from the getting-started shape, not sidecars
+  // that add to one. Exactly this many lines, for exactly these functions.
+  ["docs/01-getting-started.md", {
+    update_updated_at: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+    match_thoughts: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+    upsert_thought: { why: "the guide migrations 001-005 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
+  }],
+  ["recipes/content-fingerprint-dedup/README.md", {
+    upsert_thought: { why: "the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it", lines: 1 },
+  }],
+  ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", {
+    update_updated_at: { why: "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain", lines: 1 },
+  }],
+  ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", {
+    match_thoughts: { why: "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain", lines: 1 },
+  }],
+  ["integrations/kubernetes-deployment/k8s/init.sql", {
+    match_thoughts: { why: "the init script of the deployment's own Postgres, run once on an empty database", lines: 1 },
+  }],
+  ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
+    match_thoughts: { why: "the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database", lines: 1 },
+  }],
+  ["recipes/local-brain-no-mcp/volumes/db/init/01-thoughts-schema.sh", {
+    update_updated_at: { why: "the init script of the recipe's own Postgres container, run once on an empty database", lines: 1 },
+  }],
+  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", {
+    match_thoughts: { why: "the init script of the recipe's own Postgres container, run once on an empty database", lines: 1 },
+    upsert_thought: { why: "the init script of the recipe's own Postgres container, run once on an empty database (a third signature, text/vector/jsonb)", lines: 1 },
+  }],
+]);
+
+/** Which owned functions a text redefines or drops, by the rule the scan applies per line. */
+function coreStatementsIn(text) {
+  const names = new Set();
+  for (const fn of OWNED_FUNCTIONS.keys()) {
+    const re = coreFunctionStatement(fn);
+    if (text.split("\n").some((line) => re.test(line))) names.add(fn);
+  }
+  return names;
+}
+
+function checkCoreFunctions(dirs) {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  if (OWNED_FUNCTIONS.size === 0) return fail(SELF, "no migration under db/migrations defines a function — the owned set is empty and check 7 would pass everything");
+  for (const [fn, probe] of CORE_FUNCTION_PROBES) {
+    if (!OWNED_FUNCTIONS.has(fn)) fail(SELF, `core-function probe names '${fn}', which no migration defines — the probe or the owned set is stale`);
+    else if (!coreStatementsIn(probe).has(fn)) fail(SELF, `core-function rule no longer catches its probe for '${fn}': ${probe}`);
+  }
+  for (const text of CORE_FUNCTION_NON_PROBES) {
+    const [fn] = coreStatementsIn(text);
+    if (fn) fail(SELF, `core-function rule for '${fn}' catches ordinary text it must not: ${text}`);
+  }
+  // The seven directories, and docs/ — upstream's guide and drafts, where two
+  // of the three files this check was written for lived.
+  const scanned = [...dirs, { dir: join(ROOT, "docs"), rel: "docs" }];
+  const counts = scanLines(textFilesUnder(scanned), [...OWNED_FUNCTIONS].map(([fn, file]) => ({
+    name: fn,
+    re: coreFunctionStatement(fn),
+    msg: `redefines, drops or re-comments ${fn}, which the core migrations own (last defined by db/migrations/${file}) — a CREATE OR REPLACE on a matching signature replaces that body silently, an overload beside it splits callers by arity, a DROP removes it, a COMMENT ON overwrites a contract 028 or 031 wrote there; vendored SQL must not touch a function a migration owns (SMD-1250)`,
+    suppress: (rel) => Boolean(CORE_FUNCTION_EXCEPTIONS.get(rel)?.[fn]),
+  })));
+  for (const [rel, byFn] of CORE_FUNCTION_EXCEPTIONS) {
+    for (const [fn, { why, lines }] of Object.entries(byFn)) {
+      const seen = counts.get(`${rel} ${fn}`) ?? 0;
+      if (seen !== lines) {
+        fail(rel, seen === 0
+          ? `listed as a core-function exception for '${fn}' (${why}) but matches nothing — remove it from CORE_FUNCTION_EXCEPTIONS`
+          : `core-function exception for '${fn}' (${why}) covers ${lines} line(s) but ${seen} match — a new definition beside the documented one, or the exception's count is stale`);
+      }
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -476,6 +633,7 @@ for (const d of dirs) {
 }
 checkSqlGuards();
 checkShellHazards(dirs);
+checkCoreFunctions(dirs);
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

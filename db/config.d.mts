@@ -228,6 +228,12 @@ export const SEARCH_THOUGHTS_HYBRID_SIGNATURE: string;
 export const UPDATE_THOUGHT_SIGNATURE: string;
 /** The 4- and 5-argument search forms 020 dropped and the 7-argument update_thought 021 dropped; a schema reset drops them too. */
 export const SUPERSEDED_SIGNATURES: readonly string[];
+/** Function name → the migration file that last defines it, from the migrations as [name, text] pairs (SMD-1250). */
+export function ownedFunctionsIn(files: Iterable<readonly [string, string]>): Map<string, string>;
+/** The clause 005 added to the 2-argument upsert_thought and no earlier body has: preflight's recogniser for the shipped body. */
+export const UPSERT_TWO_ARG_SHIPPED_RE: RegExp;
+/** The clause 025 added to the 3-argument upsert_thought and 022's body lacks: preflight's recogniser for the shipped body. */
+export const UPSERT_THREE_ARG_SHIPPED_RE: RegExp;
 /** pg_settings.source values that reach every role: server configuration or the database. */
 export const SHARED_SETTING_SOURCES: string[];
 /** SELECT of the current database's pg_db_role_setting row as `cfg` (setconfig). */

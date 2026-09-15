@@ -587,6 +587,7 @@ if (configFailed) {
           SELECT p.pronargs::int AS n, p.prosrc AS src FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname = 'upsert_thought' AND n.nspname = 'public'`) as { n: number; src: string }[];
+        const { UPSERT_TWO_ARG_SHIPPED_RE, UPSERT_THREE_ARG_SHIPPED_RE } = await import("../db/config.mjs");
         const applied = await sql`
           SELECT count(*)::int AS c FROM information_schema.tables WHERE table_name = 'schema_migrations'`;
         // Which of the migrations that have a ledger-aware remedy the ledger
@@ -626,26 +627,40 @@ if (configFailed) {
         const two = forms.find((f) => f.n === 2);
         // The 3-arg body's semantics are declared by a sentinel in the body
         // itself, `ob1:vector-replaces-chunks` (022, the 014 convention): the
-        // windows stay while the label vouches for them and go otherwise. 021
-        // re-applied by hand puts 021's body back — CREATE OR REPLACE, no
-        // error — and a chunkless re-capture at another model then leaves the
-        // previous vector's windows under the new one, found by search and
-        // named by nothing.
+        // windows stay while the label vouches for them and go otherwise. 025
+        // kept that sentinel and added the provenance envelope, so 025's body
+        // is told from 022's by the clause 022's lacks; and 005's 2-argument
+        // body, from before the convention, by the guard 005 added.
+        // db/config.mjs holds both recognisers and test-schema [31] pins them
+        // to the bodies they name. Any CREATE OR REPLACE from outside the
+        // migrations — an earlier migration by hand, the getting-started guide
+        // pasted again, a vendored schema or recipe (SMD-1250) — replaces a
+        // body with no error when the signature matches; this is where the
+        // operator learns which body is there, and which migration owns it.
+        const THREE_LAST = "025_thought_provenance.sql";
         if (!three) {
           add("atomic capture", "fail", `${forms.length} upsert_thought overload(s) — the 3-argument form, the atomic capture, is missing`,
-              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql — the last definer of the 3-argument form (004 created it; 005, 008, 021 and 022 redefined it, and 004's body alone would drop each of theirs)."));
+              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST} — the last definer of the 3-argument form (004 created it; 005, 008, 021, 022 and 025 redefined it, and an earlier file's body alone would drop what every later one added).`));
         } else if (!two) {
           // This server never calls the 2-argument form; PostgREST callers by
           // name and the two-step fallback do. A warning, and the remedy says
-          // "then 022": 005 redefines the 3-argument form too, with its body.
+          // "then 025": 005 redefines the 3-argument form too, with its body.
           add("atomic capture", "warn", `${forms.length} upsert_thought overload(s) — the 2-argument form is missing; this server does not call it, PostgREST callers by name and the two-step capture fallback do`,
-              "Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then 022 again — 005 redefines the 3-argument form as well, with a body from before 008, 021 and 022.");
+              `Apply db/migrations/005_reject_non_object_payload.sql (the last definer of the 2-argument form), then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`);
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand puts it back): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
-              ledgerRemedy("022", "Apply db/migrations/022_capture_replaces_chunks.sql."));
+              "the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (021 re-applied by hand, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has",
+              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST} — the last definer; 022's file alone would leave 025's provenance envelope out.`));
+        } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
+          add("atomic capture", "warn",
+              "the 2- and 3-argument upsert_thought present, and the 3-argument body carries 022's rule, but it is from before migration 025 (022 re-applied by hand puts it back): a capture that names derived_from or supersedes has them dropped silently, and nothing downstream can tell",
+              ledgerRemedy("025", `Apply db/migrations/${THREE_LAST}.`));
+        } else if (!UPSERT_TWO_ARG_SHIPPED_RE.test(two.src)) {
+          add("atomic capture", "warn",
+              "the 2- and 3-argument upsert_thought present and the 3-argument body is 025's, but the 2-argument body is not 005's — it does not refuse a non-object payload, the one thing 005 added — so a CREATE OR REPLACE from outside the migrations put another there (the getting-started guide or the fingerprint recipe's Step 2 pasted onto a migrated brain, or a community schema that mirrors columns on write): PostgREST callers by name and the two-step fallback capture through that body, and a double-encoded payload is emptied silently again",
+              ledgerRemedy("005", `Apply db/migrations/005_reject_non_object_payload.sql, then ${THREE_LAST} again — 005 redefines the 3-argument form as well, with a body from before 008, 021, 022 and 025.`));
         } else {
-          add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 022's, so a re-capture's windows stay only while the label vouches for them");
+          add("atomic capture", "ok", "the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's");
         }
 
         // A fact of its own, with its own remedy: every writer that replaces a
@@ -869,15 +884,24 @@ if (configFailed) {
         const prov = await sql`
           SELECT
             count(*) FILTER (WHERE p.proname = 'trace_provenance')::int AS t,
-            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f
+            count(*) FILTER (WHERE p.proname = 'find_derivatives')::int AS f,
+            bool_or(p.proname = 'trace_provenance' AND p.prosrc LIKE '%ob1:provenance-walk-bounded%') AS bounded
           FROM pg_proc p
           JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE p.proname IN ('trace_provenance', 'find_derivatives') AND n.nspname = 'public'`;
         // Per function, not a combined count: a double-overload of one plus the
         // other absent must still fail, as the sibling signature checks do
-        // (review pass 1, SMD-1253).
-        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) add("provenance", "ok", "trace_provenance and find_derivatives present");
-        else add("provenance", "fail",
+        // (review pass 1, SMD-1253). And whose body: 026 redefined
+        // trace_provenance as a walk-global BFS under the sentinel
+        // `ob1:provenance-walk-bounded` (SMD-1288); 025 re-applied by hand, or
+        // the vendored provenance-chains schema — the same signature — puts a
+        // per-path recursive walk back with no error (SMD-1250).
+        if (Number(prov[0].t) >= 1 && Number(prov[0].f) >= 1) {
+          if (prov[0].bounded) add("provenance", "ok", "trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded");
+          else add("provenance", "warn",
+                   "trace_provenance and find_derivatives present, but trace_provenance's body is not 026's — the bounded walk's sentinel is absent — so a CREATE OR REPLACE from outside the migrations put another there (025 re-applied by hand, or the vendored provenance-chains schema's per-path walk): a dense derivation graph expands multiplicatively again and a trace can run to the statement timeout (SMD-1288)",
+                   ledgerRemedy("026", "Apply db/migrations/026_trace_provenance_bounded.sql."));
+        } else add("provenance", "fail",
                  "migration 025's provenance functions are missing, but capture_thought accepts derived_from/supersedes (silently dropped by the pre-025 upsert_thought) and search labels superseded hits",
                  "Apply db/migrations/025_thought_provenance.sql.");
 

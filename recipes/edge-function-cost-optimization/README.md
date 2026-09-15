@@ -76,12 +76,12 @@ Expected outcome: a 1.8M/month workload drops to roughly 440k invocations — co
 
 ## Step-by-Step Guide
 
-### Step 1 — Apply the SQL migrations
+### Step 1 — The SQL functions (already present on this fork)
 
-In the Supabase SQL Editor, paste and run [`migrations/20260417_edge_fn_optimizations.sql`](./migrations/20260417_edge_fn_optimizations.sql). It's additive (no schema changes) and creates two functions:
+Upstream's [`migrations/20260417_edge_fn_optimizations.sql`](./migrations/20260417_edge_fn_optimizations.sql) created two functions. On a brain built by `db/migrate.ts` both exist already — `thought_stats_summary()` is migration 024's, the 3-argument `upsert_thought(text, jsonb, vector)` is 004's through 025's — and upstream's bodies would have replaced theirs silently, so the file's statements are removed and it documents why (SMD-1250). Nothing to run; go to step 2.
 
-- `thought_stats_summary()` — single-query aggregation replacing the JS loop
-- `upsert_thought(text, jsonb, vector)` — 3-arg overload that stores embedding in one round-trip (the existing 2-arg signature continues to work)
+- `thought_stats_summary()` — single-query aggregation replacing the JS loop (migration 024)
+- `upsert_thought(text, jsonb, vector)` — stores content, metadata and embedding in one round-trip (migrations 004–025; the 2-argument form stays beside it)
 
 ### Step 2 — Restructure your edge function
 
