@@ -123,7 +123,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
-import { authenticate, canWrite, presentedKey } from "../../server-portable/auth.ts";
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
 
@@ -131,7 +131,7 @@ app.post("/mcp", async (c) => {
   // Authenticate with SEPARATE access keys for the shared server — named,
   // scoped, hashed entries (see the core server's auth.ts); give a household
   // member a read-scoped key unless they should mark items purchased.
-  const principal = authenticate(presentedKey(c.req.raw), {
+  const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
     MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
   });
@@ -183,7 +183,9 @@ app.post("/mcp", async (c) => {
     }
   );
 
-  server.tool(
+  // Tools that write are registered only for a write-scoped key; a read-scoped
+  // household member sees the view tools alone.
+  if (canWrite(principal)) server.tool(
     "add_shopping_item",
     "Add item to shopping list",
     {
@@ -201,7 +203,7 @@ app.post("/mcp", async (c) => {
     }
   );
 
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "update_shopping_item",
     "Mark shopping item as purchased",
     {
@@ -235,11 +237,13 @@ Deno.serve(app.fetch);
 Set the shared server's secrets in Supabase (separate from your main server's secrets):
 
 ```bash
-# Generate a separate access key for the shared server
-openssl rand -hex 32
+# Mint a separate, named key for the shared server — read-scoped unless this
+# member should add or check off items (Step 3 of the Deploy an Edge Function
+# primitive shows the by-hand form). The HASH is stored; the key goes in the URL.
+cd server-portable && bun keygen.ts --name spouse --scope read
 
 # Set secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEY=your-generated-shared-key
+supabase secrets set MCP_HOUSEHOLD_ACCESS_KEYS=spouse:read:paste-the-hash-here
 supabase secrets set SUPABASE_HOUSEHOLD_KEY=your-limited-supabase-key  # LIMITED KEY
 
 # Optional: Household ID for RLS

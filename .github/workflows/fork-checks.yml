@@ -122,6 +122,13 @@ jobs:
         working-directory: server
         run: deno check --node-modules-dir=none index.ts
 
+      # The two extensions still on supabase-js resolve under Deno (the other
+      # five import the SQL shim, which imports `bun`), so they are checked as
+      # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
+      - name: deno check extensions/family-calendar and job-hunt
+        working-directory: extensions/family-calendar
+        run: deno check --node-modules-dir=none index.ts ../job-hunt/index.ts
+
   portable-server:
     name: Portable server (Bun + Workers)
     runs-on: ubuntu-latest

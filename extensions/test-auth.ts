@@ -12,7 +12,10 @@
  * from tools/list and a call names a tool that does not exist. Then the drift
  * guards: every tool a file registers is classified here as a read or a write,
  * every write is gated, the key is read through the shared module and nowhere
- * else, and each extension's deno.json still pins what package.json installs.
+ * else, _shared/auth.ts is byte-for-byte server-portable/auth.ts (a Supabase
+ * function is bundled from supabase/functions/, so the module is copied beside
+ * the extensions rather than imported across the tree), and each extension's
+ * deno.json still pins what package.json installs.
  *
  * The files are imported under a stand-in for the two Deno globals they use:
  * `Deno.env.get` hands the process environment through, and `Deno.serve`
@@ -23,10 +26,10 @@
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hashKey } from "../server-portable/auth.ts";
+import { hashKey } from "./_shared/auth.ts";
 import { createAssert } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -85,6 +88,9 @@ const SERVERS: Server[] = [
     writes: ["mark_item_purchased"] },
 ];
 
+assert(readFileSync(join(HERE, "_shared", "auth.ts"), "utf8") === readFileSync(join(HERE, "..", "server-portable", "auth.ts"), "utf8"),
+  "_shared/auth.ts is byte-for-byte server-portable/auth.ts — copy it again after editing either");
+
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
@@ -99,15 +105,21 @@ for (const s of SERVERS) {
 type Via = "x-access-key" | "x-brain-key" | "bearer" | "query";
 const RPC = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
 
-async function call(s: Server, key: string | null, body: unknown, via: Via = "x-access-key"): Promise<{ status: number; json: any }> {
+/** One request to server `s`; `also` carries further presented forms beside the one under test. */
+async function call(s: Server, key: string | null, body: unknown, via: Via = "x-access-key", also: Partial<Record<Via, string>> = {}): Promise<{ status: number; json: any }> {
   const handler = served[SERVERS.indexOf(s)];
+  // createClient runs per request, so the URL shape must be the one THIS server's client accepts.
+  process.env.SUPABASE_URL = s.url;
   const headers: Record<string, string> = { ...RPC };
-  let url = "http://extension.test/mcp";
-  if (key !== null) {
-    if (via === "query") url += `?key=${encodeURIComponent(key)}`;
-    else if (via === "bearer") headers.Authorization = `Bearer ${key}`;
-    else headers[via] = key;
-  }
+  const query: string[] = [];
+  const present = (form: Via, value: string) => {
+    if (form === "query") query.push(`key=${encodeURIComponent(value)}`);
+    else if (form === "bearer") headers.Authorization = `Bearer ${value}`;
+    else headers[form] = value;
+  };
+  if (key !== null) present(via, key);
+  for (const [form, value] of Object.entries(also) as [Via, string][]) present(form, value);
+  const url = "http://extension.test/mcp" + (query.length ? `?${query.join("&")}` : "");
   const r = await handler(new Request(url, { method: "POST", headers, body: JSON.stringify(body) }));
   const text = await r.text();
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
@@ -170,6 +182,14 @@ console.log("\n[where the key may travel]");
     assert(toolsOf(await call(s, READ_KEY, LIST, via)).join() === [...s.reads].sort().join(),
       `the ${via} form authenticates, and scope applies through it`);
   }
+  // Every form presented is tried: a gateway's own token in Authorization, or a
+  // stale header a client keeps sending, does not shadow the key the client means.
+  assert(toolsOf(await call(s, READ_KEY, LIST, "query", { bearer: "eyJ.a.gateway-jwt" })).join() === [...s.reads].sort().join(),
+    "a gateway's bearer token beside a right ?key= does not shadow it");
+  assert(toolsOf(await call(s, WRITE_KEY, LIST, "x-access-key", { "x-brain-key": "stale" })).length === s.reads.length + s.writes.length,
+    "a wrong x-brain-key beside a right x-access-key does not shadow it");
+  assert((await call(s, "wrong-one", LIST, "query", { bearer: "wrong-two", "x-brain-key": "wrong-three" })).status === 401,
+    "three wrong forms are three refusals, not one acceptance");
   const health = await served[0](new Request("http://extension.test/", { method: "GET" }));
   assert(health.status === 200 && (await health.json()).status === "ok", "the unauthenticated GET health check still answers");
 }
@@ -196,14 +216,15 @@ for (const s of SERVERS) {
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
     assert(!/\.(insert|update|upsert|delete)\(/.test(reach), `…${r} does not write`);
   }
-  assert(text.includes('from "../../server-portable/auth.ts"') && text.includes("authenticate(presentedKey(c.req.raw)"),
-    "…the key is read and resolved through server-portable/auth.ts");
+  assert(text.includes('from "../_shared/auth.ts"') && text.includes("authenticateRequest(c.req.raw,"),
+    "…the key is read and resolved through _shared/auth.ts, every presented form tried");
   assert(!/c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)/.test(text), "…and nowhere else");
 }
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
   const dirs = readdirSync(HERE, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith("_") && d.name !== "node_modules").map((d) => d.name);
   for (const dir of dirs) {
+    if (!existsSync(join(HERE, dir, "deno.json"))) { assert(false, `${dir}/deno.json exists — every extension pins its imports`); continue; }
     const imports = JSON.parse(readFileSync(join(HERE, dir, "deno.json"), "utf8")).imports as Record<string, string>;
     const drift = Object.entries(imports).filter(([name, spec]) => spec !== `npm:${name}@${pkg[name]}`);
     assert(drift.length === 0, `${dir}/deno.json pins what package.json installs${drift.length ? ` (${drift.map(([n, s]) => `${n}: ${s}`).join(", ")})` : ""}`);

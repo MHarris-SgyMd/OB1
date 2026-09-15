@@ -128,9 +128,10 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 // The core server's access keys: named, scoped, SHA-256-hashed entries in
-// MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. Never
+// MCP_ACCESS_KEYS, compared timing-safe, each revocable on its own. _shared/
+// auth.ts is server-portable/auth.ts, copied so Supabase bundles it. Never
 // compare a key with `!==` yourself (the fork's consistency check refuses it).
-import { authenticate, canWrite, presentedKey, type Principal } from "../../server-portable/auth.ts";
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
 // --- Environment Variables ---
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -159,7 +160,7 @@ function buildServer(principal: Principal): McpServer {
 const app = new Hono();
 
 app.all("*", async (c) => {
-  const principal = authenticate(presentedKey(c.req.raw), {
+  const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
     MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
   });

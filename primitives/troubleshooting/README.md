@@ -13,7 +13,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **"Getting 401 Unauthorized"**
 - The access key doesn't match what's stored in Supabase secrets
 - Double-check that the `?key=` value in your Connection URL matches your MCP Access Key exactly
-- If using header-based auth (Claude Code), the core Open Brain server and the extension servers all accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>` — any of them works
+- If using header-based auth (Claude Code): the extension servers and this fork's server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`, and try every form you send; the original `open-brain-mcp` Edge Function from the Getting Started guide accepts `x-brain-key` or `?key=` only
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
 - Verify the secret is set: `supabase secrets list` should show `MCP_ACCESS_KEYS` (or the older `MCP_ACCESS_KEY`)
 - A key in `MCP_ACCESS_KEYS` is stored as its hash — check that the URL carries the **key**, not the hash, and that the line's scope is what you expect (a read-scoped key does not see the tools that write)

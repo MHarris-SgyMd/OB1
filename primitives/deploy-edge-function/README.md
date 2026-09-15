@@ -60,6 +60,13 @@ curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.
 curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/deno.json
 ```
 
+The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it:
+
+```bash
+mkdir -p supabase/functions/_shared
+curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/extensions/_shared/auth.ts
+```
+
 🟦 **Windows (PowerShell):**
 
 ```powershell
@@ -68,6 +75,11 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1
 
 ```powershell
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/DOWNLOAD_PATH/deno.json -OutFile supabase\functions\FUNCTION_NAME\deno.json
+```
+
+```powershell
+New-Item -ItemType Directory -Force supabase\functions\_shared | Out-Null
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1/main/extensions/_shared/auth.ts -OutFile supabase\functions\_shared\auth.ts
 ```
 
 > Replace `FUNCTION_NAME` and `DOWNLOAD_PATH` with the values from the extension's deployment table.
@@ -91,7 +103,7 @@ Or by hand — generate a key, then hash it:
 ```bash
 KEY=$(openssl rand -hex 32)
 echo "key:  $KEY"
-echo "hash: $(printf %s "$KEY" | shasum -a 256 | cut -d' ' -f1)"
+echo "hash: $(printf %s "$KEY" | shasum -a 256 | cut -d' ' -f1)"   # sha256sum on a Linux box without shasum
 ```
 
 🟦 **Windows (PowerShell):**
@@ -167,6 +179,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 **Import errors or "not in import map"**
 - Verify `deno.json` was downloaded into the function directory, not the project root
 - Run `ls supabase/functions/FUNCTION_NAME/` — you should see both `index.ts` and `deno.json`
+- `Module not found "../_shared/auth.ts"`: Step 2's third download is missing — `ls supabase/functions/_shared/` should show `auth.ts`
 
 **Deploy succeeds but function returns errors**
 - Check Edge Function logs: Supabase Dashboard → Edge Functions → your function → Logs

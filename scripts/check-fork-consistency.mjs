@@ -63,9 +63,10 @@ function contributionDirs() {
     const base = join(ROOT, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      // _template is the category's placeholder; node_modules is extensions/
-      // test-auth.ts's install (gitignored), not a contribution.
-      if (name === "_template" || name === "node_modules") continue;
+      // _template is the category's placeholder, _shared the module the
+      // extensions import, node_modules extensions/test-auth.ts's install
+      // (gitignored) — none is a contribution.
+      if (name === "_template" || name === "_shared" || name === "node_modules") continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
     }
@@ -701,16 +702,22 @@ function checkCoreFunctions() {
 //
 // The rule is the MECHANISM, not the seven files' spelling: a strict or loose
 // (in)equality with a value read from the environment under a credential's
-// name (…KEY, …SECRET, …TOKEN, …PASSWORD) on either side — read inline
-// (`!== Deno.env.get("MCP_ACCESS_KEY")`) or through an identifier the file
-// binds from such a read (`const expected = Deno.env.get(…)`, `const
-// MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? ""`, `const { API_TOKEN } =
-// process.env`, Python's `os.environ`) — in every non-binary, non-ignored file
-// under the seven category directories and docs/, prose included, since a
-// README's code block is what the next extension is copied from. Not a compare
-// of the credential: `.length` (a timing-safe compare guards its lengths
-// first), a call or an index on it, `typeof`, or a nullish or empty literal on
-// the other side (`if (KEY === undefined)` is a presence check). Exceptions are
+// name (…KEY, …SECRET, …TOKEN, …PASSWORD) on either side — read inline, in
+// any wrapping (`!== Deno.env.get("MCP_ACCESS_KEY")`, `!== (Deno.env.get(…) ??
+// "")`, `Deno.env.get(…)!.trim() ===`), or through an identifier the file binds
+// from a statement that contains such a read (`const expected = Deno.env.get(…)`,
+// `const KEY = String(process.env.KEY ?? "").trim()`, `expected ??= …`, `const {
+// API_TOKEN } = process.env`, `const { API_TOKEN: expected } = process.env`,
+// Python's `os.environ`), the read spelled `Deno.env.get`, `process.env`,
+// `Bun.env`, Hono's `c.env`, a bare `env(…)`/`env.X`, or `os.environ` — in every
+// non-binary, non-ignored file under the seven category directories and docs/,
+// prose included, since a README's code block is what the next extension is
+// copied from. Not a compare of the credential: `.length` (a timing-safe
+// compare guards its lengths first), a call or an index on it, `typeof`, or a
+// literal on the other side — nullish or empty (`if (KEY === undefined)` is a
+// presence check) or a string (`if (KEY === "your-key-here")` is a placeholder
+// check, a different smell). Outside the rule, and said so: `.includes`,
+// `Object.is`, `switch`, and a compare through a class field. Exceptions are
 // per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
 // integrations that carry the same compare are listed with the ticket that
 // holds their fix, for exactly the lines each has today — one fixed drops out
@@ -718,11 +725,13 @@ function checkCoreFunctions() {
 const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
-const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'](${IDENT})["']\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'](${IDENT})["']\s*\]|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'](${IDENT})["']\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'](${IDENT})["']\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
 /** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
 const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
-/** What on the far side of a compare makes it a presence check, not a compare of the credential. */
-const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|""|''|` + "``" + `)`;
+/** What on the far side of a compare makes it a presence or placeholder check, not a compare of the credential. */
+const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|"[^"\n]*"|'[^'\n]*'|` + "`[^`\n]*`" + `)`;
+/** What may wrap an inline read on the left of a compare: `!`, `)`, `?? ""`, `|| ""`, `.trim()`. */
+const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
 const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
 
 /**
@@ -732,13 +741,17 @@ const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
  */
 function credentialComparesIn(text) {
   const names = new Set();
-  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?(?<![=!<>])=(?![=>])\s*${ENV_READ}`, "g"))) {
+  // `x = <anything on the statement containing a credential read>` — `=`, `??=`
+  // and `||=`, a type annotation before it, a wrapper (`String(…)`, `(… ?? "")`,
+  // `.trim()`) around the read.
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])[^;\n]*?${ENV_READ}`, "g"))) {
     if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
   }
-  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\))\b/g)) {
+  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
+  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env)\b/g)) {
     for (const part of m[1].split(",")) {
-      const name = (part.split(":").pop() ?? "").trim().split(/[\s=]/)[0];
-      if (name && CREDENTIAL_ENV_NAME.test(name)) names.add(name);
+      const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
+      if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
     }
   }
   const lines = new Set();
@@ -747,13 +760,13 @@ function credentialComparesIn(text) {
     for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
   };
   const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
-  flag(new RegExp(String.raw`${EQ}\s*${ENV_READ}`, "g"), credential);
-  flag(new RegExp(String.raw`${ENV_READ}\s*${EQ}`, "g"), credential);
+  flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
+  flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
   for (const name of names) {
     const N = name.replace(/\$/g, "\\$");
     // The credential on the right: `key !== expected` — not `expected.length`, `expected(`, `expected[`, `expected?.`.
     flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${N}\b(?!\s*[.(\[?])`, "g"));
-    // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish or empty literal.
+    // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
     flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${N}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
   }
   return [...lines].sort((a, b) => a - b);
@@ -776,6 +789,17 @@ const CREDENTIAL_COMPARE_PROBES = [
   'const expected = env("MCP_ACCESS_KEY");\nif (provided !== expected) return 401;',
   'const AUDITOR_ACCESS_KEY = Deno.env.get("AUDITOR_ACCESS_KEY")!;\nif (key !== AUDITOR_ACCESS_KEY) {',
   'return Boolean(provided && provided === MCP_ACCESS_KEY);\nconst MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;',
+  // What the first review pass found slipping past: a renamed destructure, Hono's
+  // bindings and Bun's env, a wrapped read, a wrapped inline compare, `??=`.
+  'const { MCP_ACCESS_KEY: expected } = process.env;\nif (key !== expected) {',
+  'if (provided !== c.env.MCP_ACCESS_KEY) {',
+  'const KEY = Bun.env.MCP_ACCESS_KEY;\nreturn key === KEY;',
+  'const expected = (Deno.env.get("MCP_ACCESS_KEY") ?? "").trim();\nif (key !== expected) {',
+  'const expected = String(process.env.MCP_ACCESS_KEY);\nif (key !== expected) {',
+  'let expected: string | undefined;\nexpected ??= Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected) {',
+  'if (key !== (Deno.env.get("MCP_ACCESS_KEY") ?? "")) {',
+  'if (Deno.env.get("MCP_ACCESS_KEY")! !== key) {',
+  'if (Deno.env.get("MCP_ACCESS_KEY")!.trim() === key) ok();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -796,6 +820,9 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const expected = process.env.EXPECTED_DIM;\nif (_embedDimCache !== expected) {',
   'seven files compared the key with `!==` and are consumers of auth.ts now',
   'const secret = process.env.WEBHOOK_SECRET ?? "";\nconst ok = secret.length > 0 && timingSafeEqual(a, b);',
+  'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nif (key === "your-service-role-key") throw new Error("placeholder");',
+  'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
+  'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
 ];
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry
