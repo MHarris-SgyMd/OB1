@@ -107,7 +107,10 @@ where `reembed.ts` refuses to run, the refusal prints the statement
 `--retry-fallbacks` would run, one per key. The accepted-row refusal applies to
 a **plain** run too whenever 021 is pending — a brain built by hand through 021
 and adopted by "just run them", or a ledger hole — since the block runs as
-written there as well. A plain run on the baselined brain, where 030 is pending,
+written there as well; and where 030 is recorded and so will not run after 021,
+every acceptance 021 would read is refused, since nothing would take the label
+back. `--baseline` runs no SQL and is never refused on this. The checks read the
+catalog and the claim table under a 10 s lock timeout of their own. A plain run on the baselined brain, where 030 is pending,
 fails at 030 with what is missing and this command, rather than a bare "does
 not exist"; preflight's `edit signature`, `vector models` and `atomic capture`
 remedies name it where the ledger records the migration they find absent.

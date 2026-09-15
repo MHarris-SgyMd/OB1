@@ -5959,6 +5959,35 @@ comments); `--url` twice ran against the first (refused). Not taken: one
 `scanArgs()` shared with `reembed.ts` — its scanner has shapes this one does
 not need, and folding them is a change to that tool.
 
+**Review, seventh pass (high), at the user's call, triaged.** The sixth's
+extension had a hole of its own: the gate's own-key exclusion assumed 030
+would run after 021, but on a plain run with a hole at 021 *alone* 030 is
+recorded and skipped, so 021 would have rewritten exactly the labels 030 took
+back — the exclusion applies only when 030 runs in the same invocation, the
+message says why, and [7] reads the refusal with 030 recorded. `--baseline`,
+which executes no SQL, was refused on claim-row data it could never act on
+(guarded). The gate's own reads took ACCESS SHARE with no timeout of their own,
+before the transaction's `SET LOCAL` existed, so an idle ACCESS EXCLUSIVE
+holder froze the re-run at the checks — the freeze the timeout was added to
+prevent; ten seconds around the reads, reset after, and [7] holds that lock
+and reads the refusal. Preflight's new `applyOr` collapsed "the ledger could
+not be read" into "not recorded", printing the plain "apply 021" loop for a
+role without SELECT on the ledger; one `ledgerRemedy(migration, apply)` knows
+the unread case as the 023 remedy does, and the ledger is read whole rather
+than through a hand-kept list of prefixes that had already drifted from its
+comment. The banner announced a run before the refusals were printed (after
+them now). A bare `vector` column read as `vector(-1)` with the remedy "set
+the width to -1" (named for what it is). The hazards query wrapped the shared
+rows in the very window the sixth pass had removed for cost — the accepted
+rows are picked first and "latest" is a `NOT EXISTS`, the review's measured
+115 ms to 7 ms. `requeue()`'s SET list was spelled four times (one
+`REQUEUE_SET_SQL`, read by `reembed.ts`, the printed statement and the test).
+**Ticketed: SMD-1421** — the reviewers' higher altitude, proposed twice: a
+snapshot of the labels around 021's replay that makes 030's rule the only
+rule and removes the gate, the way back and the plain-run refusal; a redesign
+this late was not this PR's. Left as tidy-ups: the `startsWith("021_")`
+literal, the has-label-without-has-edit wording branch.
+
 **Review, sixth pass (high), at the user's call, triaged.** The accepted-row
 gate ran only under `--reapply`, so a *plain* run applying a pending 021 over a
 live corpus — a brain built by hand through 021 and adopted by README §4's
@@ -6108,8 +6137,10 @@ recorded file; and that the re-applied schema has a fresh apply's columns and
 functions; that `--dry-run` from a differing shell says "would refuse"; and
 that a plain run on the baselined brain, 030 pending, fails at 030 naming what
 is missing and `--reapply`; that a shell whose width differs from the column
-is refused before `BEGIN`, dry run included; and that a plain run with 021
-pending is refused on the same accepted rows. [8] applies 030 onto a
+is refused before `BEGIN`, dry run included; that a plain run with 021
+pending is refused on the same accepted rows, and with 030 recorded on the
+own-key acceptance too; and that an exclusive lock on `thoughts` fails the
+checks before the run within their own timeout. [8] applies 030 onto a
 populated 029 holding twelve labels — a
 paste's mislabel (back to NULL), a real pass's label with a later acceptance
 under another model's key (stays), an acceptance under a suffixed key (stays),
@@ -6124,7 +6155,7 @@ a mislabel with an earlier pass (taken back and relabelled at it, in the one
 block), a plain row (labelled), a label with no claim row (not read) — no
 `updated_at` moved, no audit row, the trigger enabled, and a second apply a
 no-op. `test-preflight` pins the 023 and 014 wordings; `test-schema` [29] pins
-the literals 030 is substituted with. `test-upgrade` 102/102,
+the literals 030 is substituted with. `test-upgrade` 106/106,
 `test-preflight` 174/174, `test-schema` 644/644, `test-live` 419/419, `tsc`
 clean, fork checker PASS (on the tree with SMD-1304's and SMD-1294's changes
 merged in). Upstream status:

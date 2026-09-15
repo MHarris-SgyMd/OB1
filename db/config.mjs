@@ -978,6 +978,16 @@ export const ACCEPTED_BY_MODEL_SQL =
  * by one text. The caveat prefix is inlined as a literal, so it may hold no
  * quote — asserted below.
  */
+/**
+ * What returning a claim row to its pool sets — reembed.ts's requeue() for
+ * --retry-fallbacks and --retry-failed, and the statement migrate.ts prints
+ * for the operator to run by hand where reembed.ts cannot. One spelling, so
+ * the printed statement is the tool's (the seventh review pass of SMD-1193
+ * counted four). claimed_at stays: 030's bound is the enqueue, and readers of
+ * an acceptance read the claim — neither is this row's to move.
+ */
+export const REQUEUE_SET_SQL = "status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL";
+
 export const CLAIM_EVIDENCE_ROWS_SQL =
   "SELECT c.thought_id, c.work_type, c.enqueued_at, c.claimed_at, c.finished_at, " +
   `substring(c.work_type FROM '${REEMBED_KEY_MODEL_SQL_RE}') AS model, ` +

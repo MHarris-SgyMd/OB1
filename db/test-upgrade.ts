@@ -23,7 +23,8 @@ import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, REQUEUE_SET_SQL, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
+const reEsc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -455,8 +456,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
          `a shell whose model differs from the record is refused — 006 would re-record it (exit ${otherShell.code})`);
   assert((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0].value === OPTS.model && (await column()) === 0, "…and nothing was written");
   const otherDry = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
-  assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out),
-         `…and --dry-run from that shell says it would refuse, the same judgement (exit ${otherDry.code})`);
+  assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out) && !/would re-apply every migration/.test(otherDry.out),
+         `…and --dry-run from that shell says it would refuse, the same judgement, with no banner for a run that never begins (exit ${otherDry.code})`);
   // The width is the column's, judged before BEGIN in both modes — 006 would
   // refuse it inside the transaction, after a dry run had said green.
   const otherWidth = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_DIM: "9" }, cwd: HERE });
@@ -489,13 +490,24 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
            // This schema predates 021, so the way back is not a reembed.ts command it would refuse but the statement --retry-fallbacks runs.
            /This schema predates 021, so reembed\.ts refuses to run against it/.test(hazard.out) &&
            // requeue()'s statement, as reembed.ts spells it, one per key with every row of it: the attempts reset too, claimed_at kept.
-           new RegExp(`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id IN \\('${suffixedHazard}'\\);`).test(hazard.out) &&
+           new RegExp(`UPDATE thought_work_claims SET ${reEsc(REQUEUE_SET_SQL)} WHERE work_type = 'reembed:stub-embed@8:ctx' AND thought_id IN \\('${suffixedHazard}'\\);`).test(hazard.out) &&
            new RegExp(`WHERE work_type = 'reembed:stub-embed@8' AND thought_id IN \\('${writtenSince}'\\);`).test(hazard.out) &&
            !/--retry-fallbacks, which spends/.test(hazard.out),
          `the two acceptances 021 would label and 030 would leave refuse the re-run, naming the rows and a way back this schema allows (exit ${hazard.code})`);
   assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // What --retry-fallbacks does to the rows: back to the pool, the caveat gone.
-  await sql`UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = ${SUFFIXED} OR thought_id = ${writtenSince}::uuid`;
+  await sql`UPDATE thought_work_claims SET ${sql.unsafe(REQUEUE_SET_SQL)} WHERE work_type = ${SUFFIXED} OR thought_id = ${writtenSince}::uuid`;
+  // A session holding ACCESS EXCLUSIVE on thoughts: the checks before the run
+  // read it, and would wait for ever without a timeout of their own.
+  const excl = new SQL({ url: URL_, max: 1 });
+  await excl.unsafe("BEGIN");
+  await excl.unsafe("LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE");
+  const blockedChecks = await migrate("--reapply");
+  await excl.unsafe("ROLLBACK");
+  await excl.close();
+  assert(blockedChecks.code === 1 && /--reapply\s+could not be judged: .*lock timeout/.test(blockedChecks.out) && /within the 10 s the checks before the run set/.test(blockedChecks.out) && !/re-applying every migration/.test(blockedChecks.out),
+         `an exclusive lock on thoughts fails the checks before the run within their own timeout (exit ${blockedChecks.code})`);
+  assert((await column()) === 0 && (await ledger()) === ledgerBefore, "…and nothing was written");
   // A session holding a lock on thoughts — an idle transaction, a server left
   // running: 001's DROP TRIGGER wants ACCESS EXCLUSIVE, the 10 s lock_timeout
   // fails it, and the one transaction rolls back with nothing changed.
@@ -546,6 +558,19 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(JSON.stringify(ledgerAfter.filter((r) => !/^(021|022|030)/.test(r.name))) === JSON.stringify((JSON.parse(ledgerHole) as { name: string }[])) &&
            ["021", "022", "030"].every((n) => ledgerAfter.some((r) => r.name.startsWith(n))),
          "the recorded rows are not touched — every row, sha and applied_at as before — and the pending files are recorded");
+
+  // A hole at 021 ALONE, 030 recorded: nothing would follow 021 to take an
+  // own-key acceptance's label back, so that acceptance counts too, and the
+  // plain run is refused. Here: the `accepted` thought, NULL with its own-key
+  // acceptance standing.
+  await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
+  const holeAt021 = await migrate();
+  assert(holeAt021.code === 2 && /refusing to apply 021: 021's evidence backfill, run as written, would label 1 unlabelled thought\(s\) from an acceptance that\n\s+nothing would take back — 030 is recorded, so it does not run after 021 here \(reembed:stub-embed@8\)/.test(holeAt021.out) &&
+           new RegExp(`    ${accepted}  reembed:stub-embed@8`).test(holeAt021.out),
+         `with 030 recorded, a plain run with a hole at 021 is refused on the own-key acceptance 030 would otherwise have taken back (exit ${holeAt021.code})`);
+  assert((await sql`SELECT embedding_model AS m FROM thoughts WHERE id = ${accepted}::uuid`)[0].m === null, "…and the label stays NULL");
+  const sha021 = ledgerAfter.find((r) => r.name.startsWith("021"))!;
+  await sql`INSERT INTO schema_migrations (name, sha256, applied_at) VALUES (${sha021.name}, ${sha021.sha256}, ${sha021.a}::timestamptz)`;
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument
   // upsert_thought, and a re-run of 021 by itself would have put 021's body

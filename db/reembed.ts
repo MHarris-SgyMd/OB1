@@ -374,6 +374,7 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
   ACCEPTED_BY_MODEL_SQL,
+  REQUEUE_SET_SQL,
   ACCEPTED_CAVEAT_PREFIX,
   CORPUS_BY_MODEL_SQL,
   EMBEDDING_DIM,
@@ -791,7 +792,7 @@ async function requeue(tx: SQL, where: ReturnType<typeof withCaveat>): Promise<n
   const [{ n }] = await tx`
     WITH retried AS (
       UPDATE thought_work_claims
-         SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL
+         SET ${tx.unsafe(REQUEUE_SET_SQL)}
        WHERE work_type = ${JOB} AND (${where}) RETURNING 1)
     SELECT count(*)::int AS n FROM retried`;
   return Number(n);

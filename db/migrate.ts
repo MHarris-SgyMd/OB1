@@ -46,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   CLAIM_EVIDENCE_ROWS_SQL,
+  REQUEUE_SET_SQL,
   UPDATE_THOUGHT_SIGNATURE,
   alignVectorSearchPath,
   DB_LEVEL_SETTINGS_SQL,
@@ -299,14 +300,14 @@ let floorBlocked: Migration | null = null;
  * HINT the statement raised with — 030's names --reapply — is printed as it
  * came.
  */
-function explainFailure(err: unknown, m: Migration | null, reapplying: boolean): string[] {
+function explainFailure(err: unknown, m: Migration | null, mode: "plain" | "reapply" | "checks"): string[] {
   const message = (err as Error).message;
   const { errno: sqlstate, hint } = err as { errno?: string; hint?: string };
   const lines: string[] = [];
   if (/hnsw\./.test(message) && sqlstate === "42602") {
     lines.push(
       `\n  ${m?.name ?? "the migration"} needs pgvector ${m?.requiresPgvector?.join(".") ?? "0.8.0"} or later, and the loaded library rejected an hnsw.* setting.\n` +
-        (reapplying ? pgvectorRemedy("Nothing ran: the re-run is one transaction, and it rolled back.") : PGVECTOR_REMEDY)
+        (mode === "reapply" ? pgvectorRemedy("Nothing ran: the re-run is one transaction, and it rolled back.") : PGVECTOR_REMEDY)
     );
   } else if (/hnsw\./.test(message) && sqlstate === "42501") {
     lines.push(
@@ -315,9 +316,11 @@ function explainFailure(err: unknown, m: Migration | null, reapplying: boolean):
     );
   } else if (sqlstate === "55P03") {
     lines.push(
-      reapplying
+      mode === "reapply"
         ? "  A lock was not granted within the re-run's 10 s lock_timeout: a session holds one on a table the re-run alters — the server, a worker, or an idle transaction. End it first."
-        : "  A lock was not granted within the session's lock_timeout (023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
+        : mode === "checks"
+          ? "  A lock was not granted within the 10 s the checks before the run set for their reads: a session holds an exclusive lock on thoughts or the claim table — the server mid-ALTER, or an idle transaction. End it first."
+          : "  A lock was not granted within the session's lock_timeout (023's call sets 10 s for its own transaction; a role or provider default may set one): a session holds one on a table this migration alters — the server, a worker, or an idle transaction. End it first."
     );
   }
   if (hint) lines.push(`  ${hint}`);
@@ -389,11 +392,18 @@ async function reportSeeds(m: Migration): Promise<void> {
 // commit for every file that seeds, as on a first apply.
 // 021's evidence backfill runs whenever 021 runs: under --reapply, and on a
 // plain run where 021 is pending — a brain built by hand through 021 and later
-// adopted by "just run them", or a ledger hole. The gate below reads the rows
-// it would label from that 030 would then leave, in both cases; the other
-// judgements are the re-run's own. The one filename in this loop, because the
-// hazard is that file's block and no header line could carry it (021 is hashed).
-const runs021 = reapply || migrations.some((m) => m.name.startsWith("021_") && !applied.has(m.name));
+// adopted by "just run them", or a ledger hole. Never under --baseline, which
+// executes no SQL. The gate below reads the rows 021 would label from that 030
+// would then leave — and whether 030 runs in THIS invocation decides what
+// "leave" means: after 021 in the same run it takes an own-key acceptance's
+// label back, so only the rest is refused; recorded and skipped (a hole at 021
+// alone), nothing follows 021, and every acceptance it would read is refused.
+// The other judgements are the re-run's own. The two filenames in this loop,
+// because the hazard is one file's block and the correction the other's, and
+// no header line could carry it (021 is hashed).
+const pending = (prefix: string) => migrations.some((m) => m.name.startsWith(prefix) && !applied.has(m.name));
+const runs021 = !baseline && (reapply || pending("021_"));
+const runs030 = reapply || pending("030_");
 if (runs021) {
   // Judged whole, before anything runs, and the same under --dry-run — which
   // says "would refuse" where the run says "refusing", so a green dry run is
@@ -421,6 +431,10 @@ if (runs021) {
   let hazards: { id: string; work_type: string }[] = [];
   let record: Record<string, string> = {};
   try {
+    // The reads take ACCESS SHARE on thoughts and the claim table; behind a
+    // session holding ACCESS EXCLUSIVE they would wait for ever, before the
+    // transaction's own lock_timeout exists. Ten seconds here too, then reset.
+    await sql.unsafe("SET lock_timeout = '10s'");
     [probe] = (await sql`
       SELECT to_regclass('ob1_config') IS NOT NULL AS has_config,
              to_regclass('thought_work_claims') IS NOT NULL AS has_claims,
@@ -442,22 +456,26 @@ if (runs021) {
       // row of a tie, unnamed, so every accepted row at that time counts here.
       // 030 takes the label back only for an own-key acceptance over a thought
       // not written since the row's enqueue. Whatever 021 labels that 030 does
-      // not revert is refused. The rows are config.mjs's, as 030 reads them;
-      // the latest time per thought is this reader's own window over them.
+      // not revert is refused — when 030 runs in this invocation; when it does
+      // not, nothing takes any label back, and every acceptance counts. The
+      // rows are config.mjs's, as 030 reads them. The accepted rows are picked
+      // before "latest" is asked (a window over every row was the planner
+      // barrier the shared text lost); one row per (thought, key) already, so
+      // no DISTINCT.
       hazards = (await sql.unsafe(
-        "SELECT DISTINCT t.id::text AS id, e.work_type FROM thoughts t JOIN (" +
-          `SELECT r.*, max(r.finished_at) OVER (PARTITION BY r.thought_id) AS latest FROM (${CLAIM_EVIDENCE_ROWS_SQL}) r` +
-          ") e ON e.thought_id = t.id " +
-          "WHERE e.finished_at = e.latest AND e.accepted AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
+        `SELECT t.id::text AS id, e.work_type FROM thoughts t JOIN (SELECT r.* FROM (${CLAIM_EVIDENCE_ROWS_SQL}) r WHERE r.accepted) e ON e.thought_id = t.id ` +
+          `WHERE NOT EXISTS (SELECT 1 FROM (${CLAIM_EVIDENCE_ROWS_SQL}) l WHERE l.thought_id = e.thought_id AND l.finished_at > e.finished_at)` +
+          " AND t.embedding IS NOT NULL AND t.updated_at <= e.finished_at" +
           (probe.has_label ? " AND t.embedding_model IS NULL" : "") +
-          " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" +
+          (runs030 ? " AND NOT (e.own_key AND COALESCE(t.updated_at, t.created_at) <= COALESCE(e.enqueued_at, e.claimed_at, e.finished_at, '-infinity'::timestamptz))" : "") +
           " ORDER BY 2, 1"
       )) as { id: string; work_type: string }[];
     }
+    await sql.unsafe("RESET lock_timeout");
   } catch (err) {
     console.error(`  ✗  ${reapply ? "--reapply" : "021_embedding_model_per_row.sql"}  could not be judged: ${(err as Error).message}`);
-    for (const line of explainFailure(err, null, reapply)) console.error(line);
-    console.error("  The checks before the run read pg_attribute, pg_proc, ob1_config and thought_work_claims; this role could not. Nothing was written.");
+    for (const line of explainFailure(err, null, "checks")) console.error(line);
+    console.error("  The checks before the run read pg_attribute, pg_proc, ob1_config and thought_work_claims; this role could not, or was made to wait. Nothing was written.");
     await sql.close();
     process.exit(1);
   }
@@ -465,7 +483,17 @@ if (runs021) {
   // The column is the width's authority (ob1_config's copy can be edited by
   // hand); 006 refuses a shell whose width differs from it — inside the
   // transaction, after a dry run had said green. Judged here, both modes.
-  if (reapply && width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
+  if (reapply && width !== null && Number(width) <= 0) {
+    // pgvector allows a bare `vector` column (atttypmod -1); 006 requires the
+    // declared width, so the re-run would refuse inside the transaction.
+    refusals.push({
+      code: 2,
+      text:
+        "thoughts.embedding declares no width (a bare vector column) and 006 requires vector(OB1_EMBEDDING_DIM), so the re-run would\n" +
+        `  refuse inside the transaction. Declare it first — ALTER TABLE thoughts ALTER COLUMN embedding TYPE vector(${SUBSTITUTIONS.EMBEDDING_DIM}); — with\n` +
+        "  every stored vector at that width.",
+    });
+  } else if (reapply && width !== null && Number(width) !== Number(SUBSTITUTIONS.EMBEDDING_DIM)) {
     refusals.push({
       code: 2,
       text:
@@ -506,18 +534,28 @@ if (runs021) {
           `  these rows were written by hand. Return them as --retry-fallbacks would, then run ${again} again:\n` +
           // requeue()'s statement in reembed.ts, per key: the caveat gone, the
           // attempts reset, the lease cleared; claimed_at stays, as there.
-          keys.map((k) => `    UPDATE thought_work_claims SET status = 'pending', last_error = NULL, finished_at = NULL, attempt_count = 0, ttl_expires_at = NULL WHERE work_type = '${k.replace(/'/g, "''")}' AND thought_id IN (${hazards.filter((h) => h.work_type === k).map((h) => `'${h.id}'`).join(", ")});`).join("\n");
+          keys.map((k) => `    UPDATE thought_work_claims SET ${REQUEUE_SET_SQL} WHERE work_type = '${k.replace(/'/g, "''")}' AND thought_id IN (${hazards.filter((h) => h.work_type === k).map((h) => `'${h.id}'`).join(", ")});`).join("\n");
       refusals.push({
         code: 2,
         text:
           `021's evidence backfill, ${reapply ? "re-run" : "run"} as written, would label ${hazards.length} unlabelled thought(s) from an acceptance that\n` +
-          `  migration 030 would not take back — under a suffixed key, or written since the row was enqueued (${keys.join(", ")}):\n` +
+          (runs030
+            ? `  migration 030 would not take back — under a suffixed key, or written since the row was enqueued (${keys.join(", ")}):\n`
+            : `  nothing would take back — 030 is recorded, so it does not run after 021 here (${keys.join(", ")}):\n`) +
           shown.map((h) => `    ${h.id}  ${h.work_type}`).join("\n") +
           (hazards.length > shown.length ? `\n    … and ${hazards.length - shown.length} more` : "") +
           "\n" + wayBack,
       });
     }
   }
+  if (refusals.length) {
+    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} ${reapply ? "--reapply" : "to apply 021"}: ${r.text}`);
+    console.error(`\n  Nothing was written.`);
+    await sql.close();
+    process.exit(Math.max(...refusals.map((r) => r.code)));
+  }
+  // Announced only once nothing refuses: a banner before a refusal read as a
+  // run that never began.
   const recorded = migrations.filter(reapplies).length;
   if (reapply) {
     console.log(
@@ -526,12 +564,6 @@ if (runs021) {
         "  001 and 003 take ACCESS EXCLUSIVE locks on thoughts, 011 builds the trigram index if OB1_TRGM_INDEX is on and it is absent,\n" +
         "  023's backfill call locks thoughts (OB1_BACKFILL_LIMIT bounds it, as on a first apply), 025 re-validates its constraints."
     );
-  }
-  if (refusals.length) {
-    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} ${reapply ? "--reapply" : "to apply 021"}: ${r.text}`);
-    console.error(`\n  Nothing was written.`);
-    await sql.close();
-    process.exit(Math.max(...refusals.map((r) => r.code)));
   }
 }
 
@@ -550,7 +582,7 @@ if (reapply && !dryRun) {
     });
   } catch (err) {
     console.error(`  ✗  ${progress.current?.name ?? "--reapply"}  FAILED: ${(err as Error).message}`);
-    for (const line of explainFailure(err, progress.current, true)) console.error(line);
+    for (const line of explainFailure(err, progress.current, "reapply")) console.error(line);
     console.error(
       "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
         "  Fix the cause and run --reapply again."
@@ -629,7 +661,7 @@ for (const m of reapply && !dryRun ? [] : migrations) {
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);
-    for (const line of explainFailure(err, m, false)) console.error(line);
+    for (const line of explainFailure(err, m, "plain")) console.error(line);
     await sql.close();
     process.exit(1);
   }
