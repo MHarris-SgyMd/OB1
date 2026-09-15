@@ -19,13 +19,12 @@
  *      Bash or a prefix of a network client or interpreter; no spawn through a
  *      shell in any spelling — in every non-binary file under the contribution
  *      directories, with counted per-(file, hazard) exceptions
- *   7. vendored SQL never redefines or drops a function the core migrations
- *      own — no CREATE [OR REPLACE] FUNCTION, DROP FUNCTION, ALTER FUNCTION or
- *      COMMENT ON FUNCTION naming one, and no COMMENT ON COLUMN of a thoughts
- *      column whose comment a migration writes — in every non-binary file
- *      under the seven category directories whole and docs/, the owned sets
- *      read from db/migrations/, with counted per-(file, function) exceptions
- *      for the files that create a brain rather than add to one
+ *   7. vendored SQL never redefines, drops or re-comments a function the core
+ *      migrations own, nor re-comments a thoughts column whose comment a
+ *      migration writes — in every non-binary file under the seven category
+ *      directories whole and docs/, the owned sets read from db/migrations/,
+ *      with counted per-(file, function) exceptions for the files that create
+ *      a brain rather than add to one
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -471,11 +470,17 @@ function checkShellHazards(dirs) {
   }
 }
 
-/** Every non-binary, non-ignored file under these directories — what checks 6 and 7 read. */
+/**
+ * Every non-binary, non-ignored file under these directories — what checks 6
+ * and 7 read. The ignored set is read once, over the seven category
+ * directories and docs/, which cover every directory either check walks.
+ */
+const SCANNED_ROOTS = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
+let ignoredFiles;
 function textFilesUnder(dirs) {
-  const ignored = gitIgnoredFiles(dirs);
+  ignoredFiles ??= gitIgnoredFiles(SCANNED_ROOTS);
   return dirs.flatMap((d) => walk(d.dir, [], /./))
-    .filter((f) => !BINARY_FILES.test(f) && !ignored.has(relOf(f)));
+    .filter((f) => !BINARY_FILES.test(f) && !ignoredFiles.has(relOf(f)));
 }
 
 // ── 7: vendored SQL never redefines or drops a function a migration owns ─────
@@ -575,50 +580,36 @@ const COLUMN_COMMENT_NON_PROBES = [
   "COMMENT ON COLUMN thought_work_claims.ttl_expires_at IS 'x';",
   "-- COMMENT ON COLUMN thoughts.derived_from IS what 025 runs",
 ];
+// Files that create a brain from the getting-started shape, not sidecars that
+// add to one. Exactly this many lines, for exactly these functions.
+const GUIDE = "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it";
+const NEON = "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain";
+const LOCAL_INIT = "the init script of the recipe's own Postgres container, run once on an empty database";
+const one = (why) => ({ why, lines: 1 });
 const CORE_FUNCTION_EXCEPTIONS = new Map([
-  // Files that create a brain from the getting-started shape, not sidecars
-  // that add to one. Exactly this many lines, for exactly these functions.
-  ["docs/01-getting-started.md", {
-    update_updated_at: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
-    match_thoughts: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
-    upsert_thought: { why: "the guide migrations 001-003 were extracted from, creating the brain; SETUP.md sends this fork's readers past it", lines: 1 },
-  }],
+  ["docs/01-getting-started.md", { update_updated_at: one(GUIDE), match_thoughts: one(GUIDE), upsert_thought: one(GUIDE) }],
   ["recipes/content-fingerprint-dedup/README.md", {
-    upsert_thought: { why: "the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it", lines: 1 },
+    upsert_thought: one("the recipe migration 003 was extracted from, kept as its record; the note above its Step 2 says a migrated brain must not paste it"),
   }],
-  ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", {
-    update_updated_at: { why: "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain", lines: 1 },
-  }],
-  ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", {
-    match_thoughts: { why: "creates the recipe's own Neon database from the guide's shape; never run against a migrated brain", lines: 1 },
-  }],
+  ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", { update_updated_at: one(NEON) }],
+  ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", { match_thoughts: one(NEON) }],
   ["integrations/kubernetes-deployment/k8s/init.sql", {
-    match_thoughts: { why: "the init script of the deployment's own Postgres, run once on an empty database", lines: 1 },
+    match_thoughts: one("the init script of the deployment's own Postgres, run once on an empty database"),
   }],
   ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
-    match_thoughts: { why: "the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database", lines: 1 },
+    match_thoughts: one("the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database"),
   }],
-  ["recipes/local-brain-no-mcp/volumes/db/init/01-thoughts-schema.sh", {
-    update_updated_at: { why: "the init script of the recipe's own Postgres container, run once on an empty database", lines: 1 },
-  }],
+  ["recipes/local-brain-no-mcp/volumes/db/init/01-thoughts-schema.sh", { update_updated_at: one(LOCAL_INIT) }],
   ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", {
-    match_thoughts: { why: "the init script of the recipe's own Postgres container, run once on an empty database", lines: 1 },
-    upsert_thought: { why: "the init script of the recipe's own Postgres container, run once on an empty database (a third signature, text/vector/jsonb)", lines: 1 },
+    match_thoughts: one(LOCAL_INIT),
+    upsert_thought: one(`${LOCAL_INIT} (a third signature, text/vector/jsonb)`),
   }],
 ]);
 
-/** Which owned functions a text redefines or drops, by the rule the scan applies to the whole text. */
-function coreStatementsIn(text) {
-  const names = new Set();
-  for (const fn of OWNED_FUNCTIONS.keys()) if (coreFunctionStatement(fn).test(text)) names.add(fn);
-  return names;
-}
-/** Which owned column comments a text rewrites. */
-function columnCommentsIn(text) {
-  const names = new Set();
-  for (const col of OWNED_COLUMN_COMMENTS.keys()) if (coreColumnCommentStatement(col).test(text)) names.add(col);
-  return names;
-}
+/** Which of `owned`'s names a text names in a statement, by the rule the scan applies to the whole text. */
+const namedIn = (owned, ruleFor, text) => new Set([...owned.keys()].filter((name) => ruleFor(name).test(text)));
+const coreStatementsIn = (text) => namedIn(OWNED_FUNCTIONS, coreFunctionStatement, text);
+const columnCommentsIn = (text) => namedIn(OWNED_COLUMN_COMMENTS, coreColumnCommentStatement, text);
 
 function checkCoreFunctions() {
   const SELF = "scripts/check-fork-consistency.mjs";
@@ -644,9 +635,8 @@ function checkCoreFunctions() {
   // yields one entry per contribution and so skips each category's README and
   // its `_template` — and docs/, upstream's guide and drafts, where two of the
   // three files this check was written for lived.
-  const scanned = [...CATEGORIES, "docs"].map((c) => ({ dir: join(ROOT, c), rel: c }));
   const before = violations.length;
-  const counts = scanLines(textFilesUnder(scanned), [
+  const counts = scanLines(textFilesUnder(SCANNED_ROOTS), [
     ...[...OWNED_FUNCTIONS].map(([fn, file]) => ({
       name: fn,
       fileRe: asFileRe(coreFunctionStatement(fn)),

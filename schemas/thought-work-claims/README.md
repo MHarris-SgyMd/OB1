@@ -60,7 +60,7 @@ Every claim carries `ttl_expires_at`. `claim_thoughts` reaps inline on every cal
    WHERE table_name = 'thought_work_claims';
    ```
 
-Or, if you keep migrations in `supabase/migrations/`, apply via the CLI:
+Or, if you keep migrations in `supabase/migrations/`, apply via the CLI (upstream; on this fork the file is a stub and there is nothing to push):
 
 ```bash
 supabase db push

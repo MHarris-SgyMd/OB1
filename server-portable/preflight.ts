@@ -972,6 +972,7 @@ if (configFailed) {
           WHERE p.proname IN ('claim_thoughts', 'release_thought', 'release_claims_for_worker', 'renew_claims') AND n.nspname = 'public'`)) as { sig: string; src: string }[];
         const release = wc.find((f) => f.sig === "release_thought(uuid,text,text,text,text)");
         const forWorker = wc.find((f) => f.sig === "release_claims_for_worker(text,text)");
+        // Spelled as pg_type spells them (_uuid, int4) — a spelling DROP FUNCTION accepts.
         const strays = wc.filter((f) => !KNOWN_CLAIM_SIGS.has(f.sig)).map((f) => f.sig);
         const andStrays = strays.length ? `; ${strays.length} overload(s) no migration defines: ${strays.join(", ")} — a vendored schema's (upstream's thought-work-claims takes an id list where 015's claim_thoughts takes a pool)` : "";
         if (wc.length === 0) {

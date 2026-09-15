@@ -134,7 +134,7 @@ CREATE TRIGGER trg_set_content_fingerprint
   EXECUTE FUNCTION set_content_fingerprint();
 ```
 
-The normalization is **identical** to `upsert_thought` above (`lower` + `trim` + collapse whitespace → SHA-256), so trigger-computed fingerprints line up exactly with the unique index. `upsert_thought` still works unchanged: it supplies its own fingerprint, the trigger sees a non-NULL value and leaves it alone, and `ON CONFLICT` behaves as before.
+The normalization is **identical** to `upsert_thought` above (`lower` + `trim` + collapse whitespace → SHA-256; on this fork migration 016's `content_fingerprint_of` holds that rule, and 023 fingerprints the legacy rows the trigger was written for), so trigger-computed fingerprints line up exactly with the unique index. `upsert_thought` still works unchanged: it supplies its own fingerprint, the trigger sees a non-NULL value and leaves it alone, and `ON CONFLICT` behaves as before.
 
 > [!NOTE]
 > With the trigger in place, a raw `INSERT` of content that already exists will now raise a unique-violation (`23505`) instead of quietly creating a duplicate — that is dedup working as intended. Callers that should merge rather than error (retryable webhooks, idempotent re-imports) should go through `upsert_thought`, which handles the conflict with `ON CONFLICT DO UPDATE`.

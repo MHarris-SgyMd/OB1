@@ -6488,8 +6488,10 @@ fail), names any overload of the four claim names no migration defines with
 its `DROP`, and skips before 015. The `provenance` remedies are ledger-aware
 now and say to `DROP` both functions first when the body present returns
 other columns, since the migrator's re-run otherwise fails on the return type
-— the fourth pass ran that remedy and watched it fail. Over PostgREST none of
-this is reachable, and the skip says so as before.
+— the fourth pass ran that remedy and watched it fail. The re-run remedy
+every ledger-aware check shares no longer blames `--baseline` alone: its
+parenthetical names a body put there or removed from outside the migrations.
+Over PostgREST none of this is reachable, and the skip says so as before.
 
 **Proof.** `test-schema` [31] reads the owned set as the checker does and pins
 the three last definers preflight's remedies spell (`upsert_thought` 025,
