@@ -6173,8 +6173,8 @@ merged in). Upstream status:
 
 ### 57. The migrator brackets 021's evidence backfill — the labels before the file are noted, 030's rule is applied after it, and no gate refuses the run (SMD-1421)
 
-`db/migrate.ts`, `db/config.mjs`, `db/reembed.ts`, `db/test-upgrade.ts`,
-`db/test-schema.ts` and `db/README.md` (Linear SMD-1421, filed by change 56's
+`db/migrate.ts`, `db/config.mjs`, `db/config.d.mts`, `db/reembed.ts`,
+`db/test-upgrade.ts` and `db/README.md` (Linear SMD-1421, filed by change 56's
 sixth and seventh review passes). No migration: 030 stands as it is, and the
 correction it cannot make becomes the migrator's.
 
@@ -6198,18 +6198,21 @@ file that have a claim row 021 could label from — every such id with a vector,
 where the column does not yet exist — go into a temp table on the migrator's
 connection (`ON COMMIT DROP`, analysed); the file runs; the snapshot rows now
 labelled are what 021 wrote, and they are set aside — back to NULL, the
-`updated_at` trigger held as 021 holds it — and **030's own substituted text
-runs**, there, in the same transaction: its second statement labels them again
-by its rule, the latest row that is not an acceptance, or leaves them unknown.
-One spelling of the rule, 030's, and the migrator adds none. The same
-transaction as the file — the whole re-run's under `--reapply`, the file's own
-on a plain run — so the snapshot can neither predate nor outlive what it
-brackets; whenever 021 runs, 030 following in the same run (where it runs
-again, idempotent, at its own place) or recorded and skipped (a ledger hole at
-021 alone, where the bracket is the only time it runs), since the correction is
-the migrator's and not 030's. The run says, beside 021's line, how many
-thoughts 021 labelled and how many 030's rule decided otherwise, and lists
-those rows with both labels — nothing else records them.
+`updated_at` trigger held as 021 holds it — for **030's own substituted text**
+to decide: its second statement labels them again by its rule, the latest row
+that is not an acceptance, or leaves them unknown. One spelling of the rule,
+030's, and the migrator adds none. Where the run reaches 030 — pending, or the
+re-run — 030 decides them at its own place, and the helper, called for 030,
+reads the delta from the temp table it finds waiting (a session table: on a
+plain run 021 and 030 are separate transactions on the one connection, and a
+run that dies between them leaves the labels unknown, the safe state). Where
+the ledger records 030 and the run would skip it — a hole at 021 alone — 030's
+text runs inside 021's transaction, every label from before 021 noted first
+since 030's first statement re-decides those too, and both deltas are
+reported. The snapshot can neither predate nor outlive what it brackets, and
+the correction is the migrator's, not 030's. The run says how many thoughts
+021 labelled, how many 030's rule decided otherwise, and lists every such row
+with both labels — nothing else records them.
 
 **What went.** The hazards query, both arms of the way back, the `has_edit`
 and signature probe, the claim-table probe, the "030 recorded" branch, the
@@ -6289,6 +6292,31 @@ its cast and `Number()` went (`Promise<Bracket>`, empty for other files). [7]
 hoists `labels()`, adds `recorded021()`, and splits the hole assertion so a
 failing regex prints the run.
 
+**Review, third pass (high), triaged.** On a plain run with a hole at 021 the
+bracket ran 030's *current* text before the loop reached 030's drift check, so
+an edited-after-apply 030 ran and committed — refused before anything runs,
+both modes, and [7] edits the ledger's sha and reads the refusal and the dry
+run's. 030 was found by `startsWith("030_")`, which any second 030_*.sql
+sorting first would satisfy (the fork has renumbered twice; a sibling branch
+carries a 030 today): both files are named whole, and the loader refuses two
+files sharing a number. The inline run of 030's whole text had its first
+statement re-decide labels from *before* 021 with no report, beside a 030
+line that said "already applied" — and ran 030 twice on every ordinary
+upgrade: 030's text now runs inline only where the ledger records 030 and the
+run would skip it, with every prior label noted first and a second delta
+reported ([7] plants a paste's mislabel and reads it); otherwise 021's labels
+are set aside for 030's own place, where the report is printed from a session
+temp table. A TEMP-revoked role failed the bracket with a bare 42501 after
+015–020 had committed, and a set without 030 threw inside 021's transaction:
+both judged before any SQL (the second at load), both modes. A deadlock with a
+worker's start (the docblock said "detected, not waited on") had no remedy
+line; 40P01 has one. The count line's clause "an acceptance is not evidence"
+had come back after the first pass removed it (a tie has none) — gone, and
+"every acceptance stands" became "no claim row is touched". The README said
+the run lists the rows while the code listed fifty — every row now. Change
+57's file list named `test-schema.ts` (untouched after the second pass) and
+missed `config.d.mts`.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6301,17 +6329,23 @@ Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
 acceptance over a thought written since its enqueue *before* the re-run, and
 asserts the run goes with no refusal, the six labels (`stub-embed`, NULL,
 `earlier-model`, NULL, NULL, NULL), every acceptance standing, and the report
-beside 021 — five labelled, four changed, each changed row listed with both
-labels and the agreed row absent; that an exclusive lock on `ob1_config` fails the
+— five labelled and set aside beside 021, four changed beside 030 where the
+re-run decides them, each changed row listed with both labels and the agreed
+row absent; that an exclusive lock on `ob1_config` fails the
 checks before the run within their own timeout; then deletes 021's ledger row
 with 030 recorded, plants a fifth acceptance under a suffixed key, and asserts
 a held lock on `thoughts` fails the plain run's 021 within the run's 10 s
-with nothing recorded, that the plain run then applies 021 bracketed — exit 0,
+with nothing recorded, that a drifted 030 refuses the plain run before anything
+runs (dry run too), that the plain run then applies 021 bracketed — exit 0,
 030 skipped as recorded yet its text run inside the bracket, four labelled and
-four changed, every other label as the re-run left it, 021 recorded, the
-trigger enabled — and that a second `--reapply` over the same corpus reports
-the same four and changes no label. The hazard refusals went with the gate;
-the rest of [7] and all of [8] are unchanged. `test-upgrade` 112/112,
+four changed, a paste's mislabel from before 021 taken back by 030's first
+statement and reported apart, every other label as the re-run left it, 021
+recorded, the trigger enabled — and that a second `--reapply` over the same
+corpus sets five aside and 030 changes five, every label as before. The hazard
+refusals went with the gate; the rest of [7] and all of [8] are unchanged. Not
+exercised: the TEMP refusal (a superuser holds the privilege whatever is
+revoked), the loader's duplicate-number refusal, the 40P01 line.
+`test-upgrade` 116/116,
 `test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
 clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).

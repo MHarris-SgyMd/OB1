@@ -17,7 +17,7 @@
  * with --baseline, or just run them — they will not duplicate anything.
  *
  * --reapply re-runs EVERY migration — recorded or pending — in order, in ONE
- * transaction with a 10 s lock timeout; recorded rows stay as they are, pending
+ * transaction with a lock timeout (LOCK_TIMEOUT_S); recorded rows stay as they are, pending
  * ones are recorded in the same transaction. It is the remedy for a database
  * adopted with --baseline whose schema is older than its ledger says —
  * reembed.ts and preflight name the command where they find that. Every file,
@@ -179,10 +179,21 @@ function substitute(sql: string, file: string): string {
 }
 
 function loadMigrations(): Migration[] {
-  return readdirSync(MIGRATIONS_DIR)
+  const names = readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
-    .sort() // 001_, 002_, … lexical order is the intended order
-    .map((name) => {
+    .sort(); // 001_, 002_, … lexical order is the intended order
+  // The number is the file's identity — the order, and how prose and the
+  // bracket below name a file — so two files may not share one: a second
+  // 030_*.sql sorting first would run before the one it collides with, and be
+  // found in its place (two branches each adding "the next number" is how it
+  // happens; the fork has renumbered twice).
+  for (let i = 1; i < names.length; i++) {
+    if (names[i].slice(0, 3) === names[i - 1].slice(0, 3)) {
+      console.error(`two migrations share the number ${names[i].slice(0, 3)}: ${names[i - 1]}, ${names[i]}. Renumber one.`);
+      process.exit(2);
+    }
+  }
+  return names.map((name) => {
       const template = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
       return {
         name,
@@ -208,6 +219,21 @@ if (configProblems.length > 0) {
 const migrations = loadMigrations();
 if (migrations.length === 0) {
   console.error(`No .sql files in ${MIGRATIONS_DIR}`);
+  process.exit(2);
+}
+
+/**
+ * The two files the bracket around 021's evidence backfill names — by their
+ * whole names, as test-schema pins 030's: the number alone would find any
+ * 030_*.sql. A set carrying 021 must carry 030, or nothing decides the labels
+ * the bracket sets aside; judged here, before any SQL, since --dry-run never
+ * reaches the bracket and a plain run would have applied the files before 021
+ * first. See applyBracketed.
+ */
+const FILE_021 = "021_embedding_model_per_row.sql";
+const FILE_030 = "030_label_from_claims_excludes_accepted.sql";
+if (migrations.some((m) => m.name === FILE_021) && !migrations.some((m) => m.name === FILE_030)) {
+  console.error(`${FILE_021} is in the set and ${FILE_030} is not: the bracket around 021's evidence backfill needs 030's text.`);
   process.exit(2);
 }
 
@@ -316,7 +342,10 @@ let floorBlocked: Migration | null = null;
  * from a hand-run statement, but say what it means. 55P03 (lock_not_available)
  * is a lock_timeout — LOCK_TIMEOUT_S, set on every transaction the migrator
  * opens and on the checks' reads before a re-run (023's call sets its own for
- * its transaction). What follows a failure differs by mode: a plain run
+ * its transaction). 40P01 (deadlock_detected) is the server choosing a victim
+ * between two sessions taking the same tables in opposite orders — the
+ * bracket around 021 and a worker's start, which the banner says to stop
+ * first. What follows a failure differs by mode: a plain run
  * has applied and recorded the files before it; a re-run rolled back whole. A
  * HINT the statement raised with — 030's names --reapply — is printed as it
  * came.
@@ -334,6 +363,11 @@ function explainFailure(err: unknown, m: Migration | null, mode: "plain" | "reap
     lines.push(
       `\n  A non-superuser may set hnsw.* settings only after pgvector's library is loaded in the session.\n` +
         `  Run SELECT '[1]'::vector; first in the same session, then the statement that failed.`
+    );
+  } else if (sqlstate === "40P01") {
+    lines.push(
+      "  A deadlock: another session took the same tables in the other order while this ran — a re-embed worker's start takes the claim table\n" +
+        "  before thoughts; the migrator takes thoughts first. Stop the workers and the server, then run again."
     );
   } else if (sqlstate === "55P03") {
     lines.push(
@@ -393,9 +427,17 @@ async function reportSeeds(m: Migration): Promise<void> {
   }
 }
 
-/** What the bracket around 021 saw: how many thoughts 021's block labelled, and those of them 030's rule decided otherwise. */
-type Bracket = { wrote: number; changed: { id: string; was: string; now: string | null }[] };
-const NO_BRACKET: Bracket = { wrote: 0, changed: [] };
+/** A label a bracket changed: the thought, what it held, what it holds. */
+type Relabel = { id: string; was: string | null; now: string | null };
+/**
+ * What the bracket around 021 saw. `wrote`: thoughts 021's block labelled.
+ * `settled`: 030's rule has decided them in this call — inline at 021, or at
+ * 030's own place. `changed`: of the labels 021 wrote, those 030 decided
+ * otherwise. `others`: labels from before 021 that 030's first statement, run
+ * inline because the ledger records 030, set back. Empty for any other file.
+ */
+type Bracket = { wrote: number; settled: boolean; changed: Relabel[]; others: Relabel[] };
+const NO_BRACKET: Bracket = { wrote: 0, settled: false, changed: [], others: [] };
 
 /**
  * Run one migration's SQL in the caller's transaction — and around 021's,
@@ -415,19 +457,25 @@ const NO_BRACKET: Bracket = { wrote: 0, changed: [] };
  * from (CLAIM_EVIDENCE_ROWS_SQL — every one with a vector, where the column
  * does not yet exist) go into a temp table on this connection; after the file,
  * the ones now labelled are what 021's block wrote. Those labels are set aside
- * — back to NULL, the trigger held as 021 holds it — and 030's own text runs,
- * here, in this transaction: its second statement labels them again by its
- * rule, the latest row that is NOT an acceptance, or leaves them unknown. One
- * spelling of the rule, 030's, and the migrator adds none (the second review
- * pass took out a constant that spelled 030's statement a second time, held
- * equal by an indentation-sensitive pin): what 021 wrote from a plain latest
- * row 030 writes again unchanged, what it wrote from an acceptance goes to the
- * earlier pass that did write the vector, or to unknown — the acceptance
- * standing, spent by nobody. 030 runs again at its own place in a re-run, and
- * is idempotent; where it is recorded and a plain run skips it (a ledger hole
- * at 021 alone) this is the only time it runs, and its first statement also
- * re-decides, by its own rule, labels from before 021 — as it would on any
- * re-run. The cost is 030's: its statements read the claim table whole.
+ * — back to NULL, the trigger held as 021 holds it — for 030's rule to decide:
+ * its second statement labels them again from the latest row that is NOT an
+ * acceptance, or leaves them unknown. One spelling of the rule, 030's, and the
+ * migrator adds none (the second review pass took out a constant that spelled
+ * 030's statement a second time). Where this run reaches 030 — pending, or a
+ * re-run — 030 decides them at its own place, and this function, called for
+ * 030, reads the delta from the temp table it finds waiting (a session table,
+ * not ON COMMIT DROP: on a plain run 021 and 030 are separate transactions on
+ * this one connection; a run that dies between them leaves the labels unknown,
+ * which is the safe state, and 030's next apply decides them). Where the
+ * ledger records 030 and this run would skip it — a hole at 021 alone — 030's
+ * text runs HERE, in 021's transaction, and every label from before 021 is
+ * noted first, since 030's first statement re-decides those too by its own
+ * rule; both deltas are reported (third review pass: the inline run had
+ * touched rows the report never named, and ran 030 twice on every ordinary
+ * upgrade). What 021 wrote from a plain latest row 030 writes again unchanged;
+ * what it wrote from an acceptance goes to the earlier pass that did write the
+ * vector, or to unknown — the acceptance standing, spent by nobody; no claim
+ * row is touched. The cost is 030's: its statements read the claim table whole.
  *
  * The same transaction as the file — under --reapply the whole re-run's, on a
  * plain run the file's own — so the snapshot can neither predate nor outlive
@@ -438,28 +486,46 @@ const NO_BRACKET: Bracket = { wrote: 0, changed: [] };
  * pass). Then the claim table, SHARE (readers pass, writers wait): a row
  * committed between the snapshot and the block would be evidence the block
  * reads and the snapshot never saw, and its label would stand (second review
- * pass). reembed.ts's start takes the two the other way round; the banner
- * says to stop the workers first, and a deadlock is detected, not waited on.
- * Under --reapply 001 holds the first already. Both waits are bounded by the
- * transaction's lock_timeout, LOCK_TIMEOUT_S. Nothing to bracket where the
- * claim table is missing (021's block then fails on it as it always did), or
- * where no row 021 could label from exists, or where 021 wrote no label: the
- * file runs bare. Needs TEMP on the database, which PUBLIC has unless revoked,
- * as 023 does.
+ * pass). reembed.ts's start takes the two the other way round; the banner says
+ * to stop the workers first, and a deadlock is detected by the server, not
+ * waited on — explainFailure names it. Under --reapply 001 holds the first
+ * already. Both waits are bounded by the transaction's lock_timeout,
+ * LOCK_TIMEOUT_S. Nothing to bracket where the claim table is missing (021's
+ * block then fails on it as it always did), or where no row 021 could label
+ * from exists, or where 021 wrote no label: the file runs bare. Judged before
+ * any SQL runs, in both modes: the set carries 030 (at load), this role may
+ * create a temp table, and — on a plain run, whose loop would otherwise reach
+ * 030's drift check only after 021 had run its current text — 030 is as it was
+ * applied.
  *
  * This replaced a gate that refused the run on the rows 021 would label and 030
  * would leave, and printed a way back that spent the acceptance; SMD-1193's
  * seven review passes each found a seam in it, since it was the difference of
- * two rules — 030's header, hashed, still describes it. Returns what 021 wrote
- * and what 030's rule changed, for reportBracket; empty for any other file.
+ * two rules — 030's header, hashed, still describes it.
  */
 async function applyBracketed(tx: SQL, m: Migration): Promise<Bracket> {
-  if (!m.name.startsWith("021_")) {
+  const delta = (table: string) =>
+    tx.unsafe(
+      `SELECT w.id::text AS id, w.label AS was, t.embedding_model AS now FROM ${table} w JOIN thoughts t ON t.id = w.id ` +
+        "WHERE t.embedding_model IS DISTINCT FROM w.label ORDER BY 1"
+    ) as Promise<Relabel[]>;
+  if (m.name === FILE_030) {
+    await tx.unsafe(m.sql);
+    // 021's labels set aside earlier in this run, if any: decided now.
+    const [{ held }] = (await tx`SELECT to_regclass('pg_temp.ob1_labels_from_021') IS NOT NULL AS held`) as { held: boolean }[];
+    if (!held) return NO_BRACKET;
+    const [{ wrote }] = (await tx.unsafe("SELECT count(*)::int AS wrote FROM pg_temp.ob1_labels_from_021")) as { wrote: number }[];
+    const changed = await delta("pg_temp.ob1_labels_from_021");
+    await tx.unsafe("DROP TABLE pg_temp.ob1_labels_from_021");
+    return { wrote, settled: true, changed, others: [] };
+  }
+  if (m.name !== FILE_021) {
     await tx.unsafe(m.sql);
     return NO_BRACKET;
   }
-  const thirty = migrations.find((x) => x.name.startsWith("030_"));
-  if (!thirty) throw new Error("021's bracket runs migration 030's text after the file, and no 030_*.sql is in the set");
+  // 030 recorded and skipped by this run: its text runs here, or nothing would
+  // decide the labels. Otherwise it runs at its own place, pending or re-run.
+  const inline = applied.has(FILE_030) && !reapply;
   await tx.unsafe("LOCK TABLE thoughts IN ACCESS EXCLUSIVE MODE");
   // Two statements, not one: a relation named in a statement is resolved when
   // the statement is parsed, so the claim table cannot be asked about in the
@@ -477,44 +543,101 @@ async function applyBracketed(tx: SQL, m: Migration): Promise<Bracket> {
     await tx.unsafe(m.sql);
     return NO_BRACKET;
   }
+  await tx.unsafe("DROP TABLE IF EXISTS pg_temp.ob1_unlabelled_before_021, pg_temp.ob1_labels_from_021, pg_temp.ob1_labelled_before_021");
   await tx.unsafe(
-    "CREATE TEMP TABLE ob1_unlabelled_before_021 ON COMMIT DROP AS SELECT t.id FROM thoughts t WHERE t.embedding IS NOT NULL" +
+    "CREATE TEMP TABLE ob1_unlabelled_before_021 AS SELECT t.id FROM thoughts t WHERE t.embedding IS NOT NULL" +
       (has_label ? " AND t.embedding_model IS NULL" : "") +
       ` AND EXISTS (SELECT 1 FROM (${CLAIM_EVIDENCE_ROWS_SQL}) c WHERE c.thought_id = t.id)`
   );
   await tx.unsafe("ANALYZE pg_temp.ob1_unlabelled_before_021");
+  // The labels 030's first statement may re-decide when it runs here: every
+  // label there is before 021 (none, where the column does not exist yet).
+  if (inline) {
+    await tx.unsafe(
+      "CREATE TEMP TABLE ob1_labelled_before_021 AS SELECT id, embedding_model AS label FROM thoughts" +
+        (has_label ? " WHERE embedding_model IS NOT NULL" : " WHERE false")
+    );
+  }
   await tx.unsafe(m.sql);
   await tx.unsafe(
-    "CREATE TEMP TABLE ob1_labels_from_021 ON COMMIT DROP AS SELECT t.id, t.embedding_model AS label FROM thoughts t " +
+    "CREATE TEMP TABLE ob1_labels_from_021 AS SELECT t.id, t.embedding_model AS label FROM thoughts t " +
       "JOIN pg_temp.ob1_unlabelled_before_021 s ON s.id = t.id WHERE t.embedding_model IS NOT NULL"
   );
+  await tx.unsafe("DROP TABLE pg_temp.ob1_unlabelled_before_021");
   const [{ wrote }] = (await tx.unsafe("SELECT count(*)::int AS wrote FROM pg_temp.ob1_labels_from_021")) as { wrote: number }[];
-  if (wrote === 0) return NO_BRACKET;
+  if (wrote === 0) {
+    await tx.unsafe("DROP TABLE IF EXISTS pg_temp.ob1_labels_from_021, pg_temp.ob1_labelled_before_021");
+    return NO_BRACKET;
+  }
   await tx.unsafe("ALTER TABLE thoughts DISABLE TRIGGER thoughts_updated_at");
   await tx.unsafe("UPDATE thoughts t SET embedding_model = NULL FROM pg_temp.ob1_labels_from_021 w WHERE t.id = w.id");
   await tx.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
-  await tx.unsafe(thirty.sql);
-  const changed = (await tx.unsafe(
-    "SELECT w.id::text AS id, w.label AS was, t.embedding_model AS now FROM pg_temp.ob1_labels_from_021 w JOIN thoughts t ON t.id = w.id " +
-      "WHERE t.embedding_model IS DISTINCT FROM w.label ORDER BY 1"
-  )) as Bracket["changed"];
-  return { wrote, changed };
+  if (!inline) return { wrote, settled: false, changed: [], others: [] };
+  await tx.unsafe(migrations.find((x) => x.name === FILE_030)!.sql);
+  const changed = await delta("pg_temp.ob1_labels_from_021");
+  const others = await delta("pg_temp.ob1_labelled_before_021");
+  await tx.unsafe("DROP TABLE pg_temp.ob1_labels_from_021, pg_temp.ob1_labelled_before_021");
+  return { wrote, settled: true, changed, others };
 }
 
 /**
- * What the bracket saw, beside the file's line, so the operator can tell it
- * from 030's own work — and which rows, since nothing else records them: the
- * label is not an edit, so no updated_at moves and 008's audit sees no event.
- * The first fifty, as the gate this replaced listed its rows.
+ * What the bracket saw, beside the file's line — 021's, and 030's where 030
+ * decides at its own place — so the operator can tell it from 030's own work,
+ * and every row, since nothing else records them: the label is not an edit, so
+ * no updated_at moves and 008's audit sees no event.
  */
-function reportBracket(b: Bracket | undefined): void {
-  if (!b?.wrote) return;
-  const shown = b.changed.slice(0, 50);
-  console.log(
-    `  ·  021's evidence backfill labelled ${b.wrote} thought(s); re-decided by 030's rule, ${b.changed.length} changed — an acceptance is not evidence, and every acceptance stands` +
-      (shown.length ? ":\n" + shown.map((r) => `       ${r.id}  ${r.was} → ${r.now ?? "unknown"}`).join("\n") : "") +
-      (b.changed.length > shown.length ? `\n       … and ${b.changed.length - shown.length} more` : "")
-  );
+function reportBracket(name: string, b: Bracket | undefined): void {
+  if (!b || b === NO_BRACKET) return;
+  const list = (rows: Relabel[]) => rows.map((r) => `       ${r.id}  ${r.was ?? "unknown"} → ${r.now ?? "unknown"}`).join("\n");
+  const decided = `${b.changed.length} changed` + (b.changed.length ? ":\n" + list(b.changed) : "");
+  if (name === FILE_030) {
+    console.log(`  ·  030 decided the ${b.wrote} label(s) 021's block wrote: ${decided}`);
+  } else if (!b.settled) {
+    console.log(`  ·  021's evidence backfill labelled ${b.wrote} thought(s); set aside for 030's rule, which decides them at 030's line`);
+  } else {
+    console.log(
+      `  ·  021's evidence backfill labelled ${b.wrote} thought(s); 030's text ran here, since the ledger records 030 and this run skips it: ${decided}` +
+        (b.others.length ? `\n     …and 030's first statement set back ${b.others.length} label(s) from before 021:\n` + list(b.others) : "")
+    );
+  }
+}
+
+// ── What the bracket needs, judged before any SQL ──────────────────────────
+// Both modes, "would refuse" under --dry-run. A temp table, which a hardened
+// database may deny the role (023's backfill call needs one too, and orders
+// after 021, so a fresh upgrade meets the need here first); and on a plain run
+// — whose loop reaches 030's drift check only after 021 would have run 030's
+// CURRENT text — that 030 is as it was applied. The re-run's own drift check,
+// below, covers the second there.
+const bracketRuns = !baseline && migrations.some((m) => m.name === FILE_021) && (reapply || !applied.has(FILE_021));
+if (bracketRuns) {
+  const refusals: { code: number; text: string }[] = [];
+  const [{ temp }] = (await sql`SELECT has_database_privilege(current_database(), 'TEMP') AS temp`) as { temp: boolean }[];
+  if (!temp) {
+    const [{ db, role }] = (await sql`SELECT current_database() AS db, current_user AS role`) as { db: string; role: string }[];
+    refusals.push({
+      code: 2,
+      text:
+        `the bracket around 021's evidence backfill notes the labels it writes in a temp table, and this role may not create one (023's backfill call\n` +
+        `  needs one too). GRANT TEMPORARY ON DATABASE ${quoteIdent(db)} TO ${quoteIdent(role)}; then run again.`,
+    });
+  }
+  const thirty = migrations.find((m) => m.name === FILE_030)!;
+  const priorSha = applied.get(FILE_030);
+  if (!reapply && priorSha !== undefined && priorSha !== thirty.sha) {
+    refusals.push({
+      code: 1,
+      text:
+        `${FILE_030} (was ${priorSha}, now ${thirty.sha}) changed after being applied, and the bracket around 021 would run its current text.\n` +
+        "  Migrations are append-only. If the edit was intentional and the database already reflects it, update schema_migrations.sha256 by hand, then re-run.",
+    });
+  }
+  if (refusals.length) {
+    for (const r of refusals) console.error(`\n  ${dryRun ? "would refuse" : "refusing"} ${reapply ? "--reapply" : `to apply ${FILE_021}`}: ${r.text}`);
+    console.error(`\n  Nothing was written.`);
+    await sql.close();
+    process.exit(Math.max(...refusals.map((r) => r.code)));
+  }
 }
 
 // ── The re-run, one transaction ─────────────────────────────────────────────
@@ -531,7 +654,7 @@ function reportBracket(b: Bracket | undefined): void {
 // floor, and the two things 006 would do inside the transaction from a shell
 // configured differently from the brain — refuse the column's width, or
 // re-record ob1_config's model (its INSERT … ON CONFLICT DO UPDATE, run again).
-// A 10 s lock_timeout from the first statement, so an idle session holding a
+// A lock_timeout (LOCK_TIMEOUT_S) from the first statement, so an idle session holding a
 // lock on thoughts fails the re-run at once rather than freezing every reader
 // behind 001's ACCESS EXCLUSIVE for ever — the banner says to stop the writers
 // first. The seeds check runs after the commit for every file that seeds, as on
@@ -643,7 +766,7 @@ if (reapply && !dryRun) {
       for (const m of migrations) {
         progress.current = m;
         const b = await applyBracketed(tx, m);
-        if (b.wrote) brackets.set(m.name, b);
+        if (b !== NO_BRACKET) brackets.set(m.name, b);
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
@@ -660,7 +783,7 @@ if (reapply && !dryRun) {
   for (const m of migrations) {
     const again = applied.has(m.name);
     console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
-    reportBracket(brackets.get(m.name));
+    reportBracket(m.name, brackets.get(m.name));
     if (again) reapplied++;
     else ran++;
   }
@@ -730,7 +853,7 @@ for (const m of reapply && !dryRun ? [] : migrations) {
       return b;
     });
     console.log(`  ✓  ${m.name}  applied`);
-    reportBracket(bracket);
+    reportBracket(m.name, bracket);
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);

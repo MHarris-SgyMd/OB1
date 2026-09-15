@@ -528,10 +528,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   assert(models[suffixedHazard] === null && models[writtenSince] === null, "the acceptance under a suffixed key and the own-key acceptance over a thought written since its enqueue — both labels 021's block wrote and 030 leaves — end NULL: the bracket set them back");
   const standing = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE status = 'succeeded' AND starts_with(last_error, ${ACCEPTED_CAVEAT_PREFIX})`)[0].c);
   assert((await standing()) === 4, "…and every acceptance stands, spent by nobody");
-  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 5 thought\(s\); re-decided by 030's rule, 4 changed/.test(run.out),
-         "…and the run says, beside 021's line, what the bracket saw: five labels 021's block wrote, four of them from an acceptance and changed");
-  assert(new RegExp(`\\n\\s+${accepted}  stub-embed → unknown\\n`).test(run.out) && new RegExp(`\\n\\s+${earlierThenAccepted}  stub-embed → earlier-model\\n`).test(run.out) && !new RegExp(`\\n\\s+${vouched}  `).test(run.out),
-         "…and lists each changed row with the label 021 wrote and the one 030's rule decided — not the row the two agreed on");
+  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 5 thought\(s\); set aside for 030's rule, which decides them at 030's line/.test(run.out),
+         "…and the run says, beside 021's line, what the bracket saw: five labels 021's block wrote, set aside for 030 — which this run reaches");
+  assert(/030_label_from_claims_excludes_accepted\.sql\s+applied\n\s+·\s+030 decided the 5 label\(s\) 021's block wrote: 4 changed:/.test(run.out) &&
+           new RegExp(`\\n\\s+${accepted}  stub-embed → unknown\\n`).test(run.out) && new RegExp(`\\n\\s+${earlierThenAccepted}  stub-embed → earlier-model\\n`).test(run.out) && !new RegExp(`\\n\\s+${vouched}  `).test(run.out),
+         "…and beside 030's line, what 030 decided: four changed, each listed with the label 021 wrote and the one 030's rule decided — not the row the two agreed on");
   const stampsAfter = Object.fromEntries(
     ((await sql`SELECT id, updated_at::text AS u FROM thoughts`) as { id: string; u: string }[]).map((r) => [r.id, r.u])
   );
@@ -554,6 +555,26 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const lateSuffixed = await plant("unlabelled since the upgrade; a backfill under a suffixed key was refused and accepted");
   await enqueue(SUFFIXED, [lateSuffixed]);
   await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${SUFFIXED} AND thought_id = ${lateSuffixed}::uuid`;
+  // …and a label from BEFORE 021 that 030's first statement takes back when
+  // its text runs inside the bracket: labelled at the model by a paste, with
+  // an own-key acceptance and nothing written since its enqueue. Not in the
+  // snapshot (labelled), so reported apart from what 021 wrote.
+  const pasteMislabel = (await sql`INSERT INTO thoughts (content, metadata, embedding, embedding_model, updated_at) VALUES ('labelled at the model by a paste of 021 over an own-key acceptance', '{}'::jsonb, ${vec}::vector, ${OPTS.model}, now() - interval '2 hours') RETURNING id`)[0].id as string;
+  await enqueue(KEY, [pasteMislabel]);
+  await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${pasteMislabel}::uuid`;
+  // 030 edited after it was applied: the bracket would run its current text
+  // before the loop reached 030's own drift check. Refused before anything
+  // runs, in both modes; then the ledger is put back.
+  const sha030 = ledgerAfter.find((r) => r.name.startsWith("030"))!;
+  await sql`UPDATE schema_migrations SET sha256 = 'edited-after-apply' WHERE name = ${sha030.name}`;
+  const drift030 = await migrate();
+  assert(drift030.code === 1 && /refusing to apply 021_embedding_model_per_row\.sql: 030_label_from_claims_excludes_accepted\.sql \(was edited-after-apply, now [0-9a-f]{12}\) changed after being applied, and the bracket around 021 would run its current text/.test(drift030.out),
+         `a plain run with 021 pending is refused when 030 has drifted — the bracket would run its current text (exit ${drift030.code})`);
+  const drift030Dry = await migrate("--dry-run");
+  assert(drift030Dry.code === 1 && /would refuse to apply 021_embedding_model_per_row\.sql: 030_label_from_claims_excludes_accepted\.sql \(was edited-after-apply/.test(drift030Dry.out) && !/would apply/.test(drift030Dry.out),
+         `…and --dry-run says it would refuse, before it says what would apply (exit ${drift030Dry.code})`);
+  assert((await recorded021()) === 0 && (await labels())[pasteMislabel] === OPTS.model, "…and nothing was written");
+  await sql`UPDATE schema_migrations SET sha256 = ${sha030.sha256} WHERE name = ${sha030.name}`;
   // A session holding a lock on thoughts while the plain run reaches 021: the
   // bracket takes 021's ACCESS EXCLUSIVE lock first, within 10 s, so the file
   // fails in its own transaction rather than the snapshot waiting for ever
@@ -571,14 +592,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const holeAt021 = await migrate();
   assert(holeAt021.code === 0, `with 030 recorded and skipped, a plain run with a hole at 021 applies it bracketed (exit ${holeAt021.code})${holeAt021.code === 0 ? "" : `:\n${holeAt021.out}`}`);
   assert(/021_embedding_model_per_row\.sql\s+applied/.test(holeAt021.out) && /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(holeAt021.out) &&
-           /021's evidence backfill labelled 4 thought\(s\); re-decided by 030's rule, 4 changed/.test(holeAt021.out) && new RegExp(`\\n\\s+${lateSuffixed}  stub-embed → unknown\\n`).test(holeAt021.out) && !/refus/.test(holeAt021.out),
-         "…no refusal, 030 skipped as recorded, and the four labels its block wrote from acceptances re-decided — 030's text ran inside the bracket");
+           /021's evidence backfill labelled 4 thought\(s\); 030's text ran here, since the ledger records 030 and this run skips it: 4 changed:/.test(holeAt021.out) &&
+           new RegExp(`\\n\\s+${lateSuffixed}  stub-embed → unknown\\n`).test(holeAt021.out) && !/refus/.test(holeAt021.out),
+         "…no refusal, 030 skipped as recorded, and the four labels its block wrote from acceptances decided by 030's text run inside the bracket");
+  assert(new RegExp(`…and 030's first statement set back 1 label\\(s\\) from before 021:\\n\\s+${pasteMislabel}  stub-embed → unknown`).test(holeAt021.out),
+         "…and the label from before 021 that 030's first statement took back is reported apart, since nothing else records it");
   const afterHole = await labels();
-  assert(afterHole[accepted] === null && afterHole[lateSuffixed] === null && afterHole[suffixedHazard] === null && afterHole[writtenSince] === null,
-         "…the thoughts whose only evidence is an acceptance end NULL, the new one included");
+  assert(afterHole[accepted] === null && afterHole[lateSuffixed] === null && afterHole[suffixedHazard] === null && afterHole[writtenSince] === null && afterHole[pasteMislabel] === null,
+         "…the thoughts whose only evidence is an acceptance end NULL, the new one and the paste's mislabel included");
   assert(afterHole[vouched] === OPTS.model && afterHole[earlierThenAccepted] === "earlier-model" && afterHole[noEvidence] === null,
          "…every other label is as the re-run left it — a labelled row is not in the snapshot");
-  assert((await standing()) === 5 && (await updatedAtTriggerState(sql)) === "O" && (await recorded021()) === 1,
+  assert((await standing()) === 6 && (await updatedAtTriggerState(sql)) === "O" && (await recorded021()) === 1,
          "…every acceptance stands, the trigger is enabled again, and 021 is recorded");
   // The re-run over the same corpus: 021's block labels the same rows again
   // and the bracket sets them back again — and 022's and 025's redefinitions
@@ -586,7 +610,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // are restored (the state preflight's `atomic capture` names, with this
   // remedy).
   const again = await migrate("--reapply");
-  assert(again.code === 0 && /021's evidence backfill labelled 4 thought\(s\); re-decided by 030's rule, 4 changed/.test(again.out), `a second --reapply brackets 021 the same way (exit ${again.code})`);
+  assert(again.code === 0 && /021's evidence backfill labelled 5 thought\(s\); set aside for 030's rule/.test(again.out) && /030 decided the 5 label\(s\) 021's block wrote: 5 changed:/.test(again.out),
+         `a second --reapply brackets 021 the same way — the paste's thought, unknown now, in the snapshot too (exit ${again.code})`);
   assert(JSON.stringify(await labels()) === JSON.stringify(afterHole), "…and every label is as before: the bracket is idempotent");
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument

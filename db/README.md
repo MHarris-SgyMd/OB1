@@ -117,20 +117,29 @@ accepted rows excluded, but 030 cannot know which labels 021's block wrote a
 moment ago; the migrator can. It takes 021's own lock on `thoughts` first, and
 then the claim table's against writers (so a label or a claim row committed
 while the file runs is neither set back nor read as evidence the snapshot never
-saw), notes the thoughts unlabelled before 021 that have a claim row naming a
-model (every such thought with a vector, where the column does not yet exist)
-in a temp table on its connection, runs the file, sets aside the labels it
-wrote — back to unknown, the `updated_at` trigger held as 021 holds it — and
-runs **030's own text** in the same transaction, so 030's rule decides those
-labels again: the latest row that is not an acceptance, when nothing has
-written the thought since it finished, else unknown. One spelling of the rule,
-030's. Where no succeeded claim row names a model, or 021 wrote nothing, the
-file runs bare. A label from a plain latest row is written again unchanged; a
-label from an acceptance goes to the earlier pass that did write the vector, or
-to unknown; the acceptance stands, spent by nobody. The run says, beside 021's
-line, how many thoughts 021 labelled and how many 030's rule decided otherwise,
-listing those rows — nothing else records them, since the label is not an
-edit.
+saw), notes the thoughts unlabelled before 021 that have a succeeded, finished
+claim row naming a model (every such thought with a vector, where the column
+does not yet exist) in a temp table on its connection, runs the file, and sets
+aside the labels it wrote — back to unknown, the `updated_at` trigger held as
+021 holds it — for **030's own text** to decide: the latest row that is not an
+acceptance, when nothing has written the thought since it finished, else
+unknown. One spelling of the rule, 030's. Where this run reaches 030 — pending,
+or the re-run — 030 decides them at its own place, and the report is printed
+beside 030's line; where the ledger records 030 and the run would skip it (a
+hole at 021 alone), 030's text runs inside 021's transaction, and every label
+from before 021 is noted first, since 030's first statement re-decides those
+too. Where no such claim row exists, or 021 wrote nothing, the file runs bare.
+A label from a plain latest row is written again unchanged; a label from an
+acceptance goes to the earlier pass that did write the vector, or to unknown;
+the acceptance stands, spent by nobody, and no claim row is touched. The run
+says how many thoughts 021 labelled, how many 030's rule decided otherwise, and
+lists every such row with both labels — nothing else records them, since the
+label is not an edit. Judged before anything runs, in both modes, whenever 021
+will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
+otherwise; 023's call needs one too), and on a plain run 030 is as it was
+applied — its current text would run inside the bracket before the loop
+reached 030's own drift check. A set carrying 021 without 030 is refused at
+load, and two files sharing a number are refused at load.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
