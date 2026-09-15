@@ -716,16 +716,14 @@ function checkCoreFunctions() {
 // compare guards its lengths first), a call or an index on it, `typeof`, or a
 // literal on the other side — nullish or empty (`if (KEY === undefined)` is a
 // presence check) or a string (`if (KEY === "your-key-here")` is a placeholder
-// check, a different smell). A name declared again — a loop variable, a
-// parameter, a destructure, a catch clause — between the nearest preceding
-// binding of that name from the environment and a compare, while the block
-// that declaration opened is still open (brace depth from the declaration to
-// the compare never drops below where it started), is another variable, and
-// that compare is not flagged; `key`, `token` and `secret` are common names,
-// and a whole-file rule that did not say so would fail an ordinary loop. A
-// declaration whose block has closed, one in another function above, or one
-// that precedes the binding, governs nothing: the third review pass showed
-// each of those silencing a real compare. Outside the rule, and said so: `.includes`,
+// check, a different smell). A name bound from a credential read is the
+// credential for the WHOLE file: every compare of it counts, wherever it sits.
+// Three review passes tried to except a re-declared name — a loop variable, a
+// parameter, a destructure — and each pass found the previous pass's scoping
+// both silencing real compares and failing ordinary code, because scope in
+// regex over unparsed text is not a thing; the fourth took the altitude. A
+// false positive here fails CI in the open and is answered with a rename or a
+// counted exception; a miss is silent. Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
 // an object property, a helper that returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable — each a
@@ -744,26 +742,8 @@ const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
 const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|"[^"\n]*"|'[^'\n]*'|` + "`[^`\n]*`" + `)`;
 /** What may wrap an inline read on the left of a compare: `!`, `)`, `?? ""`, `|| ""`, `.trim()`. */
 const WRAP = String.raw`(?:[!)]|\s*(?:\?\?|\|\|)\s*(?:""|'')|\.trim\(\))*`;
-/** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare. */
-const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*[.(\[?]))`;
-/** Where `N` is declared again — a loop variable, a parameter, a destructure, a catch clause — so a later use is another variable. */
-const redeclared = (N) => new RegExp(String.raw`\b(?:const|let|var)\s+(?:[\[{][^\]}\n]*\b${N}\b[^\]}\n]*[\]}]|${N}\b)|\bcatch\s*\(\s*${N}\b\s*\)?|\bfunction\b[^(\n]*\([^)\n]*\b${N}\b[^)\n]*\)|\(([^()\n]*)\)\s*(?::[^=\n]*)?=>|(?<![\w$.])${N}\s*=>`, "g");
-/**
- * Whether a declaration ending at `from` still scopes position `to`: walking the
- * braces between them, the block enclosing the declaration has not closed
- * (depth never below 0), and a block that opened after it — a function body, a
- * loop body — has not closed again (depth back to 0 after being above it). A
- * braceless form (`for (…) if (…)`, `(x) => x === y`) scopes what follows it.
- */
-function scopeOpen(text, from, to) {
-  let depth = 0, opened = false;
-  for (let i = from; i < to; i++) {
-    const ch = text[i];
-    if (ch === "{") { depth++; opened = true; }
-    else if (ch === "}" && (--depth < 0 || (opened && depth === 0))) return false;
-  }
-  return true;
-}
+/** A bound name as an operand, in the wrappings a compare puts around one: `String(x)`, `(x ?? "")`, `x.trim()`, `x?.trim()`, bare — not `x.y`, `x(`, `x[` or `x?.y`; a ternary's `?` after it is fine. */
+const bound = (N) => String.raw`(?:String\(\s*${N}\s*\)|\(\s*${N}\s*(?:\?\?|\|\|)\s*(?:""|'')\s*\)|${N}(?:\?\.|\.)trim\(\)|${N}\b(?!\s*(?:[.(\[]|\?\.)))`;
 const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
 
 /**
@@ -772,21 +752,18 @@ const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
  * text first, so a compare may sit above or below the read it compares.
  */
 function credentialComparesIn(text) {
-  /** name → positions of the name in each statement that binds it from a credential read. */
-  const names = new Map();
-  const bind = (name, at) => names.set(name, [...(names.get(name) ?? []), at]);
+  const names = new Set();
   // `x = <anything on the statement containing a credential read>` — `=`, `??=`
-  // and `||=`, a type annotation before it, a wrapper (`String(…)`, `(… ?? "")`,
-  // `.trim()`) around the read.
-  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])[^;\n]*?${ENV_READ}`, "g"))) {
-    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) bind(m[1], m.index);
+  // and `||=`, a type annotation before it, a line break after it, a wrapper
+  // (`String(…)`, `(… ?? "")`, `.trim()`) around the read.
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])\s*[^;\n]*?${ENV_READ}`, "g"))) {
+    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
   }
   // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
   for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env)\b/g)) {
     for (const part of m[1].split(",")) {
       const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
-      const name = local || envName;
-      if (envName && CREDENTIAL_ENV_NAME.test(envName)) bind(name, m.index + m[0].indexOf(name));
+      if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
     }
   }
   const lines = new Set();
@@ -794,34 +771,16 @@ function credentialComparesIn(text) {
   const flag = (re, keep = () => true) => {
     for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
   };
-  /** Spans where `N` is declared again, its own credential bindings excepted; an arrow's parameter list counts only if it names N. */
-  const shadowsOf = (N, bindings) => [...text.matchAll(redeclared(N))]
-    .filter((m) => m[1] === undefined || new RegExp(String.raw`(?<![\w$.])${N}\b`).test(m[1]))
-    .map((m) => ({ start: m.index, end: m.index + m[0].length }))
-    .filter((r) => !bindings.some((b) => b >= r.start && b <= r.end));
-  /**
-   * True when a use of N at `at` is another variable: N is declared again between
-   * the nearest credential binding before `at` and `at`, and the block that
-   * declaration opened is still open at `at`. A compare textually before every
-   * binding (a function hoisted above the const) is the credential's.
-   */
-  const shadowed = (N, at) => {
-    const bindings = names.get(N) ?? [];
-    const binding = Math.max(...bindings.filter((b) => b < at));
-    if (!Number.isFinite(binding)) return false;
-    return shadowsOf(N, bindings).some((r) => r.start > binding && r.end <= at && scopeOpen(text, r.end, at));
-  };
   const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
   flag(new RegExp(String.raw`${EQ}\s*\(*\s*${ENV_READ}`, "g"), credential);
   flag(new RegExp(String.raw`${ENV_READ}${WRAP}\s*${EQ}`, "g"), credential);
-  for (const name of names.keys()) {
+  for (const name of names) {
     const N = name.replace(/\$/g, "\\$");
-    const own = (m) => !shadowed(N, m.index);
     // The credential on the right: `key !== expected`, `!== expected.trim()`, `!== String(expected)`, `!== (expected ?? "")`
     // — not `expected.length`, `expected(`, `expected[`, `expected?.x`.
-    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${bound(N)}`, "g"), own);
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${bound(N)}`, "g"));
     // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
-    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), own);
+    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -874,6 +833,13 @@ const CREDENTIAL_COMPARE_PROBES = [
   'const token = process.env.API_TOKEN;\nfor (const token of tokens) { use(token); }\nif (presented === token) ok();',
   'function a() { let expected = 0; return expected; }\nconst expected = Deno.env.get("MCP_ACCESS_KEY");\nif (key !== expected) deny();',
   'app.post("/mcp", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });\napp.post("/sse", (c) => { const expected = Deno.env.get("MCP_ACCESS_KEY"); if (k !== expected) deny(); });',
+  // What the fourth review pass found the (since removed) shadow rule silencing,
+  // plus a ternary and a binding broken over two lines.
+  'const token = process.env.API_TOKEN;\nfor (const token of tokens) if (token === close) break;\nif (presented === token) deny();',
+  'const key = process.env.API_KEY;\nconst hit = list.some((key) => key === wanted);\nif (presented === key) deny();',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nreturn key === expected ? ok() : deny();',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nconst status = key !== expected ? 401 : 200;',
+  'const expected =\n  Deno.env.get("MCP_ACCESS_KEY");\nif (k !== expected) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -897,12 +863,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nif (key === "your-service-role-key") throw new Error("placeholder");',
   'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
   'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
-  // A name declared again between its binding and the compare is another variable.
-  'const token = process.env.GITHUB_TOKEN;\nfor (const token of tokens) if (token === close) break;',
-  'const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;\nObject.entries(o).forEach(([key, v]) => { if (key === id) use(v); });',
-  'const key = process.env.API_KEY;\nconst hit = list.some((key) => key === wanted);',
-  'const secret = process.env.WEBHOOK_SECRET;\ntry { go(); } catch (secret) { if (secret === null) retry(); }',
-  'const key = process.env.API_KEY;\nfor (const { key } of rows) { if (key === wanted) hit(); }',
+  'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (expected?.length !== 64) warn();',
 ];
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry

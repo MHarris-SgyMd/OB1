@@ -224,13 +224,13 @@ for (const s of SERVERS) {
   assert(gated.join() === [...s.writes].sort().join(), `…and exactly the writes are gated (${gated.length})`);
   for (const w of s.writes) {
     const body = blockOf(text, w);
-    const handler = body.match(/handle\w+/)?.[0];
+    const handler = body.match(/wrap\(\(\) => (handle\w+)\(/)?.[1];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
     assert(writes(reach), `…${w} does write (its body or handler inserts, updates, upserts, deletes, or calls an RPC not listed as a read)`);
   }
   for (const r of s.reads) {
     const body = blockOf(text, r);
-    const handler = body.match(/handle\w+/)?.[0];
+    const handler = body.match(/wrap\(\(\) => (handle\w+)\(/)?.[1];
     const reach = handler ? text.slice(text.indexOf(`async function ${handler}`), text.indexOf("\n}", text.indexOf(`async function ${handler}`))) : body;
     assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
   }

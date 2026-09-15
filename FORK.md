@@ -7333,24 +7333,22 @@ the next extension is copied from. Not a compare of the credential: `.length`
 (a timing-safe compare guards its lengths first), a call or an index on it,
 `typeof`, or a literal on the other side — nullish or empty (`if (KEY ===
 undefined)` is a presence check) or a string (`if (KEY === "your-key-here")` is
-a placeholder check, a different smell). A name declared again — a loop
-variable, a parameter, a destructure, a catch clause — between the nearest
-preceding credential binding of that name and a compare, while the block that
-declaration opened is still open, is another variable and that compare is not
-flagged: `key`, `token` and `secret` are common names, and the vendored tree
-binds each of them from the environment somewhere, so a whole-file rule
-without this would fail the next ordinary loop an upstream rebase adds. A
-declaration whose block has closed, one in another function, one before the
-binding, or a second binding of the same name governs nothing — the third
-pass showed each silencing a real compare under the second pass's rule, which
-took any redeclaration anywhere between the file's first `N =` and the compare.
+a placeholder check, a different smell). A name bound from a credential read
+is the credential for the **whole file**: every compare of it counts, wherever
+it sits. That is a decision, not an oversight — three passes tried to except a
+re-declared name (a loop variable, a parameter, a destructure), and each found
+the previous pass's scoping both silencing real compares and failing ordinary
+code; the fourth pass took the altitude, below. `key`, `token` and `secret`
+are common names and the vendored tree binds each from the environment
+somewhere, so an upstream rebase can trip this on an ordinary loop — in the
+open, answered with a rename or a counted exception; a miss would be silent.
 Outside the rule, and the header
 says so: `.includes`, `Object.is`, `switch`, `.localeCompare`, a compare
 through a class field or an object property, a helper that returns the key,
 several declarators on one statement, a read through `Deno.env.toObject()`
-into a variable. Thirty-eight probes the rule must catch — every line of a
+into a variable. Forty-three probes the rule must catch — every line of a
 probe that carries a compare, so a two-route probe is two catches — and
-twenty-five it must not run on every invocation, through the same function
+twenty-one it must not run on every invocation, through the same function
 the scan uses. Its first run found the
 mechanism in **seventeen
 more vendored files** — ten MCP servers with the extensions' exact shape
@@ -7428,9 +7426,9 @@ runs inside the required "Portable server" job now. Check 8 bound a name
 file-wide, so an upstream rebase adding `for (const token of tokens)` to a file
 that reads `GITHUB_TOKEN` would have failed CI with a message about a
 credential compare — a name declared again between binding and compare is
-another variable now, with the three shadow shapes as non-probes and a
-compare-before-shadow as a probe (the third pass then found that rule too
-broad — below). The same pass probed wrappers the rule
+another variable then, with the three shadow shapes as non-probes and a
+compare-before-shadow as a probe (the third pass found that rule too broad,
+the fourth removed it — below). The same pass probed wrappers the rule
 accepted on an inline read but not on a bound name (`expected.trim()`,
 `String(expected)`, `(expected ?? "")`), template quotes in the read,
 `import.meta.env`, and a suffixed name (`MCP_ACCESS_KEY_V2`) — all caught now;
@@ -7462,12 +7460,11 @@ rule silenced real compares: it took any redeclaration anywhere between the
 file's *first* `N =` and the compare, so an arrow parameter in another
 function, a loop whose block had closed, a `let` above the credential binding
 and a second binding of the same name in a second route each hid the
-extensions' exact original shape. Bindings are recorded by position now, the
-nearest preceding one governs, a second binding is a binding and not a shadow,
-and a shadow governs only while its block is open (brace depth from the
-declaration to the compare never drops below its start) — six probes for the
-misses, one non-probe for an object destructure in a loop, and the probe
-check asks that every compare line be caught rather than any. The deploy
+extensions' exact original shape. The pass rewrote the rule — bindings by
+position, the nearest preceding one governing, a shadow governing only while
+its block was open by a brace walk — with six probes for the misses, and the
+probe check asks that every compare line be caught rather than any (the
+fourth pass then removed the shadow rule altogether — below). The deploy
 primitive contradicted itself and five READMEs: its list and their tables
 still sent a reader to deploy servers that import `bun`, and "run from a
 checkout" described nothing that works — SMD-1480 filed; callouts above each
@@ -7486,6 +7483,37 @@ configuration block named only the legacy secret; FORK and the header
 disagreed on `env.X`. Verified sound by the pass and not reported: the copy
 byte-identical; `?key=` surviving the rebuilt request in all six; the shared
 server's env isolation; job-hunt's handler slicing; the workflow's step order.
+
+**Review, fourth pass** (triaged; nine findings; the altitude taken). The
+reviewer was asked to attack the shadow rule and broke it a third time, in
+both directions: a braceless shadow (`for (…) if (…)`, `list.some((key) =>
+…)`) governed to the end of the enclosing block and silenced every later
+compare of the credential, including the extensions' exact original shape one
+callback later; a `const`/destructure shadow, which opens no block, took the
+next braced statement as its block and failed an ordinary function; a
+for-header with braces in its iterable ended the scope before the body; a
+compare textually above every binding could never consult a shadow; `key =>`
+inside a string was a shadow, `{` inside a string a block. Every one of these
+is scope, and scope in regex over unparsed text — README code blocks and
+Python among the inputs — is not a thing to get right by another patch. So
+the shadow rule is gone (both helpers and the position bookkeeping with it):
+a name bound from a credential read is the credential for the whole file, the
+five shadow non-probes became probes the rule must catch, and the header and
+this section say why — a false positive fails CI in the open and is answered
+with a rename or a counted exception, a miss is silent, and the vendored tree
+had no hits under the whole-file rule when the second pass introduced the
+exception for a hypothetical. The lesson is change 56's again: when
+consecutive passes find seams in one mechanism, the mechanism is the finding.
+Also taken: a ternary after the credential (`key === expected ? ok() :
+deny()`) was excluded with `expected?.x` — only `?.` is an access now; a
+binding broken over two lines (`const expected =\n  Deno.env.get(…)`) was not
+a binding; the test's handler detection matched any `handle…` word in a
+tool's block and is anchored on the `wrap(() => handleX(` call now. Stated
+in the header as outside the rule rather than fixed: braces or `=>` inside a
+string, comment or regex literal. Verified sound by the pass: the twelve
+URLs, the fourteen renumbered places, the counts, the copy's identity, the
+seven servers' diffs, `RPC_READS`, and that a missing registration fails two
+assertions rather than aborting the run.
 
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand
