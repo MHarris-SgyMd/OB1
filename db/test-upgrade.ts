@@ -461,7 +461,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
          `reembed.ts --status on the baselined brain names \`migrate.ts --reapply\`, not a paste (exit ${status.code})`);
 
   // 021 pending too, from here on: a ledger hole on the very file whose block
-  // applyBracketed brackets, so a plain run reaches it.
+  // applyShadowed runs with the acceptances out of its sight, so a plain run
+  // reaches it.
   await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const ledgerBefore = await ledger();
 
