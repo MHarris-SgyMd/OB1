@@ -3173,8 +3173,8 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 9,
     "one update_thought, of nine parameters");
   assert(!(await exists(UT_8)) && !(await exists(UT_7)), "…neither the 8- nor the 7-argument form beside it");
-  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("032") && lastDefinerOf("validate_derived_from").startsWith("032"),
-    `032 is the last definer of review_supersession_proposal and validate_derived_from, 033 of update_thought — 032's body with the fingerprint lock before the row ([33]) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
+  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("035") && lastDefinerOf("validate_derived_from").startsWith("032"),
+    `033 is the last definer of update_thought, 035 of review_supersession_proposal (its lock moved before the proposal row, SMD-1462 [35]), 032 of validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
   const src = await srcOf(UT);
   for (const [re, what] of [
     [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
@@ -3454,7 +3454,10 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   await reapply("032");
   const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied over 033 puts the row-then-fingerprint order back, one function still");
-  await restoreShipped("update_thought");
+  // 032 also redefines review_supersession_proposal (its shipped body moved to
+  // 035, SMD-1462), so restore it too — not only update_thought — or [35] and
+  // any later block reads 032's review over the shipped one.
+  await restoreShipped("update_thought", "review_supersession_proposal");
   const edit033 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
   await db.exec(`DELETE FROM thoughts`);
@@ -3590,6 +3593,54 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   let refusedNeg = false;
   try { await db.exec(`SELECT prune_query_log(-1)`); } catch { refusedNeg = true; }
   assert(refusedNeg, "prune_query_log refuses a negative window");
+}
+
+console.log("\n[35] Migration 035: delete_thought and review_supersession_proposal both take the supersession lock before their contended row (SMD-1462)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  // 035 is the only redefinition of delete_thought since 009; the body is
+  // 009's plus one advisory-lock line, so a future edit that drops the lock —
+  // reopening the accept-vs-delete deadlock db/test-live.ts [6g] proves — is
+  // caught here, in the fast suite, without a live server.
+  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("035"),
+    `one delete_thought, 035 the last definer (${lastDefinerOf("delete_thought")})`);
+  const src = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["delete_thought(uuid, jsonb)"])).rows[0].s);
+  const iLock = src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
+  const iDelete = src.indexOf("DELETE FROM thoughts WHERE id = p_id");
+  assert(iLock > 0 && iDelete > 0 && iLock < iDelete,
+    `the supersession lock — the key review_supersession_proposal and update_thought take — is acquired before the DELETE (${iLock} < ${iDelete})`);
+  assert((src.match(/pg_advisory_xact_lock/g) ?? []).length === 1, "…exactly one advisory lock: the supersession one, not the fingerprint one a delete has no fingerprint for");
+  // 009's body, carried forward: 008's actor, the RETURNING that tells a
+  // missing row from a deletion, and the NOT_FOUND that reports it.
+  assert(/set_config\('ob1\.actor'/.test(src) && /DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted/.test(src) && /'NOT_FOUND'/.test(src),
+    "…and 009's body is intact: the actor set for the audit trigger, the RETURNING, the NOT_FOUND branch");
+  // Behaviour: the lock does not change the contract. A present row deletes
+  // and returns its id; a second delete of the same id is NOT_FOUND.
+  const t = String((await db.query<{ id: string }>(`SELECT upsert_thought('a thought to delete', '{"metadata":{}}'::jsonb) ->> 'id' AS id`)).rows[0].id);
+  const first = (await db.query<{ r: { ok: boolean; id?: string } }>(`SELECT delete_thought($1::uuid, NULL::jsonb) AS r`, [t])).rows[0].r;
+  assert(first.ok === true && first.id === t, `delete_thought removes a present row and returns its id (${JSON.stringify(first)})`);
+  const gone = (await db.query(`SELECT 1 FROM thoughts WHERE id = $1`, [t])).rows.length;
+  const second = (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT delete_thought($1::uuid, NULL::jsonb) AS r`, [t])).rows[0].r;
+  assert(gone === 0 && second.ok === false && second.error === "NOT_FOUND", `…and the row is gone, a second delete NOT_FOUND (${JSON.stringify(second)})`);
+
+  // review_supersession_proposal takes the same lock before the proposal row
+  // now (035): the delete-side lock alone left a second cycle — a delete
+  // holding the lock and waiting on the proposal through 029's cascade, a
+  // review holding the proposal and waiting on the lock (db/test-live.ts [6g]
+  // reproduced it 10 of 40). Only both writers taking the lock first close it.
+  assert((await functionsNamed("review_supersession_proposal")) === 1 && lastDefinerOf("review_supersession_proposal").startsWith("035"),
+    `one review_supersession_proposal, 035 the last definer (${lastDefinerOf("review_supersession_proposal")})`);
+  const review = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["review_supersession_proposal(uuid, text, text, text, jsonb, boolean)"])).rows[0].s);
+  const iRLock = review.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
+  const iProposal = review.indexOf("FROM supersession_proposals WHERE id = p_id FOR UPDATE");
+  assert(iRLock > 0 && iProposal > 0 && iRLock < iProposal,
+    `review takes the supersession lock before it locks the proposal row (${iRLock} < ${iProposal})`);
+  assert((review.match(/pg_advisory_xact_lock/g) ?? []).length === 1, "…acquired once, at the top, for accept and reject alike");
+  // 032's shape, unmoved: writes through update_thought, no UPDATE of its own,
+  // no walk of its own — [32] asserts this too, over the same source.
+  assert(!/UPDATE\s+thoughts\b/i.test(review) && (review.match(/update_thought\(/g) ?? []).length === 2 && !/v_walk/.test(review),
+    "…and 032's shape is intact: two update_thought calls, no UPDATE and no walk of its own");
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 report();
