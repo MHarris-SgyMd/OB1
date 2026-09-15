@@ -842,6 +842,48 @@ function checkComposeForwardsDocumentedEnv() {
 }
 checkComposeForwardsDocumentedEnv();
 
+/**
+ * 9: committed query/replay fixtures carry NO thought content (SMD-1295).
+ *
+ * export-queries.ts redacts a real brain's log to ids only, and the replay
+ * fixture is ids and vectors, so a fixture can be committed without the corpus.
+ * This guards that promise: any JSON under evals/fixtures/ whose object tree
+ * carries a content-bearing field (a thought body under `content`, `text`,
+ * `excerpt`, …) is a leak. Query strings (`query`) and descriptions (`note`) are
+ * allowed — they are what the caller typed and a fixed label, not stored
+ * thoughts. A self-test on every run keeps the rule honest in both directions.
+ */
+function checkFixtureRedaction() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  const FORBIDDEN = new Set(["content", "contents", "text", "body", "document", "excerpt", "snippet", "passage", "chunk", "blurb", "thought"]);
+  const scan = (node, path, hits) => {
+    if (Array.isArray(node)) { node.forEach((v, i) => scan(v, `${path}[${i}]`, hits)); return; }
+    if (node && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) {
+        if (FORBIDDEN.has(k.toLowerCase()) && typeof v === "string" && v.trim() !== "") hits.push(`${path}.${k}`);
+        scan(v, `${path}.${k}`, hits);
+      }
+    }
+  };
+  // Self-test: a leaked body must be caught; an ids-and-vectors fixture must not.
+  const bad = []; scan({ queries: [{ query: "q", content: "a leaked thought body" }] }, "$", bad);
+  if (bad.length === 0) fail(SELF, "fixture redaction check no longer catches a `content` field (its own probe)");
+  const good = []; scan({ queries: [{ query: "q", relevant: ["id"], baseline: ["id"] }], thoughts: [{ id: "x", embedding: [0.1, 0.2] }], note: "a description" }, "$", good);
+  if (good.length) fail(SELF, `fixture redaction check false-positives on an ids-only fixture (${good.join(", ")})`);
+
+  const dir = join(ROOT, "evals", "fixtures");
+  if (!existsSync(dir)) return;
+  for (const file of walk(dir, [], /\.json$/)) {
+    let data;
+    try { data = JSON.parse(readFileSync(file, "utf8")); }
+    catch { fail(relOf(file), "committed fixture is not valid JSON"); continue; }
+    const hits = [];
+    scan(data, "$", hits);
+    for (const h of hits) fail(relOf(file), `committed fixture carries thought content at ${h} — export redacts to ids only (SMD-1295)`);
+  }
+}
+checkFixtureRedaction();
+
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
 // its only live effect was to hide a check-5 hit in a _template SQL file that
