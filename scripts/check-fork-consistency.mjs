@@ -25,6 +25,10 @@
  *      directories whole and docs/, the owned sets read from db/migrations/,
  *      with counted per-(file, function) exceptions for the files that create
  *      a brain rather than add to one
+ *   8. a credential read from the environment is never compared with an
+ *      equality operator — inline or through an identifier bound from the read
+ *      — in the same files as 7, with counted per-file exceptions for the
+ *      vendored files a ticket holds
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -59,7 +63,9 @@ function contributionDirs() {
     const base = join(ROOT, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      if (name === "_template") continue;
+      // _template is the category's placeholder; node_modules is extensions/
+      // test-auth.ts's install (gitignored), not a contribution.
+      if (name === "_template" || name === "node_modules") continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
     }
@@ -680,6 +686,168 @@ function checkCoreFunctions() {
   }
 }
 
+
+// ── 8: a credential from the environment is never compared with === ─────────
+//
+// SMD-1252. Seven vendored extension servers authenticated with two lines —
+// `const expected = Deno.env.get("MCP_ACCESS_KEY"); if (!key || key !== expected)`
+// — and then ran as the service role: one shared plaintext secret, compared
+// byte by byte (the timing leak fix 14 closed in the core server), no scope,
+// no revocation short of re-keying every client, and full write access on a
+// key accepted from a URL query string. FORK.md change 62 made them consumers
+// of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
+// is never given the tools that write — and this is what keeps the next rebase
+// from bringing the two lines back.
+//
+// The rule is the MECHANISM, not the seven files' spelling: a strict or loose
+// (in)equality with a value read from the environment under a credential's
+// name (…KEY, …SECRET, …TOKEN, …PASSWORD) on either side — read inline
+// (`!== Deno.env.get("MCP_ACCESS_KEY")`) or through an identifier the file
+// binds from such a read (`const expected = Deno.env.get(…)`, `const
+// MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY ?? ""`, `const { API_TOKEN } =
+// process.env`, Python's `os.environ`) — in every non-binary, non-ignored file
+// under the seven category directories and docs/, prose included, since a
+// README's code block is what the next extension is copied from. Not a compare
+// of the credential: `.length` (a timing-safe compare guards its lengths
+// first), a call or an index on it, `typeof`, or a nullish or empty literal on
+// the other side (`if (KEY === undefined)` is a presence check). Exceptions are
+// per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
+// integrations that carry the same compare are listed with the ticket that
+// holds their fix, for exactly the lines each has today — one fixed drops out
+// as stale, one added fails.
+const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)\b/i;
+const IDENT = String.raw`[A-Za-z_$][\w$]*`;
+/** One read of the environment; the variable's name is the first defined group. */
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'](${IDENT})["']\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'](${IDENT})["']\s*\]|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
+/** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
+const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
+/** What on the far side of a compare makes it a presence check, not a compare of the credential. */
+const NOT_A_VALUE = String.raw`(?:undefined\b|null\b|None\b|""|''|` + "``" + `)`;
+const envNameOf = (groups) => groups.find((g) => g !== undefined) ?? "";
+
+/**
+ * The 1-based lines of `text` that compare an environment credential with an
+ * equality operator, by the rule above. Bindings are collected over the whole
+ * text first, so a compare may sit above or below the read it compares.
+ */
+function credentialComparesIn(text) {
+  const names = new Set();
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?(?<![=!<>])=(?![=>])\s*${ENV_READ}`, "g"))) {
+    if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
+  }
+  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\))\b/g)) {
+    for (const part of m[1].split(",")) {
+      const name = (part.split(":").pop() ?? "").trim().split(/[\s=]/)[0];
+      if (name && CREDENTIAL_ENV_NAME.test(name)) names.add(name);
+    }
+  }
+  const lines = new Set();
+  const lineOf = (i) => text.slice(0, i).split("\n").length;
+  const flag = (re, keep = () => true) => {
+    for (const m of text.matchAll(re)) if (keep(m)) lines.add(lineOf(m.index));
+  };
+  const credential = (m) => CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(1)));
+  flag(new RegExp(String.raw`${EQ}\s*${ENV_READ}`, "g"), credential);
+  flag(new RegExp(String.raw`${ENV_READ}\s*${EQ}`, "g"), credential);
+  for (const name of names) {
+    const N = name.replace(/\$/g, "\\$");
+    // The credential on the right: `key !== expected` — not `expected.length`, `expected(`, `expected[`, `expected?.`.
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${N}\b(?!\s*[.(\[?])`, "g"));
+    // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish or empty literal.
+    flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${N}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
+  }
+  return [...lines].sort((a, b) => a - b);
+}
+
+/** Texts the rule must catch — the check's own negative tests, run on every run. */
+const CREDENTIAL_COMPARE_PROBES = [
+  'const key = c.req.query("key") || c.req.header("x-access-key");\nconst expected = Deno.env.get("MCP_ACCESS_KEY");\nif (!key || key !== expected) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;\n// …\nif (!provided || provided !== MCP_ACCESS_KEY) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";\nreturn key === MCP_ACCESS_KEY;',
+  'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (body.secret !== READWISE_WEBHOOK_SECRET) {',
+  'const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;\nif (secret !== expectedSecret) {',
+  'if (key !== Deno.env.get("MCP_ACCESS_KEY")) {',
+  'if (req.headers.get("x-key") != process.env.API_TOKEN) {',
+  'if (process.env["BRAIN_ACCESS_KEY"] === provided) ok();',
+  'if key != os.environ.get("API_KEY"):',
+  'EXPECTED = os.environ["WEBHOOK_SECRET"]\nif token == EXPECTED:',
+  'const { MCP_ACCESS_KEY } = process.env;\nif (k === MCP_ACCESS_KEY) {',
+  'let token: string | undefined = process.env.BOT_TOKEN;\nreturn token === presented;',
+  'const expected = env("MCP_ACCESS_KEY");\nif (provided !== expected) return 401;',
+  'const AUDITOR_ACCESS_KEY = Deno.env.get("AUDITOR_ACCESS_KEY")!;\nif (key !== AUDITOR_ACCESS_KEY) {',
+  'return Boolean(provided && provided === MCP_ACCESS_KEY);\nconst MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;',
+];
+/** Texts the rule must not catch — ordinary code and prose. */
+const CREDENTIAL_COMPARE_NON_PROBES = [
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (!MCP_ACCESS_KEY) throw new Error("unset");',
+  'const expected = process.env.BRAIN_ACCESS_KEY;\nif (key.length !== expected.length) return false;\nreturn timingSafeEqual(Buffer.from(key), Buffer.from(expected));',
+  'if (process.env.OB1_STORE === "postgrest") {',
+  'if (response.status !== expectedStatus) {',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (MCP_ACCESS_KEY === undefined) fail();',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";\nif (MCP_ACCESS_KEY === "") console.warn("unset");',
+  'const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");\nif (typeof MCP_ACCESS_KEY !== "string") fail();',
+  'if (embedding.length !== EXPECTED_DIM) {',
+  'const apiKey = process.env.OPENROUTER_API_KEY;\nif (args.grader === "openrouter" && !apiKey) {',
+  'const key = c.req.query("key");\nif (!key) return c.json({ error: "Unauthorized" }, 401);',
+  'supabase secrets set MCP_ACCESS_KEY=your-generated-key-here',
+  'MCP_ACCESS_KEYS=laptop:write:<sha256 of the key>',
+  'const principal = authenticate(presentedKey(c.req.raw), { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") });',
+  'const token = process.env.TELEGRAM_BOT_TOKEN;\nif (!token) throw new Error("TELEGRAM_BOT_TOKEN is required");',
+  'const expected = process.env.EXPECTED_DIM;\nif (_embedDimCache !== expected) {',
+  'seven files compared the key with `!==` and are consumers of auth.ts now',
+  'const secret = process.env.WEBHOOK_SECRET ?? "";\nconst ok = secret.length > 0 && timingSafeEqual(a, b);',
+];
+// The vendored recipes and integrations that carry the same compare, each for
+// exactly this many lines, held by the ticket named; fixing one makes its entry
+// stale (remove it), adding a compare beside one fails.
+const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 62 did";
+const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
+  ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
+  ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
+  ["recipes/ob-graph/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/work-operating-model-activation/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/editorial-policy/auditor/index.ts", { why: HELD, lines: 1 }],
+  ["recipes/vercel-neon-telegram/src/app/api/telegram/route.ts", { why: `${HELD} (Telegram's webhook secret header)`, lines: 1 }],
+  ["integrations/delete-thought-mcp/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/update-thought-mcp/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/kubernetes-deployment/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/entity-extraction-worker/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/consolidation-workers/bio/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/consolidation-workers/metadata-norm/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/agent-memory-api/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/open-brain-rest/index.ts", { why: HELD, lines: 1 }],
+  ["integrations/readwise-capture/index.ts", { why: `${HELD} (the secret Readwise echoes in the webhook body)`, lines: 1 }],
+  ["integrations/telegram-capture/README.md", { why: `${HELD} (the README's sample handler)`, lines: 1 }],
+  ["docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs", { why: `${HELD} (the walkthrough's stub REST server)`, lines: 1 }],
+]);
+
+function checkCredentialCompares() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const probe of CREDENTIAL_COMPARE_PROBES) {
+    if (credentialComparesIn(probe).length === 0) fail(SELF, `credential-compare rule no longer catches its probe: ${JSON.stringify(probe)}`);
+  }
+  for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
+    if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
+  }
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 62), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const counts = new Map();
+  for (const file of textFilesUnder(SCANNED_ROOTS)) {
+    const rel = relOf(file);
+    const hits = credentialComparesIn(readFileSync(file, "utf8"));
+    if (hits.length === 0) continue;
+    counts.set(rel, hits.length);
+    if (!CREDENTIAL_COMPARE_EXCEPTIONS.has(rel)) for (const line of hits) fail(`${rel}:${line}`, MSG);
+  }
+  for (const [rel, { why, lines }] of CREDENTIAL_COMPARE_EXCEPTIONS) {
+    const seen = counts.get(rel) ?? 0;
+    if (seen !== lines) {
+      fail(rel, seen === 0
+        ? `listed as a credential-compare exception (${why}) but matches nothing — remove it from CREDENTIAL_COMPARE_EXCEPTIONS`
+        : `credential-compare exception (${why}) covers ${lines} line(s) but ${seen} match — a new compare beside the documented one, or the exception's count is stale`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -692,6 +860,7 @@ checkSqlGuards();
 await checkMigrationNumbers();
 checkShellHazards(dirs);
 checkCoreFunctions();
+checkCredentialCompares();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

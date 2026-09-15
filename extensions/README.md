@@ -19,6 +19,10 @@ Extensions compound. Your CRM knows about thoughts you've captured. Your meal pl
 
 Every extension requires a working Open Brain setup. If you haven't built one yet, start with the [Setup Guide](../docs/01-getting-started.md).
 
+## Access Keys
+
+Every extension server authenticates the way the core server does, through `server-portable/auth.ts`: keys are named, scoped `read` or `write`, and stored as SHA-256 hashes in the `MCP_ACCESS_KEYS` secret, each revocable on its own. A read-scoped key is never given the tools that write, so it does not see them in `tools/list` — that is the key to put in a connector URL. The older single `MCP_ACCESS_KEY` still works, with write scope. Step 3 of [Deploy an Edge Function](../primitives/deploy-edge-function/) mints one; `test-auth.ts` here asserts all seven servers behave this way (`bun install && bun test-auth.ts`).
+
 ## Contributing
 
 Extensions are **curated** — discuss with maintainers before submitting. [Propose a new extension](https://github.com/NateBJones-Projects/OB1/issues/new?template=extension-submission.yml).

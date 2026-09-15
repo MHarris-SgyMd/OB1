@@ -72,31 +72,43 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/NateBJones-Projects/OB1
 
 > Replace `FUNCTION_NAME` and `DOWNLOAD_PATH` with the values from the extension's deployment table.
 
-## Step 3: Generate an Access Key
+## Step 3: Mint an Access Key
 
-> **Already have an access key from a previous extension?** You can reuse it — skip to Step 4 and use the same key. Or generate a new one if you prefer each extension to have its own key.
+The extensions authenticate the way the core Open Brain server does: a key is **named**, has a **scope** (`read` or `write`), and only its **SHA-256 hash** is stored — the server never holds the key itself, and a key is revoked on its own by removing its line. A read-scoped key is never given the tools that write, so it does not even see them; that is the key to put in a connector URL.
+
+> **Already have keys from a previous extension?** Reuse them — skip to Step 4. All functions in the project share the same secrets.
+
+Mint one from this repository's checkout (it prints the key once, and the line to store):
+
+```bash
+cd server-portable && bun keygen.ts --name laptop --scope write
+```
+
+Or by hand — generate a key, then hash it:
 
 🟩 **Mac/Linux:**
 
 ```bash
-openssl rand -hex 32
+KEY=$(openssl rand -hex 32)
+echo "key:  $KEY"
+echo "hash: $(printf %s "$KEY" | shasum -a 256 | cut -d' ' -f1)"
 ```
 
 🟦 **Windows (PowerShell):**
 
 ```powershell
--join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+$key = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+$hash = ([System.Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString('x2') }) -join ''
+"key:  $key"; "hash: $hash"
 ```
 
-Copy the output (64 characters). Save it in your credential tracker.
-
-Set it as a Supabase secret:
+Save the **key** in your credential tracker — it goes in your Connection URL. Set the **hash** as a Supabase secret, as `name:scope:hash`; several keys are separated by commas:
 
 ```bash
-supabase secrets set MCP_ACCESS_KEY=your-generated-key-here
+supabase secrets set MCP_ACCESS_KEYS=laptop:write:paste-the-hash-here
 ```
 
-> If you already set `MCP_ACCESS_KEY` for a previous extension or during the Getting Started guide, setting it again will overwrite it. All functions share the same secrets, so every deployed function will use the new key. If you want separate keys per extension, use a different secret name (e.g., `HOUSEHOLD_MCP_KEY`) and update the extension's `index.ts` to read from that name instead.
+> The older `MCP_ACCESS_KEY=<raw key>` secret still works — one key for every client, with write scope, compared by digest now. Move to `MCP_ACCESS_KEYS` when you next touch the secrets; both may be set at once. Setting a secret again overwrites it for every function in the project, so for a key per extension give each its own line and name in the one `MCP_ACCESS_KEYS` — not a separate secret name.
 
 ## Step 4: Deploy
 
@@ -158,7 +170,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 
 **Deploy succeeds but function returns errors**
 - Check Edge Function logs: Supabase Dashboard → Edge Functions → your function → Logs
-- Verify secrets are set: `supabase secrets list` should show `MCP_ACCESS_KEY`
+- Verify secrets are set: `supabase secrets list` should show `MCP_ACCESS_KEYS` (or the older `MCP_ACCESS_KEY`)
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected — if they're missing, your Supabase project may need to be restarted
 
 **"Invalid JWT" or authentication errors**

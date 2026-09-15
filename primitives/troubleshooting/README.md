@@ -13,10 +13,11 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 **"Getting 401 Unauthorized"**
 - The access key doesn't match what's stored in Supabase secrets
 - Double-check that the `?key=` value in your Connection URL matches your MCP Access Key exactly
-- If using header-based auth (Claude Code), the core Open Brain server expects `x-brain-key` while extension servers expect `x-access-key` — prefer using the `?key=` query parameter to avoid confusion
+- If using header-based auth (Claude Code), the core Open Brain server and the extension servers all accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>` — any of them works
 - Do not use `mcp-remote` with `--header` for Cursor — use Cursor's native `url` field instead (see [Remote MCP Connection](../remote-mcp/))
-- Verify the secret is set: `supabase secrets list` should show `MCP_ACCESS_KEY`
-- Try regenerating the key: `openssl rand -hex 32`, then `supabase secrets set MCP_ACCESS_KEY=new-key` and update your Connection URL
+- Verify the secret is set: `supabase secrets list` should show `MCP_ACCESS_KEYS` (or the older `MCP_ACCESS_KEY`)
+- A key in `MCP_ACCESS_KEYS` is stored as its hash — check that the URL carries the **key**, not the hash, and that the line's scope is what you expect (a read-scoped key does not see the tools that write)
+- Try minting a new key: Step 3 of [Deploy an Edge Function](../deploy-edge-function/), then update your Connection URL
 
 **"Tools don't appear in Claude Desktop"**
 - Verify the connector is enabled for your conversation — click the "+" button at the bottom of the chat → Connectors → check the toggle

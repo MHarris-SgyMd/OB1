@@ -123,14 +123,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { authenticate, canWrite, presentedKey } from "../../server-portable/auth.ts";
 
 const app = new Hono();
 
 app.post("/mcp", async (c) => {
-  // Authenticate with a SEPARATE access key for the shared server
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Authenticate with SEPARATE access keys for the shared server — named,
+  // scoped, hashed entries (see the core server's auth.ts); give a household
+  // member a read-scoped key unless they should mark items purchased.
+  const principal = authenticate(presentedKey(c.req.raw), {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 

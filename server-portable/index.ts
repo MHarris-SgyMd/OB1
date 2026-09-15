@@ -7,7 +7,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
-import { authenticate, canWrite, type Principal } from "./auth.ts";
+import { authenticate, canWrite, presentedKey, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
@@ -1272,10 +1272,10 @@ app.options("*", (c) => {
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 app.all("*", async (c) => {
-  // Accept the access key via header OR URL query parameter. The query form stays
-  // because Claude Desktop custom connectors are URL-only; scopes are what limit
-  // the damage when such a URL leaks. See auth.ts.
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
+  // Accept the access key via header, bearer token OR URL query parameter. The
+  // query form stays because Claude Desktop custom connectors are URL-only;
+  // scopes are what limit the damage when such a URL leaks. See auth.ts.
+  const provided = presentedKey(c.req.raw);
 
   const principal = authenticate(provided, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,

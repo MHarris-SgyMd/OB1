@@ -28,8 +28,16 @@
  * It remains the weakest part of this design — query strings reach access logs,
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
+ *
+ * Consumers: server-portable/index.ts, and the six vendored extensions under
+ * extensions/ (seven servers), which authenticated with `key !== expected` on a
+ * URL query key and ran as the service role until they were made consumers of
+ * this module (SMD-1252, FORK.md change 62). Everything here is runtime-neutral
+ * — node:crypto and node:buffer resolve on Bun, Node, Workers (nodejs_compat)
+ * and Deno — so an Edge Function can import it as it is.
  */
 
+import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 export type Scope = "read" | "write";
@@ -173,4 +181,18 @@ export function authenticate(presented: string | null | undefined, cfg: AuthConf
 /** True when the principal may use tools that modify data. */
 export function canWrite(p: Principal): boolean {
   return p.scope === "write";
+}
+
+/**
+ * The key a request presents, wherever a client can put it: the `x-brain-key`
+ * header (the core server's), `x-access-key` (the extensions'), a bearer token,
+ * or `?key=` — the URL form Claude Desktop's connectors need, kept for the
+ * reason the header of this file gives. The first form present wins; an empty
+ * value is no key. One spelling for the core server and the extensions, so
+ * where a key may come from is decided here and nowhere else.
+ */
+export function presentedKey(req: Request): string | null {
+  const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
+  return req.headers.get("x-brain-key") || req.headers.get("x-access-key") || bearer
+    || new URL(req.url).searchParams.get("key") || null;
 }

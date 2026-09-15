@@ -4,11 +4,16 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1252): access keys go through server-portable/auth.ts — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is never given the tools
+// that write. FORK.md change 62; extensions/test-auth.ts exercises it.
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { authenticate, canWrite, presentedKey } from "../../server-portable/auth.ts";
 
 const app = new Hono();
 
@@ -29,9 +34,15 @@ app.post("*", async (c) => {
   }
 
 
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Named, scoped, hashed keys — the core server's auth path (server-portable/
+  // auth.ts). MCP_ACCESS_KEYS holds name:scope:sha256 entries; the older single
+  // MCP_ACCESS_KEY still works, compared by digest. A read-scoped key is never
+  // given the tools that write, so it cannot see them, let alone call them.
+  const principal = authenticate(presentedKey(c.req.raw), {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -48,7 +59,7 @@ app.post("*", async (c) => {
   const server = new McpServer({ name: "meal-planning", version: "1.0.0" });
 
   // add_recipe tool
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "add_recipe",
     "Add a recipe with ingredients and instructions",
     {
@@ -153,7 +164,7 @@ app.post("*", async (c) => {
   );
 
   // update_recipe tool
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "update_recipe",
     "Update an existing recipe",
     {
@@ -214,7 +225,7 @@ app.post("*", async (c) => {
   );
 
   // create_meal_plan tool
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "create_meal_plan",
     "Plan meals for a week",
     {
@@ -294,7 +305,7 @@ app.post("*", async (c) => {
   );
 
   // generate_shopping_list tool
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "generate_shopping_list",
     "Auto-generate a shopping list from a week's meal plan by aggregating recipe ingredients",
     {

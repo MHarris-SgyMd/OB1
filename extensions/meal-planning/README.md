@@ -193,7 +193,9 @@ Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) gui
 | Function name | `meal-planning-shared-mcp` |
 | Download path | `extensions/meal-planning` |
 | Server file | `shared-server.ts` (not `index.ts`) |
-| Access key secret name | `MCP_HOUSEHOLD_ACCESS_KEY` (not `MCP_ACCESS_KEY`) |
+| Access key secret name | `MCP_HOUSEHOLD_ACCESS_KEYS` (not `MCP_ACCESS_KEYS`; the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works) |
+
+Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
 
 You'll also need to set the household Supabase key:
 
