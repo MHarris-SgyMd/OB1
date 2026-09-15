@@ -440,7 +440,9 @@ this list marks the row holding the key — and a holder whose key describes
 text it no longer holds as STALE, grouped with the NULL row it blocks rather
 than with a twin — so what 023 decided is readable here. Stop a re-embed pass
 and an entity-extraction worker before applying it: every writer into a table
-referencing `thoughts` waits on that lock, and their leases expire. After it a row without a fingerprint is a twin, or
+referencing `thoughts` waits on that lock — and, before migration 031, waited
+out its lease; a parked worker keeps beating now, so this is throughput advice.
+After it a row without a fingerprint is a twin, or
 blocked by a stale key, or was loaded around `upsert_thought` since — and
 `SELECT backfill_content_fingerprints()` settles the last kind the same way,
 when preflight's `fingerprint backfill` says so.

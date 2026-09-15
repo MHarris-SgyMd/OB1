@@ -111,14 +111,14 @@ export function describeHolder(h: LeaseHolder): string {
  * worker held it (the beats stopped reaching the database for a whole lease on
  * its third attempt), not finished by anyone else; --retry-failed returns it.
  */
-export type LostReason =
+type LostReason =
   | { kind: "deleted" }
   | { kind: "pending" }
   | { kind: "claimed"; worker: string }
   | { kind: "reaped" }
   | { kind: "finished"; status: string; worker: string };
 
-export async function lostReason(sql: SQL, job: string, workerId: string, id: string): Promise<LostReason> {
+async function lostReason(sql: SQL, job: string, workerId: string, id: string): Promise<LostReason> {
   const rows = (await sql`SELECT status, worker_id FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${job}`) as
     { status: string; worker_id: string | null }[];
   if (rows.length === 0) return { kind: "deleted" };
@@ -142,7 +142,7 @@ export async function reportLost(sql: SQL, job: string, workerId: string, id: st
 }
 
 /** The line a worker prints for a lost row, from what the row said. Every kind but `deleted` is a row the run did not finish. */
-export function describeLoss(why: LostReason | null): string {
+function describeLoss(why: LostReason | null): string {
   if (why === null) return "no longer this worker's, and the row could not be read; skipping";
   switch (why.kind) {
     case "pending": return "back in the pool — reaped after a missed lease, requeued by an edit, or returned by hand with release_claims_for_worker — for a later claim, this run's or the next's; skipping";
