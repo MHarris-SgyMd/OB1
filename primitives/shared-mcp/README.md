@@ -66,7 +66,7 @@ Table: recipes
 
 Table: shopping_list_items
   - Operations: SELECT, INSERT, UPDATE
-  - Why: Spouse can view, add, and check off items
+  - Why: Spouse can view items and, with a write-scoped key, add and check them off
 
 Table: thoughts (NOT SHARED)
 Table: contacts (NOT SHARED)
@@ -123,14 +123,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 const app = new Hono();
 
 app.post("/mcp", async (c) => {
-  // Authenticate with a SEPARATE access key for the shared server
-  const key = c.req.query("key") || c.req.header("x-access-key");
-  const expected = Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY");
-  if (!key || key !== expected) {
+  // Authenticate with SEPARATE access keys for the shared server — named,
+  // scoped, hashed entries (see the core server's auth.ts); give a household
+  // member a read-scoped key unless they should mark items purchased.
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_HOUSEHOLD_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
@@ -178,7 +183,9 @@ app.post("/mcp", async (c) => {
     }
   );
 
-  server.tool(
+  // Tools that write are registered only for a write-scoped key; a read-scoped
+  // household member sees the view tools alone.
+  if (canWrite(principal)) server.tool(
     "add_shopping_item",
     "Add item to shopping list",
     {
@@ -196,7 +203,7 @@ app.post("/mcp", async (c) => {
     }
   );
 
-  server.tool(
+  if (canWrite(principal)) server.tool(
     "update_shopping_item",
     "Mark shopping item as purchased",
     {
@@ -230,11 +237,14 @@ Deno.serve(app.fetch);
 Set the shared server's secrets in Supabase (separate from your main server's secrets):
 
 ```bash
-# Generate a separate access key for the shared server
-openssl rand -hex 32
+# Mint a separate, named key for the shared server — read-scoped unless this
+# member should add or check off items (Step 3 of the Deploy an Edge Function
+# primitive shows the by-hand form). The HASH is stored; the key goes in the URL.
+# Run from a checkout of this repository, in a subshell so the cwd stays here:
+(cd /path/to/your/OB1/checkout/server-portable && bun keygen.ts --name spouse --scope read)
 
 # Set secrets
-supabase secrets set MCP_HOUSEHOLD_ACCESS_KEY=your-generated-shared-key
+supabase secrets set MCP_HOUSEHOLD_ACCESS_KEYS=spouse:read:paste-the-hash-here
 supabase secrets set SUPABASE_HOUSEHOLD_KEY=your-limited-supabase-key  # LIMITED KEY
 
 # Optional: Household ID for RLS
@@ -386,7 +396,7 @@ Claude: [calls view_meal_plans tool] "Here's the meal plan:
 - Wednesday: Leftover night
 ..."
 
-Spouse: "Add milk and eggs to the shopping list"
+Spouse: "Add milk and eggs to the shopping list"          (a write-scoped key; with the read-scoped one minted above, add_shopping_item is not offered)
 Claude: [calls add_shopping_item twice] "Added milk and eggs to the list."
 
 Spouse: "Show me the recipe for chicken tacos"
@@ -518,7 +528,7 @@ For Supabase: Create a custom JWT with limited claims, or use connection pooling
 
 4. Verify the connector URL is correct:
 
-   - Check that the `?key=` value matches the `MCP_HOUSEHOLD_ACCESS_KEY` secret exactly
+   - Check that the `?key=` value is the **key** whose hash sits in the `MCP_HOUSEHOLD_ACCESS_KEYS` secret (the URL carries the key, the secret its hash), and that the line's scope is what you expect
    - Try removing and re-adding the connector in Settings → Connectors
    - Verify the Edge Function is deployed: `supabase functions list`
 

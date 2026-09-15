@@ -168,7 +168,7 @@ same commit.**
 Required in every environment:
 
 ```
-MCP_ACCESS_KEY               the shared access key clients present
+MCP_ACCESS_KEYS              name:scope:sha256 entries — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 SUPABASE_URL                 PostgREST base URL (or your replacement)
 SUPABASE_SERVICE_ROLE_KEY    service credential
 OPENROUTER_API_KEY           embeddings + metadata extraction

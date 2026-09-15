@@ -120,8 +120,8 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 **Getting 401 errors**
 - The access key doesn't match what's stored in Supabase secrets
 - Double-check that the `?key=` value in your URL matches your MCP Access Key exactly
-- If using the header approach (Claude Code), the core Open Brain server uses `x-brain-key` while extension servers use `x-access-key`
-- Prefer the `?key=` query parameter approach to avoid header name confusion
+- If using the header approach (Claude Code): the extension servers and this fork's server (`server-portable/`) accept `x-brain-key`, `x-access-key` or `Authorization: Bearer <key>`; the original `open-brain-mcp` Edge Function from the Getting Started guide accepts `x-brain-key` or `?key=` only
+- A key that lists tools but not the ones that write is read-scoped — that is the scope to give a key that travels in a URL; mint a write-scoped one for a client that captures (Step 3 of [Deploy an Edge Function](../deploy-edge-function/))
 
 **Tools work but responses are slow**
 - First request on a cold Edge Function takes a few seconds to warm up

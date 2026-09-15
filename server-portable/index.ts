@@ -7,7 +7,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
-import { authenticate, canWrite, type Principal } from "./auth.ts";
+import { authenticateRequest, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
 /**
@@ -1148,7 +1148,7 @@ function buildServer(principal: Principal): McpServer {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
@@ -1272,12 +1272,12 @@ app.options("*", (c) => {
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 app.all("*", async (c) => {
-  // Accept the access key via header OR URL query parameter. The query form stays
-  // because Claude Desktop custom connectors are URL-only; scopes are what limit
-  // the damage when such a URL leaks. See auth.ts.
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-
-  const principal = authenticate(provided, {
+  // Accept the access key via header, bearer token OR URL query parameter — every
+  // form presented is tried, so a gateway's own bearer token beside the client's
+  // `?key=` does not shadow it. The query form stays because Claude Desktop
+  // custom connectors are URL-only; scopes are what limit the damage when such a
+  // URL leaks. See auth.ts.
+  const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS,
     MCP_ACCESS_KEY: env().MCP_ACCESS_KEY,
   });
