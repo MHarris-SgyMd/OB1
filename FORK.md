@@ -6171,10 +6171,11 @@ merged in). Upstream status:
 **not applicable** — the migrator, `reembed.ts` and preflight are the fork's
 (changes 11 and 29).
 
-### 57. The migrator brackets 021's evidence backfill — the labels before the file are noted, 030's rule is applied after it, and no gate refuses the run (SMD-1421)
+### 57. 021's evidence backfill runs with the operator's acceptances out of its sight — a copy of the claim table shadows the real one for that file, and no gate refuses the run (SMD-1421)
 
 `db/migrate.ts`, `db/config.mjs`, `db/config.d.mts`, `db/reembed.ts`,
-`db/test-upgrade.ts` and `db/README.md` (Linear SMD-1421, filed by change 56's
+`db/test-upgrade.ts`, `db/README.md` and `scripts/check-fork-consistency.mjs`
+(Linear SMD-1421, filed by change 56's
 sixth and seventh review passes). No migration: 030 stands as it is, and the
 correction it cannot make becomes the migrator's.
 
@@ -6208,9 +6209,12 @@ and that the name resolves to the copy is checked before the file runs.
 Creation targets are then unaffected. The copy takes ACCESS SHARE on the claim table, as 021's
 block did, and nothing on `thoughts` before 021's own ADD COLUMN: no lock the
 file alone never took. The run says beside 021's line how many thoughts the
-block labelled. Judged before any SQL, both modes: the role may create a temp
-table. The loader refuses two files sharing a number, since the file is named
-whole.
+block labelled — zero included, read from the transaction's own statistics
+(`pg_stat_xact_user_tables`), so nothing reads `thoughts` before the file.
+Judged before any SQL, both modes: the role may create a temp table. The
+loader refuses a set without 021 and two files sharing a number, since the
+file is named whole; the fork checker refuses the second on every push, where
+the collision is made.
 
 **What went.** The hazards query, both arms of the way back, the `has_edit`
 and signature probe, the claim-table probe, the "030 recorded" branch, the
@@ -6378,6 +6382,28 @@ landed there and vanished with the transaction — so the path is left alone,
 or stripped of `pg_temp` where a role lists it, and the shadow is checked
 rather than arranged.
 
+**Review, sixth pass (high), at the user's call, triaged.** Nothing checked
+that 021 was in the set: a renamed file ran bare, reading the acceptances,
+with no line saying so — refused at load. The labelled count was two
+`count(*)` scans of `thoughts`, the first taking ACCESS SHARE before the
+file's ADD COLUMN asked for ACCESS EXCLUSIVE — the lock upgrade the first pass
+had removed, back on the plain path, and [7]'s held-lock case was timing out
+on the count, not the ALTER; the count is now the transaction's own
+`n_tup_upd` on `thoughts`, before and after, O(1) and no read of the table.
+The line printed only for a non-zero count, so "shadow ran, nothing to label",
+"ran bare, no claim table" and "older migrator" were one silence — printed at
+zero too. A `DROP TABLE IF EXISTS` of the temp name was dead, and in the one
+state it seemed to guard (a pooled connection handed over with such a table)
+it broke the copy's source, resolved before the drop: gone, and that state is
+refused. The copy carried every column of every claim row; the four the block
+reads. The TEMP refusal led with acceptances on a fresh database with no claim
+table; it leads with the privilege, and [9] exercises it with a role that has
+none. The duplicate-number rule lived only in the runner, at every operator's
+and compose start's expense; the fork checker carries it too, on every push.
+Two README lines and this section's heading still described the bracket. [9]
+plants a suffixed-key acceptance and rebuilds the brain for the both-pending
+run, so the column is truly absent there.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6396,23 +6422,25 @@ run within their own timeout; then deletes 021's ledger row with 030 recorded,
 plants a fifth acceptance under a suffixed key and a paste's mislabel from
 before 021 over an own-key acceptance, and asserts a held lock on `thoughts`
 fails the plain run's 021 within the run's 10 s with nothing recorded, that
-the plain run then applies 021 — exit 0, 030 skipped as recorded, nothing
-labelled since every unlabelled thought's rows are acceptances, the paste's
-label standing since 030 did not run, every other label as the re-run left it,
-021 recorded, the trigger enabled — and that a second `--reapply` labels
-nothing at 021 while 030 at its own place takes the paste's label back. [9]
-builds a brain through 020 with the same fixture, baselines it, opens a hole at
-021 and asserts the plain run applies 021 with the column absent — two
-labelled, the acceptance-only thought unknown — then opens holes at 021 and
-030 both, plants a fresh acceptance over an unlabelled thought, and asserts
-the ordinary upgrade applies both, labels nothing new, and leaves the rule's
-labels. The hazard refusals went with the gate; the rest of [7] and all of
-[8] are unchanged. Not exercised: the TEMP refusal (a superuser holds the
-privilege whatever is revoked), the loader's duplicate-number refusal, the
-40P01 line, and the shadow refusal (the copy always shadows on the test role's
-path). `test-upgrade` 119/119, `test-schema` 644/644,
-`test-preflight` 174/174, `test-live` 419/419, `tsc` clean, fork checker PASS.
-Upstream status: **not applicable** — the
+the plain run then applies 021 — exit 0, 030 skipped as recorded, the line
+saying zero labelled since every unlabelled thought's rows are acceptances,
+the paste's label standing since 030 did not run, every other label as the
+re-run left it, 021 recorded, the trigger enabled — and that a second
+`--reapply` labels nothing at 021 while 030 at its own place takes the paste's
+label back. [9] builds a brain through 020 with the same fixture and a
+suffixed-key acceptance, baselines it, opens a hole at 021 and asserts the
+plain run applies 021 with the column absent — two labelled, every
+acceptance-only thought unknown — then rebuilds it, adds a fresh own-key
+acceptance, opens holes at 021 and 030 both and asserts the ordinary upgrade
+applies both with the column truly absent and leaves the rule's labels; and
+that a role without TEMP is refused before anything runs, dry run included,
+with the GRANT. The hazard refusals went with the gate; the rest of [7] and
+all of [8] are unchanged. Not exercised: the loader's two refusals (a set
+without 021, two files sharing a number), the checker's duplicate-number rule,
+the 40P01 line, the shadow refusal (the copy always shadows on the test role's
+path) and the stale-temp-table refusal. `test-upgrade` 120/120,
+`test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
+clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).
 
 ## Detached from the fork network

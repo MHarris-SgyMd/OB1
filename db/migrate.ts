@@ -226,6 +226,10 @@ if (migrations.length === 0) {
  * any 021_*.sql. See applyShadowed.
  */
 const FILE_021 = "021_embedding_model_per_row.sql";
+if (!migrations.some((m) => m.name === FILE_021)) {
+  console.error(`${FILE_021} is not in the set: it is the file whose evidence backfill the migrator shadows the claim table for, by its whole name — a renamed or renumbered file would run bare, reading the acceptances.`);
+  process.exit(2);
+}
 
 console.log(`  embedding: ${EMBEDDING_MODEL} @ ${EMBEDDING_DIM} dimensions`);
 // Printed because it is the one setting that changes what the schema CONTAINS
@@ -454,14 +458,22 @@ async function reportSeeds(m: Migration): Promise<void> {
  * file alone never took, and no order a worker's enqueue inverts. Needs TEMP on
  * the database (023's backfill call does too), judged before any SQL runs.
  * Where the claim table is missing, the file runs bare and fails on it as it
- * always did. The tie 030 breaks by key is 021's unnamed pick here, and a
- * label from before 021 that 030's first statement would take back — a paste
- * of the body over an acceptance — waits for 030's own run, which on a hole at
- * 021 alone is the re-run.
+ * always did; where a temp table of that name already exists on the connection
+ * — a pooled connection handed over with one — the file is refused, since the
+ * block would read it. The copy carries the four columns the block reads. The
+ * tie 030 breaks by key is 021's unnamed pick here, and a label from before
+ * 021 that 030's first statement would take back — a paste of the body over an
+ * acceptance — waits for 030's own run, which on a hole at 021 alone is the
+ * re-run.
  *
- * Reports how many thoughts the block labelled — the labelled count after
- * minus before, zero before where the column did not exist — since the label
- * is not an edit and nothing else records the write; null for any other file.
+ * Reports how many thoughts the block labelled — the rows its one UPDATE of
+ * thoughts touched, read from the transaction's own statistics
+ * (pg_stat_xact_user_tables, before and after; "not counted" where
+ * track_counts is off), so nothing here reads thoughts and no lock is taken on
+ * it before the file's own (the sixth review pass found a count(*) taking
+ * ACCESS SHARE ahead of the ALTER's ACCESS EXCLUSIVE, the upgrade the first pass
+ * had removed) — since the label is not an edit and nothing else records the
+ * write; null for any other file.
  * Four review passes bracketed 021's OUTPUT instead — a snapshot of the
  * unlabelled ids, a set-back under a held trigger, 030's rule run after — and
  * each pass found a seam in the bracket; the fifth proposed the shadow and
@@ -470,30 +482,45 @@ async function reportSeeds(m: Migration): Promise<void> {
  * back that spent the acceptance (SMD-1193) — 030's header, hashed, still
  * describes the gate.
  */
-async function applyShadowed(tx: SQL, m: Migration): Promise<number | null> {
+/** What 021's backfill wrote with the acceptances out of its sight — null where the server does not count (track_counts off). */
+type Shadow = { labelled: number | null };
+/** A search_path entry naming the temp schema, quoted or not. */
+const PG_TEMP_ENTRY = /^"?pg_temp"?$/i;
+
+async function applyShadowed(tx: SQL, m: Migration): Promise<Shadow | null> {
   if (m.name !== FILE_021) {
     await tx.unsafe(m.sql);
     return null;
   }
-  const [{ nsp, has_label, path }] = (await tx`
+  // Catalog reads only: no lock on thoughts before the file's own ADD COLUMN.
+  const [{ nsp, path, counted }] = (await tx`
     SELECT (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass('thought_work_claims')) AS nsp,
-           EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('thoughts') AND attname = 'embedding_model' AND NOT attisdropped) AS has_label,
-           current_setting('search_path') AS path`) as { nsp: string | null; has_label: boolean; path: string }[];
+           current_setting('search_path') AS path,
+           current_setting('track_counts') = 'on' AS counted`) as { nsp: string | null; path: string; counted: boolean }[];
   if (nsp === null) {
     await tx.unsafe(m.sql);
     return null;
   }
-  const labelled = async () => Number(((await tx`SELECT count(*)::int AS n FROM thoughts WHERE embedding_model IS NOT NULL`) as { n: number }[])[0].n);
-  const before = has_label ? await labelled() : 0;
-  // The source named by its schema: the copy's own name is the table's, and
-  // once it exists an unqualified name is the copy.
-  await tx.unsafe("DROP TABLE IF EXISTS pg_temp.thought_work_claims");
-  await tx.unsafe(`CREATE TEMP TABLE thought_work_claims ON COMMIT DROP AS SELECT c.* FROM ${quoteIdent(nsp)}.thought_work_claims c WHERE NOT ${ACCEPTED_CLAIM_SQL}`);
+  if (/^pg_temp/.test(nsp)) {
+    // Not ours: nothing here creates one before this point, and a pooled
+    // connection handed over with one is not a state to read the block from.
+    throw new Error(`a temp table named thought_work_claims already exists on this connection (schema ${nsp}); 021's backfill would read it in place of the claim table. Drop it and run again`);
+  }
+  // The rows 021's one UPDATE of thoughts touches, from the transaction's own
+  // statistics: O(1), visible before commit, and no read of thoughts.
+  const updated = async () => Number(((await tx`SELECT n_tup_upd AS n FROM pg_stat_xact_user_tables WHERE relid = to_regclass('thoughts')`) as { n: number }[])[0]?.n ?? 0);
+  const before = await updated();
+  // The four columns the block reads (021:214-217), from the source named by
+  // its schema — once the copy exists, an unqualified name is the copy.
+  await tx.unsafe(
+    `CREATE TEMP TABLE thought_work_claims ON COMMIT DROP AS SELECT c.thought_id, c.work_type, c.status, c.finished_at FROM ${quoteIdent(nsp)}.thought_work_claims c WHERE NOT ${ACCEPTED_CLAIM_SQL}`
+  );
+  await tx.unsafe("ANALYZE pg_temp.thought_work_claims");
   // pg_temp first for relations exactly when unlisted: a path that lists it
   // has it removed for the transaction (never added first — see above).
   const entries = path.split(",").map((e) => e.trim());
-  const listsTemp = entries.some((e) => /^"?pg_temp"?$/i.test(e));
-  if (listsTemp) await tx`SELECT set_config('search_path', ${entries.filter((e) => !/^"?pg_temp"?$/i.test(e)).join(", ")}, true)`;
+  const listsTemp = entries.some((e) => PG_TEMP_ENTRY.test(e));
+  if (listsTemp) await tx`SELECT set_config('search_path', ${entries.filter((e) => !PG_TEMP_ENTRY.test(e)).join(", ")}, true)`;
   const [{ shadowed }] = (await tx`SELECT to_regclass('thought_work_claims') = 'pg_temp.thought_work_claims'::regclass AS shadowed`) as { shadowed: boolean }[];
   if (!shadowed) {
     throw new Error(`the copy of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);
@@ -501,12 +528,22 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<number | null> {
   await tx.unsafe(m.sql);
   await tx.unsafe("DROP TABLE pg_temp.thought_work_claims");
   if (listsTemp) await tx`SELECT set_config('search_path', ${path}, true)`;
-  return (await labelled()) - before;
+  return { labelled: counted ? (await updated()) - before : null };
 }
 
-/** Beside 021's line: what its backfill wrote with the acceptances out of its sight — the label is not an edit, and nothing else records the write. */
-function reportShadow(n: number | null): void {
-  if (n) console.log(`  ·  021's evidence backfill labelled ${n} thought(s) from the claim rows, the operator's acceptances out of its sight`);
+/**
+ * Beside 021's line, whenever the shadow ran — at zero too, since a silent 021
+ * is also what a claim table not found, or an older migrator, prints: what its
+ * backfill wrote with the acceptances out of its sight. The label is not an
+ * edit, and nothing else records the write.
+ */
+function reportShadow(s: Shadow | null): void {
+  if (s === null) return;
+  console.log(
+    s.labelled === null
+      ? "  ·  021's evidence backfill ran with the operator's acceptances out of its sight; what it labelled is not counted (track_counts is off)"
+      : `  ·  021's evidence backfill labelled ${s.labelled} thought(s) from the claim rows, the operator's acceptances out of its sight`
+  );
 }
 
 // ── Judged before any SQL runs ──────────────────────────────────────────────
@@ -525,8 +562,8 @@ if (shadows021) {
     refusals.push({
       code: 2,
       text:
-        `021's evidence backfill runs with the operator's acceptances out of its sight through a temp table, and this role may not create one\n` +
-        `  (023's backfill call needs one too). GRANT TEMPORARY ON DATABASE ${quoteIdent(db)} TO ${quoteIdent(role)}; then run again.`,
+        `this role may not create a temp table, and 021's evidence backfill needs one — a copy of the claim table without the operator's acceptances,\n` +
+        `  for that file to read — as 023's backfill call does. GRANT TEMPORARY ON DATABASE ${quoteIdent(db)} TO ${quoteIdent(role)}; then run again.`,
     });
   }
 }
@@ -647,14 +684,14 @@ if (reapply) {
 if (reapply && !dryRun) {
   // An object, not a `let`: an assignment inside the callback is invisible to
   // the type checker's flow analysis, which would narrow a `let` to null.
-  const progress: { current: Migration | null; labelled: number | null } = { current: null, labelled: null };
+  const progress: { current: Migration | null; shadow: Shadow | null } = { current: null, shadow: null };
   try {
     await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
       for (const m of migrations) {
         progress.current = m;
-        const n = await applyShadowed(tx, m);
-        if (n !== null) progress.labelled = n;
+        const shadow = await applyShadowed(tx, m);
+        if (shadow !== null) progress.shadow = shadow;
         if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       }
     });
@@ -671,7 +708,7 @@ if (reapply && !dryRun) {
   for (const m of migrations) {
     const again = applied.has(m.name);
     console.log(`  ✓  ${m.name}  ${again ? "re-applied" : "applied"}`);
-    if (m.name === FILE_021) reportShadow(progress.labelled);
+    if (m.name === FILE_021) reportShadow(progress.shadow);
     if (again) reapplied++;
     else ran++;
   }
@@ -734,14 +771,14 @@ for (const m of reapply && !dryRun ? [] : migrations) {
   // same lock_timeout as the re-run's, so a held lock fails the file rather
   // than freezing the run and every reader behind it.
   try {
-    const labelled = await sql.begin(async (tx: SQL) => {
+    const shadow = await sql.begin(async (tx: SQL) => {
       await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
-      const n = await applyShadowed(tx, m);
+      const s = await applyShadowed(tx, m);
       await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
-      return n;
+      return s;
     });
     console.log(`  ✓  ${m.name}  applied`);
-    reportShadow(labelled);
+    reportShadow(shadow);
     ran++;
   } catch (err) {
     console.error(`  ✗  ${m.name}  FAILED: ${(err as Error).message}`);

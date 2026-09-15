@@ -443,7 +443,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
     /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plainRun.out);
   assert(plainOk, `a plain run on the baselined brain fails at 030 naming what is missing and --reapply, not with a bare error (exit ${plainRun.code})${plainOk ? "" : `:\n${plainRun.out}`}`);
   assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${last}`)[0].c) === 0, "…and records nothing");
-  const { vec, KEY, EARLIER, plant, enqueue, labels, corpus } = evidenceFixture(sql);
+  const { vec, KEY, plant, enqueue, labels, corpus } = evidenceFixture(sql);
   const { vouched, accepted, earlierThenAccepted } = await corpus();
   const noEvidence = await plant("nothing ever re-embedded this");
   const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
@@ -600,8 +600,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const holeAt021 = await migrate();
   assert(holeAt021.code === 0, `with 030 recorded and skipped, a plain run with a hole at 021 applies it ${shown(holeAt021)}`);
   assert(/021_embedding_model_per_row\.sql\s+applied/.test(holeAt021.out) && /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(holeAt021.out) &&
-           !/evidence backfill labelled/.test(holeAt021.out) && !/refus/.test(holeAt021.out),
-         "…no refusal, 030 skipped as recorded, and nothing labelled: every unlabelled thought's rows are acceptances, out of the block's sight");
+           /021's evidence backfill labelled 0 thought\(s\) from the claim rows/.test(holeAt021.out) && !/refus/.test(holeAt021.out),
+         "…no refusal, 030 skipped as recorded, and the shadow's line says zero: every unlabelled thought's rows are acceptances, out of the block's sight");
   const afterHole = await labels();
   assert(afterHole[accepted] === null && afterHole[lateSuffixed] === null && afterHole[suffixedHazard] === null && afterHole[writtenSince] === null,
          "…the thoughts whose only evidence is an acceptance stay NULL, the new one included");
@@ -616,7 +616,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // alone put 021's body over, are restored (the state preflight's `atomic
   // capture` names, with this remedy).
   const again = await migrate("--reapply");
-  assert(again.code === 0 && !/evidence backfill labelled/.test(again.out), `a second --reapply labels nothing at 021 — the acceptances out of its sight ${shown(again)}`);
+  assert(again.code === 0 && /021's evidence backfill labelled 0 thought\(s\)/.test(again.out), `a second --reapply labels nothing at 021 — the acceptances out of its sight ${shown(again)}`);
   assert(JSON.stringify(await labels()) === JSON.stringify({ ...afterHole, [pasteMislabel]: null }), "…and 030, at its own place, takes the paste's label back; every other label as before");
 
   // Every recorded file, not a range: 022 and 025 redefine 021's 3-argument
@@ -757,42 +757,74 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   await sql.close();
 }
 
-console.log("\n[9] 021 with the acceptances out of its sight on a plain run — the column absent, then both files pending (SMD-1421)");
+console.log("\n[9] 021 with the acceptances out of its sight on a plain run — the column absent, 030 recorded then pending, and a role without TEMP (SMD-1421)");
 {
-  await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
-  const sql = new SQL({ url: URL_, max: 1 });
   const env = migratorEnv();
   const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
-  const { KEY, plant, enqueue, labels, corpus } = evidenceFixture(sql);
-  const { vouched, accepted, earlierThenAccepted } = await corpus();
+  /** A brain through 020 with the fixture's corpus and an acceptance under a SUFFIXED key over an unlabelled thought — the row 030 can never correct. */
+  const build = async () => {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
+    const sql = new SQL({ url: URL_, max: 1 });
+    const fx = evidenceFixture(sql);
+    const corpus = await fx.corpus();
+    const suffixed = await fx.plant("unlabelled; a backfill under a suffixed key was refused and accepted");
+    await fx.enqueue(`${fx.KEY}:ctx`, [suffixed]);
+    await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${`${fx.KEY}:ctx`}`;
+    return { sql, ...fx, ...corpus, suffixed };
+  };
 
   // The column absent and 030 recorded — a --baseline'd brain with a hole at
-  // 021: the block labels from the plain rows alone.
+  // 021: the block labels from the plain rows alone, the suffixed-key
+  // acceptance out of its sight like the own-key ones.
+  let b = await build();
   await migrate("--baseline");
-  await sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
+  await b.sql`DELETE FROM schema_migrations WHERE name LIKE '021%'`;
   const absent = await migrate();
   assert(absent.code === 0, `a plain run with a hole at 021 on a schema without the column applies it ${shown(absent)}`);
   assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\) from the claim rows, the operator's acceptances out of its sight/.test(absent.out) &&
            /030_label_from_claims_excludes_accepted\.sql\s+already applied/.test(absent.out),
          "…two labelled — the plain row's thought and the earlier pass's — 030 skipped as recorded");
-  let now = await labels();
-  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model", "…and the labels are the rule's: the acceptance-only thought unknown, the earlier pass's at its model");
+  let now = await b.labels();
+  assert(now[b.vouched] === OPTS.model && now[b.accepted] === null && now[b.earlierThenAccepted] === "earlier-model" && now[b.suffixed] === null,
+         "…and the labels are the rule's: the acceptance-only thoughts unknown, the suffixed key's too, the earlier pass's at its model");
+  await b.sql.close();
 
-  // Both files pending — the ordinary upgrade, by ledger hole — with a fresh
-  // acceptance over an unlabelled thought: nothing to label from, no line.
-  await sql`DELETE FROM schema_migrations WHERE name LIKE '021%' OR name LIKE '030%'`;
-  const late = await plant("unlabelled since; a pass to the model was refused and accepted");
-  await enqueue(KEY, [late]);
-  await sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${KEY} AND thought_id = ${late}::uuid`;
+  // The same brain with both files pending — the ordinary upgrade, by ledger
+  // hole, the column truly absent — and a fresh own-key acceptance besides.
+  b = await build();
+  const late = await b.plant("unlabelled; a pass to the model was refused and accepted");
+  await b.enqueue(b.KEY, [late]);
+  await b.sql`UPDATE thought_work_claims SET status = 'succeeded', claimed_at = now(), finished_at = now(), last_error = ${ACCEPTED_CAVEAT_PREFIX + "refused"} WHERE work_type = ${b.KEY} AND thought_id = ${late}::uuid`;
+  await migrate("--baseline");
+  await b.sql`DELETE FROM schema_migrations WHERE name LIKE '021%' OR name LIKE '030%'`;
   const both = await migrate();
   assert(both.code === 0, `a plain run with 021 and 030 pending applies both ${shown(both)}`);
-  assert(/021_embedding_model_per_row\.sql\s+applied\n/.test(both.out) && !/evidence backfill labelled/.test(both.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied\n/.test(both.out),
-         "…021 labels nothing — the one unlabelled thought's row is an acceptance, out of its sight — and 030 applies at its own place");
-  now = await labels();
-  assert(now[vouched] === OPTS.model && now[accepted] === null && now[earlierThenAccepted] === "earlier-model" && now[late] === null, "…and every label is as before, the new acceptance's thought unknown");
-  assert((await updatedAtTriggerState(sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
-  await sql.close();
+  assert(/021_embedding_model_per_row\.sql\s+applied\n\s+·\s+021's evidence backfill labelled 2 thought\(s\)/.test(both.out) && /030_label_from_claims_excludes_accepted\.sql\s+applied\n/.test(both.out),
+         "…021 labels the two thoughts with plain rows and 030 applies at its own place");
+  now = await b.labels();
+  assert(now[b.vouched] === OPTS.model && now[b.accepted] === null && now[b.earlierThenAccepted] === "earlier-model" && now[b.suffixed] === null && now[late] === null,
+         "…and every acceptance-only thought is unknown, the suffixed key's and the fresh one's included");
+  assert((await updatedAtTriggerState(b.sql)) === "O", "…and the updated_at trigger is enabled again afterwards");
+
+  // A role without TEMP on the database: refused before anything runs, dry run
+  // included, naming the GRANT — where the copy would otherwise fail at 021
+  // after the files before it had committed.
+  const [{ db }] = (await b.sql`SELECT current_database() AS db`) as { db: string }[];
+  await b.sql.unsafe("CREATE ROLE ob1_notemp LOGIN PASSWORD 'notemp'");
+  await b.sql.unsafe(`REVOKE TEMP ON DATABASE "${db}" FROM PUBLIC`);
+  await b.sql.unsafe(`GRANT CONNECT ON DATABASE "${db}" TO ob1_notemp`);
+  await b.sql.unsafe("GRANT USAGE, CREATE ON SCHEMA public TO ob1_notemp");
+  await b.sql.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_notemp");
+  const noTempUrl = URL_.replace(/\/\/[^@]*@/, "//ob1_notemp:notemp@");
+  const noTemp = await runScript(["bun", join(HERE, "migrate.ts"), "--url", noTempUrl, "--reapply", "--dry-run"], { env: { ...env, DATABASE_URL: noTempUrl }, cwd: HERE });
+  assert(noTemp.code === 2 && /would refuse --reapply: this role may not create a temp table, and 021's evidence backfill needs one/.test(noTemp.out) &&
+           new RegExp(`GRANT TEMPORARY ON DATABASE "${db}" TO "ob1_notemp"; then run again`).test(noTemp.out) && !/would re-apply every migration/.test(noTemp.out),
+         `a role without TEMP is refused before anything runs, with the GRANT, and the dry run says so too (exit ${noTemp.code})`);
+  await b.sql.unsafe(`GRANT TEMP ON DATABASE "${db}" TO PUBLIC`);
+  await b.sql.unsafe("DROP OWNED BY ob1_notemp");
+  await b.sql.unsafe("DROP ROLE ob1_notemp");
+  await b.sql.close();
 }
 
 report();

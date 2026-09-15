@@ -124,20 +124,23 @@ and no claim row touched. The copy is dropped right after the file, in the
 same transaction, so 022 onward read the real table; a search path that lists
 `pg_temp` — which is searched first for tables exactly when it is *not* listed
 — has it removed for the transaction, and that the name resolves to the copy
-is checked before the file runs. The run says beside 021's line how many thoughts
-the block labelled. A label 021's block wrote from an acceptance on an earlier
+is checked before the file runs; a temp table of that name already on the
+connection refuses the file. The run says beside 021's line how many thoughts
+the block labelled — zero included, read from the transaction's own statistics
+(not counted where `track_counts` is off). A label 021's block wrote from an acceptance on an earlier
 run, or a paste of the body left, is 030's to take back at its own place — the
 re-run reaches it. Judged before anything runs, in both modes, whenever 021
 will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
 otherwise; 023's call needs one too). Two files sharing a number are refused
-at load. Every refusal is collected and reported together, the re-run's
-included.
+at load, and by the fork checker on every push; a set without 021 is refused
+at load, since the file is named whole. Every refusal is collected and
+reported together, the re-run's included.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
 acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed. `--baseline` runs no
-SQL and brackets nothing.
+SQL and shadows nothing.
 
 **Stop the server and any re-embed or extraction worker first.** Every
 transaction the migrator opens — the re-run's, and each file's on a plain run —
@@ -454,8 +457,8 @@ read-only `--status` runs against any schema; a pass that would write requires
 018, `--dry-run` reports that refusal in place of the worker plan, and a brain
 adopted with `--baseline` — ledger says 021, body says 013 — is told to
 `migrate.ts --reapply` rather than to apply a migration a plain run skips (§5
-above; the migrator brackets 021's backfill, so a label it writes from an
-accepted row goes back to unknown).
+above; the migrator runs 021's backfill with the operator's acceptances out of
+its sight, so it labels from real passes alone).
 Migration 023 is the one-shot backfill: every legacy singleton, and the oldest
 of each group (`created_at`, then id) takes its fingerprint once at upgrade,
 under a table lock that makes a capture waiting on it merge rather than double;
