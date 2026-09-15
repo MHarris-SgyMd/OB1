@@ -974,7 +974,7 @@ OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./wi
 # it, every later run under the same name finds it, checks it, applies any
 # migration the tree gained since, and skips to the oracle. One corpus per name.
 OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
-podman volume rm ob1-pg-keep-hnsw10m   # when done with it
+podman volume rm ob1-pg-keep-hnsw10m   # when done with it (the exit line prints this, with the runtime as found)
 ```
 
 Queries are random vectors, not perturbed copies of a target. A perturbed copy
@@ -1041,9 +1041,11 @@ file for is refused — then both row counts and the corpus's first and last
 rows regenerated from the seed and compared. Section L's `source` column says
 `loaded` or `reused (built …)` per scale, and the run prints what it counted
 and which files it applied. A kept database holds one corpus: a run asking for
-another scale than the one an earlier run kept is refused before anything is
-dropped (run the small scales without `OB1_PG_KEEP`, or under another name); a
-run over several scales keeps the last. The published scales are never kept —
+any scale other than the one an earlier run kept is refused up front, before
+anything is dropped (run the small scales without `OB1_PG_KEEP`, or under
+another name); a run over several scales keeps the last one above 100,000
+rows, and is refused up front if a small scale comes after it, since that
+would drop the corpus and keep nothing. The published scales are never kept —
 the before arm needs 001–013 under the rows, and a build that size is seconds.
 Measured at a million rows: 6 min 49 s for the run that built the corpus,
 3 min 45 s for the one that reused it.
@@ -1220,7 +1222,8 @@ second invocation while one is running under it is refused rather than sharing
 the database, and the readiness wait is thirty minutes rather than one, since a
 kept data directory may start into crash recovery. `bench-hnsw.ts` uses it to
 reuse a loaded corpus across passes (SMD-1493). What was kept is yours to
-remove, and the exit line prints the command:
+remove, and the exit line prints the command with the runtime as the script
+found it (`/opt/podman/bin/podman` where `podman` is off `PATH`):
 
 ```bash
 podman volume rm ob1-pg-keep-<name>

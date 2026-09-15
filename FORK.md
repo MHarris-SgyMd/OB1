@@ -8300,6 +8300,43 @@ is the same mechanism at the scale it was built for and was not re-run here; the
 reuse skips exactly the load and the builds, whose cost at that scale change 28
 records.
 
+**Second review pass, on the seams the first pass's fixes made.** The
+container is now stopped and removed by the ID `run` returned, not by name —
+under a shared name a removal by name after our own `stop` could take a
+container another invocation created meanwhile — and a namesake in any state
+but exited is refused, since podman reports `stopping` (another invocation's
+exit checkpointing the database, up to two minutes) as not running; the
+cleanup flag is raised *before* `run`, because a `run` that creates the
+container but fails to bind its port leaves the container and, without
+`OB1_PG_KEEP`, the anonymous volume the `-v` exists for (reproduced by the
+reviewer: one volume per failed run, the 79 GB leak in miniature); the
+readiness wait breaks out at once when the container has exited, so a kept
+data directory the image cannot open prints its logs in a second rather than
+after thirty minutes of dots; the removal hint prints the runtime as found,
+since `/opt/podman/bin/podman` is chosen exactly when `podman` is not on
+`PATH`; and an interrupt exits through the EXIT trap once. In the bench the
+one-corpus rule is judged against the *whole* run before the loop — the
+per-scale refusal, added by the first pass, would have measured a kept scale
+in full and then refused the run's second scale with every section unprinted —
+and a run under `OB1_PG_KEEP` that puts a small scale after a large one is
+refused up front, since the small scale would drop the corpus and keep nothing;
+the regenerated rows and counts run *before* the migrator on a reuse, so a
+table that is not the generator's is refused before a pending backfill walks
+ten million rows; the chunk-vector check runs on a reuse that applied a
+migration (the one way a kept chunk vector can change); the marker carries a
+format number beside the parameters, so a marker an earlier bench wrote
+rebuilds aloud instead of passing every check and failing in the report; the
+marker table joined `dropSchema`'s list, so a suite run in a kept database
+cannot leave a marker over rows that are gone; and both paths run the queries
+once untimed before section A, since a kept index in a new container is cold
+where a freshly built one is warm. Two ledger reads became one
+(`ledgerNames`), the row recipe one function shared by the load and the
+regenerated rows, and the reviewer's altitude finding — that `migrate.ts`
+itself should check drift and strangers before applying anything, which would
+retire both the bench's dry run and `ledgerStrangers` — is SMD-1504's. Cut
+for space: caching the exact oracle's answers in the marker (the bulk of a
+reuse's remaining minutes at ten million rows), not measured.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

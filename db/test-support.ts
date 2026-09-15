@@ -40,6 +40,10 @@ const TABLES = [
   "ob1_agents",
   "schema_migrations",
   "ob1_config",
+  // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
+  // vouches for, so a suite run in a kept database cannot leave a marker over
+  // rows that are gone.
+  "bench_hnsw_corpus",
 ];
 
 /**
@@ -421,11 +425,17 @@ export function runMigrator(url: string, env: Record<string, string>, ...flags: 
  * corpus asks this first (SMD-1493).
  */
 export async function ledgerStrangers(sql: SQL): Promise<string[] | null> {
+  const names = await ledgerNames(sql);
+  if (names === null) return null;
+  const files = new Set(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")));
+  return [...names].filter((name) => !files.has(name)).sort();
+}
+
+/** The names the migrator's ledger records, or `null` where there is no ledger. */
+export async function ledgerNames(sql: SQL): Promise<Set<string> | null> {
   const [{ has }] = await sql`SELECT to_regclass('schema_migrations') IS NOT NULL AS has`;
   if (!has) return null;
-  const files = new Set(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")));
-  const recorded: { name: string }[] = await sql`SELECT name FROM schema_migrations ORDER BY name`;
-  return recorded.map((r) => r.name).filter((name) => !files.has(name));
+  return new Set((await sql`SELECT name FROM schema_migrations`).map((r: { name: string }) => r.name));
 }
 
 export function requireDatabaseUrl(script: string): string {

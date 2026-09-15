@@ -71,22 +71,34 @@ fi
 # to checkpoint a large database cleanly (the runtimes' default of 10 s would
 # SIGKILL it into crash recovery on the next start); the named volume is not an
 # anonymous one, so `rm -v` leaves it, and the exit line says how to remove it.
-# Only a container THIS invocation started is touched: a refusal below, before
-# `run`, must not stop the container another invocation owns.
+# Only a container THIS invocation created is touched, and by its ID once `run`
+# has returned one: under OB1_PG_KEEP the name is shared across invocations, so
+# a refusal below, before `run`, must not stop the container another owns, and
+# a removal by name after our own `stop` could take a container another
+# invocation created in the meantime. A `run` that created the container but
+# failed to start it (a port taken between the pick and the bind) still leaves
+# a container and, without OB1_PG_KEEP, an anonymous volume — the leak the -v
+# is for — so the flag is raised before `run`, not after. The removal hint
+# names the runtime as this script found it: `/opt/podman/bin/podman` is chosen
+# exactly when `podman` is not on PATH, so its basename would not paste.
 STARTED=0
+CID=""
 cleanup() {
   [ "$STARTED" = 1 ] || return 0
   if [ -n "$KEEP" ]; then
-    "$RUNTIME" stop -t 120 "$NAME" >/dev/null 2>&1 || true
-    "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true
+    "$RUNTIME" stop -t 120 "${CID:-$NAME}" >/dev/null 2>&1 || true
+    "$RUNTIME" rm -fv "${CID:-$NAME}" >/dev/null 2>&1 || true
     echo
     echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
-    echo "  Remove: $(basename "$RUNTIME") volume rm $NAME"
+    echo "  Remove: $RUNTIME volume rm $NAME"
   else
-    "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true
+    "$RUNTIME" rm -fv "${CID:-$NAME}" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+# An interrupt exits through the EXIT trap once, rather than running cleanup
+# for the signal and again for the exit (bash 3.2 does both).
+trap 'exit 130' INT TERM
 
 # /dev/shm: both runtimes give a container 64 MB, and Postgres puts its dynamic
 # shared memory there — a parallel HNSW build keeps the whole graph in it, sized
@@ -102,41 +114,52 @@ SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 MOUNT_ARGS=()
 VOLUME_NOTE=""
 if [ -n "$KEEP" ]; then
-  # A container of this name still present is one of two things: running, so
-  # another invocation owns the database (a bench mid-build; a psql) — refused,
-  # since sharing it would let whichever exits first stop it under the other;
-  # or exited, the shell an interrupted run (no trap ran) left behind, whose
-  # data is in the volume — removed, and the run goes on.
+  # A container of this name still present is one of two things: alive in any
+  # sense — running, being created, paused, or STOPPING, which is another
+  # invocation's exit checkpointing the database and reads as not running —
+  # so another invocation owns the database (a bench mid-build; a psql) and
+  # this one is refused, since sharing it would let whichever exits first stop
+  # it under the other; or exited, the shell an interrupted run (no trap ran)
+  # left behind, whose data is in the volume — removed, and the run goes on.
   if "$RUNTIME" container inspect "$NAME" >/dev/null 2>&1; then
-    if [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$NAME")" = "true" ]; then
-      echo "$NAME is running: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, or use another name." >&2
-      exit 2
-    fi
-    "$RUNTIME" rm -fv "$NAME" >/dev/null
+    STATUS="$("$RUNTIME" container inspect -f '{{.State.Status}}' "$NAME")"
+    case "$STATUS" in
+      exited|stopped|dead|configured|removing) "$RUNTIME" rm -fv "$NAME" >/dev/null ;;
+      *)
+        echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, or use another name." >&2
+        exit 2
+        ;;
+    esac
   fi
   MOUNT_ARGS=(-v "$NAME:/var/lib/postgresql/data")
   if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; else VOLUME_NOTE=", new volume $NAME kept"; fi
 fi
 
 echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
-"$RUNTIME" run -d --name "$NAME" \
+STARTED=1
+CID="$("$RUNTIME" run -d --name "$NAME" \
   -e POSTGRES_PASSWORD="$PASSWORD" \
   -e POSTGRES_DB="$DB" \
   -p "$PORT:5432" \
   --shm-size "$SHM_SIZE" \
   ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
-  "$IMAGE" >/dev/null
-STARTED=1
+  "$IMAGE")"
 
 # A fresh data directory is ready in seconds. A kept one may start into crash
 # recovery (a host that slept, a machine restarted) and replay WAL for minutes
 # at ten million rows, during which pg_isready reports it as starting; giving
 # up at a minute would stop it mid-replay and the next run would start over.
+# A container that has EXITED — a kept data directory this image cannot open,
+# a bad parameter — is not waited for at all: its logs say why, at once.
 if [ -n "$KEEP" ]; then READY_TRIES=1800; else READY_TRIES=60; fi
 echo -n "▸ waiting for readiness "
 for _ in $(seq 1 "$READY_TRIES"); do
   if "$RUNTIME" exec "$NAME" pg_isready -U postgres -d "$DB" >/dev/null 2>&1; then
     echo "— ready"
+    break
+  fi
+  if [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null)" != "true" ]; then
+    echo " — the container exited"
     break
   fi
   echo -n "."
