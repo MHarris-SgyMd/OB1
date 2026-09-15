@@ -21,7 +21,9 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
-  for the benchmarks a few minutes — they build tables up to 100,000 rows
+  for the benchmarks a few minutes — they build tables up to 100,000 rows.
+  `bench-hnsw.ts` at a million rows and up wants an hour and a container with
+  gigabytes of shared memory; its section below says how much
 
 ## Steps
 
@@ -835,15 +837,22 @@ the header of `migrations/011_text_search_trgm.sql`.
 
 What a filtered `match_thoughts` returns against an exact scan of the same rows,
 and whether the candidate LIMIT above the default count is honoured. Random
-64-dimensional vectors with filter tiers planted at 50%, 10%, 1% and 0.1%; the
-function as shipped by 001–013, then 014 and every later migration applied onto
-the same rows — the plans are read from the catalog, so the after arm holds the
-function a deployment actually has.
+64-dimensional vectors with filter tiers planted at 50%, 10%, 1%, 0.1% and
+0.01% of the table and at a fixed 900, 2,000 and 5,000 rows whatever the scale;
+the function as shipped by 001–013, then 014 and every later migration applied
+onto the same rows — the plans are read from the catalog, so the after arm holds
+the function a deployment actually has.
 
 ```bash
 ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
+
+# At scale (SMD-1018): one scale per container, and give the container the
+# shared memory the parallel HNSW build keeps its graph in — at least the
+# maintenance_work_mem the bench builds with (1 KB a row by default).
+OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
+OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 ```
 
 Queries are random vectors, not perturbed copies of a target. A perturbed copy
@@ -853,17 +862,42 @@ nothing at 1%. The exact answer is computed once per query and tier and both
 arms are scored against it. Two tiers exist for the scan's failure shape rather
 than the filter's: one with fewer matching rows than the candidate budget, and
 one matching nothing — under 014 both take the exact branch, which is the
-point. Section A also times asking for the function's ceiling (500 rows).
-Section C reads the live function body from the catalog, extracts each
+point. The three fixed-count tiers exist for the scale question: 900 rows is
+the exact branch at its widest whatever the table holds, 2,000 rows is the walk
+with the most tuples to pass (`v_fetch × N / matches` — 200,000 at ten million
+rows, past the seeded cap), and 5,000 rows is the walk the seeded cap covers at
+ten million rows but pgvector's default does not. Section L reports the load:
+insert rate, HNSW build time under the `maintenance_work_mem` used, and table
+and index sizes. Section A also times asking for the function's ceiling (500
+rows). Section C reads the live function body from the catalog, extracts each
 filtered branch's statement with its plpgsql variables rewritten as parameters,
 and EXPLAINs it under both custom and generic planning on the filter the
-function routes to it (the walk on 10%, the exact branch on 1%), because
-plpgsql may use either plan. Section D runs the walk's own statement on the
-thin and empty filters — which the function never walks for — under a forced
-generic plan, to show what the seeded scan bounds do when the walk is reached
-on a table large enough to reach it. The headline table is in the header of
-`migrations/014_filtered_match_thoughts.sql`; the real-corpus version is
+function routes to it (the walk on the thinnest tier above the threshold, the
+exact branch on the broadest under it, the routing count on the broadest, the
+thinnest and the empty filter), because plpgsql may use either plan. Section D
+runs the walk's own statement on the thin and empty filters — which the
+function never walks for — under a forced generic plan, to show what the seeded
+scan bounds do when the walk is reached with next to nothing to find. Section
+E runs every tier the function routes to the walk THROUGH the function under
+the seeded bounds and again under pgvector's defaults, beside what the exact
+branch would return and cost for the same tier if the threshold were raised to
+cover it — the table 014's header's decision about the bounds rests on. The
+headline table is in the header of `migrations/014_filtered_match_thoughts.sql`;
+the scale tables are in FORK.md change 28; the real-corpus version is
 `evals/eval-filtered.ts`.
+
+The before arm runs only up to 100,000 rows: its defect is established there,
+and above that every question is about the shipped function. The rows are
+streamed from one seeded generator in two passes (the corpus at the published
+scales is byte for byte the published one) into a table whose vector indexes
+have been dropped, and the indexes are rebuilt after the load, timed. Bun's
+SQL driver has no COPY protocol, so the rows go in as multi-row INSERTs —
+28,000 rows a second at the published scales and 12,000 at ten million on the
+machine the tables came from, so the load is never the long part; the index
+build and the exact oracle are. A million rows takes
+about ten minutes; ten million about an hour and a container with 11 GB of
+shared memory to build in; a hundred million is ~26 GB of vectors before the
+index and was not run here (FORK.md change 28 says what a run needs).
 
 ### bench-plan.ts
 

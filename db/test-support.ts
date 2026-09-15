@@ -507,6 +507,15 @@ export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transactio
  * function's six arguments as SQL text — `query, threshold, count, filter,
  * recency_weight, half_life_days` (020); a pre-020 body simply reads the last
  * two of them nowhere.
+ *
+ * COSTS stays ON. It was OFF for legibility until SMD-1018 found every generic
+ * plan at ten million rows carrying 30–130 ms of startup the custom plan of
+ * the same shape did not, and could not say why: EXPLAIN prints its JIT
+ * summary only when costs are printed, so the one line that would have named
+ * the cost was suppressed with them. The estimated cost is also what decides
+ * whether JIT fires, so a reader of the plan text needs it. The shape regexes
+ * in the explainers match on the node's name and alias, which precede the
+ * `(cost=…)` annotation on the line.
  */
 export async function explainPrepared(
   tx: SQL,
@@ -515,7 +524,7 @@ export async function explainPrepared(
   await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
   await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb, float, float) AS ${opts.body}`);
   if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
-  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) EXECUTE ob1_explain(${opts.args})`);
+  const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS) EXECUTE ob1_explain(${opts.args})`);
   await tx.unsafe(`DEALLOCATE ob1_explain`);
   const text = rows.map((r: Record<string, string>) => Object.values(r)[0]).join("\n");
   return { text, ms: Number(/Execution Time: ([\d.]+) ms/.exec(text)?.[1] ?? NaN), buffers: buffersOf(text) };
