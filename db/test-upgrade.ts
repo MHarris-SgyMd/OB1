@@ -311,8 +311,10 @@ console.log("\n[4] Migration 021 onto a populated 020 — the column, and the fu
   await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("021") });
   const [dupCol] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
   const [dupFn] = await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`;
-  assert(dupCol.c === 1 && dupFn.c === 1 && (await sql`SELECT to_regprocedure(${UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS p`)[0].p === true,
-         "re-applying 021 is a no-op: the column once, the function once, at the shipped signature");
+  // 021's own signature, not UPDATE_THOUGHT_SIGNATURE: that names the form the
+  // servers call today (032's nine arguments), and this section stops at 021.
+  assert(dupCol.c === 1 && dupFn.c === 1 && (await sql`SELECT to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)') IS NOT NULL AS p`)[0].p === true,
+         "re-applying 021 is a no-op: the column once, the function once, at 021's signature");
   await sql.close();
 }
 
@@ -446,10 +448,11 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // The brain as it stood before this change: baselined through 029, so 030
   // is pending, and a PLAIN run — the compose stack's, which gates the server
   // on it — must not fail with a bare "does not exist".
-  // 030 by name, not "the last file": 031 (renew_claims, SMD-1023) follows it
-  // and needs only 015, so it is not the one a plain run must fail at.
+  // 030 by name, not "the last file": 031 (renew_claims, SMD-1023) and 032
+  // (the provenance envelope, SMD-1323) follow it and need only 015 and 021,
+  // so neither is the one a plain run must fail at.
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 2, `030 is among the last two migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 3, `030 is among the last three migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -637,7 +640,8 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // upsert_thought, and a re-run of 021 by itself would have put 021's body
   // back — the very state preflight's `atomic capture` check warns about.
   const forms = (await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[];
-  assert(forms.length === 1 && Number(forms[0].n) === 8, `the eight-argument update_thought, alone (${forms.map((f) => f.n).join(",")})`);
+  // …and 021's 8-argument update_thought would have stayed beside 032's.
+  assert(forms.length === 1 && Number(forms[0].n) === 9, `the nine-argument update_thought, alone — 032 ran after 021 and dropped 021's (${forms.map((f) => f.n).join(",")})`);
   const body3 = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)[0].prosrc as string;
   assert(/ob1:vector-replaces-chunks/.test(body3) && /derived_from/.test(body3), "the 3-argument upsert_thought is the LAST definer's body (022's sentinel, 025's provenance), not 021's");
 
@@ -794,7 +798,60 @@ console.log("\n[9] Migration 031 on a schema without 015 — refused up front, n
   await sql.close();
 }
 
-console.log("\n[10] 021 with the acceptances out of its sight on a plain run — the column absent, 030 recorded then pending, and a role without TEMP (SMD-1421)");
+console.log("\n[10] Migration 032 onto a populated 031 — the nine-argument update_thought replaces 021's, the ACL crosses, and no row moves (SMD-1323)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "032" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
+  const UT_8 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)";
+
+  // A corpus at 031: provenance set at capture through 025's envelope, and the
+  // 8-argument form hardened — PUBLIC revoked, one role granted — the way a
+  // Supabase brain's would be.
+  const [{ r: olderR }] = await sql`SELECT upsert_thought('the earlier note', '{"metadata":{}}'::jsonb, ${vec}::vector) AS r`;
+  const older = (olderR as { id: string }).id;
+  const [{ r: newerR }] = await sql`SELECT upsert_thought('the later note', ${{ metadata: {}, supersedes: older, derived_from: [older] }}::jsonb, ${vec}::vector) AS r`;
+  const newer = (newerR as { id: string }).id;
+  const forms = async () => ((await sql`SELECT pronargs AS n FROM pg_proc WHERE proname = 'update_thought' ORDER BY 1`) as { n: number }[]).map((f) => Number(f.n));
+  assert(JSON.stringify(await forms()) === "[8]", `at 031 update_thought takes eight arguments (${(await forms()).join(",")})`);
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_editor32') THEN CREATE ROLE ob1_upgrade_editor32 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${UT_8} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${UT_8} TO ob1_upgrade_editor32`);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, supersedes, derived_from, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const before = await snapshot();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("032") });
+
+  assert(JSON.stringify(await forms()) === "[9]" && (await sql`SELECT to_regprocedure(${UPDATE_THOUGHT_SIGNATURE}) IS NOT NULL AS p`)[0].p === true,
+         `after 032 one update_thought, of nine arguments, at the shipped signature (${(await forms()).join(",")})`);
+  assert((await snapshot()) === before, "no row moved: supersedes, derived_from and updated_at as they were");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and no audit row was written");
+  const acl = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UPDATE_THOUGHT_SIGNATURE}::regprocedure`)[0].a ?? "");
+  assert(!/(^\{|,)=X\//.test(acl) && /ob1_upgrade_editor32=X\//.test(acl), `the 8-argument form's ACL crossed the DROP: PUBLIC still revoked, the role still granted (${acl})`);
+
+  // The mirror: an 8-argument positional call — reembed.ts's — still resolves,
+  // through the default; the envelope clears the capture-time pointer; and the
+  // review function is 032's, calling update_thought.
+  const [{ r: eight }] = await sql`SELECT ${sql.unsafe(`update_thought('${newer}'::uuid, 'the later note', NULL::jsonb, '${vec}'::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, '${OPTS.model}'::text)`)} AS r`;
+  assert((eight as { ok: boolean }).ok === true, "an 8-argument positional call resolves through the ninth parameter's default");
+  const [{ r: cleared }] = await sql`SELECT update_thought(${newer}::uuid, NULL::text, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text, '{"supersedes": null}'::jsonb) AS r`;
+  const [row] = await sql`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = ${newer}::uuid`;
+  assert((cleared as { ok: boolean }).ok === true && row.s === null && JSON.stringify(row.d) === JSON.stringify([older]), "…and the envelope clears the pointer set at capture, leaving derived_from");
+  const review = (await sql`SELECT prosrc FROM pg_proc WHERE oid = 'review_supersession_proposal(uuid, text, text, text, jsonb, boolean)'::regprocedure`)[0].prosrc as string;
+  assert(/update_thought\(/.test(review) && !/UPDATE\s+thoughts\b/i.test(review), "review_supersession_proposal is 032's: it writes through update_thought");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("032") });
+  const again = String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${UPDATE_THOUGHT_SIGNATURE}::regprocedure`)[0].a ?? "");
+  assert(JSON.stringify(await forms()) === "[9]" && again === acl, "re-applying 032 is a no-op: one function, the ACL as it was");
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_editor32`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_editor32`);
+  await sql.close();
+}
+
+console.log("\n[11] 021 with the acceptances out of its sight on a plain run — the column absent, 030 recorded then pending, and a role without TEMP (SMD-1421)");
 {
   /** A brain through 020 with the fixture's corpus and an acceptance under a SUFFIXED key over an unlabelled thought — the row 030 can never correct. */
   const build = async () => {

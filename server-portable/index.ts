@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createStore, type ThoughtStore } from "./store.ts";
+import { createStore, UUID_RE, type ThoughtStore } from "./store.ts";
 import { authenticate, canWrite, type Principal } from "./auth.ts";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 
@@ -258,9 +258,23 @@ function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: str
       }. Re-read the thought and retry, so you amend the current text rather than overwrite someone else's edit.`;
     case "DUPLICATE_CONTENT":
       return `Refused: that text already exists as another thought, and two identical thoughts would break deduplication. Edit one of them, or delete the other first.`;
+    // Migration 032: the provenance envelope.
+    case "SUPERSEDES_NOT_FOUND":
+      return `Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result — or null to clear the pointer.`;
+    case "WOULD_CYCLE":
+      return `Refused: that supersedes pointer would close a loop — the thought named already supersedes ${id}, directly or through a chain (or is ${id} itself). A version chain runs one way; point the newer thought at the older, or clear the older's pointer first.`;
     default:
       return `Refused: ${r.error}`;
   }
+}
+
+/**
+ * A `supersedes` that is not a thought id, refused at the tool before any model
+ * call or database write (032) — both tools, one sentence; `orNull` is the
+ * edit tool's clause, since only it takes null.
+ */
+function refuseSupersedesShape(value: string, orNull = ""): string {
+  return `Refused: \`supersedes\` must be a thought id (the ID: line of a search result)${orNull}, not "${value.slice(0, 40)}".`;
 }
 
 /**
@@ -896,6 +910,10 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ content, derived_from, supersedes }) => {
       try {
+        // The shape before the two model calls, in the tool's words — as
+        // update_thought's `supersedes` is refused (032). upsert_thought would
+        // raise on it after the embedding and the metadata were already paid for.
+        if (supersedes !== undefined && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes));
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),
@@ -1008,7 +1026,7 @@ function buildServer(principal: Principal): McpServer {
     {
       title: "Update Thought",
       description:
-        "Correct or amend an existing thought by id. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves — so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
+        "Correct or amend an existing thought by id. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves — so a thought found by search can be edited without re-capturing it. Provide `content` to replace the text — the embedding and its search chunks are regenerated to match. Provide `metadata_patch` to shallow-merge keys into the existing metadata, leaving unmentioned keys alone. Provide `supersedes` to record that this thought REPLACES an older one (search will label the older as superseded), or `null` to clear a pointer set wrongly. Pass `if_unchanged_since` with the `updated_at` you last read to avoid overwriting a concurrent edit.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -1025,13 +1043,26 @@ function buildServer(principal: Principal): McpServer {
           .describe("Keys to merge into the existing metadata. Unmentioned keys are left alone"),
         if_unchanged_since: z.string().optional()
           .describe("The updated_at from your last read. The update is refused as STALE_READ if the thought changed since"),
+        // Migration 032 (SMD-1323): the visible half of the provenance
+        // envelope. Tri-state: absent leaves the pointer, null clears it, an
+        // id sets it — validated at the write (an id no thought has, or a
+        // pointer that would close a loop, is refused by name). derived_from
+        // is not offered here: an edit to a synthesis's source list is a
+        // store-level operation with no client asking for it yet.
+        supersedes: z.string().nullable().optional()
+          .describe("The id of a prior thought this one REPLACES (a corrected or updated version), as capture_thought's `supersedes`; search will label the older thought as superseded. Pass null to clear a pointer recorded wrongly. Omit to leave it as it is."),
       },
     },
-    async ({ id, content, metadata_patch, if_unchanged_since }) => {
+    async ({ id, content, metadata_patch, if_unchanged_since, supersedes }) => {
       try {
-        if (content === undefined && metadata_patch === undefined) {
-          return toolError("Provide `content`, `metadata_patch`, or both — an update with neither would do nothing.");
+        if (content === undefined && metadata_patch === undefined && supersedes === undefined) {
+          return toolError("Provide `content`, `metadata_patch`, `supersedes`, or any of them — an update with none would do nothing.");
         }
+        // The shape here, in the tool's words, as the two named refusals are;
+        // the function would raise on it, and a raised message reads as a
+        // failure rather than a refusal. The string "null" is not a clear —
+        // clearing is JSON null, and a client that sends the word meant an id.
+        if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes, " or null to clear it"));
 
         // Only re-embed when the text actually changed. A metadata-only edit
         // must not spend two model calls, nor risk replacing a good vector.
@@ -1047,6 +1078,9 @@ function buildServer(principal: Principal): McpServer {
           actor: { name: principal.name, agentId: principal.agentId, source: "mcp" },
           // Read by update_thought only with content, when the vector moves (021).
           embeddingModel: embedded?.model,
+          // 032: only the key the caller named reaches the envelope — absent
+          // must stay absent, since null means CLEAR at the function.
+          provenance: supersedes !== undefined ? { supersedes } : undefined,
         });
 
         if (!result.ok) return toolError(explainRefusal(result, id));
@@ -1054,6 +1088,7 @@ function buildServer(principal: Principal): McpServer {
         const what = [
           content !== undefined ? "content re-embedded" : null,
           metadata_patch !== undefined ? "metadata merged" : null,
+          supersedes === null ? "supersedes cleared" : supersedes !== undefined ? `now supersedes ${supersedes}` : null,
           // An edit replaces every chunk, so a failure here leaves the SAME
           // half-contextualized state a capture can, and is worth the same
           // sentence rather than a silent partial rewrite.

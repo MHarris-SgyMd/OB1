@@ -108,6 +108,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
 const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
+const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -116,6 +117,7 @@ const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
  */
 const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
 const APPLY_021_POSTGREST = `Apply the migrations through db/migrations/021_embedding_model_per_row.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
+const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
 const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
 
@@ -480,36 +482,40 @@ if (configFailed) {
         }
 
         /**
-         * Migration 021 gave update_thought an eighth parameter, the model
-         * beside the vector, by dropping the 7-argument form — and the store
-         * sends all eight by name on every edit. Probed as the store calls it,
-         * with an id no row has: update_thought answers {ok:false,
-         * error:'NOT_FOUND'} from its FOR UPDATE read and writes nothing, so
-         * the probe is free. PGRST202 is the form from before 021 (or no
-         * function). Then seven named arguments, which only two forms — 018
-         * re-applied by hand beside 021's — make ambiguous, and that breaks
-         * every PostgREST caller by name that predates this change.
+         * Migration 032 gave update_thought a ninth parameter, the provenance
+         * envelope, by dropping the 8-argument form — as 021 gave it the
+         * eighth, the model beside the vector, by dropping the seventh — and
+         * the store sends all nine by name on every edit. Probed as the store
+         * calls it, with an id no row has: update_thought answers {ok:false,
+         * error:'NOT_FOUND'} from its row-lock read and writes nothing, so
+         * the probe is free. PGRST202 is a form from before 032 (or no
+         * function). Then seven named arguments, which only two forms — 018's
+         * or 021's re-applied by hand beside 032's — make ambiguous, and that
+         * breaks every PostgREST caller by name that predates this change.
          */
         try {
+          const { SUPERSEDED_SIGNATURES } = await import("../db/config.mjs");
           const nobody = "00000000-0000-4000-8000-000000000000";
           const seven = { p_id: nobody, p_content: null, p_metadata_patch: null, p_embedding: null, p_chunks: null, p_if_unchanged_since: null, p_actor: null };
-          const { data: eight, error: eightErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null });
-          if (eightErr && missing(eightErr.message)) {
+          const { data: nine, error: nineErr } = await legacy.rpc("update_thought", { ...seven, p_embedding_model: null, p_provenance: null });
+          if (nineErr && missing(nineErr.message)) {
             add("edit signature", "fail",
-                "update_thought does not take p_embedding_model over PostgREST — it is missing or is the form from before migration 021 — and the server sends it on every edit, so every update_thought call would fail",
-                APPLY_021_POSTGREST);
-          } else if (eightErr) {
-            add("edit signature", "skip", `could not probe update_thought over PostgREST (${eightErr.message}); ${CATALOG_HINT}`);
-          } else if ((eight as { error?: string } | null)?.error !== "NOT_FOUND") {
-            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(eight)} rather than NOT_FOUND; ${CATALOG_HINT}`);
+                "update_thought does not take p_provenance over PostgREST — it is missing or is a form from before migration 032 — and the server sends it on every edit, so every update_thought call would fail",
+                APPLY_032_POSTGREST);
+          } else if (nineErr) {
+            add("edit signature", "skip", `could not probe update_thought over PostgREST (${nineErr.message}); ${CATALOG_HINT}`);
+          } else if ((nine as { error?: string } | null)?.error !== "NOT_FOUND") {
+            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(nine)} rather than NOT_FOUND; ${CATALOG_HINT}`);
           } else {
             const { error: sevenErr } = await legacy.rpc("update_thought", seven);
             if (!sevenErr) {
-              add("edit signature", "ok", "update_thought takes 021's arguments over PostgREST, and a 7-argument call resolves to one function — no earlier form beside it");
+              add("edit signature", "ok", "update_thought takes 032's arguments over PostgREST, and a 7-argument call resolves to one function — no earlier form beside it");
             } else if (/could not choose|PGRST203|not unique/i.test(sevenErr.message)) {
               add("edit signature", "fail",
-                  "update_thought has more than one form — an earlier migration re-applied by hand beside 021's — and PostgREST cannot choose between them for a 7-argument call, so every caller sending seven arguments fails",
-                  "DROP FUNCTION update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb); against the project's direct connection — the form 021 drops.");
+                  "update_thought has more than one form — an earlier migration re-applied by hand beside 032's — and PostgREST cannot choose between them for a call with fewer than nine arguments, so every caller by name from before this change fails",
+                  // IF EXISTS: this path cannot read the catalog, so both older
+                  // forms are named and the absent one must not error when pasted.
+                  `Drop the earlier form, as 032 does, against the project's direct connection — whichever the catalog shows: ${SUPERSEDED_SIGNATURES.filter((s) => s.startsWith("update_thought")).map((s) => `DROP FUNCTION IF EXISTS ${s};`).join(" ")}`);
             } else {
               add("edit signature", "skip", `could not probe update_thought over PostgREST (${sevenErr.message}); ${CATALOG_HINT}`);
             }
@@ -1102,15 +1108,17 @@ if (configFailed) {
         }
 
         /**
-         * Migration 021 changed update_thought's signature the same way — an
-         * eighth, defaulted parameter, the model beside the vector, the
-         * 7-argument form dropped — and both stores send all eight. The same
-         * two states break every edit and neither shows in a presence check:
-         * the function predates 021 (the call has no function to resolve to),
-         * or the old form was re-created BESIDE 021's by a hand re-apply of
-         * 009/013/018 (021's answers the server; every 7-argument call — a
-         * PostgREST caller by name, hand-written SQL, community integrations —
-         * is "function is not unique").
+         * Migrations 021 and 032 changed update_thought's signature the same
+         * way — a defaulted parameter added (021 the model beside the vector,
+         * 032 the provenance envelope), the earlier form dropped — and both
+         * stores send all nine. The same two states break every edit and
+         * neither shows in a presence check: the function predates 032 (the
+         * call has no function to resolve to), or an old form was re-created
+         * BESIDE 032's by a hand re-apply of 009/013/018/021 (032's answers
+         * the server; every call with fewer arguments — a PostgREST caller by
+         * name from before this change, hand-written SQL, community
+         * integrations, reembed.ts's positional eight — is "function is not
+         * unique").
          */
         try {
           const { UPDATE_THOUGHT_SIGNATURE } = await import("../db/config.mjs");
@@ -1118,21 +1126,21 @@ if (configFailed) {
             SELECT p.pronargs AS nargs, p.oid::regprocedure::text AS sig
             FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE p.proname = 'update_thought' AND n.nspname = 'public'
-            ORDER BY (p.pronargs = 8) DESC, p.oid`) as { nargs: number; sig: string }[];
-          const current = ut.filter((r) => Number(r.nargs) === 8);
-          const extra = ut.filter((r) => Number(r.nargs) !== 8).map((r) => r.sig);
+            ORDER BY (p.pronargs = 9) DESC, p.oid`) as { nargs: number; sig: string }[];
+          const current = ut.filter((r) => Number(r.nargs) === 9);
+          const extra = ut.filter((r) => Number(r.nargs) !== 9).map((r) => r.sig);
           if (!ut.length) {
-            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("021", APPLY_021));
+            add("edit signature", "fail", "update_thought is missing — the update_thought tool and db/reembed.ts call it", ledgerRemedy("032", APPLY_032));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 021 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 032 (${UPDATE_THOUGHT_SIGNATURE}), alone`);
           } else if (current.length) {
             add("edit signature", "fail",
-                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 021 — so every call that sends seven arguments to update_thought, which is every PostgREST caller by name and every hand-written SELECT from before this change, fails with "function is not unique"`,
-                `Drop the earlier form, as 021 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
+                `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 032 — so every call that sends fewer than nine arguments to update_thought, which is every PostgREST caller by name from before this change, every hand-written SELECT and db/reembed.ts's positional eight, fails with "function is not unique"`,
+                `Drop the earlier form, as 032 does: ${extra.map((sig) => `DROP FUNCTION ${sig};`).join(" ")}`);
           } else {
             add("edit signature", "fail",
-                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 021; the server sends p_embedding_model, which only 021's form takes — so every edit, and every db/reembed.ts run, would fail`,
-                ledgerRemedy("021", APPLY_021));
+                `${extra.join(" and ")} ${extra.length === 1 ? "is the form" : "are the forms"} from before migration 032; the server sends p_provenance, which only 032's form takes — so every edit would fail, and db/reembed.ts refuses to run`,
+                ledgerRemedy("032", APPLY_032));
           }
         } catch (e) {
           add("edit signature", "warn", `could not verify: ${(e as Error).message}`, "The catalog read behind this check needs SELECT on pg_proc.");
@@ -1486,8 +1494,8 @@ if (configFailed) {
          * is the operator's word about exactly that vector, and clearing the
          * claim table brings the warning back, which is right. The column
          * absent under this server is a failure: every capture would drop the
-         * label and every edit would fail (the 8-argument update_thought is
-         * 021's too — `edit signature` above says so).
+         * label and every edit would fail (update_thought writes the column
+         * too — `edit signature` above reads its form).
          */
         let haveLabel = false;
         try {

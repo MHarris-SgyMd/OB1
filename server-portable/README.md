@@ -69,8 +69,9 @@ that label: vectors at another model are a warning with the counts and the
 re-embed as the remedy, whether or not any claim row remembers the pass that
 left them — a vector the operator accepted, and has not written since, is
 detail; the column missing under this server is a failure, as is a database
-whose `update_thought` predates 021 or carries an older form beside it (`edit
-signature`) — the server sends the model on every capture and every edit.
+whose `update_thought` predates 032 or carries an older form beside it (`edit
+signature`) — the server sends the model on every capture and every edit, and
+the provenance envelope (`p_provenance`, migration 032) on every edit.
 Over a direct connection `atomic capture` reads both `upsert_thought` bodies
 as well, since a `CREATE OR REPLACE` from outside the migrations — an earlier
 migration by hand, the getting-started guide pasted again, a vendored schema
@@ -196,6 +197,17 @@ cd ../db && bun migrate.ts --url 'postgres://postgres:…@db.<ref>.supabase.co:5
 
 Or record the ones the dashboard already applied with `--baseline` and apply the
 rest; `db/README.md` §4 covers both routes.
+
+Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
+second workstation — together with the migrations. A signature-changing
+migration leaves an older checkout's preflight refusing the newer brain with a
+misleading message (it looks for a form the migration dropped) — 032 today, and
+the same shape at 020 and 021 — and, for 032, its `reembed.ts` sending you to
+`--reapply` and that older `--reapply` re-creating the dropped form beside the
+current one, after which every shorter call is `function is not unique` until a
+current checkout re-applies. The compose stack is in lockstep by construction; a hand-run server
+or a Supabase brain served from another machine is not (FORK.md change 60;
+SMD-1451 is the migrator refusing it).
 
 ## Expected outcome
 

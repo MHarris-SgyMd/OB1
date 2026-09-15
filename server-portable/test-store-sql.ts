@@ -100,6 +100,25 @@ console.log("\n[2] captureThought writes content, metadata and vector atomically
   assert((await label()) === "unit-test-model-2", "an edit with content relabels the row");
   await store.updateThought({ id: r.id, metadataPatch: { labelled: true } });
   assert((await label()) === "unit-test-model-2", "…and a metadata-only edit leaves the label with the vector");
+
+  // The provenance envelope rides as the ninth argument (032): a key named
+  // is written, a key absent is left, null clears; a refusal comes back as
+  // the store's discriminated union rather than a throw.
+  const older = await store.captureThought({ content: "the earlier version", payload: { metadata: {} }, embedding: unit(1) });
+  const prov = async () => (await admin`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = ${r.id}`)[0] as { s: string | null; d: string[] | null };
+  const set = await store.updateThought({ id: r.id, provenance: { supersedes: older.id } });
+  assert(set.ok && (await prov()).s === older.id, "an edit naming supersedes writes the pointer through update_thought's envelope");
+  const derived = await store.updateThought({ id: r.id, provenance: { derivedFrom: [older.id] } });
+  assert(derived.ok && (await prov()).s === older.id && JSON.stringify((await prov()).d) === JSON.stringify([older.id]), "…derivedFrom alone replaces the array and leaves the pointer");
+  const untouched = await store.updateThought({ id: r.id, metadataPatch: { again: true } });
+  assert(untouched.ok && (await prov()).s === older.id, "…an edit without provenance sends NULL and leaves both");
+  const cleared = await store.updateThought({ id: r.id, provenance: { supersedes: null, derivedFrom: null } });
+  assert(cleared.ok && (await prov()).s === null && (await prov()).d === null, "…and null clears both");
+  const loop = await store.updateThought({ id: older.id, provenance: { supersedes: older.id } });
+  assert(!loop.ok && loop.error === "WOULD_CYCLE", `a self-pointer is the WOULD_CYCLE refusal, not a throw (${JSON.stringify(loop)})`);
+  const ghost = await store.updateThought({ id: r.id, provenance: { supersedes: "00000000-0000-4000-8000-000000000000" } });
+  assert(!ghost.ok && ghost.error === "SUPERSEDES_NOT_FOUND", `a pointer at no thought is SUPERSEDES_NOT_FOUND (${JSON.stringify(ghost)})`);
+  await admin`DELETE FROM thoughts WHERE id = ${older.id}`;
   await admin.close();
 }
 

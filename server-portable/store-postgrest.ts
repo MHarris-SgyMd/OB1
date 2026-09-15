@@ -12,7 +12,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -31,6 +31,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  UpdateProvenance,
   UpdateResult,
 } from "./store.ts";
 
@@ -319,14 +320,16 @@ export class PostgrestStore implements ThoughtStore {
     ifUnchangedSince?: string;
     actor?: Actor;
     embeddingModel?: string;
+    provenance?: UpdateProvenance;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: `[${c.embedding.join(",")}]`,
       context: c.context ?? null,
     }));
-    // Eight named arguments since migration 021: the model beside the vector.
-    // Against a database whose update_thought predates 021 this is PGRST202,
+    // Nine named arguments since migration 032: the model beside the vector
+    // (021), then the provenance envelope, null when the edit named none.
+    // Against a database whose update_thought predates 032 this is PGRST202,
     // which preflight's `edit signature` check reports before the server serves.
     const { data, error } = await this.client.rpc("update_thought", {
       p_id: opts.id,
@@ -337,6 +340,7 @@ export class PostgrestStore implements ThoughtStore {
       p_if_unchanged_since: opts.ifUnchangedSince ?? null,
       p_actor: actorPayload(opts.actor),
       p_embedding_model: opts.embeddingModel ?? null,
+      p_provenance: provenanceEnvelope(opts.provenance),
     });
     if (error) throw new Error(error.message);
     return normaliseMutation(data as Record<string, unknown>);
