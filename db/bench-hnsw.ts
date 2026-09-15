@@ -129,7 +129,8 @@
  *
  *   ./with-postgres.sh bun bench-hnsw.ts             # 10,000 and 100,000 rows, 50 queries
  *   OB1_BENCH_SCALES=1000 OB1_BENCH_QUERIES=20 ./with-postgres.sh bun bench-hnsw.ts
- *   OB1_BENCH_SCALES=1000000,10000000 ./with-postgres.sh bun bench-hnsw.ts
+ *   # a million rows and up: one scale per container, with the shared memory
+ *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
  *
  * Vectors are 64-wide random unit vectors: wide enough that HNSW behaves like
@@ -147,7 +148,7 @@
  * every filter up to about 1% of a ten-million-row table from the GIN index
  * (exact, whatever the bounds say) and walks HNSW only for broad filters,
  * where the walk needs a few hundred tuples and the recall it loses is the
- * index's own at the default ef_search (section A's control: 8.3 / 5.0 / 2.2
+ * index's own at the default ef_search (section A's control: 8.3 / 4.7 / 2.2
  * of 10 unfiltered at 10k / 100k / 1M random rows). The seeded bounds matter
  * in one band — moderately selective filters at around a million rows, where
  * the walk does walk and pgvector's default MEMORY bound cuts it short — and
@@ -175,15 +176,16 @@
  * index are a little wider than the published run's. Bun's SQL driver has no
  * COPY protocol (a `COPY ... FROM STDIN` hangs), so the rows go in as
  * multi-row INSERTs into a table whose secondary indexes have been dropped
- * and whose user triggers are disabled for the load; the indexes are rebuilt
- * after it, with `maintenance_work_mem` sized for the graph. That is also how
- * a brain that size would be bulk-loaded.
+ * and whose user triggers are disabled for the load (so 008's audit table
+ * stays empty, where the published run's held a row per thought); the indexes
+ * are rebuilt after it, with `maintenance_work_mem` sized for the graph. That
+ * is also how a brain that size would be bulk-loaded.
  */
 
 import { SQL } from "bun";
 import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
@@ -302,6 +304,8 @@ function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
       push({ key: t.key, share: 0, label: "nothing" });
     } else if (n * t.share >= 1) {
       push({ key: t.key, share: t.share, label: `${t.share * 100}%` });
+    } else {
+      notes.push(`${t.share * 100}% of ${n.toLocaleString()} rows is under one row; not planted`);
     }
   }
   return { tiers: out.sort((a, b) => b.share - a.share), notes };
@@ -474,6 +478,11 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   const [{ chunkRows }] = await sql.unsafe(`SELECT count(*)::int AS "chunkRows" FROM thought_chunks`);
 
   const maintenanceMem = MAINTENANCE_MEM === "auto" ? `${Math.max(256, Math.ceil(n / 1024))}MB` : MAINTENANCE_MEM;
+  // The parallel build keeps its graph in dynamic shared memory sized by this
+  // setting, and the container's /dev/shm is the ceiling (with-postgres.sh
+  // gives 1 GB unless OB1_PG_SHM_SIZE says more). Nothing here can read the
+  // ceiling, so say what the build is about to ask for.
+  if (BUILD_WORKERS > 0) process.stdout.write(`(parallel build under ${maintenanceMem}: /dev/shm must hold it — OB1_PG_SHM_SIZE) `);
   await sql.unsafe(`SET maintenance_work_mem = '${maintenanceMem}'`);
   // pgvector says when the graph stops fitting in maintenance_work_mem with a
   // NOTICE, which this driver does not surface; sent to the server log it can
@@ -750,8 +759,24 @@ const bounds: BoundsRow[] = [];
  * function actually has, not by a copy of 014's arithmetic.
  */
 let routing = { vFetch: NaN, vExact: NaN };
-/** pgvector's own defaults for the two bounds 014 seeds. */
-const PGVECTOR_DEFAULTS: Record<string, string> = { "hnsw.max_scan_tuples": "20000", "hnsw.scan_mem_multiplier": "1" };
+/**
+ * pgvector's own defaults for the bounds 014 seeds, read from the server once
+ * the library is loaded (`pg_settings.boot_val`) over the same HNSW_BOUNDS
+ * list the in-force assertion and the RESETs use — not a second literal map,
+ * which a third seeded bound would have left out of the "defaults" arm
+ * (third review pass).
+ */
+let pgvectorDefaults: Record<string, string> = {};
+async function readPgvectorDefaults(sql: SQL): Promise<Record<string, string>> {
+  // The hnsw.* settings exist in pg_settings only once the library is loaded
+  // in THIS session (014's header: they come from vector.so, not the catalog),
+  // and this runs right after a reconnect. One cast loads it.
+  await sql.unsafe(`SELECT '[1]'::vector`);
+  const rows = await sql.unsafe(`SELECT name, boot_val FROM pg_settings WHERE name = ANY($1)`, [sql.array(HNSW_BOUNDS, "TEXT")]);
+  const out: Record<string, string> = Object.fromEntries(rows.map((r: { name: string; boot_val: string }) => [r.name, r.boot_val]));
+  for (const b of HNSW_BOUNDS) if (!(b in out)) throw new Error(`pg_settings has no boot value for ${b}; is pgvector loaded in this session?`);
+  return out;
+}
 /** The raised `hnsw.ef_search` for the recall controls in sections A and E; pgvector's default is 40, the function leaves it alone. */
 const EF_SEARCH_RAISED = 400;
 /**
@@ -817,7 +842,19 @@ for (const n of SCALES) {
       // plans below are read from the catalog, so the arm holds the function
       // a deployment actually has rather than a superseded one. Above the
       // before arm's scales the schema was applied whole before the load.
-      if (beforeArm) await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
+      if (beforeArm) {
+        await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
+        // 023's apply-time fingerprint backfill UPDATEs every loaded row (none
+        // carries a fingerprint), and the column is indexed, so the update is
+        // not HOT: every row gets a new heap tuple and a second, identical
+        // entry in the HNSW index beside its dead twin. Left there, half the
+        // scan's ef_search frontier is dead tuples and the published scales'
+        // recall floor is measured on a graph the large scales (schema applied
+        // to an empty table) never have (third review pass). VACUUM removes
+        // the dead entries; ANALYZE refreshes what 023's rewrite moved.
+        await sql.unsafe(`VACUUM ANALYZE thoughts`);
+        await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
+      }
       await reconnect(); // the database-level bounds 014 seeded are read at connect
       const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
       const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
@@ -827,7 +864,8 @@ for (const n of SCALES) {
       }
       console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
       routing = await routingAt(sql, K);
-      console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts`);
+      pgvectorDefaults = await readPgvectorDefaults(sql);
+      console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts; pgvector defaults ${HNSW_BOUNDS.map((b) => `${b}=${pgvectorDefaults[b]}`).join(", ")}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get("")!);
@@ -885,9 +923,9 @@ for (const n of SCALES) {
   const walkTiers = withCounts.filter((t) => t.matches > routing.vExact).sort((a, b) => a.matches - b.matches);
   for (const t of walkTiers) {
     const seeded = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-    for (const [name, value] of Object.entries(PGVECTOR_DEFAULTS)) await sql.unsafe(`SET ${name} = ${value}`);
+    for (const name of HNSW_BOUNDS) await sql.unsafe(`SET ${name} = ${pgvectorDefaults[name]}`);
     const defaults = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-    for (const name of Object.keys(PGVECTOR_DEFAULTS)) await sql.unsafe(`RESET ${name}`);
+    for (const name of HNSW_BOUNDS) await sql.unsafe(`RESET ${name}`);
     await sql.unsafe(`SET hnsw.ef_search = ${EF_SEARCH_RAISED}`);
     const raised = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
     await sql.unsafe(`RESET hnsw.ef_search`);
@@ -1014,8 +1052,8 @@ for (const g of walk) {
   );
 }
 
-console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => b.replace("hnsw.", "")).join(" / ")} as in force), under pgvector's defaults (${Object.values(PGVECTOR_DEFAULTS).join(" / ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
-console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of 100,000 and pgvector's 20,000. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
+console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${HNSW_SEEDS[b as keyof typeof HNSW_SEEDS]}`).join(", ")}), under pgvector's defaults (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${pgvectorDefaults[b]}`).join(", ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
+console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of ${Number(HNSW_SEEDS["hnsw.max_scan_tuples"]).toLocaleString()} and pgvector's ${Number(pgvectorDefaults["hnsw.max_scan_tuples"]).toLocaleString()}. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
 console.log(`| rows | filter matches | matching rows | walk visits | seeded: returned | in exact top-10 | median ms | defaults: returned | in exact top-10 | median ms | ef_search ${EF_SEARCH_RAISED}: returned | in exact top-10 | median ms | exact branch: returned | in exact top-10 | median ms |`);
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 const cell = (r: FilteredResult) => `${r.returned.toFixed(1)} | ${r.overlap.toFixed(1)} | ${r.ms.toFixed(2)}`;

@@ -448,31 +448,44 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
     body = body.replace(/^\s*WITH\s/, () => `WITH ob1_ids AS MATERIALIZED (SELECT array_agg(s.id) AS ids ${route[1]}), `);
     body = body.replace(/\bv_ids\b/g, () => `((SELECT ids FROM ob1_ids)::uuid[])`);
   }
-  const locals = declaredLocals(def);
-  // Replacer FUNCTIONS throughout: a replacement string would interpret `$1`,
-  // `$&` or `$$` inside an expression as a pattern, and 014's SQL is one `$$`
-  // away from that. Locals may reference earlier locals (v_fetch is built from
-  // v_count), so substitute until none remain rather than in one pass. A
-  // caller may override a local's expression — bench-hnsw.ts section E lifts
-  // `v_exact` to route a broader tier to the exact branch — and the override
-  // is substituted where the local was, so nothing downstream is split on a
-  // literal.
-  for (let pass = 0; pass < locals.size + 1; pass++) {
-    for (const [name, expr] of locals) body = body.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${opts.overrides?.[name] ?? expr})`);
-  }
   // 020's two parameters are $5 and $6; a body from before 020 (a bench's
   // "before" arm) reads neither, and a PREPARE that declares them is still
   // valid, so every explainer passes six arguments.
-  body = body
-    .replace(/\bquery_embedding\b/g, () => `$1::vector(${dim})`)
-    .replace(/\bmatch_threshold\b/g, () => "$2::float")
-    .replace(/\bmatch_count\b/g, () => "$3::int")
-    .replace(/\bfilter\b/g, () => "$4::jsonb")
-    .replace(/\brecency_weight\b/g, () => "$5::float")
-    .replace(/\bhalf_life_days\b/g, () => "$6::float");
-  const leftover = /\b(v_\w+)\b/.exec(body);
+  return resolveLocals(body, declaredLocals(def), {
+    overrides: opts.overrides,
+    params: {
+      query_embedding: `$1::vector(${dim})`,
+      match_threshold: "$2::float",
+      match_count: "$3::int",
+      filter: "$4::jsonb",
+      recency_weight: "$5::float",
+      half_life_days: "$6::float",
+    },
+  });
+}
+
+/**
+ * Substitute the DECLARE locals and the function's parameters into a piece
+ * of its body, so the text stands alone. Replacer FUNCTIONS throughout: a
+ * replacement string would interpret `$1`, `$&` or `$$` inside an expression
+ * as a pattern, and 014's SQL is one `$$` away from that. Locals may reference
+ * earlier locals (v_fetch is built from v_count), so substitute until none
+ * remain rather than in one pass. A caller may override a local's expression
+ * — bench-hnsw.ts section E lifts `v_exact` to route a broader tier to the
+ * exact branch — and the override is substituted where the local was, so
+ * nothing downstream is split on a literal. One routine for extractBody and
+ * routingAt (third review pass of SMD-1018: two copies had already diverged
+ * on overrides and on the leftover check).
+ */
+function resolveLocals(text: string, locals: Map<string, string>, opts: { overrides?: Record<string, string>; params: Record<string, string> }): string {
+  let out = text;
+  for (let pass = 0; pass < locals.size + 1; pass++) {
+    for (const [name, expr] of locals) out = out.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${opts.overrides?.[name] ?? expr})`);
+  }
+  for (const [name, value] of Object.entries(opts.params)) out = out.replace(new RegExp(`\\b${name}\\b`, "g"), () => value);
+  const leftover = /\b(v_\w+)\b/.exec(out);
   if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
-  return body;
+  return out;
 }
 
 
@@ -513,16 +526,13 @@ export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch:
   const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
   const locals = declaredLocals(def);
   if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
-  const resolve = (name: string): string => {
-    let expr = `(${locals.get(name)!})`;
-    for (let pass = 0; pass < locals.size + 1; pass++) {
-      for (const [n, e] of locals) expr = expr.replace(new RegExp(`\\b${n}\\b`, "g"), () => `(${e})`);
-    }
-    return expr
-      .replace(/\bmatch_count\b/g, () => `${matchCount}::int`)
-      .replace(/\brecency_weight\b/g, () => "0.0::float")
-      .replace(/\bhalf_life_days\b/g, () => "90.0::float");
-  };
+  // The same substitution the explainers use, with the call's arguments in
+  // place of the parameters; a local that reads a parameter this table does
+  // not name is caught by the leftover check rather than by the server.
+  const resolve = (name: string) =>
+    resolveLocals(`(${name})`, locals, {
+      params: { match_count: `${matchCount}::int`, match_threshold: "0.7::float", recency_weight: "0.0::float", half_life_days: "90.0::float" },
+    });
   const [row] = await sql.unsafe(`SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact`);
   return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact) };
 }

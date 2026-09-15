@@ -851,7 +851,11 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 # At scale (SMD-1018): one scale per container, and give the container the
 # shared memory the parallel HNSW build keeps its graph in — at least the
 # maintenance_work_mem the bench builds with (1 KB a row by default; the
-# script's default /dev/shm of 1 GB covers the two published scales).
+# script's default /dev/shm of 1 GB covers the two published scales). The
+# size is a cap on the VM's RAM, not a reservation: the ten-million-row run
+# needs a podman machine or Docker VM with more than 11 GB (14.8 GB was
+# used; `podman machine init` gives 2 GB), or OB1_BENCH_BUILD_WORKERS=0 to
+# build serially in backend memory.
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 ```
@@ -1391,7 +1395,13 @@ default — are unaffected.
   in WASM) *and* a real `pgvector/pgvector:0.8.6-pg16` container, but neither is RDS or
   Neon. Run `--dry-run` first against the real target.
 - **HNSW index build time is not represented.** On an empty table it is instant; on
-  a populated one it is not. Build it after a bulk load, not before.
+  a populated one it is not. Build it after a bulk load, not before — and with
+  `maintenance_work_mem` sized for the graph, which a parallel build keeps in
+  `/dev/shm`: a container's default 64 MB fails the build past a few hundred
+  thousand rows ("could not resize shared memory segment"), so `deploy/compose.yaml`
+  sets `shm_size` (`POSTGRES_SHM_SIZE`), and where it cannot be raised
+  `max_parallel_maintenance_workers = 0` builds in ordinary backend memory.
+  `bench-hnsw.ts` section L has the build times by scale.
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.
