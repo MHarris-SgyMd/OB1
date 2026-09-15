@@ -1137,15 +1137,16 @@ separated rerank-from-baseline cleanly where the saturated one could not, so a h
 held-out corpus is what a shippable reranker must be judged on.
 
 Reproducing the two corpora: **S** — a persisted `eval-longmemeval.ts` load, then
-the phase-1/2/3 commands in `decompose-rerank.ts`'s header. **M** — the loader
-`readFileSync`s the whole corpus and bun (JavaScriptCore) cannot allocate a 2.5 GB
-string, so M is loaded in question shards into its own DB (`ob1lmem`, schema cloned
-from the S DB), with a post-load pass completing each session's `lme_q` (sessions are
-shared across shards, mean 4.6 questions each, so the per-shard load leaves it
-partial); then this harness is pointed at a **slim** M file (the `haystack_sessions`
-transcripts dropped — already in the DB; only the light fields are read here) with
-the **same** decomposition dump, since M's 500 questions are S's (0 text
-differences). The loader's inability to read a >2 GB corpus is filed as a follow-up.
+the phase-1/2/3 commands in `decompose-rerank.ts`'s header. **M** — `eval-longmemeval.ts`
+loads it with the **same one command** as S: since SMD-1438 the loader *streams* the
+corpus one top-level question object at a time (a 2.5 GB file is past JavaScriptCore's
+~2.14 GB string cap, which the old `readFileSync` hit with ENOMEM), and because a single
+process still sees every question, each session's `lme_q` is the union of all its
+questions' ids by construction — the earlier shard-into-its-own-DB-and-post-pass
+workaround is retired. The *scoring* harness (`decompose-rerank.ts`) is then pointed at a
+**slim** M file (the `haystack_sessions` transcripts dropped — already in the DB; only the
+light fields are read there) with the **same** decomposition dump, since M's 500 questions
+are S's (0 text differences).
 
 ### Verifying Matryoshka support against the model cards
 
