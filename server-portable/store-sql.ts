@@ -264,9 +264,13 @@ export class SqlStore implements ThoughtStore {
             ${toVector(opts.embedding)}::vector
           ) AS r`;
 
-    const id = (rows[0]?.r as { id?: string } | undefined)?.id;
+    const r = rows[0]?.r as { id?: string; existed?: unknown } | undefined;
+    const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
-    return { id };
+    // 034: `existed` says the text was already there and the envelope's
+    // provenance was not written. Passed on only when the body said (a
+    // database before 034 returns none, and a guess would be a lie).
+    return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed } : {}) };
   }
 
   async updateThought(opts: {

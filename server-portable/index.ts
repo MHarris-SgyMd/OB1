@@ -903,9 +903,9 @@ function buildServer(principal: Principal): McpServer {
         // neither. Validated at the write — an id that is not an existing thought
         // is refused, so a synthesis cannot claim a source it does not have.
         derived_from: z.array(z.string()).optional()
-          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result)."),
+          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is and the reply says so."),
         supersedes: z.string().optional()
-          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded."),
+          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead (the reply names it)."),
       },
     },
     async ({ content, derived_from, supersedes }) => {
@@ -993,6 +993,21 @@ function buildServer(principal: Principal): McpServer {
             `OB1_LLM_BASE_URL.`;
         }
         confirmation += explainHeadWindow(embedded);
+
+        // Migration 034 (SMD-1453): a re-capture writes no provenance. The text
+        // was already a thought, so the derived_from / supersedes named here
+        // were not written; say so and name the edit that records it, since
+        // otherwise nothing would — the trace would show nothing and no
+        // error would say why.
+        if (captured.existed === true && (derived_from !== undefined || supersedes !== undefined)) {
+          const named = [derived_from !== undefined ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
+          confirmation +=
+            `\n\nNote: this text was already captured as ${captured.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
+            `a re-capture leaves an existing thought's provenance as it is.` +
+            (supersedes !== undefined
+              ? ` To record that it supersedes ${supersedes}, call update_thought with id ${captured.id} and \`supersedes\` ${supersedes}.`
+              : ` \`derived_from\` cannot be set on an existing thought through these tools.`);
+        }
 
         // Tell the user when tags are placeholders rather than real extraction,
         // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.

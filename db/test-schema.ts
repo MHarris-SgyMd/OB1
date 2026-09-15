@@ -2177,8 +2177,8 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
-         `033 is the last definer of update_thought (it carries 032's body — 021's and the provenance envelope — with the fingerprint lock before the row) and of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, and takes the fingerprint lock), 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("upsert_thought").startsWith("034") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
+         `033 is the last definer of update_thought (it carries 032's body — 021's and the provenance envelope — with the fingerprint lock before the row), 034 of upsert_thought (its 3-argument body carries 022's chunk rule, 021's label and 025's envelope, takes the fingerprint lock and writes provenance on a first capture only), 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
   // current one, and a 7-argument call is ambiguous. The last definer (032)
@@ -2306,7 +2306,7 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   assert(!/ob1:vector-replaces-chunks/.test(up4) && /elem->>'context'/.test(up4) && /DELETE FROM thought_chunks WHERE thought_id = v_id/.test(up4),
          "the 4-argument form is 013's, untouched: it delegates here and replaces the windows with the caller's");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("upsert_thought").startsWith("033"), `033 is the last definer of upsert_thought (it carries 025's body — 022's rule and the envelope — and takes the fingerprint lock) (${lastDefinerOf("upsert_thought")})`);
+  assert(lastDefinerOf("upsert_thought").startsWith("034"), `034 is the last definer of upsert_thought (it carries 033's body — 022's rule, 025's envelope, the fingerprint lock — and writes provenance on a first capture only) (${lastDefinerOf("upsert_thought")})`);
 
   // The trap: 021 re-applied by hand puts 021's 3-argument body back, and the
   // defect with it — which is what preflight's `atomic capture` reads the
@@ -3060,8 +3060,8 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // a migration went away.
   assert(owned.size >= 37 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
     `the owned set is read from the migrations: ${owned.size} functions (37 at 032, never fewer), names only — no word from a header comment quoting a statement`);
-  assert(owned.get("upsert_thought") === "033_upsert_thought_fingerprint_lock.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
-    "…and the last definers preflight's remedies name: upsert_thought 033, trace_provenance 026, release_thought 015");
+  assert(owned.get("upsert_thought") === "034_recapture_writes_no_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
+    "…and the last definers preflight's remedies name: upsert_thought 034, trace_provenance 026, release_thought 015");
   const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
   assert(ownedCols.get("embedding_model") === "021_embedding_model_per_row.sql" && ownedCols.get("derived_from") === "025_thought_provenance.sql" && ownedCols.get("supersedes") === "025_thought_provenance.sql" && ownedCols.size >= 3,
     `the thoughts columns whose comments a migration writes are read the same way (${ownedCols.size}): embedding_model 021, derived_from and supersedes 025`);
@@ -3359,9 +3359,11 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   const two = await srcOf(TWO), three = await srcOf(THREE), four = await srcOf(FOUR), edit = await srcOf(UPDATE_THOUGHT_SIGNATURE);
 
   // The shape: three overloads and one update_thought, 033 the last definer
-  // of both names, the lock spelled once.
-  assert((await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && lastDefinerOf("upsert_thought").startsWith("033") && lastDefinerOf("update_thought").startsWith("033"),
-    `three upsert_thought overloads and one update_thought, 033 the last definer of both (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
+  // of update_thought and 034 of upsert_thought (034 carries 033's bodies
+  // with the fill and the supersession lock gone — [34]), the lock spelled
+  // once.
+  assert((await functionsNamed("upsert_thought")) === 3 && (await functionsNamed("update_thought")) === 1 && lastDefinerOf("upsert_thought").startsWith("034") && lastDefinerOf("update_thought").startsWith("033"),
+    `three upsert_thought overloads and one update_thought, 033 the last definer of update_thought and 034 of upsert_thought (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
   assert(two.includes(LOCK) && three.includes(LOCK) && edit.includes(LOCK), "the 2- and 3-argument bodies and update_thought spell the fingerprint lock identically — the same key is the same lock");
   // update_thought's order since 033: the fingerprint lock BEFORE the row
   // read, whenever content arrives — one order for every writer, so the
@@ -3376,11 +3378,12 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   assert(/ob1:unchanged-edit-not-duplicate/.test(edit) && /v_existing\.content_fingerprint = v_fingerprint THEN/.test(edit), "…keeping 018's sentinel and its owns-the-key shortcut for the lookup");
   assert(/ob1:capture-takes-fingerprint-lock/.test(two) && /ob1:capture-takes-fingerprint-lock/.test(three), "…and both capture bodies carry the ob1:capture-takes-fingerprint-lock sentinel preflight reads");
   assert(!/ob1:capture-takes-fingerprint-lock/.test(four) && !/pg_advisory_xact_lock/.test(four) && /elem->>'context'/.test(four), "the 4-argument form is 013's, untouched: it delegates to the 3-argument body and takes its lock there");
-  // Order in the 3-argument body: supersession lock, fingerprint lock, the
-  // label read, the INSERT — by position in the source.
+  // Order in the 3-argument body: fingerprint lock, the row read, the INSERT
+  // — by position in the source. 033 took the supersession lock first when
+  // the envelope named supersedes; 034 dropped it with the fill ([34]).
   const at = (re: RegExp, src = three) => { const m = re.exec(src); return m ? m.index : -1; };
   const iSup = at(/hashtext\('ob1:supersession-review'\)/), iFp = at(/hashtextextended\(v_fingerprint, 0\)/), iRead = at(/content_fingerprint = v_fingerprint FOR NO KEY UPDATE/), iIns = at(/INSERT INTO thoughts/);
-  assert(iSup > 0 && iSup < iFp && iFp < iRead && iRead < iIns, `the 3-argument body acquires supersession lock, then fingerprint lock, then reads the row, then inserts (${iSup} < ${iFp} < ${iRead} < ${iIns})`);
+  assert(iSup === -1 && iFp > 0 && iFp < iRead && iRead < iIns, `the 3-argument body takes no supersession lock (034), acquires the fingerprint lock, then reads the row, then inserts (${iSup}; ${iFp} < ${iRead} < ${iIns})`);
   assert(at(/hashtextextended\(v_fingerprint, 0\)/, two) < at(/INSERT INTO thoughts/, two), "…and the 2-argument body locks before it inserts");
   // One owner per rule: 016's hash, 032's derived_from — no inline copy left.
   assert(/content_fingerprint_of\(p_content\)/.test(two) && /content_fingerprint_of\(p_content\)/.test(three) && !/regexp_replace/.test(two) && !/regexp_replace/.test(three),
@@ -3390,7 +3393,7 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   for (const [re, what] of [
     [/jsonb_typeof\(p_payload\) <> 'object'/, "005's guard"], [/set_config\('ob1\.actor'/, "008's actor"], [/p_payload->>'embedding_model'/, "021's label"], [/ELSE EXCLUDED\.embedding_model END/, "021's ON CONFLICT label clause"],
     [/v_existed := FOUND/, "022's FOUND"], [/DELETE FROM thought_chunks WHERE thought_id = v_id/, "022's chunk DELETE"], [/ob1:vector-replaces-chunks/, "022's sentinel"],
-    [/supersedes must be a thought UUID string/, "025's supersedes shape check"], [/COALESCE\(thoughts\.supersedes,\s+EXCLUDED\.supersedes\)/, "025's add-if-empty"],
+    [/supersedes must be a thought UUID string/, "025's supersedes shape check"], [/v_supersedes::uuid/, "025's two columns in the INSERT (the ON CONFLICT fill is 034's to have removed — [34])"],
   ] as [RegExp, string][]) assert(re.test(three), `…the 3-argument body carrying ${what}`);
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(two) && /set_config\('ob1\.actor'/.test(two), "…the 2-argument body carrying 005's guard and, since 033, 008's actor");
 
@@ -3413,30 +3416,19 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   // them, and the refusals are validate_derived_from's.
   const b = await cap("the newer locked capture", { metadata: {}, supersedes: a.id, derived_from: [a.id] }, unit(1));
   const rowB = (await db.query<{ s: string; d: unknown }>(`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = $1`, [b.id])).rows[0];
-  assert(rowB.s === a.id && JSON.stringify(rowB.d) === JSON.stringify([a.id]), "a capture naming provenance writes it under the two locks");
+  assert(rowB.s === a.id && JSON.stringify(rowB.d) === JSON.stringify([a.id]), "a capture naming provenance writes it on its fresh row under the fingerprint lock");
   let raised = "";
   try { await cap("bad provenance 33", { metadata: {}, derived_from: ["nope"] }, unit(2)); } catch (e) { raised = (e as Error).message; }
   assert(/derived_from must contain only thought UUID strings/.test(raised) && !/^upsert_thought:/.test(raised.replace(/^error: /, "")), `a bad derived_from is refused with validate_derived_from's message (${raised.slice(0, 60)})`);
   try { await cap("bad supersedes 33", { metadata: {}, supersedes: "nope" }, unit(2)); } catch (e) { raised = (e as Error).message; }
   assert(/upsert_thought: supersedes must be a thought UUID string/.test(raised), "…and a bad supersedes with 025's own message, prefix kept");
 
-  // The residue the header states (SMD-1453): a re-capture filling a NULL
-  // pointer is ordered against the walk, not walked. R with no pointer, X
-  // superseding R, then R's text captured naming X: R → X → R is written.
-  const r = await cap("residue: the earlier note", { metadata: {} }, unit(3));
-  const x = await cap("residue: the later note", { metadata: {}, supersedes: r.id }, unit(4));
-  await cap("residue: the earlier note", { metadata: {}, supersedes: x.id }, unit(3));
-  const loop = (await db.query<{ rs: string; xs: string }>(`SELECT (SELECT supersedes FROM thoughts WHERE id = $1) AS rs, (SELECT supersedes FROM thoughts WHERE id = $2) AS xs`, [r.id, x.id])).rows[0];
-  assert(loop.rs === x.id && loop.xs === r.id, "a re-capture fills a NULL pointer without walking the chain — the two-row loop the header states and SMD-1453 holds");
-  const walk = await db.query<{ cycle: boolean }>(`SELECT cycle FROM trace_provenance($1::uuid)`, [r.id]);
-  assert(walk.rows.length >= 1, "…and trace_provenance still answers over it, cycle-guarded");
-  const seen = (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb) AS r`, [x.id, JSON.stringify({ supersedes: r.id })])).rows[0].r;
-  assert(seen.ok === false && seen.error === "WOULD_CYCLE", `…and update_thought's walk, asked to write what x already holds, sees the loop the capture wrote (${seen.error})`);
-  assert((await db.query<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb) AS r`, [r.id])).rows[0].r.ok === true, "…which the envelope (032) undoes");
+  // The residue 033's header stated (SMD-1453) — a re-capture filling a NULL
+  // pointer without a walk, R → X → R — is [34]'s now: 034 removed the fill.
 
   // The trap: 025 re-applied by hand puts an unlocked 3-argument body back
-  // (its file defines that form; the 2-argument one keeps 033's); 005 puts
-  // both back unlocked. 033 re-applied restores both.
+  // (its file defines that form; the 2-argument one keeps 033's = 034's);
+  // 005 puts both back unlocked. 034, the last definer, restores both.
   await reapply("025");
   assert(!/ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)), "025 re-applied over 033 puts an unlocked 3-argument body back and leaves the 2-argument one locked");
   await reapply("005");
@@ -3445,7 +3437,7 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   // read from the catalog, not the files ([25]'s note): restored with the rest.
   assert(!/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "(025 re-applied put its unbounded trace_provenance back too — 026's sentinel is gone)");
   await restoreShipped("upsert_thought", "trace_provenance");
-  assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "033 re-applied: both bodies locked again, three overloads");
+  assert(/ob1:capture-takes-fingerprint-lock/.test(await srcOf(TWO)) && /ob1:capture-takes-fingerprint-lock/.test(await srcOf(THREE)) && (await functionsNamed("upsert_thought")) === 3, "034 re-applied: both bodies locked again, three overloads");
   assert(/ob1:provenance-walk-bounded/.test(await srcOf("trace_provenance(uuid, int, int)")), "…and 026 re-applied: the bounded walk's sentinel is back");
   // 032 re-applied by hand over 033 puts 032's update_thought back — the
   // row → fingerprint order, no sentinel to say so (the header states it);
@@ -3453,9 +3445,132 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   await reapply("032");
   const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied over 033 puts the row-then-fingerprint order back, one function still");
-  await restoreShipped("update_thought");
+  // 033's file, update_thought's last definer, also redefines both capture
+  // forms — as 033's; upsert_thought's last definer (034) must follow it.
+  await restoreShipped("update_thought", "upsert_thought");
   const edit033 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[34] Migration 034: a re-capture writes no provenance — the envelope's derived_from and supersedes land on a first capture only, no capture takes the supersession lock, and the return says existed (SMD-1453)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const TWO = "upsert_thought(text, jsonb)";
+  const THREE = "upsert_thought(text, jsonb, vector)";
+  const FOUR = "upsert_thought(text, jsonb, vector, jsonb)";
+  const REVIEW = "review_supersession_proposal(uuid, text, text, text, jsonb, boolean)";
+  const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
+  const commentOf = async (sig: string) => String((await db.query<{ d: string }>(`SELECT obj_description($1::regprocedure, 'pg_proc') AS d`, [sig])).rows[0].d);
+  const three = await srcOf(THREE);
+  type R = { id: string; fingerprint: string; existed?: boolean; chunks?: number };
+  const cap = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
+    (await db.query<{ r: R }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r;
+  const prov = async (id: string) => (await db.query<{ s: string | null; d: unknown }>(`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = $1`, [id])).rows[0];
+  const edit = async (id: string, envelope: Record<string, unknown>) =>
+    (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb) AS r`, [id, JSON.stringify(envelope)])).rows[0].r;
+  const twoRowLoops = async () => Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id`)).rows[0].c);
+
+  // The shape: 034 the last definer of upsert_thought, 033 still of
+  // update_thought, which this file does not touch.
+  assert(lastDefinerOf("upsert_thought").startsWith("034") && lastDefinerOf("update_thought").startsWith("033") && (await functionsNamed("upsert_thought")) === 3,
+    `034 is the last definer of upsert_thought and 033 of update_thought, three overloads (${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("update_thought")})`);
+  // The 3-argument body, read from pg_proc: 034's sentinel beside 022's and
+  // 033's; no supersession lock; an ON CONFLICT clause that sets neither
+  // column while the INSERT still lists both; the row read for every
+  // capture; `existed` in the return.
+  assert(/ob1:re-capture-writes-no-provenance/.test(three) && /ob1:capture-takes-fingerprint-lock/.test(three) && /ob1:vector-replaces-chunks/.test(three), "the 3-argument body carries 034's sentinel beside 022's and 033's");
+  assert(!/supersession-review/.test(three), "…and takes no supersession lock — hashtext('ob1:supersession-review') is gone from the body");
+  const onConflict = three.slice(three.indexOf("DO UPDATE"), three.indexOf("RETURNING id INTO v_id"));
+  assert(onConflict.length > 0 && !/supersedes\s*=/.test(onConflict) && !/derived_from\s*=/.test(onConflict) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three), "…its ON CONFLICT clause sets neither derived_from nor supersedes — 025's add-if-empty is gone");
+  assert(/INSERT INTO thoughts \(content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes\)/.test(three) && /v_supersedes::uuid/.test(three) && /validate_derived_from\(p_payload->'derived_from'\)/.test(three), "…while the INSERT still writes both from the envelope, validated");
+  assert(!/IF p_embedding IS NOT NULL THEN\s+SELECT embedding_model/.test(three) && /FOR NO KEY UPDATE;\s+v_existed := FOUND;/.test(three) && /'existed', v_existed\)/.test(three), "…the row read runs for every capture and the return carries existed");
+  assert(/IF p_embedding IS NOT NULL AND v_existed/.test(three), "…and the chunk DELETE keeps 022's condition — a vector arrived, a row was there");
+  const four = await srcOf(FOUR);
+  assert(/upsert_thought\(p_content, p_payload, p_embedding\)/.test(four) && /v_result \|\| jsonb_build_object/.test(four), "the 4-argument form still delegates and appends to the inner return, so existed passes through");
+  const two = await srcOf(TWO);
+  assert(/ob1:capture-takes-fingerprint-lock/.test(two) && /set_config\('ob1\.actor'/.test(two) && /jsonb_typeof\(p_payload\) <> 'object'/.test(two) && !/existed/.test(two), "the 2-argument body is 033's, carried: locked, attributed, guarded, no existed");
+
+  // Behaviour. A first capture writes provenance and says existed: false.
+  const a = await cap("034 the earlier note", { metadata: {} }, unit(0));
+  assert(a.existed === false && (await prov(a.id)).s === null, "a first capture says existed: false");
+  const b = await cap("034 the later note", { metadata: {}, supersedes: a.id, derived_from: [a.id] }, unit(1));
+  const pb = await prov(b.id);
+  assert(b.existed === false && pb.s === a.id && JSON.stringify(pb.d) === JSON.stringify([a.id]), "a first capture naming provenance writes it on its fresh row");
+  // A re-capture naming DIFFERENT provenance leaves what is there (025's
+  // half that stays)…
+  const c = await cap("034 a third note", { metadata: {} }, unit(2));
+  const bAgain = await cap("034 the later note", { metadata: { k: 1 }, supersedes: c.id, derived_from: [c.id] }, unit(1));
+  const pb2 = await prov(b.id);
+  assert(bAgain.id === b.id && bAgain.existed === true && pb2.s === a.id && JSON.stringify(pb2.d) === JSON.stringify([a.id]), "a re-capture naming other provenance leaves the row's, and says existed: true");
+  assert((await db.query<{ k: number }>(`SELECT (metadata->>'k')::int AS k FROM thoughts WHERE id = $1`, [b.id])).rows[0].k === 1, "…while its metadata merged as before");
+  // …and a re-capture of a row with NONE fills nothing — the half 034 removes.
+  const aAgain = await cap("034 the earlier note", { metadata: {}, supersedes: c.id, derived_from: [c.id] }, unit(0));
+  const pa = await prov(a.id);
+  assert(aAgain.id === a.id && aAgain.existed === true && pa.s === null && pa.d === null, "a re-capture naming provenance over a row that has none writes none — 025's fill is gone");
+  // A vectorless re-capture says existed too: the read runs without a vector.
+  const aPlain = await cap("034 the earlier note", { metadata: {} }, null);
+  assert(aPlain.id === a.id && aPlain.existed === true, "a vectorless re-capture says existed: true — the row read runs for every capture");
+  // Through the 4-argument form `existed` passes beside `chunks` — asserted
+  // from 013's source above and called on a real server in test-live [13],
+  // not here: PGlite aborts with a WASM out-of-bounds on a windowed capture
+  // through that form (at 033 as at 034 — a probe applying each and calling
+  // it twice crashed on the second call under both), while every Postgres
+  // suite that captures with windows passes.
+  // Validation still runs on a dedup: the envelope is checked before the
+  // write is known to be one.
+  let raised = "";
+  try { await cap("034 the earlier note", { metadata: {}, derived_from: ["nope"] }, unit(0)); } catch (e) { raised = (e as Error).message; }
+  assert(/derived_from must contain only thought UUID strings/.test(raised), "a re-capture with a malformed derived_from is refused as a first one is");
+  raised = "";
+  try { await cap("034 the earlier note", { metadata: {}, supersedes: "nope" }, unit(0)); } catch (e) { raised = (e as Error).message; }
+  assert(/upsert_thought: supersedes must be a thought UUID string/.test(raised), "…and a malformed supersedes likewise");
+
+  // SMD-1453's case, sequential: R with no pointer, X superseding R, then R's
+  // text captured naming X. [33] wrote R → X → R at 033; now nothing is
+  // written, and the one path left to that pointer walks and refuses it.
+  const r = await cap("034 residue: the earlier note", { metadata: {} }, unit(3));
+  const x = await cap("034 residue: the later note", { metadata: {}, supersedes: r.id }, unit(4));
+  const rAgain = await cap("034 residue: the earlier note", { metadata: {}, supersedes: x.id }, unit(3));
+  const loop = (await db.query<{ rs: string | null; xs: string }>(`SELECT (SELECT supersedes FROM thoughts WHERE id = $1) AS rs, (SELECT supersedes FROM thoughts WHERE id = $2) AS xs`, [r.id, x.id])).rows[0];
+  assert(rAgain.existed === true && loop.rs === null && loop.xs === r.id, "R's text re-captured naming X writes no pointer: X → R stands alone, no loop — the residue 033 stated is closed");
+  const refused = await edit(r.id, { supersedes: x.id });
+  assert(refused.ok === false && refused.error === "WOULD_CYCLE", `…and update_thought's envelope, asked for the same pointer, walks and refuses it (${refused.error})`);
+  assert((await twoRowLoops()) === 0, "…no two-row loop in the table (the header's query)");
+
+  // No supersession lock: inside one transaction a capture naming supersedes
+  // holds ONE advisory lock — the fingerprint's. At 033 it held two.
+  let heldNaming = -1;
+  await db.transaction(async (tx) => {
+    await tx.query(`SELECT upsert_thought($1, $2::jsonb, $3::vector)`, ["034 a capture naming a pointer, held", JSON.stringify({ metadata: {}, supersedes: c.id }), unit(5)]);
+    heldNaming = (await tx.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c;
+    await tx.rollback();
+  });
+  assert(heldNaming === 1, `a capture naming supersedes holds one advisory lock while its transaction is open — the fingerprint's, not the supersession lock (${heldNaming})`);
+  assert(Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)).rows[0].c) === 0, "…and none once it ends");
+
+  // The COMMENTs say so: the 3-argument form's states the rule and the
+  // return; review_supersession_proposal's (032's, re-issued) no longer
+  // carries the add-if-empty aside.
+  const cThree = await commentOf(THREE), cReview = await commentOf(REVIEW);
+  assert(/provenance is NOT written \(034\)/.test(cThree) && /existed/.test(cThree) && /no supersession lock \(034\)/.test(cThree), "the 3-argument COMMENT states the rule and the return");
+  assert(!/add-if-empty/.test(cReview) && /since 034 a re-capture does not touch it/.test(cReview) && /Migration 029 \/ 032 \/ 034/.test(cReview), "…and review_supersession_proposal's COMMENT no longer carries 032's add-if-empty aside");
+
+  // The trap: 033 re-applied by hand puts the fill and the supersession lock
+  // back (its file defines both forms and update_thought) — 034's sentinel is
+  // what says so; 034 re-applied restores.
+  await reapply("033");
+  const three033 = await srcOf(THREE);
+  assert(!/ob1:re-capture-writes-no-provenance/.test(three033) && /supersession-review/.test(three033) && /COALESCE\(thoughts\.supersedes/.test(three033) && /ob1:capture-takes-fingerprint-lock/.test(three033), "033 re-applied over 034 puts the fill and the supersession lock back, the lock sentinel kept");
+  const filled = await cap("034 residue: the earlier note", { metadata: {}, supersedes: x.id }, unit(3));
+  assert(filled.existed === undefined && (await prov(r.id)).s === x.id && (await twoRowLoops()) === 2, "…and under it the same re-capture writes the loop and says nothing (no existed)");
+  assert((await edit(r.id, { supersedes: null })).ok === true && (await twoRowLoops()) === 0, "…which the envelope clears (the header's remedy for a loop written before 034)");
+  assert(!/add-if-empty/.test(await commentOf(REVIEW)), "(033 re-applied leaves review_supersession_proposal's COMMENT as 034 issued it — only 032's own file puts the aside back, as [33]'s trap did before 034 followed)");
+  await restoreShipped("upsert_thought");
+  const restored = await srcOf(THREE);
+  assert(/ob1:re-capture-writes-no-provenance/.test(restored) && !/supersession-review/.test(restored) && !/COALESCE\(thoughts\.supersedes/.test(restored) && (await functionsNamed("upsert_thought")) === 3 && lastDefinerOf("update_thought").startsWith("033"),
+    "034 re-applied: the fill and the lock gone again, three overloads, update_thought still 033's");
+  assert(!/add-if-empty/.test(await commentOf(REVIEW)), "…and review_supersession_proposal's COMMENT re-issued without the aside");
   await db.exec(`DELETE FROM thoughts`);
 }
 
