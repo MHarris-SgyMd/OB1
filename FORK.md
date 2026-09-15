@@ -6756,7 +6756,7 @@ it still saying eight; CI runs that suite). Green: `test-schema`
 
 **Not done, and why.** `upsert_thought` still carries its inline copy of the
 derived_from rule — switching it is a redefinition of the other function, which
-SMD-1043 owns (change 61 does); whichever of the two lands second carries the first's body. No
+SMD-1043 owns (change 62 does); whichever of the two lands second carries the first's body. No
 `derived_from` input on the MCP tool (above). The three audit reads in the test
 suites that ordered by the audit table's uuid key now order by `created_at` —
 one of them, [28]'s, was a latent flake this section's twin assertion exposed.
@@ -7171,13 +7171,15 @@ supersession lock, fingerprint lock, row — or a suffix of it, and takes at mos
 one lock of each class. A capture naming `supersedes`: supersession →
 fingerprint → the row the text lands on. A capture without: fingerprint → row.
 `update_thought` with content: supersession (when named) → fingerprint → the
-edited row; without content: supersession → row. The review path: supersession
-→ row → `update_thought` without content, re-entrant on both. The FK check a
-`supersedes` write makes takes `KEY SHARE` on the target last, which does not
-conflict with `FOR NO KEY UPDATE` (change 60), and the capture's row lock is
-`FOR NO KEY UPDATE` (022), so the foreign keys never enter a cycle. One total
-order, one lock per class per transaction: no two writers can each hold what
-the other waits for. 023's `LOCK TABLE … IN EXCLUSIVE MODE` is a table lock,
+edited row; without content: supersession → row. The review path: the proposal
+row `FOR UPDATE` → supersession → the superseding row → `update_thought`
+without content, re-entrant on both. The FK check a `supersedes` write makes
+takes `KEY SHARE` on the target last, which does not conflict with `FOR NO KEY
+UPDATE` (change 60), and the capture's row lock is `FOR NO KEY UPDATE` (022),
+so the foreign keys never enter a cycle among these. One total order, one lock
+per class per transaction: no two of these writers can each hold what the
+other waits for. Outside the order: `delete_thought`, below. 023's `LOCK TABLE
+… IN EXCLUSIVE MODE` is a table lock,
 ordered against every INSERT and row lock and not against an advisory lock,
 and the backfill takes none, so the two cannot deadlock either — the review
 pass ran that three-way as well. READ COMMITTED throughout, as 018 and 023
@@ -7210,6 +7212,28 @@ it back" is the wrong cause on the brain every operator has the morning of the
 upgrade — 033 pending, not re-applied — so the parenthetical follows the
 ledger; and a [33] assertion that read the last definer from the *files* to
 "prove" a catalog state now reads `pg_proc`.
+
+**A second pass, triaged: the stop signal, one residue named, two lines.** Its
+top finding was in the first pass's prose, not its code: the new proof said
+*every* writer of `thoughts` is in the order, and `delete_thought` is not. 009's
+DELETE holds the thought `FOR UPDATE` while 029's `ON DELETE CASCADE` reaches
+the proposals that name it; an acceptance locks the proposal row first (029's
+order, which the first pass's list also left out), then the supersession lock,
+the superseding row, and asks `KEY SHARE` on the thought being deleted. Two
+shipped functions, a cycle of two — reproduced 23 times in 40 against a real
+server, the delete the victim each time; a plain edit naming `supersedes`
+against the same delete 0 in 40, since it holds no proposal row. Pre-existing
+since 029/032 and not this change's to fix — the fix is a `delete_thought`
+that takes the supersession lock first, **SMD-1462**, which also carries the
+smaller thing the probe saw (a target deleted between `update_thought`'s walk
+and its UPDATE surfaces as 23503, not `SUPERSEDES_NOT_FOUND` as 032's COMMENT
+promises). The proof is scoped to the writers it names, here and in the
+header; the review path's order is stated with the proposal row first; and
+§60's pointer to this change said 61. Everything the first pass added — the
+moved lock (the two bodies diffed mechanically: one block moved, nothing else),
+the carried DROP block (032's identical first `WHEN`, so an existing 9-argument
+form's ACL is never touched), [6f]'s waits, `pre033()`'s three branches — was
+verified and held.
 
 **Closed, and not.** Closed: a capture racing an edit to the same text (the edit
 is told, not refused); two first captures of one text (the second finds the

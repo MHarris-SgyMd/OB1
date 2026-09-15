@@ -77,12 +77,24 @@
 --     * a capture without: fingerprint → row;
 --     * update_thought with content: supersession (when supersedes is named)
 --       → fingerprint → the edited row; without content: supersession → row;
---     * review_supersession_proposal (032): supersession → row →
---       update_thought without content, re-entrant on both.
+--     * review_supersession_proposal (032): the proposal row FOR UPDATE →
+--       supersession → the superseding row → update_thought without content,
+--       re-entrant on both (reject locks the superseding row with no
+--       advisory lock).
 --   The FK check a supersedes write makes takes FOR KEY SHARE on the target
 --   row last, and KEY SHARE does not conflict with FOR NO KEY UPDATE (032).
---   One total order over the lock classes, one lock of each class per
---   transaction: no two writers can each hold what the other waits for.
+--   Among these writers — every capture, every edit, the review path — one
+--   total order over the lock classes and one lock of each class per
+--   transaction: no two of them can each hold what the other waits for.
+--   OUTSIDE the order, and stated (the second review pass): delete_thought
+--   (009) takes no advisory lock, and its DELETE holds the row FOR UPDATE
+--   while 029's ON DELETE CASCADE reaches the proposals that name it. An
+--   acceptance holding the proposal row and asking KEY SHARE on the deleted
+--   thought, against a delete holding that thought and asking the proposal
+--   row, is a cycle of two shipped functions — reproduced 23 times in 40
+--   against a real server, pre-existing since 029/032, and SMD-1462's: the
+--   delete takes the supersession lock first there. A plain edit naming
+--   supersedes does not cross it (0 in 40): it holds no proposal row.
 --
 --   Why the edit's order moved. The first version of this file took the
 --   capture's locks fingerprint → row and left 018's edit at row →
