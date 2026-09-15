@@ -2794,6 +2794,8 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `SELECT status, superseding_id, review_note, reviewed_at FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
   assert(accRow.status === "accepted" && accRow.superseding_id === reversal && accRow.review_note === "confirmed in the June minutes" && accRow.reviewed_at !== null,
     "…the row is accepted, names the thought it wrote, and keeps the note");
+  // By created_at: thought_audit.id is a uuid, so `ORDER BY id` is a coin toss
+  // (this read ordered by it until SMD-1323's twin exposed the flake).
   const audit = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
     `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [reversal])).rows[0];
   const auditAfter = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;

@@ -269,6 +269,15 @@ function explainRefusal(r: { error: string; currentUpdatedAt?: string }, id: str
 }
 
 /**
+ * A `supersedes` that is not a thought id, refused at the tool before any model
+ * call or database write (032) — both tools, one sentence; `orNull` is the
+ * edit tool's clause, since only it takes null.
+ */
+function refuseSupersedesShape(value: string, orNull = ""): string {
+  return `Refused: \`supersedes\` must be a thought id (the ID: line of a search result)${orNull}, not "${value.slice(0, 40)}".`;
+}
+
+/**
  * The two things migration 018 reports on a successful edit that the caller
  * should hear about: the edit's unchanged text is also another thought's, or
  * another thought's stale fingerprint blocks this one's. Neither says which
@@ -904,9 +913,7 @@ function buildServer(principal: Principal): McpServer {
         // The shape before the two model calls, in the tool's words — as
         // update_thought's `supersedes` is refused (032). upsert_thought would
         // raise on it after the embedding and the metadata were already paid for.
-        if (supersedes !== undefined && !UUID_RE.test(supersedes)) {
-          return toolError(`Refused: \`supersedes\` must be a thought id (the ID: line of a search result), not "${supersedes.slice(0, 40)}".`);
-        }
+        if (supersedes !== undefined && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes));
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),
@@ -1055,9 +1062,7 @@ function buildServer(principal: Principal): McpServer {
         // the function would raise on it, and a raised message reads as a
         // failure rather than a refusal. The string "null" is not a clear —
         // clearing is JSON null, and a client that sends the word meant an id.
-        if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) {
-          return toolError(`Refused: \`supersedes\` must be a thought id (the ID: line of a search result) or null to clear it, not "${supersedes.slice(0, 40)}".`);
-        }
+        if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes, " or null to clear it"));
 
         // Only re-embed when the text actually changed. A metadata-only edit
         // must not spend two model calls, nor risk replacing a good vector.

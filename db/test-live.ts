@@ -562,6 +562,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
     }).catch((e: Error) => { out.error = e.message; });
   const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
   const advisoryWaiters = async (pid: number) => Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${pid}`)[0].n);
+  /** A one-shot gate: the promise A awaits, and the call that opens it. */
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
 
   // Arm 1 — the lock 018 took, by hand in B's place: a deadlock, detected and
   // raised (40P01) in one of the two, where the tool promised DUPLICATE_CONTENT
@@ -569,8 +571,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   {
     const connA = new SQL({ url: URL_, max: 1 });
     const connB = new SQL({ url: URL_, max: 1 });
-    let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
-    let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
+    const { p: goP, open: go } = gate();
+    const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
     const aDone = standAsA(connA, goP, doneP, a);
     await waitFor(() => a.holding === true || a.error !== undefined);
@@ -599,8 +601,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   {
     const connA = new SQL({ url: URL_, max: 1 });
     const connB = new SQL({ url: URL_, max: 1 });
-    let go: () => void = () => {}; const goP = new Promise<void>((r) => { go = r; });
-    let done: () => void = () => {}; const doneP = new Promise<void>((r) => { done = r; });
+    const { p: goP, open: go } = gate();
+    const { p: doneP, open: done } = gate();
     const a: { holding?: boolean; wrote?: boolean; error?: string } = {};
     const aDone = standAsA(connA, goP, doneP, a);
     await waitFor(() => a.holding === true || a.error !== undefined);
