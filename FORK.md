@@ -7432,6 +7432,9 @@ servers (`extensions/family-calendar`, `home-maintenance`,
 `shared-server.ts` — and `professional-crm`), their `.env.example`s,
 `extensions/_shared/auth.ts`, `extensions/_template/AGENT_SPEC.md`,
 `extensions/README.md`, `extensions/test-auth.ts`, `extensions/package.json`,
+`extensions/bun.lock`, the READMEs of `home-maintenance`,
+`household-knowledge`, `meal-planning` and `professional-crm`,
+`server-portable/README.md`, `server-portable/keygen.ts`,
 `primitives/deploy-edge-function/README.md`, `primitives/shared-mcp/README.md`,
 `primitives/remote-mcp/README.md`, `primitives/troubleshooting/README.md`,
 `scripts/check-fork-consistency.mjs` and `.github/workflows/fork-checks.yml`
@@ -7582,7 +7585,7 @@ Outside the rule, and the header
 says so: `.includes`, `Object.is`, `switch`, `.localeCompare`, a compare
 through a class field or an object property, a helper that returns the key,
 several declarators on one statement, a read through `Deno.env.toObject()`
-into a variable. Forty-five probes the rule must catch — every line of a
+into a variable. Forty-seven probes the rule must catch — every line of a
 probe that carries a compare, so a two-route probe is two catches — and
 twenty-one it must not run on every invocation, through the same function
 the scan uses. Its first run found the
@@ -7689,9 +7692,10 @@ the six and the shared server; `.gitignore`, the lockfile and `--frozen-lockfile
 
 **Review, third pass** (triaged; ten findings, all taken, one ticket filed).
 Main had moved — SMD-1226 landed as change 62 — so this section is 63 after a
-merge, and the number is spelled in fourteen places outside this file (the
-seven server headers, both copies of the auth module — byte identity held —
-the checker, the test, the test's `package.json`). The second pass's shadow
+merge, and the number is spelled in fourteen lines of twelve files outside
+this one (the seven server headers, both copies of the auth module — byte
+identity held — the checker's three, the test, the test's `package.json`).
+The second pass's shadow
 rule silenced real compares: it took any redeclaration anywhere between the
 file's *first* `N =` and the compare, so an arrow parameter in another
 function, a loop whose block had closed, a `let` above the credential binding
@@ -7755,7 +7759,7 @@ assertions rather than aborting the run.
 boundary — nine gaps and nits, and none of the fourth pass's fixes among
 them: the stop signal). Main had moved again — SMD-1043 landed as change 63
 — so this section is 64 after a second merge, the number spelled in the same
-fourteen places. Check 8 did not read Hono's `env(c)` adapter form, the
+fourteen lines. Check 8 did not read Hono's `env(c)` adapter form, the
 canonical environment read for a Hono server on Workers or Deno — the stack
 these servers use; it does, with two probes, and the header's "outside the
 rule" list gained the three spellings the pass named (a read by a non-literal
@@ -7782,6 +7786,31 @@ credential read and use it a dozen times each, the five
 string`); all seventeen exceptions matching exactly the intended compare
 line; the 24/45 split by every write verb; "Portable server" among the nine
 required contexts; the lockfile version; the Step 3 hash matching Node's.
+
+**Review, sixth pass** (at the maintainer's call, past the stop signal;
+nothing above gap level). The reviewer ran rather than read: the deploy
+layout the `_shared/` decision rests on, reproduced offline — `index.ts`,
+`deno.json` and `_shared/auth.ts` copied where the primitive's Step 2 puts
+them, and `deno check` resolves `../_shared/auth.ts` from there; a
+write-scoped key calling a write tool against a closed port — the tool is
+registered and reaches the shim, answers "Failed to connect" in 13 ms, and
+neither the URL, the user, the database, the password, the service key nor
+the key itself appears in the response, while the read key is told the tool
+does not exist; check 8 over every scanned file with the exceptions off —
+exactly the seventeen files at exactly the seventeen lines, each the
+credential compare itself and not a shadow-name compare the count could hide;
+and sixteen further spellings caught. The one gap: two sample prompts — the
+meal-planning README's "Mark chicken breast as purchased" and the
+shared-server primitive's "Add milk and eggs" — sat directly under the advice
+to mint the household member's key read-scoped, and would fail under it; each
+says so in place now. Nits: this section's file list omitted five files the
+diff touches; "fourteen places" enumerated twelve files (fourteen lines, the
+checker carrying three); `authenticateRequest`'s docblock said the work
+depended on nothing the server holds when it also depends on which of the
+client's own forms authenticated; Go's `os.Getenv` was not a read (it is,
+with two probes — none of the scanned roots hold a Go file today). History,
+read as a whole: the implementation commit's claims each fix corrected are
+corrected within the same eight messages.
 
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand

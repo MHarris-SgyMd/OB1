@@ -210,7 +210,8 @@ export function presentedKeys(req: Request): string[] {
 /**
  * The principal for a request: the first presented key that authenticates, or
  * null. Each candidate is compared against every configured key, so the work
- * done depends on how many forms the client sent and nothing the server holds.
+ * done depends on how many forms the client sent and on which of its own forms
+ * authenticated — nothing the server holds.
  */
 export function authenticateRequest(req: Request, cfg: AuthConfig): Principal | null {
   for (const key of presentedKeys(req)) {

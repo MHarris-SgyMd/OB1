@@ -396,7 +396,7 @@ Claude: [calls view_meal_plans tool] "Here's the meal plan:
 - Wednesday: Leftover night
 ..."
 
-Spouse: "Add milk and eggs to the shopping list"
+Spouse: "Add milk and eggs to the shopping list"          (a write-scoped key; with the read-scoped one minted above, add_shopping_item is not offered)
 Claude: [calls add_shopping_item twice] "Added milk and eggs to the list."
 
 Spouse: "Show me the recipe for chicken tacos"

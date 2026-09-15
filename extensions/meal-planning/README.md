@@ -225,7 +225,7 @@ Your spouse can now use prompts like:
 ```
 What's for dinner this week?
 Show me the shopping list for this week.
-Mark "chicken breast" as purchased.
+Mark "chicken breast" as purchased.        (needs a write-scoped key — mark_item_purchased is the one tool that writes)
 Search recipes tagged "quick".
 ```
 

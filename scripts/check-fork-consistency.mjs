@@ -740,7 +740,7 @@ function checkCoreFunctions() {
 const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
-const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*${IDENT}\s*\)\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.getenv\(\s*["'](${IDENT})["'])`;
+const ENV_READ = String.raw`(?:Deno\.env\.get\(\s*["'\x60](${IDENT})["'\x60]\s*\)|process\.env\.(${IDENT})|process\.env\[\s*["'\x60](${IDENT})["'\x60]\s*\]|\b(?:Bun|c|ctx|context)\.env\.(${IDENT})|import\.meta\.env\.(${IDENT})|(?<![\w.$])env\(\s*${IDENT}\s*\)\.(${IDENT})|(?<![\w.$])env\(\s*["'](${IDENT})["']\s*\)|(?<![\w.$])env\(\)\.(${IDENT})|(?<![\w.$])env\.(${IDENT})|os\.environ(?:\.get)?[[(]\s*["'](${IDENT})["']|os\.[gG]etenv\(\s*["'](${IDENT})["'])`;
 /** An equality operator, strict or loose, and not part of `=>`, `<=`, `>=` or `!` alone. */
 const EQ = String.raw`(?<![=!<>])(?:!==|===|!=|==)(?!=)`;
 /** What on the far side of a compare makes it a presence or placeholder check, not a compare of the credential. */
@@ -801,6 +801,8 @@ const CREDENTIAL_COMPARE_PROBES = [
   'if (req.headers.get("x-key") != process.env.API_TOKEN) {',
   'if (process.env["BRAIN_ACCESS_KEY"] === provided) ok();',
   'if key != os.environ.get("API_KEY"):',
+  'if presented == os.Getenv("API_KEY") {',
+  'if presented == os.getenv(\'MCP_ACCESS_KEY\'):',
   'EXPECTED = os.environ["WEBHOOK_SECRET"]\nif token == EXPECTED:',
   'const { MCP_ACCESS_KEY } = process.env;\nif (k === MCP_ACCESS_KEY) {',
   'let token: string | undefined = process.env.BOT_TOKEN;\nreturn token === presented;',
