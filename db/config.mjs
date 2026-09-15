@@ -1353,3 +1353,128 @@ export async function alignVectorSearchPath(sql) {
   }
   return schema;
 }
+
+/**
+ * The table privileges this fork's SECURITY INVOKER functions need to run as
+ * their caller. Every function 010/012/015 declares is SECURITY INVOKER, so the
+ * writes they make — chunk rows, audit rows, work claims, entity rows — run as
+ * the connecting role, not the definer, and reach beyond `thoughts` since 007.
+ * Upstream never hit this: Supabase's `service_role` holds default privileges on
+ * the public schema. A self-hosted role set up from the guide's `GRANT … ON
+ * thoughts` alone can capture nothing — its first windowed capture fails on
+ * `thought_chunks`, and the audit trigger fails on `thought_audit`.
+ *
+ * One list, grouped by the role that needs each group, each row naming the
+ * migration that introduced the requirement. This is the single spelling:
+ * preflight's `write privileges` check reads CAPTURE_WRITES, `migrate.ts
+ * --grant` issues every group through grantStatements(), and db/README.md's
+ * "Grants for a capturing role" is rendered from the same groups — a
+ * check-fork-consistency check asserts the README names each table.
+ *
+ * Privileges are the DML a group's functions actually run, no more: SELECT where
+ * a function reads, and only the write verbs its statements use.
+ */
+export const ROLE_GRANTS = Object.freeze({
+  // The server's own connection. Every item is unconditional on the core path —
+  // a windowed capture, an edit with content, a search, a delete — so a role
+  // missing any of these fails a capture outright, and preflight refuses it.
+  capture: Object.freeze([
+    Object.freeze({ table: "thoughts",       privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "001" }),
+    Object.freeze({ table: "thought_chunks", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "007" }),
+    Object.freeze({ table: "thought_audit",  privileges: Object.freeze(["INSERT"]),                                since: "008" }),
+  ]),
+  // The server's soft extras, beyond the hard capture set: preflight reads its
+  // own `ob1_config` as this role, and `resolve_agent` (010, SECURITY INVOKER)
+  // attributes a write when a key is presented — and it UPSERTs both agent
+  // tables (last_used_at, and registering an agent/key), so SELECT alone leaves
+  // it raising. A capture tolerates all of this: the resolve step is caught
+  // (agents.ts) and attribution degrades, and preflight only warns on the
+  // config read. Documented and granted, not enforced — but granted with the
+  // writes `resolve_agent` actually makes, so attribution works when it lands.
+  server: Object.freeze([
+    Object.freeze({ table: "ob1_config",     privileges: Object.freeze(["SELECT"]),                    since: "006" }),
+    Object.freeze({ table: "ob1_agents",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
+    Object.freeze({ table: "ob1_agent_keys", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "010" }),
+  ]),
+  // A worker role — reembed.ts, consolidate.ts, extract-entities.ts — claims and
+  // releases work, upserts its job key into `ob1_config` (reembed's
+  // --switch-model, extract's key), and, for consolidate.ts, records and
+  // resolves proposals in `supersession_proposals` (029's SECURITY INVOKER
+  // record/accept functions run as the caller).
+  worker: Object.freeze([
+    Object.freeze({ table: "thought_work_claims",    privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "015" }),
+    Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["INSERT", "UPDATE"]),                     since: "006" }),
+    Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
+  ]),
+  // The entity-extraction worker, additionally, writes the entity graph.
+  extraction: Object.freeze([
+    Object.freeze({ table: "ob1_entities",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "016" }),
+    Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
+    Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
+  ]),
+});
+
+/** The order groups are issued and documented in. */
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction"]);
+
+/**
+ * The (table, privilege) pairs the core capture/edit/search path needs
+ * unconditionally — preflight's `write privileges` refusal set. Flattened from
+ * ROLE_GRANTS.capture so the check and the docs cannot disagree.
+ */
+export const CAPTURE_WRITES = Object.freeze(
+  ROLE_GRANTS.capture.flatMap((g) =>
+    g.privileges.map((p) => Object.freeze({ table: g.table, privilege: p, since: g.since }))),
+);
+
+/**
+ * The (table, privilege) pairs 016's entity-extraction enqueue trigger adds to
+ * the capture path — but only while `ob1_config.entity_extraction_key` is set.
+ * That trigger fires `AFTER INSERT OR UPDATE OF content ON thoughts`, runs as the
+ * calling role (SECURITY INVOKER), and upserts a `thought_work_claims` row
+ * (`INSERT … ON CONFLICT DO UPDATE`) — so once extraction is enabled, every
+ * capture and content-edit needs INSERT and UPDATE there, even for a role that
+ * never runs a worker. Preflight folds these into the `write privileges` check
+ * exactly when the key is set; a brain that never enabled extraction never needs
+ * them. `thought_work_claims` is 015's; the requirement is 016's trigger.
+ */
+export const EXTRACTION_TRIGGER_WRITES = Object.freeze([
+  Object.freeze({ table: "thought_work_claims", privilege: "INSERT", since: "016" }),
+  Object.freeze({ table: "thought_work_claims", privilege: "UPDATE", since: "016" }),
+]);
+
+/** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
+export function grantedTables(groups = ROLE_GRANT_GROUPS) {
+  const seen = new Set();
+  const out = [];
+  for (const g of groups) for (const row of ROLE_GRANTS[g] ?? []) if (!seen.has(row.table)) { seen.add(row.table); out.push(row.table); }
+  return out;
+}
+
+/**
+ * GRANT statements giving `role` exactly the privileges the given groups need
+ * (default: all — the do-everything role the guide sets up). Pass `present` (a
+ * Set of table names that exist) to skip the tables a partially-migrated
+ * database lacks; omit it to emit every table. The role is quoted; the schema
+ * USAGE grant is the caller's to add (a schema, not a table). One GRANT per
+ * table, its privileges combined, in group/list order.
+ */
+export function grantStatements(role, { groups = ROLE_GRANT_GROUPS, present = null } = {}) {
+  const ident = quoteIdent(role);
+  // A table can appear in more than one group with different privileges
+  // (ob1_config: SELECT in `server`, INSERT/UPDATE in `worker`). Merge per table
+  // so the role gets one GRANT combining them, privileges in a stable order.
+  const ORDER = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+  const byTable = new Map();
+  for (const g of groups) {
+    for (const row of ROLE_GRANTS[g] ?? []) {
+      if (present && !present.has(row.table)) continue;
+      const set = byTable.get(row.table) ?? new Set();
+      for (const p of row.privileges) set.add(p);
+      byTable.set(row.table, set);
+    }
+  }
+  const out = [];
+  for (const [table, set] of byTable) out.push(`GRANT ${ORDER.filter((p) => set.has(p)).join(", ")} ON ${table} TO ${ident};`);
+  return out;
+}

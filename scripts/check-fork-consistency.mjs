@@ -695,7 +695,7 @@ function checkCoreFunctions() {
 // — and then ran as the service role: one shared plaintext secret, compared
 // byte by byte (the timing leak fix 14 closed in the core server), no scope,
 // no revocation short of re-keying every client, and full write access on a
-// key accepted from a URL query string. FORK.md change 62 made them consumers
+// key accepted from a URL query string. FORK.md change 63 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
 // is never given the tools that write — and this is what keeps the next rebase
 // from bringing the two lines back.
@@ -866,7 +866,7 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
 // The vendored recipes and integrations that carry the same compare, each for
 // exactly this many lines, held by the ticket named; fixing one makes its entry
 // stale (remove it), adding a compare beside one fails.
-const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 62 did";
+const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 63 did";
 const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
   ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
   ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
@@ -895,7 +895,7 @@ function checkCredentialCompares() {
   for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 62), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 63), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);
@@ -999,6 +999,44 @@ async function checkEmbeddingDefaults() {
   for (const p of problems) violations.push({ where: "db/config.mjs", msg: `default configuration is not usable: ${p}` });
 }
 await checkEmbeddingDefaults();
+
+/**
+ * db/README.md's "Grants for a capturing role" names every table db/config.mjs's
+ * ROLE_GRANTS requires — the two are one spelling (SMD-1226). Preflight's `write
+ * privileges` check and `migrate.ts --grant` both read ROLE_GRANTS; the README is
+ * the human list. A table added to a group in config without a line in the
+ * README would leave a self-hoster's role short a privilege the docs never
+ * mention. Matched in backticks, the doc's convention for a table name, so
+ * `thoughts` is not satisfied by `thought_chunks` merely containing it.
+ */
+async function checkCapturingGrants() {
+  const cfg = await import("../db/config.mjs");
+  const readme = readFileSync(join(ROOT, "db", "README.md"), "utf8");
+  const heading = /^#+\s+Grants for a capturing role\s*$/m.exec(readme);
+  if (!heading) {
+    violations.push({ where: "db/README.md", msg: 'no "Grants for a capturing role" section — db/config.mjs ROLE_GRANTS has no documented home (SMD-1226)' });
+    return;
+  }
+  // Bound at the next level-2 heading, not any `#`-led line: the section holds a
+  // ```bash fence, and a future `# comment` inside it would otherwise read as the
+  // next heading and truncate the section (SMD-1226 review, L3).
+  const rest = readme.slice(heading.index + heading[0].length);
+  const next = /^##\s/m.exec(rest);
+  const section = next ? rest.slice(0, next.index) : rest;
+  // Match within the markdown table rows (pipe-led lines), not the section's
+  // prose: a table named only in a paragraph would otherwise satisfy the check
+  // even if its privilege row were deleted. The rows are where the grant lives.
+  const tableRows = section.split("\n").filter((l) => l.trimStart().startsWith("|")).join("\n");
+  for (const table of cfg.grantedTables()) {
+    if (!tableRows.includes("`" + table + "`")) {
+      violations.push({
+        where: "db/README.md",
+        msg: `"Grants for a capturing role" does not name \`${table}\`, which db/config.mjs's ROLE_GRANTS requires — the list and the docs have drifted (SMD-1226)`,
+      });
+    }
+  }
+}
+await checkCapturingGrants();
 
 /**
  * A setting documented in deploy/.env.example that deploy/compose.yaml never

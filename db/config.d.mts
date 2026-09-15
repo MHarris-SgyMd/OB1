@@ -262,3 +262,22 @@ export function parseSetConfig(cfg: string[] | null | undefined): Record<string,
  * otherwise a no-op returning null. Session scope only — no ALTER DATABASE/ROLE.
  */
 export function alignVectorSearchPath(sql: import("bun").SQL): Promise<string | null>;
+
+/** One table's requirement in ROLE_GRANTS: the privileges a group needs on it, and the migration that introduced the need. */
+export type RoleGrant = { table: string; privileges: readonly string[]; since: string };
+/**
+ * Table privileges the fork's SECURITY INVOKER functions need to run as their
+ * caller, grouped by the role that needs each group. The single spelling read by
+ * preflight's `write privileges` check, `migrate.ts --grant`, and db/README.md.
+ */
+export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "extraction", readonly RoleGrant[]>>;
+/** The order groups are issued and documented in. */
+export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction")[];
+/** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
+export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
+/** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
+export const EXTRACTION_TRIGGER_WRITES: readonly { table: string; privilege: string; since: string }[];
+/** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
+export function grantedTables(groups?: readonly string[]): string[];
+/** GRANT statements giving `role` the privileges the given groups need; `present` skips absent tables; the role is quoted. */
+export function grantStatements(role: string, opts?: { groups?: readonly string[]; present?: Set<string> | null }): string[];

@@ -5,7 +5,7 @@
   "scripts": {
     "test": "bun test-auth.ts"
   },
-  "comment": "Test-only (SMD-1252, FORK.md change 62): test-auth.ts imports the seven extension servers as deployed. Versions are pinned EXACTLY to the extensions' deno.json — one file, six identical copies — and to server-portable/package.json, so the test exercises the libraries the functions deploy with; test-auth.ts fails if a deno.json drifts. Bump all of them in the same commit.",
+  "comment": "Test-only (SMD-1252, FORK.md change 63): test-auth.ts imports the seven extension servers as deployed. Versions are pinned EXACTLY to the extensions' deno.json — one file, six identical copies — and to server-portable/package.json, so the test exercises the libraries the functions deploy with; test-auth.ts fails if a deno.json drifts. Bump all of them in the same commit.",
   "devDependencies": {
     "@hono/mcp": "0.1.1",
     "@modelcontextprotocol/sdk": "1.24.3",

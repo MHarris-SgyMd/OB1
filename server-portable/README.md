@@ -85,9 +85,12 @@ bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
 body is not 024's; and `work claims` fails when `release_thought`'s or
 `release_claims_for_worker`'s body is not 015's — every worker release would
 fail 015's CHECK — and names any overload of the claim names no migration
-defines. `chunk delete privilege`: a role that cannot DELETE from
-`thought_chunks` — every chunk writer runs as its caller — is a failure with the
-GRANT as the remedy. `fingerprint backfill` (023): a thought without a fingerprint
+defines. `write privileges`: a role missing any privilege the capture path's
+writers need — SELECT/INSERT/DELETE on `thought_chunks`, INSERT on
+`thought_audit`, DML on `thoughts`, each writer running as its caller — is a
+failure naming each
+missing one with its GRANT (`db/config.mjs`'s `ROLE_GRANTS`, the same list
+`migrate.ts --grant` issues). `fingerprint backfill` (023): a thought without a fingerprint
 whose text no row holds is a capture doubled in waiting — a warning naming the
 migration, or after it the one statement `SELECT backfill_content_fingerprints();`
 as the table's owner; NULL rows that share their text with the row holding the

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * test-auth.ts — the seven extension servers authenticate through the core
- * server's auth path (SMD-1252, FORK.md change 62).
+ * server's auth path (SMD-1252, FORK.md change 63).
  *
  * The claim is the one server-portable/test-auth.ts makes for the core server,
  * made here for each vendored extension as it is deployed: a wrong key is
