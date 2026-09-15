@@ -398,7 +398,7 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, resolveEmbedConfig } from "../server-portable/embed.ts";
 import { UUID_RE } from "../server-portable/store.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, describeLoss, heartbeatFor, leaseHolders, leaseRefusal, lostReason, startHeartbeat } from "./lease.ts";
+import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, reportLost, startHeartbeat } from "./lease.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string): string | undefined => {
@@ -1561,14 +1561,11 @@ async function worker(n: number): Promise<void> {
       for (const b of batch) {
         if (stopping) return;
         if (hb.lost.has(b.thought_id)) {
-          // A beat found this row no longer ours. The row says why: deleted
-          // (its claim cascaded away), back in the pool (reaped, or requeued by
-          // an edit), or another worker's now. Nothing to release either way,
-          // and repeating the provider's work would only race the holder.
-          const why = await lostReason(sql, JOB, workerId, b.thought_id).catch(() => null);
-          if (why?.kind === "deleted") vanished++;
+          // A beat found this row no longer ours. Nothing to release, and
+          // repeating the provider's work would only race the holder; the row
+          // says why (db/lease.ts reportLost), and which count it joins.
+          if ((await reportLost(sql, JOB, workerId, b.thought_id)) === "deleted") vanished++;
           else lost++;
-          console.error(`  ${b.thought_id}: ${describeLoss(why)}`);
           continue;
         }
         const row = byId.get(b.thought_id);

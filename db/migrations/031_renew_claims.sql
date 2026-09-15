@@ -109,8 +109,25 @@
 --   * Idempotent: CREATE OR REPLACE, and COMMENT ON replaces.
 --
 -- Prerequisites
---   Migration 015. Applied by `bun db/migrate.ts`.
+--   Migration 015. Applied by `bun db/migrate.ts`. A brain adopted with
+--   --baseline whose schema lacks 015 is refused up front, 015 and --reapply
+--   named, as 030 does: plpgsql resolves the table at first run, so the
+--   CREATE FUNCTION below would succeed and the column COMMENT would then fail
+--   with a bare "does not exist" and no pointer, with the server gated on the
+--   migrator in the compose stack. db/test-upgrade.ts [9] drives it.
 -- ============================================================================
+
+DO $rc$
+BEGIN
+  IF to_regclass('thought_work_claims') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 031 needs 015 (thought_work_claims); this schema lacks it',
+      -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
+END
+$rc$;
 
 -- ---------------------------------------------------------------------------
 -- renew_claims — the heartbeat

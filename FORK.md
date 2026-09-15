@@ -6206,7 +6206,12 @@ rows still held: one of the batch not among them is no longer this worker's —
 reaped, requeued by an edit, or deleted — and the caller reads the row to learn
 which. One column comment beside it, on `ttl_expires_at`, says what the
 lease means since 031; neither literal spells a flag with its dashes, which
-`test-schema` [10] requires and [30] asserts of the live text.
+`test-schema` [10] requires and [30] asserts of the live text. The file opens
+as 030 does: a brain adopted with `--baseline` whose schema lacks 015 is
+refused up front, 015 and `--reapply` named, where a plain run would otherwise
+have passed the `CREATE FUNCTION` (plpgsql resolves the table at first run)
+and failed at the column comment with a bare "does not exist"; `test-upgrade`
+[9] drives it.
 
 **The heartbeat, once.** `db/lease.ts` is the implementation the three workers
 share, as `consolidation_pool()` was change 54's one pool rule: a timer per
@@ -6233,7 +6238,9 @@ it was, so the row still names this worker — says so and names
 skipped) and the timer is unref'd, so it holds no process open. The three
 workers wire it identically: started beside the worker id, `claimed()` after
 the claim, each row removed before its release, stopped in the `finally` that
-returns the leases, and the beats summed into the run's summary. Each opens a
+returns the leases, and the beats summed into the run's summary; the
+lost-at-top step — ask the row, print, say which count — is one function,
+`reportLost`, so the three cannot drift on it. Each opens a
 pool of one connection per worker and one spare, and says beside the number
 that the spare is what keeps the leases alive while every worker is parked on
 a lock or a long statement (the case 023's header warned of), so long as each

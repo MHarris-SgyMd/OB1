@@ -712,4 +712,31 @@ console.log("\n[8] Migration 030 onto a populated 029 — a label whose only evi
   await sql.close();
 }
 
+console.log("\n[9] Migration 031 on a schema without 015 — refused up front, naming 015 and --reapply (SMD-1023)");
+{
+  // A brain adopted with --baseline at a ledger through 031 whose schema stops
+  // before 015. 031's CREATE FUNCTION would succeed there (plpgsql resolves
+  // the table at first run) and its column COMMENT would fail bare; the file
+  // opens with 030's guard instead, so a plain run — the compose stack's,
+  // gating the server — fails naming what is missing and the remedy.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "015" });
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_, OB1_EMBEDDING_DIM: String(OPTS.dim), OB1_EMBEDDING_MODEL: OPTS.model }))
+    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+  const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env, cwd: HERE });
+  const baselined = await migrate("--baseline");
+  assert(baselined.code === 0, `--baseline records every migration over the pre-015 schema (exit ${baselined.code})`);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the031 = MIGRATIONS.find((f) => f.startsWith("031_"))!;
+  await sql`DELETE FROM schema_migrations WHERE name = ${the031}`;
+  const plain = await migrate();
+  const ok = plain.code === 1 && /031_renew_claims\.sql\s+FAILED: migration 031 needs 015 \(thought_work_claims\); this schema lacks it/.test(plain.out) &&
+    /adopted with --baseline\?\)\. Re-apply every migration in one transaction: cd db && bun migrate\.ts --url <url> --reapply/.test(plain.out);
+  assert(ok, `a plain run fails at 031 naming 015 and --reapply, not with a bare "does not exist" (exit ${plain.code})${ok ? "" : `:\n${plain.out}`}`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name = ${the031}`)[0].c) === 0, "…records nothing");
+  assert((await sql`SELECT to_regprocedure('renew_claims(text, text, int)') IS NULL AS absent`)[0].absent === true, "…and defines nothing: the guard runs before the function");
+  await sql.close();
+}
+
 report();

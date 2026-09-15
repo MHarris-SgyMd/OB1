@@ -129,6 +129,18 @@ export async function lostReason(sql: SQL, job: string, workerId: string, id: st
   return { kind: "finished", status, worker: worker_id ?? "?" };
 }
 
+/**
+ * The lost-at-top step the three loops share: ask the row, print the line, say
+ * which count the row joins — "deleted" for a deleted thought, "lost" for the
+ * rest. A read that fails is printed as such, not thrown: the next row's
+ * write or the next claim is where a database gone stops the worker.
+ */
+export async function reportLost(sql: SQL, job: string, workerId: string, id: string): Promise<"deleted" | "lost"> {
+  const why = await lostReason(sql, job, workerId, id).catch(() => null);
+  console.error(`  ${id}: ${describeLoss(why)}`);
+  return why?.kind === "deleted" ? "deleted" : "lost";
+}
+
 /** The line a worker prints for a lost row, from what the row said. Every kind but `deleted` is a row the run did not finish. */
 export function describeLoss(why: LostReason | null): string {
   if (why === null) return "no longer this worker's, and the row could not be read; skipping";

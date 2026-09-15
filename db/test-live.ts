@@ -773,7 +773,7 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
   // step with an upper bound — the claim at 5.5 s must land before the renewed
   // deadline at 9.5 s — has four seconds. The beat at 4.5 s has no upper
   // bound: a lease past its deadline that no claim has reaped is still the
-  // holder's, and the beat renews it ([29] asserts that).
+  // holder's, and the beat renews it ([30] asserts that).
   const JOB4 = "test:heartbeat";
   const six = [...pool].slice(8, 14);
   await sql`SELECT enqueue_thoughts(${JOB4}, ${sql.array(six, "TEXT")}::uuid[])`;
