@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-one numbered changes on top of the pin. Seven fix defects found in an
+Sixty-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–61 are the numbered `###` sections** further down, which is
+sections. Changes **18–62 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -3879,7 +3879,8 @@ drop 005's guard, 008's actor, 021's label and 022's rule); a missing
 2-argument form names 005. The function is SECURITY INVOKER, so the DELETE runs
 as the calling role: a role that only ever captured chunklessly never needed
 DELETE on `thought_chunks` (007's 4-argument form and `update_thought` did),
-and does from here — a check of its own, `chunk delete privilege`, reads
+and does from here — a check of its own (`chunk delete privilege` then;
+since SMD-1226 the wider `write privileges`) reads
 `has_table_privilege` for the connection's role wherever the table exists,
 schema-qualified (the bare name resolves through `search_path` and raises for a
 relation it cannot see), and refuses to start without it, printing the GRANT.
@@ -4132,7 +4133,7 @@ list; no NULL row is ok, said as "missing", since a stale key on a row that has
 one doubles on capture too and is not read here. Presence is read from the
 catalog first, so a brain before 003 or 016 is a skip, not a raise; the
 `EXISTS` stops at the first pending row, so a brain before 023 answers at once.
-Over PostgREST a skip, beside `atomic capture` and `chunk delete privilege`;
+Over PostgREST a skip, beside `atomic capture` and `write privileges`;
 and the direct-connection block's checks are now one list, so a connection that
 fails between two of them leaves the first unreported carrying the error and
 every later one saying it was not reached — never a second row for a check that
@@ -4178,7 +4179,7 @@ read; the "apply 023" remedy on a `--baseline`d brain whose ledger already says
 missing table that could not be reached, since the same statement referenced
 the table — presence read from the catalog first; and the block's outer catch
 reported only `atomic capture`, so a failed catalog connection silenced this
-check and `chunk delete privilege` — both say so now. To a ticket: a census of
+check and `write privileges` — both say so now. To a ticket: a census of
 stale keys (a brain that ran the community recipe holds one on every row), which
 means hashing every fingerprinted row and belongs to a command, not a start.
 
@@ -7108,6 +7109,79 @@ strip is exercised. `test-upgrade` 133/133,
 in), `test-live` 419/419, `tsc` clean, fork checker PASS. Upstream status: **not
 applicable** — the migrator and `reembed.ts` are the fork's (changes 11 and
 29).
+
+### 62. A capturing role's grants are documented and checked for the whole capture path, not `thoughts` alone — one list, a widened preflight check, and `migrate.ts --grant` (SMD-1226)
+
+Every function this fork adds is `SECURITY INVOKER` (the policy 010, 012 and 015
+state, and the default the capture writers in 005/007/008/022/025 rely on), so
+the writes they make run as the connecting role — and since 007 they reach past
+`thoughts`: a windowed capture INSERTs `thought_chunks` (and since 022 DELETEs
+them on a re-capture the label does not vouch for), an edit with content replaces
+those rows, and 008's trigger INSERTs `thought_audit` on every capture. A role
+granted `SELECT, INSERT, UPDATE, DELETE ON thoughts` alone — exactly what the
+getting-started guide's grant step gives — therefore captures **nothing** on a
+self-hosted brain: its first windowed capture fails on `thought_chunks`, its
+first capture of any kind on the audit trigger. Upstream never hit it because
+Supabase's `service_role` holds default privileges on the public schema; the
+non-Supabase path is where it bites. Found by change 58's (SMD-1175's) review
+passes, when 022 added a DELETE to the 3-argument path and the privilege class
+surfaced — the gap for the audit and chunk-insert writers predated it.
+
+`db/config.mjs`'s `ROLE_GRANTS` is now the single spelling: the tables and
+privileges the fork's writers need, grouped by role (`capture`, `server`, `worker`,
+`extraction`), each naming the migration that introduced it. Three consumers read
+it, so none can drift from the others:
+
+* Preflight's **`write privileges`** check (renamed from `chunk delete privilege`,
+  which checked DELETE on `thought_chunks` alone) reads `CAPTURE_WRITES` — the
+  `capture` group flattened — and refuses a server role missing any of it,
+  naming each missing privilege in `ROLE_GRANTS` order with its GRANT (quoted
+  role, schema-qualified `has_table_privilege`, gated on table presence so a
+  brain before 007/008 is a skip not a raise). It stays a refusal: a role that
+  cannot INSERT `thought_audit` fails every capture. One conditional addition
+  (found by the second and third review passes): 016 adds a trigger on `thoughts`
+  that runs as the caller on every capture and content-edit — it reads
+  `ob1_config` always, and upserts a `thought_work_claims` row while
+  `entity_extraction_key` is set. So the check reads `pg_trigger`: when the
+  trigger is present it folds `ob1_config` SELECT into the refusal set (a role
+  without it fails every capture in the trigger, even with extraction off), and
+  when the key is set it adds `thought_work_claims` INSERT/UPDATE too. A server
+  role that never runs a worker is thus refused at start-up on an extraction
+  brain instead of being blessed and then failing every capture. The `server`
+  group
+  (`ob1_config` read, and the agent tables — `resolve_agent` is SECURITY INVOKER
+  and *upserts* them, so they get the writes, not just `SELECT`, which the
+  ticket's own list had wrong) is documented and granted but not enforced:
+  attribution and preflight's config read degrade to a warn without it, not a
+  failed capture. Over PostgREST it is a skip, as the old check
+  was: table privileges are read over a direct connection.
+* **`migrate.ts --grant <role>`** issues the whole documented set — `USAGE ON
+  SCHEMA public` plus every group, for the tables that exist — in one
+  transaction. Guarded like `--baseline`: it records nothing in the ledger and is
+  refused beside `--baseline`/`--reapply`. It never creates a role or sets a
+  password (a missing role is an error naming `CREATE ROLE`), so no credential
+  passes through it; `--grant --dry-run` prints the statements for a role you
+  would rather grant by hand. There are no sequences to grant — every table's
+  primary key is a `uuid` or a natural key.
+* **`db/README.md`**'s "Grants for a capturing role" is the human table, and the
+  getting-started guide's grant step points a self-hoster at it. A
+  check-fork-consistency check (the config↔docs parity check beside change 58's
+  check 7) asserts the README names every table `ROLE_GRANTS` requires, in
+  backticks, so a table added to a group in config without a README line fails
+  CI rather than a self-hoster's first capture.
+
+No schema, migration or runtime-server change — a documentation, preflight and
+migrator change. `test-preflight.ts [5]` proves it end to end: a role with
+`thoughts` and `SELECT` everywhere is refused, each missing write named with its
+GRANT; after `migrate.ts --grant` a real windowed capture and an edit with
+content run through the role, its chunk and audit rows landing.
+
+Upstream status: **not applicable** — a self-hosting concern the Supabase path
+does not have. **Unfiled** upstream. Reproduce: on a migrated brain, `CREATE ROLE
+r LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO r; GRANT SELECT ON
+ALL TABLES IN SCHEMA public TO r;` then run preflight as `r` (refused, naming the
+chunk and audit writes), `bun db/migrate.ts --grant r` (granted), preflight again
+(ok), and a windowed `upsert_thought` through `r`.
 
 ## Detached from the fork network
 
