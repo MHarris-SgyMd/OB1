@@ -7235,7 +7235,9 @@ elsewhere:
   3-argument form takes 029's `hashtext('ob1:supersession-review')` before the
   fingerprint lock, so a re-capture filling a NULL pointer is ordered against
   `update_thought`'s cycle walk and the review path's write (change 60's
-  carry-forward).
+  carry-forward). Until change 66: migration 035 drops the fill and, with it,
+  this lock from the capture path — 033's "what a successor must carry" list
+  is superseded by 035's.
 - **One copy of each rule.** `derived_from` is validated through 032's
   `validate_derived_from` — 025's inline copy is gone, and the refusals lose
   their `upsert_thought:` prefix — and both forms hash through 016's
@@ -7250,7 +7252,8 @@ elsewhere:
 **Lock order.** Every writer of `thoughts` now acquires in one order —
 supersession lock, fingerprint lock, row — or a suffix of it, and takes at most
 one lock of each class. A capture naming `supersedes`: supersession →
-fingerprint → the row the text lands on. A capture without: fingerprint → row.
+fingerprint → the row the text lands on (until change 66: fingerprint → row,
+like a capture without). A capture without: fingerprint → row.
 `update_thought` with content: supersession (when named) → fingerprint → the
 edited row; without content: supersession → row. The review path: the proposal
 row `FOR UPDATE` → supersession → the superseding row → `update_thought`
@@ -7948,17 +7951,21 @@ as 025 did, a re-capture leaves both columns as they were whatever the envelope
 names. Validation is unchanged and runs before the write is known to be a
 dedup, so a malformed reference is refused either way. The supersession lock
 leaves the capture path — with no pointer ever written onto an existing row
-there is nothing for it to order. The return is `{id, fingerprint, existed}`:
-`existed` true means the text was already there, the metadata merged, the
-vector and windows moved by 021/022, and any provenance named not written.
+there is nothing for it to order. The return is `{id, fingerprint, existed,
+supersedes}`: `existed` true means the text was already there, the metadata
+merged, the vector and windows moved by 021/022, and any provenance named not
+written; `supersedes` is the row's pointer after the write, so a caller told
+the text existed can say what stands.
 022's `FOR NO KEY UPDATE` label read runs for every capture now, not only with
 a vector, so the flag is right for a vectorless capture too — one index probe
 under the fingerprint lock, on the partial unique index the INSERT's
 arbitration reads anyway. 013's 4-argument form returns `v_result ||
 {"chunks": n}`, so the key passes through to both servers, and the
 `capture_thought` tool's reply names `update_thought`'s `supersedes` when the
-caller sent one and the text existed, and says the tools cannot set
-`derived_from` on an existing thought when that was sent. The 2-argument body is carried verbatim from
+caller sent one and the text existed — already supersedes what was named,
+currently supersedes another (an edit would replace it), was named as its own
+predecessor, or holds no pointer and the call records it — and says the tools
+cannot set `derived_from` on an existing thought when that was sent. The 2-argument body is carried verbatim from
 033 so 035 is the last definer of both inserting forms and preflight keeps one
 remedy; `update_thought` is not redefined — 033 stays its last definer, with
 the order 033 gave it. 032's `COMMENT ON review_supersession_proposal` said "a
@@ -7981,6 +7988,57 @@ before this change too, and SMD-1462's to word. Change 63's order for every
 writer — supersession, fingerprint, row — stands; the capture path takes the
 suffix fingerprint → row, and `test-live` [6f]'s four writers on two texts
 finish as before.
+
+**A first review pass, triaged: no code defect, ten wording fixes, one
+behaviour stated.** Three reviewers, one each on the SQL, the callers and
+tests, and the prose. The SQL reviewer ran eight workers of captures, edits and
+review decisions over a seeded brain with and without deletes: no loop of any
+length, no deadlock without deletes, and with them only SMD-1462's
+review-versus-delete cycle, never raised in a capture or an edit; a capture
+naming `supersedes` completed in 2 ms while another connection held the
+supersession lock; the unconditional read against 023's `LOCK TABLE` held
+under a real backfill with fifty concurrent vectorless captures. The one
+behaviour both the SQL and the callers reviewer found: a re-capture naming a
+`supersedes` that names no thought is not refused — the FK ran only on the
+fill — so `existed` is true with nothing written, and `update_thought`, which
+the reply names, refuses it by name. Stated above and in the header, and [35]
+holds it, with a first capture's FK still refusing. The wording: the capture
+reply names `update_thought` for `supersedes` only, and says the tools cannot
+set `derived_from` on an existing thought; "the shipped tools never sent
+`supersedes` on a re-capture" was a claim about clients nobody can check and
+now says what is checkable; the bench's corpus and connection count were this
+change's, not 63's; "the same as the 200 naming none" over-read one pair; the
+2-argument form's silence is 033's header's statement, not 025's; the review
+COMMENT's re-issue replaces the aside with the rule rather than deleting it;
+preflight's cause for a pre-033 body on a brain at 032 now names both pending
+files; the capture tool's input descriptions no longer promise a reply the
+PostgREST two-step fallback cannot give; change 60 and change 63's present
+tenses carry a note; and both store suites now assert `existed`, which they
+had not.
+
+**A second pass, triaged: the number, and one thing the reply could not know.**
+Three reviewers again — pass 1's fixes, a run of the operator's morning and
+the concurrent paths on a real server, and the questions nobody had asked.
+Pass 1's fixes all held, and every preflight sentence for every ledger state
+came out as documented when driven — "migration 035 is not yet applied" from
+the ledger branch on the day-of-upgrade brain, "033 re-applied by hand puts
+it back" with `--reapply` once the ledger recorded 035. The top finding was
+outside the diff: main had taken migration 034 and changes 64 and 65 while
+this was in review, so this is 035, change 66 and `test-schema` [35], and
+`test-upgrade`'s recent-migration window is six. The one behaviour finding
+came from driving the capture tool: its reply was built from the caller's
+inputs alone, so when the existing thought already held a pointer the reply
+advised recording it again, replacing it without saying so, or — for a
+thought named as its own predecessor — an edit `update_thought` refuses. The
+3-argument form now returns the row's `supersedes` after the write beside
+`existed`, and the reply says what stands; `test-e2e-sql` [7] drives the five
+shapes through the server. Stated as well: `existed` is "a row held this
+fingerprint when the locked read ran", so a writer that bypasses the
+fingerprint lock can make the merge report false (the class 018, 023 and 033
+already exclude); change 63's two remaining present tenses about the capture's
+supersession lock carry a note, and 033's successor list is superseded by
+035's; preflight's pre-022 cause no longer names a vendored overload SMD-1250
+removed, and its pending-files string lost a dead term.
 
 **Closed, and not.** Closed: the capture path cannot write a supersession
 loop by any sequence — a loop now needs a writer outside the two functions
@@ -8011,33 +8069,6 @@ as change 63 made it, and says both halves when the ledger records 033 but not
 035 and the body lacks 033's lock (025 re-applied by hand *and* 035 pending).
 `test-preflight` adds 033 re-applied by hand over 035 to the walk.
 
-**A first review pass, triaged: no code defect, ten wording fixes, one
-behaviour stated.** Three reviewers, one each on the SQL, the callers and
-tests, and the prose. The SQL reviewer ran eight workers of captures, edits and
-review decisions over a seeded brain with and without deletes: no loop of any
-length, no deadlock without deletes, and with them only SMD-1462's
-review-versus-delete cycle, never raised in a capture or an edit; a capture
-naming `supersedes` completed in 2 ms while another connection held the
-supersession lock; the unconditional read against 023's `LOCK TABLE` held
-under a real backfill with fifty concurrent vectorless captures. The one
-behaviour both the SQL and the callers reviewer found: a re-capture naming a
-`supersedes` that names no thought is not refused — the FK ran only on the
-fill — so `existed` is true with nothing written, and `update_thought`, which
-the reply names, refuses it by name. Stated above and in the header, and [35]
-holds it, with a first capture's FK still refusing. The wording: the capture
-reply names `update_thought` for `supersedes` only, and says the tools cannot
-set `derived_from` on an existing thought; "the shipped tools never sent
-`supersedes` on a re-capture" was a claim about clients nobody can check and
-now says what is checkable; the bench's corpus and connection count were this
-change's, not 63's; "the same as the 200 naming none" over-read one pair; the
-2-argument form's silence is 033's header's statement, not 025's; the review
-COMMENT's re-issue replaces the aside with the rule rather than deleting it;
-preflight's cause for a pre-033 body on a brain at 032 now names both pending
-files; the capture tool's input descriptions no longer promise a reply the
-PostgREST two-step fallback cannot give; change 60 and change 63's present
-tenses carry a note; and both store suites now assert `existed`, which they
-had not.
-
 **Cost.** Less, and measured with change 63's design — alternating arms each
 on a fresh schema, 033, 035, 033, 035, the cold first arm discarded — at 1,024
 dimensions, HNSW, a 300-row corpus, the SQL store with 64 connections: 50
@@ -8051,7 +8082,7 @@ inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at 033,
 took the parallelism. More: one index probe per vectorless 3-argument capture,
 under the fingerprint lock.
 
-**Verified.** `test-schema` [35] (822): 035 the last definer of
+**Verified.** `test-schema` [35] (840): 035 the last definer of
 `upsert_thought` and 033 of `update_thought`; the 3-argument body read from
 `pg_proc` — 035's sentinel beside the two before it, no supersession lock, an
 `ON CONFLICT` clause that sets neither column while the INSERT lists both, the
@@ -8079,7 +8110,7 @@ just written the loop — no column, signature, row, audit row or ACL moves, the
 loop stays, the 2-argument body and `update_thought` byte-identical before
 and after, the next such re-capture fills nothing, the loop is cleared through
 the envelope and cannot be re-written, a re-run is a no-op. `test-preflight`
-(203), `test-search-path`, both store suites, `test-e2e-sql`,
+(205), `test-search-path`, both store suites, `test-e2e-sql`,
 `test-update-delete`, `test-audit`, `tsc`, the consistency checker.
 
 Upstream status: **not applicable** — upstream's `upsert_thought` writes no

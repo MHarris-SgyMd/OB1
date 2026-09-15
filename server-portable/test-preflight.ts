@@ -890,7 +890,7 @@ else {
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 035's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 035 — captures work, search is over-inclusive.
-  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 035 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there\)/.test(reapplied021.out) && /Apply db\/migrations\/035_recapture_writes_no_provenance\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
+  assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 \(004, 005, 008 or 021 re-applied by hand without 035 after them\)/.test(reapplied021.out) && /Apply db\/migrations\/035_recapture_writes_no_provenance\.sql — the last definer; 022's or 025's file alone would leave what the later ones added out\./.test(reapplied021.out) && !/either/.test(reapplied021.out),
          "021 re-applied over 035 leaves 021's 3-argument upsert_thought, and the start warns naming 035 — the last definer, not 022, 025 or 033 — rather than refusing");
   // 022 re-applied by hand over 035: the sentinel is back, the provenance
   // envelope is not — derived_from and supersedes would be dropped silently

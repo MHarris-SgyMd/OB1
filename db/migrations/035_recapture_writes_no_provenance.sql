@@ -50,21 +50,32 @@
 --      the envelope named supersedes; with no pointer ever written onto an
 --      existing row there is nothing for it to order (see "Lock order").
 --   3. The return says whether the row was there:
---        {"id": …, "fingerprint": …, "existed": true|false}
+--        {"id": …, "fingerprint": …, "existed": true|false, "supersedes": uuid|null}
 --      `existed` true means the metadata merged, the vector and windows moved
 --      by 021/022's rules, and any provenance the envelope named was NOT
---      written. 022's label read — FOR NO KEY UPDATE on the row the text
+--      written. `supersedes` is the row's pointer after the write — the fresh
+--      row's, or the one the existing row keeps — so a caller told `existed`
+--      can say what stands rather than guess (the second review pass drove
+--      the capture tool's reply through the server and found it advising an
+--      edit that was redundant, replaced a pointer it did not mention, or
+--      would be refused; the reply reads this key now). 022's label read — FOR NO KEY UPDATE on the row the text
 --      lands on — runs for every capture now, not only with a vector, so the
 --      flag is right for a vectorless capture too (one index probe under the
 --      fingerprint lock; the chunk DELETE keeps its condition). `existed`
---      means a row HELD THIS FINGERPRINT: a legacy row with a NULL one (from
+--      means a row HELD THIS FINGERPRINT WHEN THE LOCKED READ RAN — a writer
+--      that sets content_fingerprint without the fingerprint lock (raw SQL;
+--      the class 018, 023 and 033 already exclude) can commit between the
+--      read and the INSERT and make the merge report false; and a legacy row
+--      with a NULL one (from
 --      before 003, until 023's backfill reaches it) is not found, and the
 --      capture inserts a twin — 003/023's semantics, unchanged here. 013's
 --      4-argument form returns v_result || {"chunks": n}, so the key passes
---      through to both servers; the capture tool tells the caller, naming
---      update_thought's `supersedes` when supersedes was sent, and saying the
---      tools have no way to set derived_from on an existing thought when that
---      was.
+--      through to both servers; the capture tool tells the caller what
+--      stands — the thought already supersedes what was named, currently
+--      supersedes another (an edit would replace it), was named as its own
+--      predecessor, or holds no pointer and update_thought's `supersedes`
+--      records it — and says the tools have no way to set derived_from on an
+--      existing thought when that was sent.
 --   4. The 2-argument form is carried verbatim from 033 — 005's guard, 008's
 --      actor, content_fingerprint_of, the fingerprint lock, its sentinel — so
 --      this file is the last definer of BOTH inserting forms and preflight's
@@ -203,8 +214,9 @@
 --   content_fingerprint_of, the fingerprint lock before the read (3-argument)
 --   and before the INSERT (both) with the `ob1:capture-takes-fingerprint-lock`
 --   sentinel in both bodies — MINUS the supersession lock, PLUS the
---   unconditional read, `existed` in the return, and the
---   `ob1:re-capture-writes-no-provenance` sentinel.
+--   unconditional read, `existed` and `supersedes` in the return, the
+--   `ob1:re-capture-writes-no-provenance` sentinel, and the COMMENT on
+--   review_supersession_proposal re-issued without 032's aside.
 --
 -- Callers
 --   Nothing changes its call. server-portable/store.ts's CaptureResult gains
@@ -296,6 +308,10 @@ DECLARE
   -- read for every capture, so `existed` in the return is always right.
   v_existed     boolean := false;
   v_old_label   text;
+  -- 035: the row's pointer after the write — the fresh row's, or the one the
+  -- existing row keeps — returned so a caller told `existed` can say what
+  -- stands instead of guessing.
+  v_supersedes_now uuid;
   -- 025: the provenance the envelope carries, if any — written on a fresh
   -- row only (035).
   v_derived     jsonb;
@@ -400,7 +416,7 @@ BEGIN
         -- thought is update_thought's, through its p_provenance envelope
         -- (032): walked, audited, one function. The return's `existed` tells
         -- the caller the envelope's provenance was not written.
-  RETURNING id INTO v_id;
+  RETURNING id, supersedes INTO v_id, v_supersedes_now;
 
   -- ob1:vector-replaces-chunks — a CONTRACT SENTINEL, not prose (the 014
   -- convention); preflight's `atomic capture` check reads it. 022: the windows
@@ -416,13 +432,14 @@ BEGIN
   END IF;
 
   -- 035: `existed` — the text was already captured; metadata merged, vector
-  -- and windows by 021/022, provenance in the envelope not written.
-  RETURN jsonb_build_object('id', v_id, 'fingerprint', v_fingerprint, 'existed', v_existed);
+  -- and windows by 021/022, provenance in the envelope not written — and
+  -- `supersedes`, the row's pointer as it stands after this write.
+  RETURN jsonb_build_object('id', v_id, 'fingerprint', v_fingerprint, 'existed', v_existed, 'supersedes', v_supersedes_now);
 END;
 $$;
 
 COMMENT ON FUNCTION upsert_thought(text, jsonb, vector) IS
-  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (035). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (035). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (035) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed}: existed true means the text was already there and any provenance named was not written.';
+  'Atomic capture: content + metadata + embedding in one statement. Reads p_payload.actor (008), p_payload.embedding_model (021), and p_payload.derived_from / p_payload.supersedes (025) from the envelope. derived_from is validated by validate_derived_from — an array of existing thought UUIDs, or the write is refused (SMD-1253); supersedes'' existence is the self-FK''s, checked where the column is written — a first capture (035). Takes the fingerprint advisory lock before the write (033), the one update_thought takes, so a capture and an edit of one text are serialised (READ COMMITTED); no supersession lock (035). On a re-capture the label follows the vector, the chunk rows stay only while the label vouches for them (022), and the envelope''s provenance is NOT written (035) — provenance lands on a first capture only; setting, changing or clearing it on an existing thought is update_thought''s p_provenance (032). Returns {id, fingerprint, existed, supersedes}: existed true means the text was already there and any provenance named was not written; supersedes is the row''s pointer after the write.';
 
 -- 032's COMMENT, re-issued with the aside this file makes false ("a capture's
 -- add-if-empty through upsert_thought aside") replaced by the rule: every

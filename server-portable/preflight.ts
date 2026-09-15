@@ -696,7 +696,7 @@ if (configFailed) {
         const pre = (stage: string, earlier: string) => {
           // The unapplied files, named: 035 alone when `stage` is 035 or the
           // ledger has it, both otherwise (a brain at 032 lacks 033 as well).
-          const pending = stage === "035" || (ledgerRead && ledger.has(stage)) ? "migration 035 is" : `migrations ${stage} and 035 are`;
+          const pending = stage === "035" ? "migration 035 is" : `migrations ${stage} and 035 are`;
           return ledger.has("035") ? `${earlier} re-applied by hand puts it back`
             : ledgerRead && ledger.has(stage) ? `${earlier} re-applied by hand puts it back, and migration 035 is not yet applied`
             : ledgerRead ? `${pending} not yet applied`
@@ -714,7 +714,7 @@ if (configFailed) {
               applyLast(" — the last definer of the 2-argument form as well."));
         } else if (!/ob1:vector-replaces-chunks/.test(three.src)) {
           add("atomic capture", "warn",
-              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 035 after them, or a vendored recipe's 3-argument overload — edge-function-cost-optimization's migration — puts one there): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
+              `the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 (004, 005, 008 or 021 re-applied by hand without 035 after them): a re-capture that makes no windows — the Edge Function server, or a window that grew — at another model replaces the vector and leaves the previous vector's chunk rows under it, so search finds the thought by windows it no longer has; and it takes no fingerprint lock${andTwo}${andOthers}`,
               applyLast(" — the last definer; 022's or 025's file alone would leave what the later ones added out."));
         } else if (!UPSERT_THREE_ARG_SHIPPED_RE.test(three.src)) {
           add("atomic capture", "warn",

@@ -3584,6 +3584,7 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   let refusedNeg = false;
   try { await db.exec(`SELECT prune_query_log(-1)`); } catch { refusedNeg = true; }
   assert(refusedNeg, "prune_query_log refuses a negative window");
+}
 
 console.log("\n[35] Migration 035: a re-capture writes no provenance — the envelope's derived_from and supersedes land on a first capture only, no capture takes the supersession lock, and the return says existed (SMD-1453)");
 {
@@ -3595,7 +3596,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
   const commentOf = async (sig: string) => String((await db.query<{ d: string }>(`SELECT obj_description($1::regprocedure, 'pg_proc') AS d`, [sig])).rows[0].d);
   const three = await srcOf(THREE);
-  type R = { id: string; fingerprint: string; existed?: boolean; chunks?: number };
+  type R = { id: string; fingerprint: string; existed?: boolean; supersedes?: string | null; chunks?: number };
   const cap = async (content: string, payload: Record<string, unknown>, vec: string | null) =>
     (await db.query<{ r: R }>(`SELECT upsert_thought($1, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify(payload), vec])).rows[0].r;
   const prov = async (id: string) => (await db.query<{ s: string | null; d: unknown }>(`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = $1`, [id])).rows[0];
@@ -3616,7 +3617,8 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   const onConflict = three.slice(three.indexOf("DO UPDATE"), three.indexOf("RETURNING id INTO v_id"));
   assert(onConflict.length > 0 && !/supersedes\s*=/.test(onConflict) && !/derived_from\s*=/.test(onConflict) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three), "…its ON CONFLICT clause sets neither derived_from nor supersedes — 025's add-if-empty is gone");
   assert(/INSERT INTO thoughts \(content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes\)/.test(three) && /v_supersedes::uuid/.test(three) && /validate_derived_from\(p_payload->'derived_from'\)/.test(three), "…while the INSERT still writes both from the envelope, validated");
-  assert(!/IF p_embedding IS NOT NULL THEN\s+SELECT embedding_model/.test(three) && /FOR NO KEY UPDATE;\s+v_existed := FOUND;/.test(three) && /'existed', v_existed\)/.test(three), "…the row read runs for every capture and the return carries existed");
+  assert(!/IF p_embedding IS NOT NULL THEN\s+SELECT embedding_model/.test(three) && /FOR NO KEY UPDATE;\s+v_existed := FOUND;/.test(three) && /'existed', v_existed, 'supersedes', v_supersedes_now\)/.test(three) && /RETURNING id, supersedes INTO v_id, v_supersedes_now/.test(three),
+    "…the row read runs for every capture and the return carries existed and the row's supersedes after the write");
   assert(/IF p_embedding IS NOT NULL AND v_existed/.test(three), "…and the chunk DELETE keeps 022's condition — a vector arrived, a row was there");
   const four = await srcOf(FOUR);
   assert(/upsert_thought\(p_content, p_payload, p_embedding\)/.test(four) && /v_result \|\| jsonb_build_object/.test(four), "the 4-argument form still delegates and appends to the inner return, so existed passes through");
@@ -3625,21 +3627,21 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
 
   // Behaviour. A first capture writes provenance and says existed: false.
   const a = await cap("035 the earlier note", { metadata: {} }, unit(0));
-  assert(a.existed === false && (await prov(a.id)).s === null, "a first capture says existed: false");
+  assert(a.existed === false && a.supersedes === null && (await prov(a.id)).s === null, "a first capture says existed: false, supersedes: null");
   const b = await cap("035 the later note", { metadata: {}, supersedes: a.id, derived_from: [a.id] }, unit(1));
   const pb = await prov(b.id);
-  assert(b.existed === false && pb.s === a.id && JSON.stringify(pb.d) === JSON.stringify([a.id]), "a first capture naming provenance writes it on its fresh row");
+  assert(b.existed === false && b.supersedes === a.id && pb.s === a.id && JSON.stringify(pb.d) === JSON.stringify([a.id]), "a first capture naming provenance writes it on its fresh row, and the return carries the pointer");
   // A re-capture naming DIFFERENT provenance leaves what is there (025's
   // half that stays)…
   const c = await cap("035 a third note", { metadata: {} }, unit(2));
   const bAgain = await cap("035 the later note", { metadata: { k: 1 }, supersedes: c.id, derived_from: [c.id] }, unit(1));
   const pb2 = await prov(b.id);
-  assert(bAgain.id === b.id && bAgain.existed === true && pb2.s === a.id && JSON.stringify(pb2.d) === JSON.stringify([a.id]), "a re-capture naming other provenance leaves the row's, and says existed: true");
+  assert(bAgain.id === b.id && bAgain.existed === true && bAgain.supersedes === a.id && pb2.s === a.id && JSON.stringify(pb2.d) === JSON.stringify([a.id]), "a re-capture naming other provenance leaves the row's, and says existed: true with the pointer that STANDS, not the one named");
   assert((await db.query<{ k: number }>(`SELECT (metadata->>'k')::int AS k FROM thoughts WHERE id = $1`, [b.id])).rows[0].k === 1, "…while its metadata merged as before");
   // …and a re-capture of a row with NONE fills nothing — the half 035 removes.
   const aAgain = await cap("035 the earlier note", { metadata: {}, supersedes: c.id, derived_from: [c.id] }, unit(0));
   const pa = await prov(a.id);
-  assert(aAgain.id === a.id && aAgain.existed === true && pa.s === null && pa.d === null, "a re-capture naming provenance over a row that has none writes none — 025's fill is gone");
+  assert(aAgain.id === a.id && aAgain.existed === true && aAgain.supersedes === null && pa.s === null && pa.d === null, "a re-capture naming provenance over a row that has none writes none — 025's fill is gone — and returns supersedes: null");
   // A vectorless re-capture says existed too: the read runs without a vector.
   const aPlain = await cap("035 the earlier note", { metadata: {} }, null);
   assert(aPlain.id === a.id && aPlain.existed === true, "a vectorless re-capture says existed: true — the row read runs for every capture");

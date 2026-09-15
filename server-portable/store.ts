@@ -376,6 +376,13 @@ export type CaptureResult = {
    * PostgREST two-step fallback, whose 2-argument form does not say.
    */
   existed?: boolean;
+  /**
+   * Beside `existed` (migration 035): the row's `supersedes` pointer after the
+   * write — the fresh row's, or the one the existing row keeps — so a caller
+   * told the text existed can say what stands rather than guess. `null` is a
+   * row with no pointer; absent whenever `existed` is.
+   */
+  supersedes?: string | null;
 };
 
 /**

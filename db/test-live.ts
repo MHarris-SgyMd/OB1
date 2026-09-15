@@ -2308,7 +2308,7 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   // A three-thought chain: grandparent ← parent ← child, and the child also
   // supersedes the parent.
   const capR = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) =>
-    (await sql`SELECT upsert_thought(${content}, ${{ metadata: meta, ...(prov ?? {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string; existed?: boolean };
+    (await sql`SELECT upsert_thought(${content}, ${{ metadata: meta, ...(prov ?? {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string; existed?: boolean; supersedes?: string | null };
   const cap = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) => (await capR(content, meta, at, prov)).id;
 
   const gp = await cap("provenance grandparent: the raw note", { type: "observation" }, 0);
@@ -2328,7 +2328,7 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   // (032): walked, audited, one function.
   const childAgain = await capR("provenance child: a digest of the digest", { type: "synthesis" }, 2, { derived_from: [gp], supersedes: gp });
   const kept = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
-  assert(childAgain.id === child && childAgain.existed === true && JSON.stringify(kept.derived_from) === JSON.stringify([parent]) && kept.supersedes === parent, "a re-capture with different provenance keeps the original, it does not overwrite — and says existed: true");
+  assert(childAgain.id === child && childAgain.existed === true && childAgain.supersedes === parent && JSON.stringify(kept.derived_from) === JSON.stringify([parent]) && kept.supersedes === parent, "a re-capture with different provenance keeps the original, it does not overwrite — and says existed: true with the pointer that stands");
   const first = await capR("provenance plain: a first-hand note", { type: "note" }, 6);
   const plain = first.id;
   assert(first.existed === false && (await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from === null, "a first-hand capture has null derived_from, existed: false");

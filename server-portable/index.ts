@@ -1059,10 +1059,19 @@ function buildServer(principal: Principal): McpServer {
         // error would say why.
         if (captured.existed === true && (derived_from !== undefined || supersedes !== undefined)) {
           const named = [derived_from !== undefined ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
+          // What stands, from the row's pointer the store returned beside
+          // `existed` (035) — not from the caller's inputs alone, which the
+          // second review pass found advising a redundant edit, a replacement
+          // it did not mention, or one update_thought would refuse.
+          const current = captured.supersedes ?? null;
+          const advice = supersedes === undefined ? ""
+            : supersedes === captured.id ? ` The \`supersedes\` given names the thought itself; a thought cannot supersede itself.`
+            : current === supersedes ? ` It already supersedes ${supersedes}; there is nothing to record.`
+            : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${supersedes}, call update_thought with id ${captured.id} and \`supersedes\` ${supersedes}.`
+            : ` To record that it supersedes ${supersedes}, call update_thought with id ${captured.id} and \`supersedes\` ${supersedes}.`;
           confirmation +=
             `\n\nNote: this text was already captured as ${captured.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
-            `a re-capture leaves an existing thought's provenance as it is.` +
-            (supersedes !== undefined ? ` To record that it supersedes ${supersedes}, call update_thought with id ${captured.id} and \`supersedes\` ${supersedes}.` : "") +
+            `a re-capture leaves an existing thought's provenance as it is.` + advice +
             (derived_from !== undefined ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
         }
 

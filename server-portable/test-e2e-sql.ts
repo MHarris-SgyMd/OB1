@@ -348,6 +348,32 @@ console.log("\n[7] Dedup through the tool surface");
   const after = await call("thought_stats");
   assert(/Total thoughts: 3/.test(after), "a normalised duplicate did not add a row");
   assert(before.split("\n")[0] === after.split("\n")[0], "the total is unchanged");
+
+  // 035: a re-capture writes no provenance, and the reply says what stands —
+  // read from the row's pointer the store returns beside `existed`, not from
+  // the caller's inputs (the second review pass drove these four shapes and
+  // found the input-only reply advising a redundant or a refused edit).
+  const idOf = (out: string) => out.match(/— id ([0-9a-f-]{36})/)?.[1] ?? "";
+  const alpha = idOf(await call("capture_thought", { content: "alpha thought about migrations" }));
+  const beta = idOf(await call("capture_thought", { content: "beta thought about databases" }));
+  const gamma = idOf(await call("capture_thought", { content: "gamma thought about runtimes" }));
+  assert(alpha && beta && gamma && alpha !== beta, "the three ids read back from the replies");
+  const none = await call("capture_thought", { content: "  ALPHA THOUGHT ABOUT MIGRATIONS  ", supersedes: beta });
+  assert(new RegExp(`Note: this text was already captured as ${alpha}, so the \`supersedes\` given here was not written — a re-capture leaves an existing thought's provenance as it is\\. To record that it supersedes ${beta}, call update_thought with id ${alpha} and \`supersedes\` ${beta}\\.`).test(none),
+         `a re-capture naming supersedes over a thought with no pointer: not written, and the reply names the edit that records it (${none.split("Note:")[1]?.slice(0, 80)})`);
+  assert(/now supersedes/.test(await call("update_thought", { id: alpha, supersedes: beta })), "…which, followed, works");
+  const same = await call("capture_thought", { content: "alpha thought about migrations", supersedes: beta });
+  assert(new RegExp(`It already supersedes ${beta}; there is nothing to record\\.`).test(same) && !/call update_thought/.test(same), "…re-captured naming the pointer it holds: the reply says so and advises no edit");
+  const other = await call("capture_thought", { content: "alpha thought about migrations", supersedes: gamma });
+  assert(new RegExp(`It currently supersedes ${beta}; to replace that pointer with ${gamma}, call update_thought with id ${alpha} and \`supersedes\` ${gamma}\\.`).test(other), "…naming another: the reply says what it holds and that the edit would replace it");
+  const self = await call("capture_thought", { content: "alpha thought about migrations", supersedes: alpha });
+  assert(/names the thought itself; a thought cannot supersede itself\./.test(self) && !/call update_thought/.test(self), "…naming itself: refused in words, no edit advised");
+  const derived = await call("capture_thought", { content: "alpha thought about migrations", derived_from: [beta] });
+  assert(/the `derived_from` given here was not written/.test(derived) && /`derived_from` cannot be set on an existing thought through these tools\./.test(derived) && !/supersedes/.test(derived.split("Note:")[1] ?? ""), "…derived_from alone: told it cannot be set here, nothing about supersedes");
+  const fresh = await call("capture_thought", { content: "theta thought that is new", supersedes: beta });
+  assert(!/Note: this text was already captured/.test(fresh), "a first capture naming supersedes carries no such note");
+  await call("update_thought", { id: alpha, supersedes: null });
+  await call("delete_thought", { id: idOf(fresh) });
 }
 
 console.log("\n[8] the id a read prints round-trips to update_thought and delete_thought");
