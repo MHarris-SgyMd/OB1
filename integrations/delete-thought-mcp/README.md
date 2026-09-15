@@ -41,6 +41,8 @@ GENERATED DURING SETUP
 
 ## Steps
 
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+
 ### 1. Create the Edge Function
 
 From the root of your local Open Brain repo:
@@ -71,7 +73,7 @@ The third file is the access-key module the function imports from `../_shared/au
 supabase secrets set MCP_ACCESS_KEYS="laptop:write:<sha256-of-your-key>"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. Use a `write` key: `delete_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. Use a `write` key: `delete_thought` is registered only for one, so a `read` key connects to a server with no tools at all.
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by the Supabase platform.
 

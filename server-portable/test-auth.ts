@@ -11,7 +11,7 @@
  * Run: bun test-auth.ts   (no database needed — nothing here reaches the store)
  */
 
-import { authenticate, hashKey, parseKeyRecords, canWrite } from "./auth.ts";
+import { authenticate, hashKey, parseKeyRecords, canWrite, secretMatches } from "./auth.ts";
 import { actorPayload } from "./store.ts";
 import { createAssert } from "../db/test-support.ts";
 
@@ -232,6 +232,18 @@ console.log("\n[11] An unreachable agent registry does not deny service");
   const tools = await toolsFor(WRITE_KEY, "header");
   assert(tools.includes("capture_thought"),
          "the full tool surface is served with no registry reachable");
+}
+
+console.log("\n[12] secretMatches — a secret the caller echoes, compared digest to digest");
+{
+  assert(secretMatches("s3cret", "s3cret"), "the same secret matches");
+  assert(!secretMatches("s3cre", "s3cret") && !secretMatches("s3cret!", "s3cret"), "a prefix or an extension does not");
+  assert(!secretMatches("S3CRET", "s3cret"), "case matters");
+  assert(!secretMatches("", ""), "two empty strings are not a match");
+  assert(!secretMatches(null, "s3cret") && !secretMatches("s3cret", undefined), "empty on either side is a refusal");
+  assert(!secretMatches("undefined", undefined) && !secretMatches("null", null), "the literal spellings of nothing do not match nothing");
+  assert(!secretMatches(hashKey("s3cret"), "s3cret"), "the digest is not the secret");
+  assert(!secretMatches(12345, "12345") && !secretMatches({ secret: "s3cret" }, "s3cret"), "a value that is not a string is refused, not hashed");
 }
 
 server.stop();

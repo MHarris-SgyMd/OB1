@@ -36,12 +36,17 @@
  * URL query key and ran as the service role until they were made consumers of
  * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
  * integrations that compared the same way — nine MCP and HTTP servers, four
- * workers and one webhook receiver (SMD-1455, change 65). Each imports a
- * `_shared/auth.ts` beside it — extensions/_shared/, recipes/_shared/,
- * integrations/_shared/ and integrations/consolidation-workers/_shared/, every
- * one a byte-for-byte copy of this file, because a Supabase Edge Function is
- * bundled from supabase/functions/ and `_shared/` is the one place beside it a
- * shared module can live; extensions/test-auth.ts fails if any copy differs.
+ * workers and one webhook receiver (SMD-1455, change 65). Each imports
+ * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
+ * supabase/functions/, one level under which every function sits, and
+ * `_shared/` beside it is the one place a shared module can live — so a
+ * byte-for-byte copy of this file sits in every directory that holds a
+ * function directory: extensions/_shared/, recipes/_shared/,
+ * recipes/editorial-policy/_shared/,
+ * recipes/edge-function-cost-optimization/examples/_shared/,
+ * integrations/_shared/ and integrations/consolidation-workers/_shared/.
+ * `bun run sync-auth` in extensions/ rewrites them all from this file;
+ * extensions/test-auth.ts fails if any copy differs or is missing from either list.
  * Everything here is runtime-neutral — node:crypto and node:buffer resolve on
  * Bun, Node, Workers (nodejs_compat) and Deno — so the copies run as they are.
  */
@@ -153,11 +158,13 @@ function digestsMatch(a: string, b: string): boolean {
  * value Readwise puts in its payload — is the one configured. Both sides are
  * hashed first and the digests compared timing-safe, so neither the secret's
  * length nor its prefix reaches the response time; empty on either side is a
- * refusal, never a match. No scope and no name: a webhook secret identifies the
- * caller's platform, not a client, so there is no principal to give.
+ * refusal, never a match, and so is anything that is not a string — a payload
+ * field is the caller's to shape, and a number or an object is refused here
+ * rather than hashed or thrown on. No scope and no name: a webhook secret
+ * identifies the caller's platform, not a client, so there is no principal to give.
  */
-export function secretMatches(presented: string | null | undefined, expected: string | null | undefined): boolean {
-  if (!presented || !expected) return false;
+export function secretMatches(presented: unknown, expected: string | null | undefined): boolean {
+  if (typeof presented !== "string" || typeof expected !== "string" || !presented || !expected) return false;
   return digestsMatch(hashKey(presented), hashKey(expected));
 }
 

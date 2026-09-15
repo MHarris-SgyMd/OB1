@@ -46,12 +46,17 @@ Copy the `integrations/consolidation-workers/` folder into your Supabase project
 ```bash
 cp -r integrations/consolidation-workers/bio supabase/functions/consolidation-bio
 cp -r integrations/consolidation-workers/metadata-norm supabase/functions/consolidation-metadata
-cp -r integrations/consolidation-workers/_shared supabase/functions/_shared
+cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-bio/deno.json
+cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-metadata/deno.json
+mkdir -p supabase/functions/_shared
+cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-If you already have a `_shared/` folder from the enhanced MCP server, its files are identical — but make sure `_shared/auth.ts` is there too: both workers import the access-key module from `../_shared/auth.ts`.
+The `deno.json` pins `@supabase/supabase-js` for each function's own imports — Supabase reads one per function directory, and the workers import the package by its bare name. `_shared/` is copied file by file so a `_shared/` folder you already have (from the enhanced MCP server, or any other server on this fork) gains the files rather than a nested copy; both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
+
+> **`consolidation-bio` is not deployable as it stands.** It imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix; its access-key behaviour is exercised by `extensions/test-auth.ts`. `consolidation-metadata` deploys.
 
 ```bash
 supabase functions deploy consolidation-bio --no-verify-jwt
@@ -66,7 +71,7 @@ supabase secrets set \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 

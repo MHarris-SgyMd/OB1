@@ -736,7 +736,10 @@ function checkCoreFunctions() {
 // catches the operator, and a call is where the timing-safe compare lives.
 // Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
-// an object property, a helper that returns the key, several declarators on
+// a lower-case object property (an upper-case credential-named one —
+// `keys.MCP_ACCESS_KEY`, the shape change 65's workers bind — is caught, in
+// the one-line and the multi-line binding alike), a helper that returns the
+// key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable, a read
 // by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
 // (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
@@ -796,6 +799,16 @@ function credentialComparesIn(text) {
     // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
     flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
   }
+  // A credential-named upper-case property of any object but the environment
+  // ones ENV_READ reads — `keys.MCP_ACCESS_KEY`, `cfg.API_SECRET` — the shape
+  // change 65's workers bind their keys in (`const keys = { MCP_ACCESS_KEY:
+  // Deno.env.get(…) }`), which the binding rule above does not follow into: the
+  // object is bound, its property is not, in either the one-line or the
+  // multi-line form. Same guards as a bound name: not `typeof`, not against a
+  // nullish, empty or string literal, not `.x`, `(`, `[` after it.
+  const PROP = String.raw`(?<![\w$.])(?!(?:process|Deno|Bun|c|ctx|context)\.env\b)(?!import\.meta\.env\b)(?:${IDENT}(?:\?\.|\.))+(?:[A-Z][A-Z0-9_]*_)?(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)S?\b(?:(?:\?\.|\.)trim\(\))?`;
+  flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${PROP}(?!\s*(?:[.(\[]|\?\.))`, "g"));
+  flag(new RegExp(String.raw`(?<!typeof\s+)${PROP}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
   return [...lines].sort((a, b) => a - b);
 }
 
@@ -859,6 +872,10 @@ const CREDENTIAL_COMPARE_PROBES = [
   // The fifth pass: Hono's adapter form.
   'import { env } from "hono/adapter";\nif (provided !== env(c).MCP_ACCESS_KEY) deny();',
   'const { MCP_ACCESS_KEY } = env(c);\nif (provided !== MCP_ACCESS_KEY) deny();',
+  // Change 65's third pass: a credential-named property, however the object was bound.
+  'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys.MCP_ACCESS_KEY) deny();',
+  'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nif (!provided || provided !== keys.MCP_ACCESS_KEY?.trim()) deny();',
+  'const cfg = accessKeys();\nif (k !== cfg.MCP_ACCESS_KEY) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -887,6 +904,10 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   // typeof test beside a bound secret is a type check, not a compare of it.
   'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS") });\nif (session.scope !== principal.scope) session = undefined;',
   'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) deny();',
+  // A property's presence, type or absence is not a compare of it; the workers' fail-closed check.
+  'if (keys.MCP_ACCESS_KEY === undefined) warn();',
+  'if (typeof keys.MCP_ACCESS_KEY === "string") ok();',
+  'if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) return json({ error: "misconfigured" }, 503);',
 ];
 // Empty since SMD-1455 (FORK.md change 65) moved the seventeen files check 8's
 // first run found onto the shared module. The shape stays for the next audit: a

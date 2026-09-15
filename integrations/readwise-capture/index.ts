@@ -153,7 +153,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Readwise echoes the webhook secret in the payload; reject anything that
     // does not match the configured value — compared timing-safe, digest to
     // digest, so the response time says nothing about the secret.
-    if (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) {
+    if (!secretMatches(body.secret, READWISE_WEBHOOK_SECRET)) {
       return new Response("unauthorized", { status: 401 });
     }
 

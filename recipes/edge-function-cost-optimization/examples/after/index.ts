@@ -8,7 +8,7 @@
 //    subsequent ones, collapsing the 4-step MCP handshake
 //  - Access-Control-Expose-Headers includes mcp-session-id so browser
 //    clients (Claude Desktop, claude.ai) can read it off the response
-//  - Access keys through ../../../_shared/auth.ts (recipes/_shared/, the core
+//  - Access keys through ../_shared/auth.ts (examples/_shared/, the core
 //    server's server-portable/auth.ts): named, scoped, hashed entries in
 //    MCP_ACCESS_KEYS, and a read-scoped key is handed a server on which the
 //    tools that write were never registered (ob1-fork, SMD-1455, FORK.md
@@ -18,7 +18,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { serverFor } from "./server.ts";
-import { authenticateRequest, type Scope } from "../../../_shared/auth.ts";
+import { authenticateRequest, type Scope } from "../_shared/auth.ts";
 
 // ── Session reuse ──────────────────────────────────────────────────────────
 // A session remembers the scope it was minted under: a session id is not a

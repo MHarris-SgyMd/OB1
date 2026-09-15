@@ -11,7 +11,7 @@
 // most, not one per request.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { canWrite, type Principal } from "../../../_shared/auth.ts";
+import { canWrite, type Principal } from "../_shared/auth.ts";
 import { register as registerOpenBrain } from "./tools/open-brain.ts";
 import { register as registerHousehold } from "./tools/household.ts";
 import { register as registerMeal } from "./tools/meal.ts";

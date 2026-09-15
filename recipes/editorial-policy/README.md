@@ -114,20 +114,23 @@ Run the contents of `schema.sql` in your Supabase SQL Editor. This adds the `get
 In the Supabase dashboard: **Settings → Edge Functions → Secrets**. Set:
 
 ```
-AUDITOR_ACCESS_KEYS = cron:write:<sha256-of-a-key you generate — see Deploy an Edge Function, Step 3 (primitives/deploy-edge-function); the hash, never the key. Write scope: the audit stores a report. The older single AUDITOR_ACCESS_KEY still works.>
+AUDITOR_ACCESS_KEYS = cron:write:<sha256-of-your-key>
 SLACK_DIGEST_CHANNEL = <optional; defaults to SLACK_CAPTURE_CHANNEL>
 POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
 ```
 
+`AUDITOR_ACCESS_KEYS` holds `name:scope:sha256` entries — the hash of a key you generate, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. Give the schedule a `write` key: the audit stores a report. The older single `AUDITOR_ACCESS_KEY` still works, compared by digest.
+
 ### Step 5: Deploy the function
+
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
 
 ```bash
 # From your OB1 working directory:
-mkdir -p supabase/functions/auditor
+mkdir -p supabase/functions/auditor supabase/functions/_shared
 cp <recipe>/auditor/index.ts  supabase/functions/auditor/index.ts
 cp <recipe>/auditor/deno.json supabase/functions/auditor/deno.json
-mkdir -p supabase/functions/_shared
-cp recipes/_shared/auth.ts    supabase/functions/_shared/auth.ts   # the access-key module index.ts imports
+cp <recipe>/_shared/auth.ts   supabase/functions/_shared/auth.ts   # the access-key module index.ts imports as ../_shared/auth.ts
 supabase functions deploy auditor
 ```
 

@@ -86,6 +86,8 @@ Save it to your credential tracker, then set it in Supabase:
 supabase secrets set DEFAULT_USER_ID=your-generated-uuid
 ```
 
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+
 ### 4. Deploy the MCP server
 
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:

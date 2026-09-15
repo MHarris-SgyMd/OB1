@@ -169,7 +169,7 @@ After deployment you should see:
 
 - `openbrain-0` pod running with 2 containers (db + mcp-server)
 - PostgreSQL with `thoughts` table and `match_thoughts` function
-- MCP endpoint responding to `tools/list` with 4 tools: `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`
+- MCP endpoint responding to `tools/list` with 4 tools: `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought` (3 for a `read` key — `capture_thought` is registered only for `write`)
 - Thoughts captured via any MCP client are stored in your self-hosted database
 
 > **Tool hygiene:** This integration adds MCP tools to your AI's context window. As your deployment grows, the total tool count grows — and with it, the context cost and risk of your AI picking the wrong tool. See the [MCP Tool Audit & Optimization Guide](../../docs/05-tool-audit.md) for strategies on auditing, merging, and scoping your tools.

@@ -7898,14 +7898,20 @@ that leaves it does not deploy. Four of the seventeen deploy today —
 `deno.json`, `kubernetes-deployment` from a Dockerfile — and the rest
 already import the SQL shim across the tree (fix 13; the state SMD-1480
 records for five extensions). So the module is a `_shared/auth.ts` beside each
-server, imported as `../_shared/auth.ts` from its function directory — where
-Supabase looks — which in this repository is one copy per category
-(`recipes/_shared/`, `integrations/_shared/`) and one in the consolidation
-workers' own `_shared/`, already their deploy-time shared directory beside
-`helpers.ts` and `network.ts`. The auditor and the two samples sit deeper and
-reach the category copy by `../../` and `../../../`. Four copies of one file,
-each byte for byte `server-portable/auth.ts`, the test failing if any differs;
-the deploy primitive says any one of them serves. The Kubernetes image is
+server, imported as `../_shared/auth.ts` — every function deploys one level
+under `supabase/functions/`, and that is the one import it can resolve there —
+which in this repository puts a copy in each directory that holds a function
+directory: `recipes/_shared/`, `integrations/_shared/`, the consolidation
+workers' own `_shared/` (already their deploy-time shared directory beside
+`helpers.ts` and `network.ts`), `recipes/editorial-policy/_shared/` for the
+auditor and `recipes/edge-function-cost-optimization/examples/_shared/` for the
+two samples. (The implementation had the auditor and the samples reach the
+category copy by `../../` and `../../../`, which resolves in this tree and not
+in a deployed layout — the third pass's deployer found it.) Six copies of one
+file, each byte for byte `server-portable/auth.ts`; `bun run sync-auth` in
+`extensions/` rewrites them all, and the test fails if any differs or the tree,
+the list and the command disagree. The deploy primitive says any one of them
+serves. The Kubernetes image is
 built with `integrations/` as its context so the copy is inside it, the
 Dockerfile mirroring the repository layout; the README's build line changed.
 
@@ -7934,9 +7940,9 @@ payloads either (the first review pass; the implementation had let it). The
 four workers keep their fail-closed 503 when no key is configured
 and let a read-scoped key do the one thing that writes nothing: a dry run
 (`?dry_run=true`, or the auditor's `dry_run` body flag); anything else is 403.
-The consolidation workers' undocumented `x-mcp-key` header went; the
-auditor's own `x-auditor-key` is tried beside the module's four forms, its
-keys `AUDITOR_ACCESS_KEYS` with the older `AUDITOR_ACCESS_KEY` still accepted.
+The consolidation workers' undocumented `x-mcp-key` header went, and — after
+the third pass — so did the auditor's undocumented `x-auditor-key`; its keys
+are `AUDITOR_ACCESS_KEYS`, the older `AUDITOR_ACCESS_KEY` still accepted.
 Every server reads its keys per request, where they are used, so a rotation
 takes effect without a restart and the test can set and unset them. The
 "after" sample's session map remembers the scope a session was minted under:
@@ -7953,7 +7959,10 @@ empty value on either side is a refusal. `readwise-capture` uses it through
 payload field is refused rather than hashed. The Next.js recipe's route uses a
 `secretMatches` added to its own `src/lib/auth.ts`, beside the
 `timingSafeEqual` it already had for the access key — a Next.js app does not
-import this fork's server. The Telegram README's sample handler — pasted into
+import this fork's server. The module refuses anything that is not a string
+before hashing, so a payload field shaped by the caller is refused, not thrown
+on; on `main`, Readwise admitted a body with no `secret` field whenever the
+secret was unset — `undefined !== undefined` is false — which this closes. The Telegram README's sample handler — pasted into
 a fresh Supabase project, where nothing else of this fork exists — and the
 dashboard walkthrough's Node stub each carry a five-line `node:crypto` version:
 the two calls `_shared/auth.ts` makes, proven on the target runtime. (The
@@ -7985,19 +7994,25 @@ exactly the writes take `requireWrite`, a route's reach including the
 file-level functions it calls; `.delete()` a table verb only with no argument
 (`searchParams.delete("page")` had made two reads writes); raw `INSERT INTO`
 counts for the Kubernetes server's SQL; the read's own trace inserts allowed
-by table name and only behind a `canWrite` check; the four copies identical;
+by table name and only behind a `canWrite` check; the six copies identical,
+the tree, the list and the sync command agreeing;
 every `npm:` pin in a recipe's or integration's deno.json for a package the
 test installs matching it exactly, scoped names included; and the six files it
 cannot run — the "after" sample's two files, whose tool modules are not in the
 repository, the Next.js route and its lib, the README, the stub — say the
-same thing in their text. 634 assertions.
+same thing in their text. 643 assertions.
 
 **Check 8.** The exception list is empty; the shape stays, the header says why,
 and the failure message names both places a fix can go — the `_shared/auth.ts`
 beside the file, or `secretMatches()` for a secret the caller echoes. Said in
 the rule's text too: a compare routed through a function is outside the rule
 by design, because the operator is what it catches and a call is where the
-timing-safe compare lives.
+timing-safe compare lives. The third pass widened the rule by one clause: a
+credential-named upper-case property of any object but the environment's —
+`keys.MCP_ACCESS_KEY`, the shape the workers here bind their keys in — compared
+with an operator is caught, in the one-line and the multi-line binding alike,
+which the binding rule did not follow into; three probes and three non-probes
+hold it, and a scan of the eight roots found no existing hit.
 
 **Docs.** Each converted server's README: the secret is `MCP_ACCESS_KEYS`
 (`name:scope:sha256`, minted as the deploy primitive's Step 3 shows, the older
@@ -8092,20 +8107,56 @@ whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone);
 `readwise-capture` answers an empty body 200 before the secret check —
 upstream's accommodation of Readwise's Test Webhook button, unchanged.
 
+**Review, third pass** (past the stop signal, at the user's call; two
+reviewers — one walking every README as a deployer, one adversarial on the
+module and the rule — seventeen findings, sixteen fixed). The deployer found
+what the reading passes had not. A function deploys one level under
+`supabase/functions/`, so its import must be `../_shared/auth.ts` wherever the
+file sits in this repository: the auditor's `../../` and the samples'
+`../../../` resolved in the tree and not in the README's layout
+(`supabase/_shared/`, outside the bundle). Every server imports
+`../_shared/auth.ts` now and two more copies sit where those files are — six,
+held identical by the test, which also asserts the tree, its list and `bun run
+sync-auth` agree. The first pass's `metadata-norm` change — the bare specifier
+through `deno.json` — had made the one consolidation worker that deployed on
+`main` undeployable by its README, which copied the folder without the
+`deno.json`; the README copies it for both workers, and copies `_shared/` file
+by file, since `cp -r` into an existing `_shared/` — which every other README
+now creates — nests. Every `supabase secrets set MCP_ACCESS_KEYS="one:entry"`
+example said, in effect, drop every other client's key: the secret is
+project-wide, and each README says to set the whole list. The seven
+shim-importing READMEs carry the extensions' SMD-1480 callout above their
+deploy steps. The rule: check 8 was silent on the shape this change introduced
+— `if (provided === keys.MCP_ACCESS_KEY)` after the workers' `keys` object —
+in both its one-line and multi-line forms; the property clause above.
+`secretMatches` refuses a non-string in the module rather than trusting each
+caller (readwise's guard went with it) and has a unit test in the core
+server's suite. Smaller: the auditor's undocumented `x-auditor-key` header went;
+a malformed `MCP_ACCESS_KEYS` entry is dropped without a log in every vendored
+server, as in change 64 — the deploy primitive's troubleshooting says so and
+what to check; the editorial README had a sentence of prose inside the
+secret's value and mixed path roots in its copy lines; the Kubernetes README's
+expected tool count says three for a read key; the harness says how to add a
+server, silences a handler's `console.error` for the length of a request,
+accepts single-quoted specifiers, and dropped a parameter never passed. Noted:
+the auditor's legacy-key principal is named `MCP_ACCESS_KEY` though its
+variable is `AUDITOR_ACCESS_KEY` — a logging name, never logged; the exceptions
+mechanism has nothing to exercise it while the list is empty.
+
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
-**Verified:** `extensions/test-auth.ts` 634/634 (the seven extensions' 243
+**Verified:** `extensions/test-auth.ts` 643/643 (the seven extensions' 243
 among them); `server-portable/test-auth.ts` 59/59, `test-server.ts` 73/73,
 `tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
 --node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
 `agent-memory-api`, `consolidation-workers/metadata-norm` and
 `kubernetes-deployment`, each from its own directory — the four CI now checks;
 `bun scripts/check-fork-consistency.mjs` PASS with the exception list empty
-(47 probes, 23 non-probes, no vendored hit). The ticket's verify grep —
+(50 probes, 26 non-probes, no vendored hit). The ticket's verify grep —
 `req.query("key")` under `extensions/`, `recipes/`, `integrations/` — returns
 nothing.
 

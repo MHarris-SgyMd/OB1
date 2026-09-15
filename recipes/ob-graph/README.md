@@ -93,7 +93,7 @@ supabase secrets set \
   DEFAULT_USER_ID=your-user-uuid
 ```
 
-`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically by Supabase for Edge Functions. You only need to set `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID` manually. `MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; the older single `MCP_ACCESS_KEY` still works, compared by digest. A `read` key sees the query tools only; the five tools that write (`create_node`, `create_edge`, `update_node`, `delete_node`, `delete_edge`) are registered only for a `write` key.
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided automatically by Supabase for Edge Functions. You only need to set `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID` manually. `MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per client — the hash, never the key; the older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. A `read` key sees the query tools only; the five tools that write (`create_node`, `create_edge`, `update_node`, `delete_node`, `delete_edge`) are registered only for a `write` key.
 
 Done when: The `ob-graph-mcp` function is deployed successfully and its secrets include `MCP_ACCESS_KEYS` and `DEFAULT_USER_ID`.
 

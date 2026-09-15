@@ -4,7 +4,7 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
-// ob1-fork (SMD-1455): the access key goes through ../../../_shared/auth.ts (recipes/_shared/,
+// ob1-fork (SMD-1455): the access key goes through ../_shared/auth.ts (examples/_shared/,
 // the core server's server-portable/auth.ts) — FORK.md change 65. The anti-pattern this file
 // teaches is the per-request construction below, not the key compare it used to carry.
 // ❌ ANTI-PATTERN — McpServer reconstructed on every HTTP request.
@@ -21,7 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { z } from "zod";
 import { createClient } from "../../../../compat/supabase-sql/index.ts";
-import { authenticateRequest } from "../../../_shared/auth.ts";
+import { authenticateRequest } from "../_shared/auth.ts";
 
 const app = new Hono();
 

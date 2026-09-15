@@ -27,8 +27,10 @@
  *
  * The files are imported under a stand-in for the two Deno globals they use —
  * `Deno.env.get` hands the process environment through, `Deno.serve` captures
- * the fetch handler instead of listening — and, for the recipes and
- * integrations, under a loader that reads their Deno specifiers on Bun: a
+ * the fetch handler instead of listening, and console.error/warn silenced for
+ * the length of a request, since a refused port is the proof and not noise —
+ * and, for the recipes and integrations, under a loader that reads their Deno
+ * specifiers on Bun: a
  * `jsr:` type-only import is dropped, `npm:pkg@version` becomes `pkg`, the
  * Deno postgres driver becomes a stub that never connects, and a bare package
  * name resolves from this directory's install, since theirs is a deno.json.
@@ -42,7 +44,7 @@
 
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
 import { createAssert } from "../db/test-support.ts";
@@ -75,11 +77,11 @@ Bun.plugin({
     build.onLoad({ filter: VENDORED }, async (args) => {
       let src = await Bun.file(args.path).text();
       src = src.replace(/^import\s+"jsr:[^"]+";\s*$/gm, "");
-      src = src.replace(/(from\s+|import\s+)"([^"]+)"/g, (whole, lead, spec) => {
+      src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
         let s = spec as string;
         if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (s === "postgres") return `${lead}"${PG_STUB}"`;
-        if (PACKAGES.test(s)) return `${lead}"${Bun.resolveSync(s, HERE)}"`;
+        if (s === "postgres") return `${lead}${q}${PG_STUB}${q}`;
+        if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
         return whole;
       });
       return { contents: src, loader: "ts" };
@@ -104,8 +106,6 @@ type Server = {
   legacy: string;
   /** What SUPABASE_URL must look like: the SQL shim wants postgres://, supabase-js an https:// URL. */
   url: string;
-  /** The import that reaches the copy of server-portable/auth.ts beside the file. */
-  shared: string;
   /** MCP: tool names. HTTP: "METHOD /path". A worker has one operation, gated by dry_run. */
   reads: string[];
   writes: string[];
@@ -125,9 +125,19 @@ const HTTPS = "https://stub.invalid";
 /** supabase-js's shape of the same: a valid URL nothing answers, refused at once. */
 const HTTPS_REFUSED = "https://127.0.0.1:1";
 const ext = (file: string, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
-  ({ file: `extensions/${file}`, kind: "mcp", keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, shared: "../_shared/auth.ts", reads, writes, ...o });
+  ({ file: `extensions/${file}`, kind: "mcp", keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
 const vendored = (file: string, kind: Kind, reads: string[], writes: string[], o: Partial<Server> = {}): Server =>
-  ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, shared: "../_shared/auth.ts", reads, writes, ...o });
+  ({ file, kind, keys: "MCP_ACCESS_KEYS", legacy: "MCP_ACCESS_KEY", url: PG, reads, writes, ...o });
+// To add a server: one entry below — `url` in the shape its client accepts (PG
+// for the SQL shim, HTTPS for supabase-js; the *_REFUSED forms when a handler
+// queries before it can answer); `kind` picks the assertions; a REST server
+// lists its routes as "METHOD /path" and needs `readProbe`, a worker `dryRun`
+// and `unconfigured`. Then, as needed: RPC_READS and LOG_TABLES for what its
+// reads may call; PACKAGES and extensions/package.json for a new npm package
+// (the pin guard then holds its deno.json to it); a TEXT_ONLY entry for a file
+// that cannot run; COPIES and package.json's sync-auth for a new _shared/. A
+// REST server's routes must be mounted `app.<verb>("…", …)` at column 0, or
+// the classifier cannot see them.
 const SERVERS: Server[] = [
   // The seven extension servers (change 64).
   ext("family-calendar/index.ts", ["get_week_schedule", "search_activities", "get_upcoming_dates"],
@@ -146,8 +156,7 @@ const SERVERS: Server[] = [
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
     { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 65).
-  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], [],
-    { shared: "../../../_shared/auth.ts" }),
+  vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),
   vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
@@ -164,7 +173,7 @@ const SERVERS: Server[] = [
     ["PUT /thought/:id", "DELETE /thought/:id", "POST /capture", "POST /thought/:id/reflection", "POST /ingest"],
     { url: PG_REFUSED, readProbe: "GET /health" }),
   vendored("recipes/editorial-policy/auditor/index.ts", "worker", [], [],
-    { keys: "AUDITOR_ACCESS_KEYS", legacy: "AUDITOR_ACCESS_KEY", url: PG_REFUSED, shared: "../../_shared/auth.ts", dryRun: "body", unconfigured: 401 }),
+    { keys: "AUDITOR_ACCESS_KEYS", legacy: "AUDITOR_ACCESS_KEY", url: PG_REFUSED, dryRun: "body", unconfigured: 401 }),
   vendored("integrations/entity-extraction-worker/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
   vendored("integrations/consolidation-workers/bio/index.ts", "worker", [], [], { dryRun: "query", unconfigured: 503 }),
   vendored("integrations/consolidation-workers/metadata-norm/index.ts", "worker", [], [], { url: HTTPS, dryRun: "query", unconfigured: 503 }),
@@ -173,11 +182,26 @@ const SERVERS: Server[] = [
 /** The webhook receiver: a secret the caller echoes, compared through the module's secretMatches(). */
 const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "READWISE_WEBHOOK_SECRET", secret: "a-secret-readwise-minted" };
 
-const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
+// Every function deploys one level under supabase/functions/, so every server
+// imports `../_shared/auth.ts` and a copy sits in each directory that holds a
+// function directory. The list here, the tree, and package.json's sync-auth
+// (the one command that rewrites them all) must agree.
+const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
+  "recipes/edge-function-cost-optimization/examples/_shared/auth.ts", "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
 const CORE = readFileSync(join(ROOT, "server-portable", "auth.ts"), "utf8");
 for (const copy of COPIES) {
-  assert(readFileSync(join(ROOT, copy), "utf8") === CORE,
-    `${copy} is byte-for-byte server-portable/auth.ts — copy it again after editing either`);
+  assert(existsSync(join(ROOT, copy)) && readFileSync(join(ROOT, copy), "utf8") === CORE,
+    `${copy} is byte-for-byte server-portable/auth.ts — \`bun run sync-auth\` here rewrites every copy`);
+}
+{
+  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/_shared/auth.ts").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules")).sort();
+  assert(inTree.join() === [...COPIES].sort().join(), `every _shared/auth.ts in the tree is in COPIES and vice versa (${inTree.join(", ")})`);
+  const sync = (JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).scripts as Record<string, string>)["sync-auth"] ?? "";
+  for (const copy of COPIES) {
+    const dir = relative(HERE, join(ROOT, dirname(copy))).replace(/\\/g, "/");
+    assert(sync.split(/[\s;]+/).includes(dir), `package.json's sync-auth names ${dir}`);
+  }
 }
 
 // The workers refuse with 503 before they touch the queue when no LLM key is
@@ -225,7 +249,15 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const [path, own] = init.path.split("?");
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
-  const r = await handler(new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
+  // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
+  const console_ = { error: console.error, warn: console.warn };
+  console.error = () => {}; console.warn = () => {};
+  let r: Response;
+  try {
+    r = await handler(new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
+  } finally {
+    Object.assign(console, console_);
+  }
   const text = await r.text();
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
   let json: any = null;
@@ -241,8 +273,8 @@ const http = (s: Server, key: string | null, route: string, via: Via = "x-access
   return request(s, key, via, {}, { method, path: path.replace(/:[a-z_]+/g, "test-id"), body: method === "GET" ? undefined : {}, rawBody });
 };
 /** A worker run, dry or not. */
-const run = (s: Server, key: string | null, dryRun: boolean, via: Via = "x-access-key") =>
-  request(s, key, via, {}, s.dryRun === "body"
+const run = (s: Server, key: string | null, dryRun: boolean) =>
+  request(s, key, "x-access-key", {}, s.dryRun === "body"
     ? { method: "POST", path: "/", body: { dry_run: dryRun } }
     : { method: "POST", path: dryRun ? "/?dry_run=true" : "/", body: undefined });
 /** Past the gate: whatever the handler answers once the key and the scope let it through — not a refusal by another status. */
@@ -503,7 +535,7 @@ for (const s of SERVERS) {
     assert(text.includes("authenticateRequest(req,") && text.includes("if (!canWrite(principal) && !dryRun)"),
       `${s.file}: the key is resolved from the request through the module, and a read-scoped key may only dry-run`);
   }
-  assert(text.includes(`from "${s.shared}"`), `…the module is the _shared/auth.ts beside the file (${s.shared})`);
+  assert(text.includes('from "../_shared/auth.ts"'), "…the module is ../_shared/auth.ts — the one import a function one level under supabase/functions/ resolves");
   assert(!OLD_SPELLINGS.test(text), "…and the key is compared nowhere else");
 }
 {
@@ -518,10 +550,10 @@ for (const s of SERVERS) {
 console.log("\n[the files this test reads but cannot run]");
 const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
-    must: [/from "\.\.\/\.\.\/\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /serverFor\(principal\)/, /session\.scope !== principal\.scope/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /serverFor\(principal\)/, /session\.scope !== principal\.scope/],
     mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
-    must: [/from "\.\.\/\.\.\/\.\.\/_shared\/auth\.ts"/, /export function serverFor\(principal: Principal\)/, /register\w+\(server, principal\)/],
+    must: [/from "\.\.\/_shared\/auth\.ts"/, /export function serverFor\(principal: Principal\)/, /register\w+\(server, principal\)/],
     mustNot: [/export const server\b/] },
   { file: "recipes/vercel-neon-telegram/src/app/api/telegram/route.ts",
     must: [/import \{ secretMatches \} from "@\/lib\/auth"/, /secretMatches\(req\.headers\.get\("x-telegram-bot-api-secret-token"\), expectedSecret\)/],

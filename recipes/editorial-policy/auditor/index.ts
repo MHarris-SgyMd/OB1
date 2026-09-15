@@ -26,13 +26,13 @@
 //
 // Schedule: see schedule.sql in this recipe folder.
 
-// ob1-fork (SMD-1455): access keys go through ../../_shared/auth.ts — the core server's
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 65; extensions/test-auth.ts exercises it.
 import { createClient } from "../../../compat/supabase-sql/index.ts";
-import { authenticate, authenticateRequest, canWrite } from "../../_shared/auth.ts";
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
 // ── Env ──────────────────────────────────────────────────────────────────
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -509,14 +509,14 @@ async function postToSlack(channel: string, text: string): Promise<void> {
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     // Named, scoped, hashed keys through the shared module (AUDITOR_ACCESS_KEYS;
-    // the older single AUDITOR_ACCESS_KEY still works, compared by digest). The
-    // module reads ?key=, x-brain-key, x-access-key and a bearer token; this
-    // function's own x-auditor-key header is tried beside them.
+    // the older single AUDITOR_ACCESS_KEY still works, compared by digest),
+    // presented as ?key= — the schedule's form — x-brain-key, x-access-key or a
+    // bearer token, and no other: an undocumented header is a rule nobody can learn.
     const keys = {
       MCP_ACCESS_KEYS: Deno.env.get("AUDITOR_ACCESS_KEYS"),
       MCP_ACCESS_KEY: Deno.env.get("AUDITOR_ACCESS_KEY"),
     };
-    const principal = authenticateRequest(req, keys) ?? authenticate(req.headers.get("x-auditor-key"), keys);
+    const principal = authenticateRequest(req, keys);
     if (!principal) {
       return new Response("unauthorized", { status: 401 });
     }

@@ -50,6 +50,8 @@ The function expects `thoughts.id` to be a UUID. The dashboard now treats though
 
 ## Deploy
 
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+
 From a Supabase workdir, copy or symlink this folder to `supabase/functions/open-brain-rest` and `integrations/_shared/auth.ts` to `supabase/functions/_shared/auth.ts` — the function imports the access-key module from `../_shared/auth.ts` (the same file every server on this fork shares). Then deploy:
 
 ```bash
