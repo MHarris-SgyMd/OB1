@@ -18,8 +18,9 @@
 --   to order it against update_thought's walk, and measured what that lock
 --   costs: a capture NAMING supersedes held the one brain-wide key from
 --   before its label read to commit, HNSW insert included — 200 concurrent at
---   1,024 dimensions took 1,388 ms, 6.9 ms each, the serial cost; about 145
---   pointer-naming captures a second whatever the worker count. The lock
+--   1,024 dimensions took 1,388 ms in 033's own measurement, 6.9 ms each, the
+--   serial cost; about 145 pointer-naming captures a second whatever the
+--   worker count (this file's re-run of the same arms is under Cost). The lock
 --   existed only for the fill: a fresh row cannot close a loop, but which of
 --   the two a capture is becomes known only under the fingerprint lock, and
 --   the supersession lock had to come before that one.
@@ -58,17 +59,18 @@
 --      can say what stands rather than guess (the second review pass drove
 --      the capture tool's reply through the server and found it advising an
 --      edit that was redundant, replaced a pointer it did not mention, or
---      would be refused; the reply reads this key now). 022's label read — FOR NO KEY UPDATE on the row the text
---      lands on — runs for every capture now, not only with a vector, so the
---      flag is right for a vectorless capture too (one index probe under the
---      fingerprint lock; the chunk DELETE keeps its condition). `existed`
---      means a row HELD THIS FINGERPRINT WHEN THE LOCKED READ RAN — a writer
---      that sets content_fingerprint without the fingerprint lock (raw SQL;
---      the class 018, 023 and 033 already exclude) can commit between the
---      read and the INSERT and make the merge report false; and a legacy row
---      with a NULL one (from
---      before 003, until 023's backfill reaches it) is not found, and the
---      capture inserts a twin — 003/023's semantics, unchanged here. 013's
+--      would be refused; the reply reads this key now). 022's label read —
+--      FOR NO KEY UPDATE on the row the text lands on — runs for every
+--      capture now, not only with a vector, so the flag is right for a
+--      vectorless capture too (one index probe under the fingerprint lock;
+--      the chunk DELETE keeps its condition). `existed` means a row HELD THIS
+--      FINGERPRINT WHEN THE LOCKED READ RAN — a writer that sets
+--      content_fingerprint without the fingerprint lock (raw SQL; the class
+--      018, 023 and 033 already exclude) can commit between the read and the
+--      INSERT and make the merge report false; and a legacy row with a NULL
+--      one (from before 003, until 023's backfill reaches it) is not found,
+--      and the capture inserts a twin — 003/023's semantics, unchanged here.
+--      013's
 --      4-argument form returns v_result || {"chunks": n}, so the key passes
 --      through to both servers; the capture tool tells the caller what
 --      stands — the thought already supersedes what was named, currently
@@ -81,8 +83,8 @@
 --      this file is the last definer of BOTH inserting forms and preflight's
 --      `atomic capture` has one remedy for every stale state, as 033 had. It
 --      takes no vector and reads no provenance (033's header says so); it
---      returns neither `existed` nor `supersedes` — the two-step fallback is its one
---      caller and attaches the vector afterwards either way.
+--      returns neither `existed` nor `supersedes` — the two-step fallback is
+--      its one caller and attaches the vector afterwards either way.
 --   Otherwise the 3-argument body is 033's, verbatim: 005's guard, 008's
 --   actor, 016's content_fingerprint_of, 021's label in the INSERT and its ON
 --   CONFLICT clause, 022's read with its FOUND and the chunk DELETE under its
@@ -98,8 +100,9 @@
 --     * a capture, naming supersedes or not: fingerprint → the row the text
 --       lands on (FOR NO KEY UPDATE, or the INSERT's own lock), then the FK
 --       check's FOR KEY SHARE on the target when a fresh row names one;
---     * update_thought with content: supersession (when supersedes is named)
---       → fingerprint → the edited row; without content: supersession → row;
+--     * update_thought with content: supersession (when supersedes names a
+--       thought; a JSON-null clear takes none, 033) → fingerprint → the edited
+--       row; without content: supersession → row;
 --     * review_supersession_proposal (032): the proposal row FOR UPDATE →
 --       supersession → the superseding row → update_thought without content.
 --   Still one total order over the lock classes and at most one lock of each
@@ -138,11 +141,15 @@
 --   not have" is gone. A caller that captured a thought and later wants to
 --   record what it supersedes or derives from re-captures nothing: it calls
 --   update_thought with the envelope (the capture tool's reply names it).
---   Changed with it: a re-capture naming a supersedes that names NO thought
---   is not refused — the FK ran only on the fill; a first capture's FK still
---   refuses one — so `existed` is true with nothing written, and
---   update_thought, the path the reply names, refuses it by name
---   (SUPERSEDES_NOT_FOUND): the caller learns one step later, not never.
+--   Changed with it: a re-capture naming a supersedes that names NO thought,
+--   or one whose chain reaches this thought, is not refused — the FK and the
+--   walk ran only where the pointer is written, and a re-capture writes none
+--   (a first capture's FK still refuses a missing target, said in the tool's
+--   words since this change) — so `existed` is true and no provenance is
+--   written (the dedup's own merge runs: metadata, updated_at), and
+--   update_thought, the path the reply names with that condition spelled out,
+--   refuses it by name (SUPERSEDES_NOT_FOUND, WOULD_CYCLE): the caller learns
+--   one step later, not never.
 --   The shape checks (a UUID string; validate_derived_from's existence
 --   check for derived_from) run on a dedup as before.
 --   Not closed, and not this file's: delete_thought outside the lock order
@@ -172,7 +179,8 @@
 --   vs 79.7 ms and 73.6 vs 74.0 ms at 035 (1.2×, 1.0×); 200 concurrent naming
 --   supersedes 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 035 —
 --   inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at
---   033, 346.8 / 334.5 ms at 035); one serial capture naming supersedes 7.30 / 6.75 ms at 033,
+--   033, 346.8 / 334.5 ms at 035); one serial capture naming supersedes 7.30 /
+--   6.75 ms at 033,
 --   7.22 / 6.27 ms at 035 — the per-call cost is the HNSW insert either way,
 --   the lock only took the parallelism. 470 pointers written in every arm.
 --   More: one index probe per vectorless 3-argument capture — the row read
@@ -187,10 +195,11 @@
 --     file stays, loop or not. No shipped code sends supersedes on its own
 --     (consolidate.ts writes through the review path), but capture_thought
 --     forwards a caller's, so a loop is possible wherever a client re-captured
---     existing text naming one. To find a loop that was written: a
---     two-row one is `SELECT a.id, b.id FROM thoughts a JOIN thoughts b ON
---     b.id = a.supersedes AND b.supersedes = a.id`; update_thought's envelope
---     with {"supersedes": null} clears one side, audited.
+--     existing text naming one. To find a loop that was written: a two-row
+--     one is `SELECT a.id, b.id FROM thoughts a JOIN thoughts b ON b.id =
+--     a.supersedes AND b.supersedes = a.id AND a.id < b.id` (one row per
+--     loop); update_thought's envelope with {"supersedes": null} clears one
+--     side, audited.
 --   * Idempotent: a re-run replaces the bodies with themselves and re-issues
 --     the COMMENTs.
 --   * Privileges: SECURITY INVOKER as before; the 3-argument form still needs

@@ -359,7 +359,7 @@ console.log("\n[7] Dedup through the tool surface");
   const gamma = idOf(await call("capture_thought", { content: "gamma thought about runtimes" }));
   assert(alpha && beta && gamma && alpha !== beta, "the three ids read back from the replies");
   const none = await call("capture_thought", { content: "  ALPHA THOUGHT ABOUT MIGRATIONS  ", supersedes: beta });
-  assert(new RegExp(`Note: this text was already captured as ${alpha}, so the \`supersedes\` given here was not written — a re-capture leaves an existing thought's provenance as it is\\. To record that it supersedes ${beta}, call update_thought with id ${alpha} and \`supersedes\` ${beta}\\.`).test(none),
+  assert(new RegExp(`Note: this text was already captured as ${alpha}, so the \`supersedes\` given here was not written — a re-capture leaves an existing thought's provenance as it is\\. To record that it supersedes ${beta}, call update_thought with id ${alpha} and \`supersedes\` ${beta}; it records the pointer if that thought exists and closes no loop\\.`).test(none),
          `a re-capture naming supersedes over a thought with no pointer: not written, and the reply names the edit that records it (${none.split("Note:")[1]?.slice(0, 80)})`);
   assert(/now supersedes/.test(await call("update_thought", { id: alpha, supersedes: beta })), "…which, followed, works");
   const same = await call("capture_thought", { content: "alpha thought about migrations", supersedes: beta });
@@ -367,7 +367,23 @@ console.log("\n[7] Dedup through the tool surface");
   const upper = await call("capture_thought", { content: "alpha thought about migrations", supersedes: beta.toUpperCase() });
   assert(new RegExp(`It already supersedes ${beta}; there is nothing to record\\.`).test(upper) && !/call update_thought/.test(upper), "…the same pointer in upper case is the same pointer (compared and printed lower-case)");
   const other = await call("capture_thought", { content: "alpha thought about migrations", supersedes: gamma });
-  assert(new RegExp(`It currently supersedes ${beta}; to replace that pointer with ${gamma}, call update_thought with id ${alpha} and \`supersedes\` ${gamma}\\.`).test(other), "…naming another: the reply says what it holds and that the edit would replace it");
+  assert(new RegExp(`It currently supersedes ${beta}; to replace that pointer with ${gamma}, call update_thought with id ${alpha} and \`supersedes\` ${gamma}; it records the pointer if that thought exists and closes no loop\\.`).test(other), "…naming another: the reply says what it holds and that the edit would replace it");
+  // The advice's two conditions, driven: a pointer that would close a loop
+  // (gamma supersedes alpha; alpha re-captured naming gamma) is advised with
+  // the condition and refused by the edit; a first capture naming no thought
+  // is 025's FK, said in the tool's words.
+  await call("update_thought", { id: gamma, supersedes: alpha });
+  const loopy = await call("capture_thought", { content: "alpha thought about migrations", supersedes: gamma });
+  assert(/closes no loop\./.test(loopy), "…a pointer that would close a loop is advised with the condition spelled out");
+  let refused = "";
+  try { await call("update_thought", { id: alpha, supersedes: gamma }); } catch (e) { refused = (e as Error).message; }
+  assert(/would close a loop/.test(refused), `…and the edit refuses it by name (${refused.slice(0, 60)})`);
+  await call("update_thought", { id: gamma, supersedes: null });
+  try { await call("capture_thought", { content: "iota thought naming a ghost", supersedes: "00000000-0000-0000-0000-000000000000" }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: no thought with the id given as supersedes/.test(refused), `a first capture naming no thought is refused in the tool's words, not Postgres's (${refused.slice(0, 60)})`);
+  try { await call("capture_thought", { content: "iota thought naming a bad source", derived_from: ["abc"] }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: every `derived_from` entry must be a thought id/.test(refused), `a derived_from element that is no id is refused before the model calls (${refused.slice(0, 60)})`);
+  assert(!/Note: this text was already captured/.test(await call("capture_thought", { content: "alpha thought about migrations", derived_from: [] })), "an empty derived_from names nothing, and no note fires for it");
   const self = await call("capture_thought", { content: "alpha thought about migrations", supersedes: alpha });
   assert(/names the thought itself; a thought cannot supersede itself\./.test(self) && !/call update_thought/.test(self), "…naming itself: refused in words, no edit advised");
   const derived = await call("capture_thought", { content: "alpha thought about migrations", derived_from: [beta] });

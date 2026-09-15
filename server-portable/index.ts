@@ -972,6 +972,11 @@ function buildServer(principal: Principal): McpServer {
         // update_thought's `supersedes` is refused (032). upsert_thought would
         // raise on it after the embedding and the metadata were already paid for.
         if (supersedes !== undefined && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes));
+        // derived_from's SHAPE likewise (fourth review pass): a non-id element
+        // paid both model calls before validate_derived_from refused it.
+        // Existence stays the write's.
+        const badDerived = derived_from?.find((d) => typeof d !== "string" || !UUID_RE.test(d));
+        if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${String(badDerived).slice(0, 40)}".`);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),
@@ -1057,8 +1062,9 @@ function buildServer(principal: Principal): McpServer {
         // were not written; say so and name the edit that records it, since
         // otherwise nothing would — the trace would show nothing and no
         // error would say why.
-        if (captured.existed === true && (derived_from !== undefined || supersedes !== undefined)) {
-          const named = [derived_from !== undefined ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
+        const derivedNamed = derived_from !== undefined && derived_from.length > 0;
+        if (captured.existed === true && (derivedNamed || supersedes !== undefined)) {
+          const named = [derivedNamed ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
           // What stands, from the row's pointer the store returned beside
           // `existed` (035) — not from the caller's inputs alone, which the
           // second review pass found advising a redundant edit, a replacement
@@ -1072,12 +1078,12 @@ function buildServer(principal: Principal): McpServer {
           const advice = given === undefined ? ""
             : given === captured.id ? ` The \`supersedes\` given names the thought itself; a thought cannot supersede itself.`
             : current === given ? ` It already supersedes ${given}; there is nothing to record.`
-            : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}.`
-            : ` To record that it supersedes ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}.`;
+            : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`
+            : ` To record that it supersedes ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`;
           confirmation +=
             `\n\nNote: this text was already captured as ${captured.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
             `a re-capture leaves an existing thought's provenance as it is.` + advice +
-            (derived_from !== undefined ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
+            (derivedNamed ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
         }
 
         // Tell the user when tags are placeholders rather than real extraction,
@@ -1093,8 +1099,14 @@ function buildServer(principal: Principal): McpServer {
           content: [{ type: "text" as const, text: confirmation }],
         };
       } catch (err: unknown) {
+        const msg = (err as Error).message;
+        // 025's self-FK is what refuses a first capture's supersedes naming no
+        // thought (a re-capture writes no pointer, so it never fires there —
+        // migration 035). Said as update_thought says it, not as Postgres does
+        // (fourth review pass).
+        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.");
         return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
           isError: true,
         };
       }

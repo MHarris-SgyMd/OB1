@@ -3602,7 +3602,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   const prov = async (id: string) => (await db.query<{ s: string | null; d: unknown }>(`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = $1`, [id])).rows[0];
   const edit = async (id: string, envelope: Record<string, unknown>) =>
     (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT update_thought($1::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $2::jsonb) AS r`, [id, JSON.stringify(envelope)])).rows[0].r;
-  const twoRowLoops = async () => Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id`)).rows[0].c);
+  const twoRowLoops = async () => Number((await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id AND a.id < b.id`)).rows[0].c);
 
   // The shape: 035 the last definer of upsert_thought, 033 still of
   // update_thought, which this file does not touch.
@@ -3614,7 +3614,9 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   // capture; `existed` in the return.
   assert(/ob1:re-capture-writes-no-provenance/.test(three) && /ob1:capture-takes-fingerprint-lock/.test(three) && /ob1:vector-replaces-chunks/.test(three), "the 3-argument body carries 035's sentinel beside 022's and 033's");
   assert(!/supersession-review/.test(three), "…and takes no supersession lock — hashtext('ob1:supersession-review') is gone from the body");
-  const onConflict = three.slice(three.indexOf("DO UPDATE"), three.indexOf("RETURNING id, supersedes INTO v_id, v_supersedes_now"));
+  const iDo = three.indexOf("DO UPDATE"), iRet = three.indexOf("RETURNING id, supersedes INTO v_id, v_supersedes_now");
+  assert(iDo > 0 && iRet > iDo, `the ON CONFLICT clause and its RETURNING are both in the body, in that order (${iDo}, ${iRet}) — the slice below is bounded by real anchors, not -1 (third review pass)`);
+  const onConflict = three.slice(iDo, iRet);
   assert(onConflict.length > 0 && !/supersedes\s*=/.test(onConflict) && !/derived_from\s*=/.test(onConflict) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three), "…its ON CONFLICT clause sets neither derived_from nor supersedes — 025's add-if-empty is gone");
   assert(/INSERT INTO thoughts \(content, content_fingerprint, metadata, embedding, embedding_model, derived_from, supersedes\)/.test(three) && /v_supersedes::uuid/.test(three) && /validate_derived_from\(p_payload->'derived_from'\)/.test(three), "…while the INSERT still writes both from the envelope, validated");
   assert(!/IF p_embedding IS NOT NULL THEN\s+SELECT embedding_model/.test(three) && /FOR NO KEY UPDATE;\s+v_existed := FOUND;/.test(three) && /'existed', v_existed, 'supersedes', v_supersedes_now\)/.test(three) && /RETURNING id, supersedes INTO v_id, v_supersedes_now/.test(three),
@@ -3706,7 +3708,7 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   const three033 = await srcOf(THREE);
   assert(!/ob1:re-capture-writes-no-provenance/.test(three033) && /supersession-review/.test(three033) && /COALESCE\(thoughts\.supersedes/.test(three033) && /ob1:capture-takes-fingerprint-lock/.test(three033), "033 re-applied over 035 puts the fill and the supersession lock back, the lock sentinel kept");
   const filled = await cap("035 residue: the earlier note", { metadata: {}, supersedes: x.id }, unit(3));
-  assert(filled.existed === undefined && (await prov(r.id)).s === x.id && (await twoRowLoops()) === 2, "…and under it the same re-capture writes the loop and says nothing (no existed)");
+  assert(filled.existed === undefined && (await prov(r.id)).s === x.id && (await twoRowLoops()) === 1, "…and under it the same re-capture writes the loop and says nothing (no existed) — one row from the header's query");
   assert((await edit(r.id, { supersedes: null })).ok === true && (await twoRowLoops()) === 0, "…which the envelope clears (the header's remedy for a loop written before 035)");
   assert(!/add-if-empty/.test(await commentOf(REVIEW)), "(033 re-applied leaves review_supersession_proposal's COMMENT as 035 issued it — only 032's own file puts the aside back, as [33]'s trap did before 035 followed)");
   await restoreShipped("upsert_thought");

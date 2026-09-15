@@ -1029,7 +1029,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   const cap = async (content: string, payload: Record<string, unknown>, axis: number) =>
     (await sql`SELECT upsert_thought(${content}, ${payload}::jsonb, ${vec(axis)}::vector) AS r`)[0].r as R;
   const pointer = async (id: string) => (await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${id}::uuid`)[0].s as string | null;
-  const twoRowLoops = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id`)[0].c);
+  const twoRowLoops = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id AND a.id < b.id`)[0].c);
 
   // A corpus at 033, with the loop 033's header states written the way it
   // could be: R with no pointer, X superseding R, R's text re-captured
@@ -1038,7 +1038,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
   const r = await cap(R_TEXT, { metadata: {} }, 0);
   const x = await cap("upgrade 035: the later note", { metadata: {}, supersedes: r.id }, 1);
   const filled = await cap(R_TEXT, { metadata: {}, supersedes: x.id }, 0);
-  assert(filled.existed === undefined && (await pointer(r.id)) === x.id && (await twoRowLoops()) === 2, "at 033 a re-capture naming supersedes fills R's NULL pointer — R → X → R — and the return has no existed");
+  assert(filled.existed === undefined && (await pointer(r.id)) === x.id && (await twoRowLoops()) === 1, "at 033 a re-capture naming supersedes fills R's NULL pointer — R → X → R, one row from the header's query — and the return has no existed");
   assert(/supersession-review/.test(await bodyOf(THREE)) && /COALESCE\(thoughts\.supersedes/.test(await bodyOf(THREE)) && !/ob1:re-capture-writes-no-provenance/.test(await bodyOf(THREE)), "…the 3-argument body takes the supersession lock, fills, and carries no 035 sentinel");
   const plain = await cap("upgrade 035: a first-hand note", { metadata: {} }, 2);
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_capturer34') THEN CREATE ROLE ob1_upgrade_capturer34 NOLOGIN; END IF; END $r$`);
@@ -1056,7 +1056,7 @@ console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longe
 
   const after = await shape(sql);
   assert(before.columns === after.columns && before.functions === after.functions, "035 adds no column and changes no signature — three upsert_thought overloads as before");
-  assert((await snapshot()) === rows && (await twoRowLoops()) === 2, "no row moved: the loop a re-capture wrote at 033 stays — nothing here is a backfill (the header says how to find and clear one)");
+  assert((await snapshot()) === rows && (await twoRowLoops()) === 1, "no row moved: the loop a re-capture wrote at 033 stays — nothing here is a backfill (the header says how to find and clear one)");
   const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
   assert(Number(auditAfter) === Number(auditBefore), "…and no audit row was written");
   assert((await aclOf(THREE)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the 3-argument form's ACL: PUBLIC still revoked, the role still granted (${acl})`);
