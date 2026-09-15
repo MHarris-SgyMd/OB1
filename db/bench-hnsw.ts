@@ -65,11 +65,15 @@
  *      200,000 at ten million, past the seeded cap — and 5,000 rows is the
  *      walk that the seeded cap covers at ten million (80,000 tuples) but
  *      pgvector's default of 20,000 does not. Their shares shrink with the
- *      table, which is the point: the same filter, a growing brain. (A row
- *      count is a nominal size — membership is a coin per row — so the table
- *      prints the count actually planted, and a tier goes to section D or E
- *      by that count against the threshold, not by its name: the 0.1% tier at
- *      a million rows plants about 1,000 and lands on either side.)
+ *      table, which is the point: the same filter, a growing brain. A fixed
+ *      count is planted only where it is under half the table (5,000 rows at
+ *      the default 10,000 says nothing the 50% tier does not), and where it
+ *      lands on a share tier's exact share the two are one tier under both
+ *      names; the run says which tiers it dropped or merged. (A row count is
+ *      a nominal size — membership is a coin per row — so the table prints
+ *      the count actually planted, and a tier goes to section D or E by that
+ *      count against the threshold, not by its name: the 0.1% tier at a
+ *      million rows plants about 1,000 and lands on either side.)
  *
  *      The thinnest tiers have fewer matching rows than the candidate budget,
  *      so a walk for them cannot stop early and must run until it exhausts the
@@ -177,7 +181,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
 
@@ -199,16 +203,17 @@ const OPTS = { dim: DIM, model: "stub-embed", trgm: false };
 // are now the deployed function's and may differ from the published lines.
 const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
   .split(",")
-  .map((s) => Number(s.trim()))
-  .filter((n) => Number.isFinite(n) && n > 0);
+  .map((s) => Number(s.trim()));
+if (SCALES.some((n) => !Number.isInteger(n) || n <= 0)) {
+  // Validated up front like Q: a fraction would pass every step until the
+  // generator's skip refused it, after the schema had been rebuilt.
+  console.error(`OB1_BENCH_SCALES must be positive integers (got ${JSON.stringify(process.env.OB1_BENCH_SCALES)})`);
+  process.exit(2);
+}
 /** Random queries per selectivity. Validated: a typo here would surface only after the load. */
 const Q = Number(process.env.OB1_BENCH_QUERIES ?? 50);
 if (!Number.isInteger(Q) || Q < 1) {
   console.error(`OB1_BENCH_QUERIES must be a positive integer (got ${JSON.stringify(process.env.OB1_BENCH_QUERIES)})`);
-  process.exit(2);
-}
-if (SCALES.length === 0) {
-  console.error(`OB1_BENCH_SCALES must name at least one positive row count (got ${JSON.stringify(process.env.OB1_BENCH_SCALES)})`);
   process.exit(2);
 }
 /** The before arm (001–013) runs up to this scale; see the header. */
@@ -272,17 +277,26 @@ type Tier = { key: string; share: number; label: string };
  * 50% tier does not, and a share tier planting less than one row is dropped —
  * `none` stays, since matching nothing is its job.
  */
-function tiersAt(n: number): Tier[] {
+function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
   const out: Tier[] = [];
+  const notes: string[] = [];
   // Membership is one draw against the share, so two tiers with the same
   // share are the same rows under two names (5,000 rows at five million is
-  // the 0.1% tier); the first spelling in TIERS keeps the name.
+  // the 0.1% tier, 2,000 at 20,000 the 10% one); they are one tier, labelled
+  // with both names, so nothing is measured twice and nothing vanishes.
   const push = (t: Tier) => {
-    if (!out.some((o) => o.share === t.share)) out.push(t);
+    const twin = out.find((o) => o.share === t.share);
+    if (twin) {
+      twin.label = `${twin.label} (also the ${t.label} tier)`;
+      notes.push(`${t.label} is the ${twin.label.split(" (")[0]} tier at this scale`);
+    } else out.push(t);
   };
   for (const t of TIERS) {
     if ("rows" in t) {
-      if (t.rows >= n / 2) continue;
+      if (t.rows >= n / 2) {
+        notes.push(`${t.rows.toLocaleString()} rows is at least half the table; not planted`);
+        continue;
+      }
       push({ key: t.key, share: t.rows / n, label: `${t.rows.toLocaleString()} rows` });
     } else if (t.share === 0) {
       push({ key: t.key, share: 0, label: "nothing" });
@@ -290,7 +304,7 @@ function tiersAt(n: number): Tier[] {
       push({ key: t.key, share: t.share, label: `${t.share * 100}%` });
     }
   }
-  return out.sort((a, b) => b.share - a.share);
+  return { tiers: out.sort((a, b) => b.share - a.share), notes };
 }
 
 // ── Deterministic data ──────────────────────────────────────────────────────
@@ -679,26 +693,6 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
   return out as Plans;
 }
 
-/**
- * The exact branch's statement with its threshold floor lifted, so a filter
- * the function routes to the walk can be answered the way the exact branch
- * would answer it if the threshold were raised to cover it. The extracted
- * text carries the DECLARE expression inline wherever the branch read
- * `v_exact` — `GREATEST((...) * 4, 1000)`, nested through v_base and v_count,
- * once per spliced routing subquery — and the floor is the one place the
- * literal 1000 occurs. The rewrite insists that every `1000` in the text is
- * that floor, so a redefinition that moves or reuses the literal fails here
- * rather than measuring something else.
- */
-async function exactBodyWithFloor(sql: SQL, floor: number): Promise<string> {
-  const body = await extractBody(sql, "exact", DIM);
-  const marker = "* 4, 1000)";
-  const asFloor = body.split(marker).length - 1;
-  const anywhere = (body.match(/\b1000\b/g) ?? []).length;
-  if (asFloor === 0 || asFloor !== anywhere) throw new Error(`expected the exact branch's threshold floor (${marker}) to be the only 1000 in its text; found it ${asFloor} time(s) among ${anywhere}`);
-  return body.split(marker).join(`* 4, ${floor})`);
-}
-
 // ── Run ─────────────────────────────────────────────────────────────────────
 
 let sql = new SQL({ url: URL_, max: 1 });
@@ -749,9 +743,13 @@ const bounds: BoundsRow[] = [];
   }
 }
 
-/** 014's GREATEST(v_fetch * 4, 1000) at K: the most matching thoughts the exact branch takes. */
-const V_EXACT = Math.max(Math.max(K * 4, 20) * 4, 1000);
-const V_FETCH = Math.max(K * 4, 20);
+/**
+ * The deployed function's v_fetch and v_exact at K — read from its own
+ * DECLARE block and evaluated by the server once the after arm is in place
+ * (test-support's routingAt), so the tiers are routed by the threshold the
+ * function actually has, not by a copy of 014's arithmetic.
+ */
+let routing = { vFetch: NaN, vExact: NaN };
 /** pgvector's own defaults for the two bounds 014 seeds. */
 const PGVECTOR_DEFAULTS: Record<string, string> = { "hnsw.max_scan_tuples": "20000", "hnsw.scan_mem_multiplier": "1" };
 /** The raised `hnsw.ef_search` for the recall controls in sections A and E; pgvector's default is 40, the function leaves it alone. */
@@ -762,9 +760,11 @@ const EF_SEARCH_RAISED = 400;
  * actually walks at scale have the exact branch measured beside them — the
  * first draft stopped at 50,000 and left the 1% tier at ten million as a
  * dash, which is where the "exact would be faster" claim most needs a number
- * (review pass). Scoring the 50% tier row by row is still not a candidate.
+ * (review pass). With headroom over the nominal 100,000: the planted count
+ * is binomial about it, and a ceiling AT the mean would print the dash on
+ * half of all seeds. Scoring the 50% tier row by row is still not a candidate.
  */
-const EXACT_CEILING = 100_000;
+const EXACT_CEILING = 110_000;
 
 let banner = false;
 for (const n of SCALES) {
@@ -781,7 +781,8 @@ for (const n of SCALES) {
     console.log(`  ${DIM}-dimensional random unit vectors, ${Q} random queries per filter, K=${K}`);
     banner = true;
   }
-  const tiers = tiersAt(n);
+  const { tiers, notes } = tiersAt(n);
+  for (const note of notes) console.log(`  (${note})`);
   const queries = queriesFor(n);
   process.stdout.write("  inserting         ");
   const { stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries);
@@ -825,13 +826,8 @@ for (const n of SCALES) {
         throw new Error(`session did not pick up the database-level bounds (in force ${JSON.stringify(inForce)}; database has ${JSON.stringify(cfg)})`);
       }
       console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
-      // The threshold this bench routes tiers by is the deployed one, or the
-      // sections are mislabelled: a redefinition that raises the floor
-      // (SMD-1464) must move V_EXACT with it.
-      const [{ prosrc }] = await sql.unsafe(`SELECT prosrc FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(sql)]);
-      if (!/v_exact\s+int\s+:=\s*GREATEST\(v_base \* 4, 1000\);/.test(prosrc) || !/v_base\s+int\s+:=\s*GREATEST\(v_count \* 4, 20\);/.test(prosrc)) {
-        throw new Error(`the deployed match_thoughts no longer sizes its exact threshold as GREATEST(v_base * 4, 1000) from GREATEST(v_count * 4, 20); V_EXACT (${V_EXACT}) and V_FETCH (${V_FETCH}) must follow it`);
-      }
+      routing = await routingAt(sql, K);
+      console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
     const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get("")!);
@@ -854,14 +850,14 @@ for (const n of SCALES) {
     // for `@>` has the least to go on (SMD-1018's second note), and the empty
     // one, the shape one integration sends every call.
     const withRows = withCounts.filter((t) => t.matches > 0).sort((a, b) => a.matches - b.matches);
-    const walkTier = withRows.find((t) => t.matches > V_EXACT);
-    const exactTier = [...withRows].reverse().find((t) => t.matches <= V_EXACT);
+    const walkTier = withRows.find((t) => t.matches > routing.vExact);
+    const exactTier = [...withRows].reverse().find((t) => t.matches <= routing.vExact);
     const broadest = withRows[withRows.length - 1];
     const thinnest = withRows[0];
     const plan: Result["plan"] = arm === "after (014 on)" ? {} : undefined;
     if (plan) {
       if (walkTier) plan.walk = { branch: "walk", tier: walkTier.label, matches: walkTier.matches, ...(await plans(sql, queries[0], tierFilter(walkTier.key), "walk")) };
-      else console.log(`\n  (no tier above the exact threshold of ${V_EXACT} rows at this scale; the walk branch is not explained)`);
+      else console.log(`\n  (no tier above the exact threshold of ${routing.vExact} rows at this scale; the walk branch is not explained)`);
       if (walkTier && broadest && broadest !== walkTier) plan.walkBroad = { branch: "walk", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "walk")) };
       if (exactTier) plan.exact = { branch: "exact", tier: exactTier.label, matches: exactTier.matches, ...(await plans(sql, queries[0], tierFilter(exactTier.key), "exact")) };
       if (broadest) plan.routeBroad = { branch: "route", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "route")) };
@@ -878,11 +874,15 @@ for (const n of SCALES) {
   // database-level settings the function does not override, so a session SET
   // is exactly how an operator's tuning reaches it; RESET restores the
   // connect-time value, which is the database-level seed. The exact branch's
-  // statement is extracted with its floor lifted just past the tier, for
-  // tiers up to a bound where an exact answer is still conceivable — scoring
-  // the 50% tier row by row is not a candidate for anything.
+  // statement is extracted with `v_exact` overridden to just past the tier,
+  // for tiers up to a bound where an exact answer is still conceivable —
+  // scoring the 50% tier row by row is not a candidate for anything — and
+  // PREPAREd under a forced custom plan: the function's medians above are
+  // custom plans' (plpgsql's first five and, in every session here, the rest),
+  // and a comparison against them must not drift onto the generic plan and
+  // its JIT after the fifth EXECUTE (review pass).
   process.stdout.write("  bounds, via fn    ");
-  const walkTiers = withCounts.filter((t) => t.matches > V_EXACT).sort((a, b) => a.matches - b.matches);
+  const walkTiers = withCounts.filter((t) => t.matches > routing.vExact).sort((a, b) => a.matches - b.matches);
   for (const t of walkTiers) {
     const seeded = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
     for (const [name, value] of Object.entries(PGVECTOR_DEFAULTS)) await sql.unsafe(`SET ${name} = ${value}`);
@@ -893,15 +893,17 @@ for (const n of SCALES) {
     await sql.unsafe(`RESET hnsw.ef_search`);
     let exact: FilteredResult | undefined;
     if (t.matches <= EXACT_CEILING) {
-      const body = await exactBodyWithFloor(sql, t.matches + 1);
+      const body = await extractBody(sql, "exact", DIM, { overrides: { v_exact: String(t.matches + 1) } });
       const applied = await applyFunctionSettings(sql, { scope: "session" });
+      await sql.unsafe(`SET plan_cache_mode = force_custom_plan`);
       await sql.unsafe(`PREPARE bench_exact(vector(${DIM}), float, int, jsonb, float, float) AS ${body}`);
       const viaExact = (q: number[], filter: string) => `EXECUTE bench_exact('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
       exact = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaExact);
       await sql.unsafe(`DEALLOCATE bench_exact`);
+      await sql.unsafe(`RESET plan_cache_mode`);
       for (const name of applied) await sql.unsafe(`RESET ${name}`);
     }
-    bounds.push({ scale: n, label: t.label, matches: t.matches, tuples: Math.round((V_FETCH * n) / t.matches), seeded, defaults, raised, exact });
+    bounds.push({ scale: n, label: t.label, matches: t.matches, tuples: Math.round((routing.vFetch * n) / t.matches), seeded, defaults, raised, exact });
     process.stdout.write(".");
   }
   console.log(" done");
@@ -912,7 +914,9 @@ for (const n of SCALES) {
   // statement — extracted from the catalog as section C does — under the
   // function's scan mode and a forced generic plan (the filter a parameter, so
   // the chunk side, whose filter lives on the parent row, walks its HNSW index
-  // and looks each candidate's parent up), on the thin and empty filters. It
+  // and looks each candidate's parent up), on every tier under the threshold
+  // — the same count gate section E uses from the other side — and the empty
+  // one. It
   // shows what the seeded bounds do when the walk IS reached with next to
   // nothing to find: the cost of a walk that cannot stop early. It runs last
   // for its scale — the next scale resets the schema — so nothing needs
@@ -926,7 +930,7 @@ for (const n of SCALES) {
   await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
   await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb, float, float) AS ${walkBody}`);
   const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
-  const thin = withCounts.filter((t) => t.matches <= V_EXACT && t.share <= 0.001);
+  const thin = withCounts.filter((t) => t.matches <= routing.vExact);
   for (const t of thin) {
     const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);
     walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
@@ -1001,7 +1005,7 @@ if (PRINT_PLANS) {
 }
 
 console.log("\n### D. The walk branch, forced onto thin and empty filters (generic plan)\n");
-console.log("The function answers these exactly and never walks for them; this runs the walk's own statement on them to show what the two scan bounds do when the walk is reached with next to nothing to find.\n");
+console.log("Every tier under the exact threshold, and the empty filter. The function answers these exactly and never walks for them; this runs the walk's own statement on them to show what the two scan bounds do when the walk is reached with next to nothing to find.\n");
 console.log("| rows | filter matches | matching rows | returned | in exact top-10 | exact has | median ms |");
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 for (const g of walk) {
@@ -1011,7 +1015,7 @@ for (const g of walk) {
 }
 
 console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => b.replace("hnsw.", "")).join(" / ")} as in force), under pgvector's defaults (${Object.values(PGVECTOR_DEFAULTS).join(" / ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
-console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${V_FETCH} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of 100,000 and pgvector's 20,000. The exact column is measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
+console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of 100,000 and pgvector's 20,000. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
 console.log(`| rows | filter matches | matching rows | walk visits | seeded: returned | in exact top-10 | median ms | defaults: returned | in exact top-10 | median ms | ef_search ${EF_SEARCH_RAISED}: returned | in exact top-10 | median ms | exact branch: returned | in exact top-10 | median ms |`);
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 const cell = (r: FilteredResult) => `${r.returned.toFixed(1)} | ${r.overlap.toFixed(1)} | ${r.ms.toFixed(2)}`;

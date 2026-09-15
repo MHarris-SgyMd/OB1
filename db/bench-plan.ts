@@ -13,6 +13,15 @@
  * the filtered branches, and at 64 dimensions; this explains the unfiltered
  * one at the shipped width, where the answer turns out to be different.
  *
+ * One note on the filtered `exact` rows: since SMD-1018 the shared rewrite
+ * (test-support's extractBody) splices the routing collection into the exact
+ * branch as ONE materialized CTE, where it had spliced a scalar subquery per
+ * `v_ids` reference — two InitPlans, two GIN collections per call. The exact
+ * rows this bench prints therefore read one collection fewer than the lines
+ * 019's header publishes ("5.4–6.5 ms for 936 matching rows at 100,000"),
+ * and the difference is the harness's, not the function's: the function
+ * always ran the collection once.
+ *
  * ── What is measured ─────────────────────────────────────────────────────────
  *
  * Per scale, the unfiltered branch's own statement — read from the catalog and
@@ -60,7 +69,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, loadChunkRows, matchThoughtsOid, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { EMBEDDING_DIM } from "./config.mjs";
 
@@ -265,7 +274,9 @@ for (const n of SCALES) {
   // itself would route on, so a scale where 1% is 1,100 rows does not explain
   // a branch the function never takes for that filter (second review pass).
   // Under 014's settings now, under 019's after it is applied.
-  const V_EXACT = 1000; // 014's GREATEST(v_fetch * 4, 1000) at the default count
+  // The deployed function's own threshold at the default count, evaluated by
+  // the server (test-support's routingAt), not a copy of 014's arithmetic.
+  const { vExact: V_EXACT } = await routingAt(sql, 10);
   const [{ m50, m1 }] = await sql.unsafe(`SELECT count(*) FILTER (WHERE metadata @> '{"tiers": ["t50"]}')::int AS m50, count(*) FILTER (WHERE metadata @> '{"tiers": ["t1"]}')::int AS m1 FROM thoughts`);
   const filteredCases: { branch: Branch; filter: string; matches: number }[] = [
     { branch: "route", filter: '{"tiers": ["t50"]}', matches: Number(m50) },

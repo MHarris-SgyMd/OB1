@@ -52,20 +52,21 @@ trap cleanup EXIT INT TERM
 
 # /dev/shm: both runtimes give a container 64 MB, and Postgres puts its dynamic
 # shared memory there — a parallel HNSW build keeps the whole graph in it, sized
-# by maintenance_work_mem, so `bench-hnsw.ts` at a million rows and up fails
-# with "could not resize shared memory segment ... No space left on device"
-# under the default (SMD-1018). The tests and the small benches never need it;
-# a large bench sets OB1_PG_SHM_SIZE (e.g. 12g) at least as large as the
-# maintenance_work_mem it builds with.
-SHM_ARGS=()
-if [ -n "${OB1_PG_SHM_SIZE:-}" ]; then SHM_ARGS=(--shm-size "$OB1_PG_SHM_SIZE"); fi
+# by maintenance_work_mem, so a build under more than 64 MB fails with "could
+# not resize shared memory segment ... No space left on device". bench-hnsw.ts
+# builds under 256 MB at its default scales and under gigabytes at a million
+# rows and up (SMD-1018). The size is a tmpfs cap, backed only as it is used,
+# so 1 GB by default costs nothing the tests notice; a large bench sets
+# OB1_PG_SHM_SIZE at least as large as the maintenance_work_mem it builds with
+# (the README's commands say how much).
+SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 
-echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME"))${OB1_PG_SHM_SIZE:+, /dev/shm $OB1_PG_SHM_SIZE}"
+echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE"
 "$RUNTIME" run -d --name "$NAME" \
   -e POSTGRES_PASSWORD="$PASSWORD" \
   -e POSTGRES_DB="$DB" \
   -p "$PORT:5432" \
-  ${SHM_ARGS[@]+"${SHM_ARGS[@]}"} \
+  --shm-size "$SHM_SIZE" \
   "$IMAGE" >/dev/null
 
 echo -n "▸ waiting for readiness "

@@ -1713,8 +1713,9 @@ scale a real brain's recall turns, the knob is a session or database setting
 away and costs what the last column says.
 
 *Filtered, through the function.* Ten asked, 50 queries, the tiers above
-plus three fixed at 900, 2,000 and 5,000 matching rows whatever the scale, so
-the same filter can be followed as the table grows. The `matches` column is
+plus three fixed at 900, 2,000 and 5,000 matching rows wherever that is under
+half the table (so not 5,000 at 10,000 rows), so the same filter can be
+followed as the table grows. The `matches` column is
 what was actually planted (a row count is a coin per row). At a million rows,
 with the plan the function got this pass, and in brackets what the same tier
 did in the two passes where the planner walked HNSW for it:
@@ -1792,14 +1793,19 @@ Read across a row and four things fall out.
   only place the seeded bounds do anything.
 - **The seeded bounds matter on that HNSW side, and nowhere else.** In the
   passes that walked, the same tiers lost three to four points of recall
-  under pgvector's defaults (8.8 → 4.9, 9.2 → 5.5, and 6.0 → 2.7 at ten million) and
-  kept them under the seed — the memory bound, not the tuple cap, since the
-  formula's 4,000–8,000 tuples are well under the default cap of 20,000:
-  `work_mem × 1` is 4 MB, the iterative scan's visited set is the graph nodes
-  it touched rather than the tuples it emitted, and on random vectors it
-  touches many more than it emits. The header's "pgvector's default covers
-  500,000 rows at the default count" is therefore wrong in the direction that
-  matters, and the seed of 8× covers the case. Everywhere else nothing binds:
+  under pgvector's defaults (8.8 → 4.9, 9.2 → 5.5, and 6.0 → 2.7 at ten
+  million) and kept them under the seed. Which of the two bounds bit is
+  inferred, not measured: section E moves both together (`20000 / 1` against
+  `100000 / 8`), and the formula that says 4,000–8,000 tuples sit well under
+  the default cap of 20,000 is the formula this section retires — pgvector
+  counts every tuple the scan emits, filter-rejected ones included, so the
+  cap may be what bit. The second review pass of 014 measured the memory
+  bound binding first at 100,000 rows (`work_mem × 1` is 4 MB; the visited
+  set is graph nodes, not emitted tuples), which is the reading here too, and
+  two arms that move one bound each (SMD-1464) would settle it. Either way
+  the header's "pgvector's default covers 500,000 rows at the default count"
+  is wrong in the direction that matters, and the seed covers the case.
+  Everywhere else nothing binds:
   every thinner tier is served by GIN whatever the bounds say, and the broad
   tiers (10%, 50%) need a few hundred tuples and are bound by nothing but
   `ef_search`. **Neither seed should scale with the table**; what they buy is
@@ -1860,7 +1866,15 @@ million, and every call then compiles its expressions, the way 017 found
 `search_thoughts_hybrid` doing (15 ms where its arms cost 1.3). The second
 pass of this bench could only infer that, because its EXPLAIN ran with
 `COSTS OFF`, which also suppresses the JIT summary; the explainers now print
-costs and section C carries the `jit = off` arm. Every session of this bench stayed on custom plans throughout
+costs and section C carries the `jit = off` arm. One more thing the harness
+change moved: the shared rewrite now splices the routing collection into the
+exact branch as one materialized CTE where it had spliced a scalar subquery
+per `v_ids` reference — two GIN collections per call where the function runs
+one — so `bench-plan.ts`'s filtered `exact` rows and section C's exact rows
+read one collection fewer than 019's header publishes for the same tier
+("5.4–6.5 ms for 936 matching rows at 100,000"); the function did not change,
+the harness did, and 019 is checksummed, so the note lives here and in
+bench-plan's header. Every session of this bench stayed on custom plans throughout
 — the medians above are the custom plans' — but the choice is the planner's
 estimate against its own average, made per session after five calls, and a
 session that lands on the generic plan pays these numbers on every filtered

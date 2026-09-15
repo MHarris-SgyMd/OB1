@@ -850,7 +850,8 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 
 # At scale (SMD-1018): one scale per container, and give the container the
 # shared memory the parallel HNSW build keeps its graph in — at least the
-# maintenance_work_mem the bench builds with (1 KB a row by default).
+# maintenance_work_mem the bench builds with (1 KB a row by default; the
+# script's default /dev/shm of 1 GB covers the two published scales).
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 ```
@@ -866,7 +867,9 @@ point. The three fixed-count tiers exist for the scale question: 900 rows is
 the exact branch at its widest whatever the table holds, 2,000 rows is the walk
 with the most tuples to pass (`v_fetch × N / matches` — 200,000 at ten million
 rows, past the seeded cap), and 5,000 rows is the walk the seeded cap covers at
-ten million rows but pgvector's default does not. Section L reports the load:
+ten million rows but pgvector's default does not; a fixed count is planted only
+where it is under half the table, and the run says which it dropped or merged
+with a share tier. Section L reports the load:
 insert rate, HNSW build time under the `maintenance_work_mem` used, and table
 and index sizes. Section A also times asking for the function's ceiling (500
 rows). Section C reads the live function body from the catalog, extracts each
