@@ -23,7 +23,7 @@ import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
 const { assert, report } = createAssert();
@@ -69,8 +69,8 @@ const shown = (x: { code: number; out: string }) => `(exit ${x.code})${x.code ==
  */
 function evidenceFixture(sql: SQL) {
   const vec = `[${[1, ...new Array(OPTS.dim - 1).fill(0)].join(",")}]`;
-  const KEY = `reembed:${OPTS.model}@${OPTS.dim}`;
-  const EARLIER = `reembed:earlier-model@${OPTS.dim}`;
+  const KEY = reembedKey(OPTS.model, OPTS.dim);
+  const EARLIER = reembedKey("earlier-model", OPTS.dim);
   const plant = async (content: string) =>
     (await sql`INSERT INTO thoughts (content, metadata, embedding, updated_at) VALUES (${content}, '{}'::jsonb, ${vec}::vector, now() - interval '2 hours') RETURNING id`)[0].id as string;
   const enqueue = (key: string, ids: string[]) => sql.unsafe(`SELECT enqueue_thoughts('${key}', ARRAY[${ids.map((i) => `'${i}'`).join(",")}]::uuid[])`);
@@ -459,13 +459,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   const { vec, KEY, plant, enqueue, accept, labels, corpus } = evidenceFixture(sql);
   const { vouched, accepted, earlierThenAccepted } = await corpus();
   const noEvidence = await plant("nothing ever re-embedded this");
-  const [absent] = await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`;
-  assert(absent.c === 0, "the schema stands at 020 — no embedding_model column — whatever the ledger says");
+  const column = async () => Number((await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`)[0].c);
+  assert((await column()) === 0, "the schema stands at 020 — no embedding_model column — whatever the ledger says");
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
   const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: statusEnv, cwd: HERE });
-  const column = async () => Number((await sql`SELECT count(*)::int AS c FROM information_schema.columns WHERE table_name = 'thoughts' AND column_name = 'embedding_model'`)[0].c);
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&

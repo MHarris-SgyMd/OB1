@@ -465,8 +465,7 @@ function searchPathEntries(path: string): string[] {
  * accepted rows (ACCEPTED_CLAIM_SQL, the predicate 030's evidence rows carry)
  * — a view, not a copy: one catalog row, no rows materialised, and the block
  * reads the claim rows as they stand when it runs, through the filter, so no
- * window opens between a copy and the block (the seventh review pass measured
- * the copy at ~15 MB per 200k rows and found the window). An unqualified name
+ * window opens between a copy and the block. An unqualified name
  * resolves in pg_temp before any schema on the search_path, and 021's block is
  * a DO block, resolved when it runs — so it reads the view, and labels from
  * the latest row that is NOT an acceptance, or not at all: 030's rule, by
@@ -503,17 +502,12 @@ function searchPathEntries(path: string): string[] {
  * thoughts touched, read from the transaction's own statistics
  * (pg_stat_xact_user_tables, before and after; "not counted" where
  * track_counts is off), so nothing here reads thoughts and no lock is taken on
- * it before the file's own (the sixth review pass found a count(*) taking
- * ACCESS SHARE ahead of the ALTER's ACCESS EXCLUSIVE, the upgrade the first pass
- * had removed) — since the label is not an edit and nothing else records the
- * write. Returns the line to print beside the file, null for any other file.
- * Four review passes bracketed 021's OUTPUT instead — a snapshot of the
- * unlabelled ids, a set-back under a held trigger, 030's rule run after — and
- * each pass found a seam in the bracket; the fifth proposed the shadow and
- * verified it against 021's block. This replaced, in turn, a gate that refused
- * the run on the rows 021 would label and 030 would leave, and printed a way
- * back that spent the acceptance (SMD-1193) — 030's header, hashed, still
- * describes the gate.
+ * it before the file's own — since the label is not an edit and nothing else
+ * records the write. Returns the line to print beside the file, null for any
+ * other file. What this replaced — a gate that refused the run on the rows 021
+ * would label and 030 would leave (SMD-1193), then four shapes of a bracket
+ * around 021's output — and why, is FORK.md changes 56 and 60; 030's header,
+ * hashed, still describes the gate.
  */
 async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   if (m.name !== FILE_021) {

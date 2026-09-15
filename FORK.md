@@ -6910,8 +6910,14 @@ file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
 over a later schema (a ledger hole) still puts 021's `upsert_thought` body over
 022's and 025's — preflight's `atomic capture` names that state and
-`--reapply`, and [7] now shows the re-run restoring it. The `startsWith("021_")`
-literal change 56 left is now spelled twice.
+`--reapply`, and [7] now shows the re-run restoring it (SMD-1434 holds the
+plain run's judgement of a ledger hole).
+
+**Boyscout.** What the passes cut for space, in the files this change touched,
+no behaviour changed: `applyShadowed`'s docblock states the mechanism and
+points here for the passes, rather than carrying three of them; the fixture
+spells the claim keys with `reembedKey()`, the function that owns the shape;
+[7]'s column probe is `column()`, defined once before its first use.
 
 Verified: `test-upgrade` [7] plants the suffixed-key acceptance and the own-key
 acceptance over a thought written since its enqueue *before* the re-run, and
