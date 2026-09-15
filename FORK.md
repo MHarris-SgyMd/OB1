@@ -6591,7 +6591,7 @@ bun run test:sql && bun run test:e2e            # needs podman or docker
 bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker
-cd .. && bun scripts/check-fork-consistency.mjs   # CI runs it under node; bun runs it too
+cd .. && bun scripts/check-fork-consistency.mjs   # CI runs it under bun too (change 58); node runs it as well
 
 git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
   -m "Upstream main @ $(git rev-parse upstream/main)"

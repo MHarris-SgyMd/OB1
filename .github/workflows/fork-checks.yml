@@ -61,15 +61,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: "22"
+          bun-version: "1.4.0"
 
       # Applies the upstream gate's rules to the WHOLE repo, not just the
       # directories a PR happens to touch. The upstream gate only validates
-      # changed dirs, so pre-existing violations never surface there.
+      # changed dirs, so pre-existing violations never surface there. Under
+      # bun, the runtime every other job and every developer here uses (node
+      # is not installed on the maintainer's machine, so a node-only run was
+      # the one step nobody could reproduce locally); the script is plain ESM
+      # and runs under either.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards and core-function redefinitions
-        run: node scripts/check-fork-consistency.mjs
+        run: bun scripts/check-fork-consistency.mjs
 
   deno-check:
     name: Edge Function typecheck

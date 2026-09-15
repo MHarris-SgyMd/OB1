@@ -27,7 +27,7 @@
  *      read from db/migrations/, with counted per-(file, function) exceptions
  *      for the files that create a brain rather than add to one
  *
- * Run: node scripts/check-fork-consistency.mjs
+ * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
  */
 
