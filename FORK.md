@@ -6201,18 +6201,18 @@ labelled are what 021 wrote, and they are set aside — back to NULL, the
 `updated_at` trigger held as 021 holds it — for **030's own substituted text**
 to decide: its second statement labels them again by its rule, the latest row
 that is not an acceptance, or leaves them unknown. One spelling of the rule,
-030's, and the migrator adds none. Where the run reaches 030 — pending, or the
-re-run — 030 decides them at its own place, and the helper, called for 030,
-reads the delta from the temp table it finds waiting (a session table: on a
-plain run 021 and 030 are separate transactions on the one connection, and a
-run that dies between them leaves the labels unknown, the safe state). Where
-the ledger records 030 and the run would skip it — a hole at 021 alone — 030's
-text runs inside 021's transaction, every label from before 021 noted first
-since 030's first statement re-decides those too, and both deltas are
-reported. The snapshot can neither predate nor outlive what it brackets, and
-the correction is the migrator's, not 030's. The run says how many thoughts
-021 labelled, how many 030's rule decided otherwise, and lists every such row
-with both labels — nothing else records them.
+030's, and the migrator adds none. On a plain run 030's text runs inside 021's
+transaction, so no label 021 wrote commits unknown across 022–029 (where 030
+is pending it runs again at its own place, idempotent, once in a brain's life;
+where the ledger records it, this is the only time), and the labels from
+before 021 that its first statement could re-decide — labelled, with an
+acceptance under the model's own key — are noted first and reported apart. On
+the re-run, one transaction, the labels wait for 030's own place, and the
+helper, called for 030, reads the delta from the temp table it finds. The
+snapshot can neither predate nor outlive what it brackets, and the correction
+is the migrator's, not 030's. The run says how many thoughts 021 labelled, how
+many 030's rule decided otherwise, and lists every such row with both labels —
+nothing else records them.
 
 **What went.** The hazards query, both arms of the way back, the `has_edit`
 and signature probe, the claim-table probe, the "030 recorded" branch, the
@@ -6317,6 +6317,32 @@ the run lists the rows while the code listed fifty — every row now. Change
 57's file list named `test-schema.ts` (untouched after the second pass) and
 missed `config.d.mts`.
 
+**Review, fourth pass (high), at the user's call, triaged.** The third pass's
+inline note of the labels from before 021 named the column in a `WHERE false`
+query — resolved when the statement is parsed, so every plain run of a
+`--baseline`'d brain with a hole at 021 and no column yet failed at 021; a
+`NULL::text` there, and [9] runs that brain. The third pass's handoff — 021's
+labels set aside for 030's own place — left every label 021 wrote, the right
+ones too, committed NULL across 022–029's separate transactions on a plain
+upgrade, where a worker's pool reads NULL as work; a plain run now decides
+them inside 021's transaction (030's text runs again at its own place if
+pending, idempotent, once in a brain's life), and only the re-run, one
+transaction, defers — which also closes the report a dying run lost with its
+session table and the count a live server could skew between the two
+transactions. The bracket's judgements exited before the re-run's were
+collected, against the "every refusal, one dry run" contract: one list, one
+tail. The plain run took locks 021 alone never did — the claim table's against
+writers, the other way round from a worker's enqueue — with no note to stop
+the workers (the banner is the re-run's) and a deadlock line naming a re-embed
+start that cannot run on a pre-021 schema: the plain run says so before it
+applies 021, the banner and README name the lock, the lock messages name the
+claim table, the deadlock line names an enqueue. The load-time check was
+one-directional (a renamed 021 ran bare): both files or neither. The pre-021
+label note copied every labelled thought; bounded to those with an own-key
+acceptance, the only rows 030's first statement can change. [9] is new: the
+plain run with the column absent, then with both files pending — the ordinary
+upgrade path, which no test had run through the bracket.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6341,11 +6367,16 @@ runs (dry run too), that the plain run then applies 021 bracketed — exit 0,
 four changed, a paste's mislabel from before 021 taken back by 030's first
 statement and reported apart, every other label as the re-run left it, 021
 recorded, the trigger enabled — and that a second `--reapply` over the same
-corpus sets five aside and 030 changes five, every label as before. The hazard
-refusals went with the gate; the rest of [7] and all of [8] are unchanged. Not
-exercised: the TEMP refusal (a superuser holds the privilege whatever is
-revoked), the loader's duplicate-number refusal, the 40P01 line.
-`test-upgrade` 116/116,
+corpus sets five aside and 030 changes five, every label as before. [9] builds
+a brain through 020 with [7]'s three thoughts, baselines it, opens a hole at
+021 and asserts the plain run applies 021 bracketed with the column absent —
+three labelled, two decided otherwise, nothing from before 021 to report —
+then opens holes at 021 and 030 both and asserts the ordinary upgrade decides
+021's labels inside 021's transaction, applies 030 at its place with nothing
+to report there, and leaves 030's rule's labels. The hazard refusals went
+with the gate; the rest of [7] and all of [8] are unchanged. Not exercised:
+the TEMP refusal (a superuser holds the privilege whatever is revoked), the
+loader's duplicate-number refusal, the 40P01 line. `test-upgrade` 123/123,
 `test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
 clean, fork checker PASS. Upstream status: **not applicable** — the
 migrator and `reembed.ts` are the fork's (changes 11 and 29).

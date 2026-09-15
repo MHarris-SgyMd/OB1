@@ -123,12 +123,15 @@ does not yet exist) in a temp table on its connection, runs the file, and sets
 aside the labels it wrote — back to unknown, the `updated_at` trigger held as
 021 holds it — for **030's own text** to decide: the latest row that is not an
 acceptance, when nothing has written the thought since it finished, else
-unknown. One spelling of the rule, 030's. Where this run reaches 030 — pending,
-or the re-run — 030 decides them at its own place, and the report is printed
-beside 030's line; where the ledger records 030 and the run would skip it (a
-hole at 021 alone), 030's text runs inside 021's transaction, and every label
-from before 021 is noted first, since 030's first statement re-decides those
-too. Where no such claim row exists, or 021 wrote nothing, the file runs bare.
+unknown. One spelling of the rule, 030's. On a plain run 030's text runs inside
+021's transaction, so no label 021 wrote commits unknown across the files
+between (where 030 is pending it runs again at its own place, idempotent; where
+the ledger records it, this is the only time), and the labels from before 021
+that its first statement could re-decide — labelled, with an acceptance under
+the model's own key — are noted first and reported apart. On the re-run, one
+transaction, the labels wait for 030's own place and the report is printed
+beside 030's line. Where no such claim row exists, or 021 wrote nothing, the
+file runs bare.
 A label from a plain latest row is written again unchanged; a label from an
 acceptance goes to the earlier pass that did write the vector, or to unknown;
 the acceptance stands, spent by nobody, and no claim row is touched. The run
@@ -139,7 +142,11 @@ will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
 otherwise; 023's call needs one too), and on a plain run 030 is as it was
 applied — its current text would run inside the bracket before the loop
 reached 030's own drift check. A set carrying 021 without 030 is refused at
-load, and two files sharing a number are refused at load.
+load, and two files sharing a number are refused at load. Every refusal is
+collected and reported together, the re-run's included. A plain run applying
+021 says so first, and says to stop the server and the workers: the bracket
+locks the claim table against writers, which 021 alone never did, and a
+worker's enqueue takes the two tables the other way round.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
@@ -151,7 +158,8 @@ SQL and brackets nothing.
 transaction the migrator opens — the re-run's, and each file's on a plain run —
 sets the same 10 s lock timeout, so a held lock fails the run rather than
 freezing it and every reader behind it. 001 and 003
-take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
+take ACCESS EXCLUSIVE locks on `thoughts`; 021's bracket locks the claim table
+against writers; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing
 when no row is waiting); 025 re-validates its constraints over the table. 021's
