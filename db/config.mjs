@@ -1003,25 +1003,34 @@ export const REAPPLY_COMMAND = "cd db && bun migrate.ts --url … --reapply";
  * thoughts fails the run rather than freezing it and every reader behind 001's
  * ACCESS EXCLUSIVE. A session setting overrides a role's or provider's default
  * for the migrator alone; 023's call sets its own, locally, for its
- * transaction. db/README.md spells the number in prose.
+ * transaction. db/README.md spells the number in prose. Ten, and only ten:
+ * 023's hashed body sets 10 s with set_config(…, true) — transaction-local,
+ * and under --reapply the transaction is the whole run — so from 023 on the
+ * bound is 023's whatever this says; another value here would be false for
+ * the re-run's tail.
  */
 export const LOCK_TIMEOUT_S = 10;
 
 /**
- * Two migration files sharing a number — the first such pair in a sorted
- * listing, or null. The number is a file's identity and its order, and two
- * branches each adding "the next number" is how two files come to share one
- * (the fork has renumbered twice; SMD-1421). One rule, read by migrate.ts at
- * load — every operator's run and every compose start — and by
+ * What is wrong with a listing of migration files, or null: a .sql not named
+ * NNN_name.sql (the number is a file's identity and its order — `021.sql` or
+ * `021-fix.sql` would sort before `021_…` and run at its number), or two files
+ * sharing a number (two branches each adding "the next number" is how it
+ * happens; the fork has renumbered twice; SMD-1421). One rule, read by
+ * migrate.ts at load — every operator's run and every compose start — and by
  * scripts/check-fork-consistency.mjs on every push, where the collision is
- * made. Files not of the form NNN_*.sql are not judged.
+ * made. Only .sql files are judged.
  * @param {string[]} names
- * @returns {[string, string] | null}
+ * @returns {string | null}
  */
-export function duplicateMigrationNumber(names) {
-  const sorted = names.filter((n) => /^\d{3}_.*\.sql$/.test(n)).sort();
+export function migrationNameProblem(names) {
+  const sorted = names.filter((n) => n.endsWith(".sql")).sort();
+  const odd = sorted.find((n) => !/^\d{3}_.+\.sql$/.test(n));
+  if (odd) return `${odd} is not a migration name: NNN_name.sql, three digits and an underscore — the number is the file's identity and its order`;
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i].slice(0, 3) === sorted[i - 1].slice(0, 3)) return [sorted[i - 1], sorted[i]];
+    if (sorted[i].slice(0, 3) === sorted[i - 1].slice(0, 3)) {
+      return `two migrations share the number ${sorted[i].slice(0, 3)}: ${sorted[i - 1]}, ${sorted[i]} — the number is the file's identity and its order; renumber one`;
+    }
   }
   return null;
 }

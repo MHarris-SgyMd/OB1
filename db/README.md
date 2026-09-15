@@ -132,10 +132,10 @@ the block labelled — zero included, read from the transaction's own statistics
 run, or a paste of the body left, is 030's to take back at its own place — the
 re-run reaches it. Judged before anything runs, in both modes, whenever 021
 will run: the role may create a temp table (`GRANT TEMPORARY ON DATABASE`
-otherwise; 023's call needs one too). Two files sharing a number are refused
-at load, and by the fork checker on every push; a set without 021 is refused
-at load, since the file is named whole. Every refusal is collected and
-reported together, the re-run's included.
+otherwise; 023's call needs one too). A file not named `NNN_name.sql`, or two
+sharing a number, is refused at load, and by the fork checker on every push; a
+set without 021 is refused at load, since the file is named whole. Every
+refusal is collected and reported together, the re-run's included.
 Until SMD-1421 the migrator instead *refused* the run on the rows 021 would
 label and 030 would leave (an acceptance under a suffixed key; a thought
 written since the row's enqueue; with 030 recorded and skipped, any
@@ -143,9 +143,12 @@ acceptance) and printed a way back that spent the acceptance — the refusal
 030's own header still describes, that file being hashed. `--baseline` runs no
 SQL and shadows nothing.
 
-**Stop the server and any re-embed or extraction worker first.** The
-migrator's session sets a 10 s lock timeout for everything it does, so a held
-lock fails the run rather than freezing it and every reader behind it. 001 and 003
+**Stop the server and any re-embed or extraction worker first, and connect
+directly, not through a transaction-mode pooler:** the migrator sets session
+state (the lock timeout, the pgvector search path) and takes locks across
+statements. It sets a 10 s lock timeout for everything it does — for the
+session, and again inside every transaction — so a held lock fails the run
+rather than freezing it and every reader behind it. 001 and 003
 take ACCESS EXCLUSIVE locks on `thoughts`; 011 builds the trigram index if
 `OB1_TRGM_INDEX` is on and the index is absent; 023's call runs again and takes
 its lock (`OB1_BACKFILL_LIMIT` bounds it, as on a first apply; it writes nothing

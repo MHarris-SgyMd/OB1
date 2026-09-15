@@ -220,7 +220,7 @@ function checkSqlGuards() {
   }]);
 }
 
-// ── 5b: one migration per number ────────────────────────────────────────────
+// ── 5b: every migration numbered, one per number ────────────────────────────
 //
 // The number is a migration's identity — its order, and how prose names it —
 // and two branches each adding "the next number" is how two files come to
@@ -230,9 +230,9 @@ function checkSqlGuards() {
 // — where the collision is created, on every push.
 
 async function checkMigrationNumbers() {
-  const { duplicateMigrationNumber } = await import("../db/config.mjs");
-  const shared = duplicateMigrationNumber(readdirSync(join(ROOT, "db", "migrations")));
-  if (shared) fail(`db/migrations/${shared[1]}`, `shares migration number ${shared[1].slice(0, 3)} with ${shared[0]}; the number is the file's identity and its order — renumber one`);
+  const { migrationNameProblem } = await import("../db/config.mjs");
+  const problem = migrationNameProblem(readdirSync(join(ROOT, "db", "migrations")));
+  if (problem) fail("db/migrations", problem);
 }
 
 // ── 6: shipped content never hands untrusted input a shell ───────────────────

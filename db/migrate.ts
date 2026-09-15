@@ -58,7 +58,7 @@ import {
   ACCEPTED_CLAIM_SQL,
   LOCK_TIMEOUT_S,
   alignVectorSearchPath,
-  duplicateMigrationNumber,
+  migrationNameProblem,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
@@ -173,12 +173,14 @@ function loadMigrations(): Migration[] {
     .filter((f) => f.endsWith(".sql"))
     .sort(); // 001_, 002_, … lexical order is the intended order
   // The number is the file's identity — the order, and how prose names a file
-  // — so two files may not share one: a second 021_*.sql sorting first would
-  // run before the one it collides with. The rule is config.mjs's, shared with
-  // the fork checker, which refuses the collision where it is made.
-  const shared = duplicateMigrationNumber(names);
-  if (shared) {
-    console.error(`two migrations share the number ${shared[0].slice(0, 3)}: ${shared[0]}, ${shared[1]}. Renumber one.`);
+  // — so every file carries one and two files may not share it: `021.sql`
+  // would sort before `021_…` and run at its number, and a second 021_*.sql
+  // sorting first would run before the one it collides with. The rule is
+  // config.mjs's, shared with the fork checker, which refuses where the
+  // collision is made.
+  const problem = migrationNameProblem(names);
+  if (problem) {
+    console.error(problem);
     process.exit(2);
   }
   return names.map((name) => {
@@ -230,11 +232,21 @@ console.log(`  trigram index: ${TRGM_INDEX ? "on" : "off"} (OB1_TRGM_INDEX)`);
 console.log(`  023 backfill:  ${SUBSTITUTIONS.BACKFILL_LIMIT === "NULL" ? "every row waiting" : `one batch of ${SUBSTITUTIONS.BACKFILL_LIMIT} rows`} (OB1_BACKFILL_LIMIT)`);
 
 const sql = new SQL({ url, max: 1 });
-// One lock_timeout for the session — every transaction the migrator opens, the
-// checks' reads before a re-run, the ledger reads below: a held lock fails the
-// run rather than freezing it and every reader behind it. 023's call sets its
-// own, locally, for its transaction.
+// One lock_timeout for the session — the checks' reads before a re-run, the
+// ledger reads below — and again, LOCAL, inside every transaction (begin): a
+// held lock fails the run rather than freezing it and every reader behind it.
+// The session setting alone would not do: through a transaction-mode pooler
+// it may be another server connection's by the time a transaction opens, and
+// the bound must hold where the locks are taken. (A pooled URL is not the
+// migrator's — README §5 says so: the search_path it aligns is session state
+// too.) 023's call sets its own, locally, for its transaction.
 await sql.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT_S}s'`);
+/** A transaction with the run's lock_timeout set inside it, as its first statement. */
+const begin = <T>(fn: (tx: SQL) => Promise<T>): Promise<T> =>
+  sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_S}s'`);
+    return fn(tx);
+  }) as Promise<T>;
 
 await sql`
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -416,6 +428,25 @@ async function reportSeeds(m: Migration): Promise<void> {
   }
 }
 
+/** A search_path entry naming the temp schema, quoted or not. */
+const PG_TEMP_ENTRY = /^"?pg_temp"?$/i;
+
+/** search_path's entries: split on the commas outside double quotes, since a quoted schema name may hold one. */
+function searchPathEntries(path: string): string[] {
+  const out: string[] = [];
+  let entry = "";
+  let quoted = false;
+  for (const ch of path) {
+    if (ch === '"') quoted = !quoted;
+    if (ch === "," && !quoted) {
+      out.push(entry.trim());
+      entry = "";
+    } else entry += ch;
+  }
+  if (entry.trim()) out.push(entry.trim());
+  return out;
+}
+
 /**
  * Run one migration's SQL in the caller's transaction — and 021's with the
  * operator's acceptances out of its sight (SMD-1421). 021's evidence backfill
@@ -447,9 +478,11 @@ async function reportSeeds(m: Migration): Promise<void> {
  * where listed, and listed first it is also where CREATE puts things,
  * functions included — 021's update_thought landed there and vanished with the
  * transaction when the fifth review pass tried naming it first — so a role's
- * path that lists it has it removed for the transaction (a quoted name may
- * hold a comma, so the split minds quotes), and otherwise the path is left
- * alone; that the name resolves to the view is checked before the file runs,
+ * path is set, for the transaction, to itself without pg_temp (a quoted name
+ * may hold a comma, so the split minds quotes) — a no-op where it is absent,
+ * and not restored: unlisted, pg_temp is still searched first and is never a
+ * creation target, so nothing after 021 differs — and that the name resolves
+ * to the view is checked before the file runs,
  * and the file is refused if not. Creation targets are then unaffected: 021's
  * column and functions go where they went. The view takes ACCESS SHARE on the
  * claim table when the block reads it, as 021's block did, and nothing on
@@ -482,25 +515,6 @@ async function reportSeeds(m: Migration): Promise<void> {
  * back that spent the acceptance (SMD-1193) — 030's header, hashed, still
  * describes the gate.
  */
-/** A search_path entry naming the temp schema, quoted or not. */
-const PG_TEMP_ENTRY = /^"?pg_temp"?$/i;
-
-/** search_path's entries: split on the commas outside double quotes, since a quoted schema name may hold one. */
-function searchPathEntries(path: string): string[] {
-  const out: string[] = [];
-  let entry = "";
-  let quoted = false;
-  for (const ch of path) {
-    if (ch === '"') quoted = !quoted;
-    if (ch === "," && !quoted) {
-      out.push(entry.trim());
-      entry = "";
-    } else entry += ch;
-  }
-  if (entry.trim()) out.push(entry.trim());
-  return out;
-}
-
 async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   if (m.name !== FILE_021) {
     await tx.unsafe(m.sql);
@@ -530,18 +544,16 @@ async function applyShadowed(tx: SQL, m: Migration): Promise<string | null> {
   await tx.unsafe(
     `CREATE TEMP VIEW thought_work_claims AS SELECT c.thought_id, c.work_type, c.status, c.finished_at FROM ${quoteIdent(nsp)}.thought_work_claims c WHERE NOT ${ACCEPTED_CLAIM_SQL}`
   );
-  // pg_temp first for relations exactly when unlisted: a path that lists it
-  // has it removed for the transaction (never added first — see above).
-  const entries = searchPathEntries(path);
-  const listsTemp = entries.some((e) => PG_TEMP_ENTRY.test(e));
-  if (listsTemp) await tx`SELECT set_config('search_path', ${entries.filter((e) => !PG_TEMP_ENTRY.test(e)).join(", ")}, true)`;
+  // pg_temp first for relations exactly when unlisted: the path, for the
+  // transaction, without it — a no-op where it is absent, never added first
+  // (see above), not restored (nothing after 021 differs).
+  await tx`SELECT set_config('search_path', ${searchPathEntries(path).filter((e) => !PG_TEMP_ENTRY.test(e)).join(", ")}, true)`;
   const [{ shadowed }] = (await tx`SELECT to_regclass('thought_work_claims') = 'pg_temp.thought_work_claims'::regclass AS shadowed`) as { shadowed: boolean }[];
   if (!shadowed) {
     throw new Error(`the view of thought_work_claims without the acceptances does not shadow the table for 021 (search_path: ${path}); its backfill would have read them`);
   }
   await tx.unsafe(m.sql);
   await tx.unsafe("DROP VIEW pg_temp.thought_work_claims");
-  if (listsTemp) await tx`SELECT set_config('search_path', ${path}, true)`;
   // At zero too: a silent 021 is also what a claim table not found, or an
   // older migrator, prints. The label is not an edit, and nothing else
   // records the write.
@@ -689,7 +701,7 @@ if (reapply && !dryRun) {
   /** What a file said beside its line, by name — 021's, with the acceptances out of its sight. */
   const notes = new Map<string, string>();
   try {
-    await sql.begin(async (tx: SQL) => {
+    await begin(async (tx: SQL) => {
       for (const m of migrations) {
         progress.current = m;
         const note = await applyShadowed(tx, m);
@@ -771,7 +783,7 @@ for (const m of reapply && !dryRun ? [] : migrations) {
   // Each migration runs in its own transaction: a failure leaves earlier ones
   // applied and recorded, so a rerun resumes rather than starting over.
   try {
-    const note = await sql.begin(async (tx: SQL) => {
+    const note = await begin(async (tx: SQL) => {
       const n = await applyShadowed(tx, m);
       await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
       return n;

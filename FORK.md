@@ -6610,8 +6610,8 @@ inability to `readFileSync` a >2 GB corpus is filed as a follow-up.
 ### 60. 021's evidence backfill runs with the operator's acceptances out of its sight — a view of the claim table shadows the real one for that file, and no gate refuses the run (SMD-1421)
 
 `db/migrate.ts`, `db/config.mjs`, `db/config.d.mts`, `db/reembed.ts`,
-`db/test-upgrade.ts`, `db/README.md` and `scripts/check-fork-consistency.mjs`
-(Linear SMD-1421, filed by change 56's
+`db/test-upgrade.ts`, `db/test-support.ts`, `db/README.md` and
+`scripts/check-fork-consistency.mjs` (Linear SMD-1421, filed by change 56's
 sixth and seventh review passes). No migration: 030 stands as it is, and the
 correction it cannot make becomes the migrator's.
 
@@ -6873,6 +6873,38 @@ an environment override of the lock timeout so the suite's three 10 s waits
 run in 3 s — a production knob for the migrator bought with test time, where
 the three waits exercise three real lock paths.
 
+**Review, eighth pass (high), at the user's call, triaged.** Main had moved:
+SMD-1023 landed migration 031 and changes 57–59, and this ticket's test section
+asserted 030 was the last file — merged (this section is 60, its test section
+[10]), and the one assertion that assumed 030 was last now asks that no note
+follows 030's line. The seventh pass's session-level `SET lock_timeout` does
+not follow the migrator's transactions through a transaction-mode pooler,
+where the freeze it prevents comes back silently; one `begin` sets it LOCAL
+inside every transaction as well, and README §5 says to connect directly.
+`duplicateMigrationNumber` judged only `NNN_*.sql` names, so `021-fix.sql`
+would have sorted before 021 and run at its number unrefused by runner and
+checker alike; `migrationNameProblem` refuses a .sql not so named, and two
+sharing a number. `LOCK_TIMEOUT_S` claimed to be the one number when 023's
+hashed body sets 10 s for a transaction that under `--reapply` is the whole
+run's tail — the comment says so, and why the value is ten and only ten.
+`test-support`'s `applyMigrations` applies 021 bare, acceptances in sight,
+and said nothing; its docblock names the divergence and where to plant. The
+search-path strip had four moving parts, a dead restore on plain runs and no
+test: one unconditional `set_config` to the path without `pg_temp`, and [10]'s
+both-pending run sets the database's path to list `pg_temp` last. The design
+docblock had come unstuck from `applyShadowed` behind two helpers; moved. A
+dead `href !== URL_` assertion went. [7], [9] and [10] share one `migrate`,
+the fixture gained `accept()` for the five spellings of an acceptance row, and
+`build()` uses `resetSchema`. **Weighed and declined:** rewriting 021's
+`FROM thought_work_claims c` in the substituted text to a filtered subquery,
+which would remove the view, the two probes, the search-path strip and the
+TEMP refusal. The template's placeholders are declared in the file; a
+run-time rewrite of a hashed statement's text is an invisible edit to a file
+the repo says is never edited, and the migrator would then be running a body
+no reader of the file can see. The view leaves the text intact and changes
+only what a name resolves to, which Postgres supports by design; the catalog
+machinery is the price of that honesty.
+
 **Not done here.** 030's header describes the gate it was written beside; the
 file is applied and hashed, so the description stands as history, and this
 section and README §5 carry the current shape. A plain run applying 021 alone
@@ -6907,11 +6939,13 @@ with the GRANT. The hazard refusals went with the gate; the rest of [7] and
 all of [8] are unchanged. Not exercised: the loader's two refusals (a set
 without 021, two files sharing a number), the checker's duplicate-number rule,
 the 40P01 line, the shadow refusal (the view always shadows on the test role's
-path), the stale-temp-relation refusal, the search-path strip and its quoted
-comma. `test-upgrade` 121/121,
-`test-schema` 644/644, `test-preflight` 174/174, `test-live` 419/419, `tsc`
-clean, fork checker PASS. Upstream status: **not applicable** — the
-migrator and `reembed.ts` are the fork's (changes 11 and 29).
+path), the stale-temp-relation refusal and the quoted comma in a search path.
+[10]'s both-pending run lists `pg_temp` last on the database's path, so the
+strip is exercised. `test-upgrade` 124/124,
+`test-schema` 683/683 (main's 031 merged in), `test-preflight` 174/174,
+`test-live` 419/419, `tsc` clean, fork checker PASS. Upstream status: **not
+applicable** — the migrator and `reembed.ts` are the fork's (changes 11 and
+29).
 
 ## Detached from the fork network
 

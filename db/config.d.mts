@@ -203,8 +203,8 @@ export const CLAIM_EVIDENCE_ROWS_SQL: string;
 export const REAPPLY_COMMAND: string;
 /** The lock timeout, in seconds, migrate.ts sets for its session and quotes in its messages; test-upgrade derives its expectations from it. */
 export const LOCK_TIMEOUT_S: number;
-/** The first two migration files sharing a number in a listing, or null — one rule for migrate.ts at load and the fork checker on push. */
-export function duplicateMigrationNumber(names: string[]): [string, string] | null;
+/** What is wrong with a listing of migration files — a name not NNN_name.sql, or two sharing a number — or null; one rule for migrate.ts at load and the fork checker on push. */
+export function migrationNameProblem(names: string[]): string | null;
 /** The SET list that returns a claim row to its pool — requeue()'s. */
 export const REQUEUE_SET_SQL: string;
 
