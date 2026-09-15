@@ -157,7 +157,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `019_match_thoughts_plan_and_rows.sql` | `match_thoughts` redefined with `SET enable_seqscan = off` beside 014's scan mode, and `ROWS 10`; `search_thoughts_keyword` redefined with `ROWS 25`; both bodies carried verbatim. At the shipped width a vector is TOASTed and the planner's seq-scan estimate never counts the detoast reads, so wherever the heap is small — every brain up to some tens of thousands of thoughts, and the ceiling at every size — it chose a sequential scan of the chunk table and, above the default count, of `thoughts`: five to twenty times the buffers the index reads (upstream #469, measured by `bench-plan.ts` at 1,000 to 100,000 rows). The `ROWS` clauses give every composing query the estimate 017's JIT finding was priced without; they live in the defining statements because `CREATE OR REPLACE` resets them | This fork |
 | `020_match_thoughts_recency.sql` | `match_thoughts(…, recency_weight float DEFAULT 0, half_life_days float DEFAULT 90)`: the rows are ordered by a new `score` column — `recency_score()`, `similarity · (1 − w) + 0.5^(age_days / half_life) · w`, equal to `similarity` at weight 0, then by id — computed over the candidates the HNSW scan already produced, with the threshold still on the raw similarity and the candidate window four times wider under a weight. The 4-argument function is **dropped**, not overloaded (a second form beside it would make every 4-argument call `function is not unique`); `search_thoughts_hybrid` likewise, redefined to pass the weight through and rank its vector arm on `score`. 019's clauses carried, and each old function's ACL replayed across the DROP. Measured on the corpus (`evals/eval-recency.ts`): a weight lowers MRR on a relevance task at every setting, so the default stays 0 and the ChatGPT `search` sends 0 | This fork; upstream `schemas/recency-boosted-match-thoughts` for the formula |
 | `021_embedding_model_per_row.sql` | `thoughts.embedding_model` — the model that produced each vector, written by the same statement as the vector (the label follows the vector; NULL is unknown, and the only backfill is from evidence — a row a finished pass wrote and nothing wrote since is labelled from its claim). `upsert_thought` reads it from the payload envelope beside the actor; `update_thought` takes it as an eighth parameter, the 7-argument form **dropped** first (an overload beside it would make every 7-argument call `function is not unique`), the old ACL replayed. `reembed.ts` builds its pool from the rows not at the target under the model's own key (every thought under a `--job` backfill key) and returns a finished row whose thought moved; preflight's `vector models` reads the corpus by label and `edit signature` checks the form — see below | This fork |
-| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `chunk delete privilege` refuses a role without DELETE on the table, printing the GRANT | This fork |
+| `022_capture_replaces_chunks.sql` | The 3-arg `upsert_thought` redefined (021's body; the row's label read and the row locked before the write, one block added): a re-capture's chunk rows stay while the label vouches for them — the row's vector labelled with a model and the arriving vector labelled with the same one — and go otherwise (a label unknown on either side, or another model); no vector arriving keeps them. Until then a thought captured with windows and re-captured through that form — the path every chunkless capture takes: both stores, the Edge Function server, any PostgREST caller — kept the windows of a vector it no longer had, and since 021 under a label that said it was at the new model. No column, no signature change, no backfill (a stale window cannot be told from a live one; a `--job` pass regenerates them — and a brain upgraded through 021 without a finished pass should run one first: an unlabelled row's windows go on its first chunkless re-capture, since nothing vouches for them). The DELETE runs as the calling role, which needs DELETE on `thought_chunks`; the row is locked `FOR NO KEY UPDATE`, ordered against `update_thought` and not against the foreign keys' `KEY SHARE`. The body carries the `ob1:vector-replaces-chunks` sentinel, which preflight's `atomic capture` warns without — 021 re-applied by hand puts 021's body back — and `write privileges` refuses a role missing any of the capture path's table privileges (`thought_chunks` DELETE among them; see [Grants for a capturing role](#grants-for-a-capturing-role)), printing the GRANT | This fork |
 | `023_content_fingerprint_backfill.sql` | 003's missing half. `backfill_content_fingerprints(p_limit integer DEFAULT NULL)`, called once by the file: every thought without a fingerprint whose normalised text no row holds takes it, and of each group sharing one text the oldest (`created_at`, then id) takes it while the rest stay NULL, the state 018 leaves after a pass — the pairs list marks the row holding the key; a row whose key another row holds — the same text under a fingerprint, or a stale key — stays NULL, and no existing key is touched. Until then a capture of a legacy row's text inserted a second row (`ON CONFLICT` cannot see a NULL), silently, on every brain from before 003 or loaded around `upsert_thought`. The function scans before the lock, then locks `thoughts` `IN EXCLUSIVE MODE` for its transaction (writers and `update_thought`'s `FOR UPDATE` wait, readers do not; `lock_timeout` 10 s; READ COMMITTED, as 018's lock) and re-checks the rows it found by index — still NULL, still the text that was hashed, the key still free — which is what lets a capture waiting on it merge instead of doubling and an edit be told `duplicate_of` instead of raising 23505; stop both 015 consumers first (a re-embed pass, an entity-extraction worker), since every writer into a table referencing `thoughts` waits on the lock and would wait out its lease; it holds the `updated_at` trigger (the fingerprint is not an edit) and writes no audit row. The UPDATE is not HOT — the column is indexed — so every row written is entered into every index, the HNSW one included; measured, see the header. It returns the rows it found waiting, so a loop until 0 is exact; `p_limit` (at least 1) bounds a call — each call its own transaction, since the lock is held to commit — and the file's own call takes `{{BACKFILL_LIMIT}}`, NULL unless `OB1_BACKFILL_LIMIT` is in the migrator's environment at that invocation (validated in `config.mjs`, forwarded by the compose migrate service), which a brain with millions of legacy rows sets to take one batch at upgrade and the rest by hand. It adds `ob1_fp_backfill_idx`, a partial expression index over exactly the rows without a key, so the scan is an ordered walk that a batch's LIMIT stops early and preflight's probe on every start reads the index rather than the heap; on a fingerprinted brain it is empty. Run again after a load that inserted into `thoughts` directly, which preflight's `fingerprint backfill` says when | This fork |
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
@@ -186,7 +186,56 @@ so the policy never evaluated. Re-add real RLS against your own claim if you
 introduce multi-tenancy; do not port this one.
 
 **No `GRANT … TO service_role`.** Grant to whichever role your application
-connects as.
+connects as — and to more than `thoughts`: see [Grants for a capturing
+role](#grants-for-a-capturing-role) below.
+
+## Grants for a capturing role
+
+Every function this fork adds is `SECURITY INVOKER` (migrations 010, 012 and 015
+say so), so the writes they make run as the connecting role — and since migration
+007 they reach past `thoughts`. A role granted `SELECT, INSERT, UPDATE, DELETE ON
+thoughts` and nothing else, as the getting-started guide's grant step gives, can
+capture nothing on a self-hosted brain: its first windowed capture fails on
+`thought_chunks`, and 008's audit trigger fails on `thought_audit` on its very
+first capture of any kind. (Supabase is unaffected — its `service_role` holds
+default privileges on the public schema, which is why the hosted path never hits
+this.)
+
+`db/config.mjs`'s `ROLE_GRANTS` is the machine-readable list; this table is the
+same one, grouped by what the role does. Preflight's `write privileges` check
+refuses a server role missing any of the **capture** group; `migrate.ts --grant`
+issues every group at once.
+
+| Group | Table (migration) | Privileges |
+| --- | --- | --- |
+| **capture** — the server's own connection; preflight refuses a role missing any of it | `thoughts` (001) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
+| | `thought_audit` (008) | `INSERT` |
+| **read** — used when present, never fatal to a bare capture (`resolve_agent` attribution, preflight's config read) | `ob1_config` (006) | `SELECT` |
+| | `ob1_agents` (010) | `SELECT` |
+| | `ob1_agent_keys` (010) | `SELECT` |
+| **worker** — `reembed.ts`, `consolidate.ts` | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
+| **extraction** — the entity-extraction worker | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
+| | `thought_entities` (016) | `SELECT, INSERT, DELETE` |
+| | `ob1_entity_edges` (016) | `SELECT, INSERT, DELETE` |
+
+Plus `USAGE ON SCHEMA public`. There are no sequences to grant: every table's
+primary key is a `uuid` or a natural key, so `INSERT` needs no sequence `USAGE`.
+
+The one executable spelling — run as a role that can grant (the tables' owner or
+a superuser), after the migrations are applied:
+
+```bash
+bun migrate.ts --url ... --grant your_role
+```
+
+`--grant` issues exactly the list above for the tables that exist, in one
+transaction; it never creates the role or sets a password, so create the role
+first. `--grant --dry-run` prints the statements without running them, so a
+locked-down deployment can grant a subset by hand. A role that only ever runs the
+server needs the **capture** and **read** groups; add **worker** and
+**extraction** only for the role your bulk passes and entity extraction connect
+as.
 
 ## Chunk context, and why it is off
 

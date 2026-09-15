@@ -179,6 +179,9 @@ grant select, insert, update, delete on table public.thoughts to service_role;
 > [!IMPORTANT]
 > This step is required. Supabase no longer grants full table permissions to `service_role` by default on new projects. Without this, your MCP server will return "permission denied for table thoughts" when trying to capture or search.
 
+> [!NOTE]
+> Self-hosting with the extension migrations in [`db/`](../db/) (the non-Supabase path)? Those add tables beyond `thoughts` — `thought_chunks`, `thought_audit` and more — whose writers run as your connecting role, so it needs grants past this one. See [Grants for a capturing role](../db/README.md#grants-for-a-capturing-role), or run `bun migrate.ts --grant your_role`.
+
 ![2.6](https://img.shields.io/badge/2.6-Add_Deduplication-555?style=for-the-badge&labelColor=F4511E)
 
 New query → paste and Run:

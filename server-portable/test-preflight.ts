@@ -48,6 +48,16 @@ async function run(env: Record<string, string | undefined>, ...args: string[]) {
   return runScript(["bun", join(HERE, "preflight.ts"), ...args], { env: clean, cwd: HERE });
 }
 
+// db/migrate.ts, for the --grant step: the one executable spelling of the
+// capturing-role privileges. Spawned like preflight so its exit code and output
+// are asserted the same way.
+async function migrate(args: string[], env: Record<string, string | undefined> = {}) {
+  const clean: Record<string, string> = {};
+  for (const [k, v] of Object.entries({ ...process.env, ...env })) if (v !== undefined) clean[k] = String(v);
+  for (const [k, v] of Object.entries(env)) if (v === undefined) delete clean[k];
+  return runScript(["bun", join(HERE, "..", "db", "migrate.ts"), ...args], { env: clean, cwd: join(HERE, "..", "db") });
+}
+
 const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined };
 
 console.log("[1] Missing configuration fails, with an actionable fix");
@@ -936,23 +946,29 @@ else {
          "…and the consolidate pass check, which reads the same table, says so too");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") });
 
-  // The chunk writers run as the calling role. A role that can read
-  // everything and write thoughts, but not delete from thought_chunks, would
-  // fail every edit with content and every re-capture at another model — so
-  // preflight refuses to start it, with the GRANT; granted, it starts. A
-  // role is cluster-wide and dropSchema does not touch it, so an interrupted
-  // run's leftover is dropped first and the fixture is cleaned up whatever
-  // happens inside it.
+  // The capture path's SECURITY INVOKER writers run as the calling role. A role
+  // that can read everything and write thoughts, but cannot INSERT/DELETE
+  // thought_chunks or INSERT thought_audit, fails every windowed capture and the
+  // audit trigger on every capture — so preflight refuses it, naming each
+  // missing privilege with its GRANT. `migrate.ts --grant` then issues the whole
+  // documented set (db/config.mjs's ROLE_GRANTS, the one spelling); granted, the
+  // role starts and a real windowed capture and an edit through it succeed. A
+  // full apply first, so upsert_thought is the shipped 4-argument form whatever
+  // state the reapply blocks above left. A role is cluster-wide and dropSchema
+  // does not touch it, so an interrupted run's leftover is dropped first and the
+  // fixture cleans up whatever happens inside it.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
   const CAPTURE_URL = LIVE.replace(/\/\/[^@]*@/, "//ob1_pf_capture:ob1pf@");
+  const vecOf = (seed: number) => `[${Array.from({ length: EMBEDDING_DIM }, (_, i) => (i === 0 ? seed : 0)).join(",")}]`;
   const dropCaptureRole = () => claims.unsafe(`DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_pf_capture') THEN
       EXECUTE 'DROP OWNED BY ob1_pf_capture'; EXECUTE 'DROP ROLE ob1_pf_capture';
     END IF; END $$`);
   const [{ mayCreate }] = await claims`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`;
   if (CAPTURE_URL === LIVE) {
-    skipRaw("a capturing role without DELETE on thought_chunks does not start", "DATABASE_URL carries no credentials to swap for the role's");
+    skipRaw("a capturing role missing the write privileges does not start", "DATABASE_URL carries no credentials to swap for the role's");
   } else if (!mayCreate) {
-    skipRaw("a capturing role without DELETE on thought_chunks does not start", "the connection's role cannot CREATE ROLE");
+    skipRaw("a capturing role missing the write privileges does not start", "the connection's role cannot CREATE ROLE");
   } else {
     await dropCaptureRole();
     try {
@@ -960,14 +976,63 @@ else {
       await claims.unsafe("GRANT USAGE ON SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_pf_capture");
       await claims.unsafe("GRANT INSERT, UPDATE, DELETE ON thoughts TO ob1_pf_capture");
-      const noDelete = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(noDelete.code === 1 && /chunk delete privilege\s+this connection's role \(ob1_pf_capture\) cannot DELETE from thought_chunks/.test(noDelete.out) && /GRANT DELETE ON thought_chunks TO ob1_pf_capture;/.test(noDelete.out),
-             `a capturing role without DELETE on thought_chunks does not start, with the GRANT as the remedy (exit ${noDelete.code})`);
-      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 025's/.test(noDelete.out), "…while atomic capture, a separate fact, is ok for it");
-      await claims.unsafe("GRANT DELETE ON thought_chunks TO ob1_pf_capture");
-      const granted = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
-      assert(granted.code === 0 && /chunk delete privilege\s+ob1_pf_capture can DELETE from thought_chunks/.test(granted.out),
-             `…and granted, it starts (exit ${granted.code}: ${granted.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+
+      // thoughts satisfied, but no INSERT/DELETE on thought_chunks and no INSERT
+      // on thought_audit: refused, both tables named in CAPTURE_WRITES order,
+      // each with its GRANT.
+      const missingBoth = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      const writeLine = (out: string) => out.split("\n").find((l) => /write privileges/.test(l)) ?? "";
+      assert(missingBoth.code === 1 &&
+             /write privileges\s+this connection's role \(ob1_pf_capture\) is missing privileges the capture path's writers need/.test(missingBoth.out) &&
+             /INSERT, DELETE on thought_chunks; INSERT on thought_audit/.test(writeLine(missingBoth.out)) &&
+             /GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture;\s+GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingBoth.out),
+             `a role missing the chunk and audit writes does not start, each named in order with its GRANT (exit ${missingBoth.code})`);
+      assert(/atomic capture\s+the 2- and 3-argument upsert_thought present; the 3-argument body is 025's/.test(missingBoth.out), "…while atomic capture, a separate fact, is ok for it");
+
+      // Grant the chunk writes by hand; only the audit INSERT remains named.
+      await claims.unsafe("GRANT INSERT, DELETE ON thought_chunks TO ob1_pf_capture");
+      const missingAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(missingAudit.code === 1 &&
+             /INSERT on thought_audit/.test(writeLine(missingAudit.out)) &&
+             !/thought_chunks/.test(writeLine(missingAudit.out)) &&
+             /GRANT INSERT ON thought_audit TO ob1_pf_capture;/.test(missingAudit.out),
+             `with the chunk writes granted, only the audit INSERT is named (exit ${missingAudit.code})`);
+
+      // The executable spelling: migrate.ts --grant issues the whole documented
+      // set — the read, worker and extraction groups too, quoted role — so the
+      // role holds everything the writers need and preflight is ok.
+      const grant = await migrate(["--grant", "ob1_pf_capture", "--url", LIVE]);
+      assert(grant.code === 0 &&
+             /GRANT INSERT ON thought_audit TO "ob1_pf_capture";/.test(grant.out) &&
+             /GRANT SELECT, INSERT, UPDATE, DELETE ON thought_work_claims TO "ob1_pf_capture";/.test(grant.out),
+             `migrate.ts --grant issues the documented set (exit ${grant.code}: ${grant.out.trim().split("\n").slice(-1)[0]})`);
+      const okRun = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      assert(okRun.code === 0 && /write privileges\s+ob1_pf_capture holds the capture path's privileges/.test(okRun.out),
+             `…and granted, the role starts (exit ${okRun.code}: ${okRun.out.split("\n").filter((l) => /fail/.test(l)).join(" | ").trim()})`);
+
+      // The real proof: a windowed capture and an edit with content run through
+      // the role. The 4-argument upsert_thought DELETEs then INSERTs
+      // thought_chunks (both privileges, even the DELETE of zero rows), and the
+      // thoughts INSERT fires 008's trigger into thought_audit — the three
+      // writes a thoughts-only grant lacked.
+      const asRole = new SQL({ url: CAPTURE_URL, max: 1 });
+      try {
+        // Objects and arrays, bound to ::jsonb the way store-sql.ts does — a
+        // JSON.stringify here would double-encode and 005's guard would reject it.
+        const envelope = { metadata: {}, embedding_model: EMBEDDING_MODEL };
+        const windows = [
+          { content: "window one", embedding: vecOf(1), context: null },
+          { content: "window two", embedding: vecOf(2), context: null },
+        ];
+        const [{ r }] = (await asRole`SELECT upsert_thought('a windowed capture through the role'::text, ${envelope}::jsonb, ${vecOf(3)}::vector, ${windows}::jsonb) AS r`) as { r: { id: string; chunks: number } }[];
+        assert(r.chunks === 2, `a windowed capture through the role writes chunk rows (${r.chunks})`);
+        const [{ audited }] = (await asRole`SELECT count(*)::int AS audited FROM thought_audit WHERE thought_id = ${r.id}`) as { audited: number }[];
+        assert(audited >= 1, "…and 008's trigger writes an audit row as the role");
+        const edit = (await asRole`SELECT update_thought(${r.id}::uuid, 'the capture, edited with content'::text, NULL::jsonb, ${vecOf(4)}::vector, ${windows}::jsonb, NULL::timestamptz, NULL::jsonb, ${EMBEDDING_MODEL}::text) AS r`) as { r: { ok?: boolean } }[];
+        assert(edit.length === 1 && edit[0].r?.ok !== false, "an edit with content through the role succeeds — chunks replaced as the role");
+      } finally {
+        await asRole.close();
+      }
     } finally {
       await dropCaptureRole();
     }

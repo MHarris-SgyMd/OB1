@@ -750,6 +750,37 @@ async function checkEmbeddingDefaults() {
 await checkEmbeddingDefaults();
 
 /**
+ * db/README.md's "Grants for a capturing role" names every table db/config.mjs's
+ * ROLE_GRANTS requires — the two are one spelling (SMD-1226). Preflight's `write
+ * privileges` check and `migrate.ts --grant` both read ROLE_GRANTS; the README is
+ * the human list. A table added to a group in config without a line in the
+ * README would leave a self-hoster's role short a privilege the docs never
+ * mention. Matched in backticks, the doc's convention for a table name, so
+ * `thoughts` is not satisfied by `thought_chunks` merely containing it.
+ */
+async function checkCapturingGrants() {
+  const cfg = await import("../db/config.mjs");
+  const readme = readFileSync(join(ROOT, "db", "README.md"), "utf8");
+  const heading = /^#+\s+Grants for a capturing role\s*$/m.exec(readme);
+  if (!heading) {
+    violations.push({ where: "db/README.md", msg: 'no "Grants for a capturing role" section — db/config.mjs ROLE_GRANTS has no documented home (SMD-1226)' });
+    return;
+  }
+  const rest = readme.slice(heading.index + heading[0].length);
+  const next = /^#+\s/m.exec(rest);
+  const section = next ? rest.slice(0, next.index) : rest;
+  for (const table of cfg.grantedTables()) {
+    if (!section.includes("`" + table + "`")) {
+      violations.push({
+        where: "db/README.md",
+        msg: `"Grants for a capturing role" does not name \`${table}\`, which db/config.mjs's ROLE_GRANTS requires — the list and the docs have drifted (SMD-1226)`,
+      });
+    }
+  }
+}
+await checkCapturingGrants();
+
+/**
  * A setting documented in deploy/.env.example that deploy/compose.yaml never
  * forwards.
  *

@@ -55,6 +55,8 @@ import {
   HNSW_SEEDS,
   SHARED_SETTING_SOURCES,
   TRGM_INDEX,
+  grantStatements,
+  grantedTables,
   migrationValues,
   parseSetConfig,
   quoteIdent,
@@ -79,9 +81,9 @@ const has = (name: string) => args.includes(`--${name}`);
 // otherwise be a silent plain run that exits 0. reembed.ts scans its arguments
 // the same way, with more shapes; the two are not yet one function.
 {
-  const TAKES_ONE = new Set(["url"]);
+  const TAKES_ONE = new Set(["url", "grant"]);
   const TAKES_NONE = new Set(["dry-run", "baseline", "reapply"]);
-  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --reapply";
+  const USAGE = "  flags: --url <postgres://…>, --dry-run, --baseline, --reapply, --grant <role>";
   const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -122,6 +124,61 @@ if (!url) {
 if (reapply && baseline) {
   console.error("--reapply re-runs what the ledger records; --baseline records without running. One or the other.");
   process.exit(2);
+}
+
+// --grant <role>: issue exactly the privileges db/config.mjs's ROLE_GRANTS
+// documents — the one executable spelling of db/README.md's "Grants for a
+// capturing role". A standalone mode: it records nothing in the ledger and runs
+// no migration, so it is refused beside --baseline or --reapply. It grants only
+// tables that already exist, so it is safe on a partially-migrated database and
+// again after later migrations bring the rest. It never creates a role or sets a
+// password — a missing role is an error naming CREATE ROLE, not a silent create
+// — so no credential passes through it. --dry-run prints the statements without
+// running them: the list, copyable, for a role you would rather grant by hand.
+const grantRole = flag("grant");
+if (grantRole !== undefined) {
+  if (baseline || reapply) {
+    console.error("--grant issues privileges; it does not apply or record migrations. Run it on its own.");
+    process.exit(2);
+  }
+  const gsql = new SQL({ url, max: 1 });
+  try {
+    const [{ present: roleExists }] = (await gsql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${grantRole}) AS present`) as { present: boolean }[];
+    if (!roleExists) {
+      console.error(
+        `No role ${JSON.stringify(grantRole)} exists. Create it first, as a role that can:\n` +
+          `  CREATE ROLE ${quoteIdent(grantRole)} LOGIN PASSWORD '…';\n` +
+          "then re-run --grant. This step grants privileges only; it never creates a role or sets a password."
+      );
+      await gsql.close();
+      process.exit(2);
+    }
+    const wanted = grantedTables();
+    const present = new Set<string>(
+      ((await gsql`SELECT tbl FROM unnest(${gsql.array(wanted, "TEXT")}::text[]) AS r(tbl) WHERE to_regclass('public.' || tbl) IS NOT NULL`) as { tbl: string }[]).map((r) => r.tbl)
+    );
+    const missing = wanted.filter((t) => !present.has(t));
+    const statements = [`GRANT USAGE ON SCHEMA public TO ${quoteIdent(grantRole)};`, ...grantStatements(grantRole, { present })];
+    if (dryRun) {
+      console.log(`\n--grant ${grantRole}  (--dry-run: nothing run)\n`);
+      for (const s of statements) console.log(`  ${s}`);
+      if (missing.length) console.log(`\n  not yet present, skipped: ${missing.join(", ")}`);
+      await gsql.close();
+      process.exit(0);
+    }
+    await gsql.begin(async (tx) => {
+      for (const s of statements) await tx.unsafe(s);
+    });
+    console.log(`\nGranted ${grantRole} the capturing-role privileges over ${present.size} table(s):\n`);
+    for (const s of statements) console.log(`  ${s}`);
+    if (missing.length) console.log(`\n  not yet present, skipped (run --grant again after applying them): ${missing.join(", ")}`);
+    await gsql.close();
+    process.exit(0);
+  } catch (err) {
+    console.error(`--grant failed: ${(err as Error).message}`);
+    await gsql.close();
+    process.exit(1);
+  }
 }
 
 type Migration = {

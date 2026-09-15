@@ -93,7 +93,7 @@ const CATALOG_HINT = "run once with OB1_STORE=sql to read the catalog";
 // that has not reported yet, rather than one name for whatever went wrong.
 const DIRECT_CHECKS = [
   "vector extension",
-  "atomic capture", "chunk delete privilege", "fingerprint backfill", "audit trail", "agent identity",
+  "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "filtered search",
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger",
@@ -522,7 +522,7 @@ if (configFailed) {
       // DELETE on thought_chunks are catalog facts; over PostgREST neither is
       // reachable, and a check that prints nothing looks like one that passed.
       add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's is read from the catalog; ${CATALOG_HINT}`);
-      add("chunk delete privilege", "skip", `not checked over PostgREST — whether the role can remove a thought's windows is read from the catalog; ${CATALOG_HINT}`);
+      add("write privileges", "skip", `not checked over PostgREST — the capture path's table privileges are read over a direct connection; ${CATALOG_HINT}`);
       add("fingerprint backfill", "skip", `not checked over PostgREST — whether a thought without a fingerprint has one waiting is decided by hashing rows on the server; ${CATALOG_HINT}`);
     }
 
@@ -694,27 +694,60 @@ if (configFailed) {
           add("atomic capture", "ok", `the 2- and 3-argument upsert_thought present; the 3-argument body is 025's — 022's rule, so a re-capture's windows stay only while the label vouches for them, and the provenance envelope — and the 2-argument body is 005's${andOthers}`);
         }
 
-        // A fact of its own, with its own remedy: every writer that replaces a
-        // thought's windows — 007's 4-argument form, update_thought, and since
-        // 022 the 3-argument form on a re-capture the label does not vouch for
-        // — runs as its caller, so the connection's role needs DELETE on
-        // thought_chunks whatever body is installed. Schema-qualified: the
-        // text form of has_table_privilege resolves through search_path and
-        // RAISES for a relation it cannot see, and a raise here would land in
-        // the catch below and take every later check with it.
-        const [chunks] = await sql`
-          SELECT t.present,
-                 CASE WHEN t.present THEN has_table_privilege('public.thought_chunks', 'DELETE') END AS can,
-                 current_user::text AS role, quote_ident(current_user::text) AS ident
-          FROM (SELECT to_regclass('public.thought_chunks') IS NOT NULL AS present) t`;
-        if (!chunks.present) {
-          add("chunk delete privilege", "skip", "not checked — thought_chunks does not exist (before migration 007)");
-        } else if (!chunks.can) {
-          add("chunk delete privilege", "fail",
-              `this connection's role (${chunks.role}) cannot DELETE from thought_chunks — the chunk writers run as their caller, so every edit with content, every capture with windows, and since 022 every re-capture with a vector the row's label does not vouch for would fail`,
-              `GRANT DELETE ON thought_chunks TO ${chunks.ident};`);
+        // The privileges the capture path's SECURITY INVOKER writers need to run
+        // as their caller, checked as one set: every windowed capture INSERTs —
+        // and since 022, on a re-capture the label does not vouch for, DELETEs —
+        // thought_chunks, every edit with content replaces those rows, and 008's
+        // trigger INSERTs thought_audit on every capture, edit and delete. So a
+        // role granted `thoughts` alone, as the guide's grant step gives, fails
+        // its first windowed capture on thought_chunks and its first capture of
+        // any kind on the audit trigger. CAPTURE_WRITES is db/config.mjs's list,
+        // the one shared with `migrate.ts --grant` and db/README.md's grants
+        // section. Schema-qualified and gated on presence: the text form of
+        // has_table_privilege RAISES for a relation it cannot see, and a raise
+        // here would land in the catch below and take every later check with it,
+        // so a table absent before its migration is skipped, not failed.
+        const { CAPTURE_WRITES } = await import("../db/config.mjs");
+        const reqTables = CAPTURE_WRITES.map((w) => w.table);
+        const reqPrivs = CAPTURE_WRITES.map((w) => w.privilege);
+        const privRows = (await sql`
+          WITH req AS (
+            SELECT tbl, priv
+              FROM unnest(${sql.array(reqTables, "TEXT")}::text[], ${sql.array(reqPrivs, "TEXT")}::text[]) AS r(tbl, priv)
+          ), present AS (
+            SELECT DISTINCT tbl, to_regclass('public.' || tbl) IS NOT NULL AS ok FROM req
+          )
+          SELECT req.tbl, req.priv, present.ok AS present,
+                 CASE WHEN present.ok THEN has_table_privilege('public.' || req.tbl, req.priv) END AS granted
+            FROM req JOIN present USING (tbl)`) as { tbl: string; priv: string; present: boolean; granted: boolean | null }[];
+        const [{ role, ident }] = await sql`SELECT current_user::text AS role, quote_ident(current_user::text) AS ident`;
+        const grantState = new Map(privRows.map((r) => [`${r.tbl} ${r.priv}`, r.granted]));
+        const presentTables = new Set(privRows.filter((r) => r.present).map((r) => r.tbl));
+        if (!presentTables.has("thoughts")) {
+          add("write privileges", "skip", "not checked — thoughts does not exist (before migration 001)");
         } else {
-          add("chunk delete privilege", "ok", `${chunks.role} can DELETE from thought_chunks (INSERT on it, and on thought_audit, are not checked here)`);
+          // Present tables only, in CAPTURE_WRITES order (SELECT, INSERT, …), so
+          // a GRANT reads the way the guide writes one and names only what is
+          // missing — never the privileges the role already holds.
+          const missingByTable = new Map<string, string[]>();
+          const heldByTable = new Map<string, string[]>();
+          for (const w of CAPTURE_WRITES) {
+            if (!presentTables.has(w.table)) continue;
+            const target = grantState.get(`${w.table} ${w.privilege}`) ? heldByTable : missingByTable;
+            target.set(w.table, [...(target.get(w.table) ?? []), w.privilege]);
+          }
+          const absent = reqTables.filter((t, i) => reqTables.indexOf(t) === i && !presentTables.has(t));
+          if (missingByTable.size) {
+            const phrase = [...missingByTable].map(([t, ps]) => `${ps.join(", ")} on ${t}`).join("; ");
+            const grants = [...missingByTable].map(([t, ps]) => `GRANT ${ps.join(", ")} ON ${t} TO ${ident};`).join("  ");
+            add("write privileges", "fail",
+                `this connection's role (${role}) is missing privileges the capture path's writers need, run as their caller: ${phrase} — so a windowed capture, an edit with content, or 008's audit trigger would fail`,
+                grants);
+          } else {
+            const held = [...heldByTable].map(([t, ps]) => `${ps.join("/")} on ${t}`).join(", ");
+            add("write privileges", "ok",
+                `${role} holds the capture path's privileges — ${held}${absent.length ? ` (${absent.join(", ")} not yet present)` : ""} (ob1_config and the agent tables are read-only and checked elsewhere)`);
+          }
         }
 
         // 003's missing half (023). A thought without a fingerprint whose key
