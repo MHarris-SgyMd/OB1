@@ -1690,7 +1690,7 @@ console.log("\n[19] Migration 018: an unchanged edit is never a duplicate, and n
   assert(/date_trunc\('milliseconds'/.test(src) && /p_if_unchanged_since IS NULL\s+OR/.test(src), "…009's millisecond-truncated guard as a predicate in the UPDATE");
   assert(/elem->>'context'/.test(src), "…013's context in the chunk insert");
   assert(/content_fingerprint_of\(/.test(src) && !/regexp_replace/.test(src), "…016's fingerprint function rather than a third inline copy of the rule");
-  assert(/FROM thoughts WHERE id = p_id FOR UPDATE/.test(src), "…the row read FOR UPDATE, so \"unchanged\" is decided against a row that cannot change under the call");
+  assert(/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/.test(src), "…the row read FOR NO KEY UPDATE (018's FOR UPDATE, weakened by 032 for the FK's KEY SHARE), so \"unchanged\" is decided against a row that cannot change under the call");
   assert(/pg_advisory_xact_lock/.test(src), "…and the advisory lock that serialises edits to one fingerprint (db/test-live.ts [6b] proves it)");
   assert(/ob1:unchanged-edit-not-duplicate/.test(src), "…and the ob1:unchanged-edit-not-duplicate sentinel reembed.ts asks for, which a successor must keep");
   await db.exec(`DELETE FROM thoughts`);
@@ -2164,11 +2164,11 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   assert((await audits()) === beforeLabel, "a label-only change is not an audit event either");
 
   // One function, eight parameters, 018's body by name; 010's trigger untouched.
-  assert((await functionsNamed("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload");
+  assert((await functionsNamed("update_thought")) === 1, "exactly one update_thought: 021 replaced the signature rather than adding an overload, and 032 again");
   const proc = (await db.query<{ n: number; src: string }>(`SELECT pronargs AS n, prosrc AS src FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0];
-  assert(Number(proc?.n) === 8, `…of eight parameters (${proc?.n})`);
+  assert(Number(proc?.n) === 9, `…of nine parameters since 032 (${proc?.n})`);
   for (const [re, what] of [
-    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR UPDATE/, "018's FOR UPDATE"],
+    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
     [/pg_advisory_xact_lock/, "018's advisory lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
     [/date_trunc\('milliseconds'/, "009's guard"], [/jsonb_typeof\(p_payload\) <> 'object'/, null],
   ] as [RegExp, string | null][]) {
@@ -2177,23 +2177,26 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   const up = (await db.query<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = 'upsert_thought(text, jsonb, vector)'::regprocedure`)).rows[0].src;
   assert(/jsonb_typeof\(p_payload\) <> 'object'/.test(up) && /set_config\('ob1\.actor'/.test(up) && /p_payload->>'embedding_model'/.test(up), "the 3-argument upsert_thought carries 005's guard and 008's actor beside the label");
   assert((await functionsNamed("upsert_thought")) === 3, "still exactly three upsert_thought overloads");
-  assert(lastDefinerOf("update_thought").startsWith("021") && lastDefinerOf("upsert_thought").startsWith("025") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
-         `021 is the last definer of update_thought, 025 of upsert_thought (its 3-argument body carries 022's chunk rule and 021's label) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
+  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("upsert_thought").startsWith("025") && lastDefinerOf("thoughts_write_audit").startsWith("025"),
+         `032 is the last definer of update_thought (it carries 021's body and adds the provenance envelope), 025 of upsert_thought (its 3-argument body carries 022's chunk rule and 021's label) and 025 of the audit trigger (it carries 010's body and diffs provenance) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("upsert_thought")}, ${lastDefinerOf("thoughts_write_audit")})`);
 
   // The trap: 018 re-applied by hand puts the 7-argument form back BESIDE the
-  // eight-argument one, and a 7-argument call is ambiguous. 021 re-applied
-  // drops it again.
+  // current one, and a 7-argument call is ambiguous. The last definer (032)
+  // re-applied drops it again — 021's file drops it too, but leaves its own
+  // 8-argument form beside 032's; [32] holds that case.
   await reapply("018");
-  assert((await functionsNamed("update_thought")) === 2, "re-applying 018 over 021 creates a second update_thought");
+  assert((await functionsNamed("update_thought")) === 2, "re-applying 018 over the shipped form creates a second update_thought");
   let ambiguous = "";
   try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb)`, [labelled]); }
   catch (e) { ambiguous = (e as Error).message; }
   assert(/not unique/.test(ambiguous), `…after which a 7-argument call is "function is not unique" (${ambiguous.slice(0, 60)})`);
   await restoreShipped("update_thought", "upsert_thought");
-  assert((await functionsNamed("update_thought")) === 1, "…and re-applying 021 drops the 7-argument form again");
+  assert((await functionsNamed("update_thought")) === 1, "…and re-applying the last definer drops the 7-argument form again");
 
   // The ACL survives the DROP, as 020's does ([21]): 018's form back and
-  // hardened, 021 applied for the first time, the new form's ACL read.
+  // hardened, the current form applied for the first time, its ACL read.
+  // 032 reads the 7-argument form's ACL when no 8-argument one is there —
+  // the fallback for exactly this state.
   const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
   const hasPublic = (a: string) => /(^\{|,)=X\//.test(a);
   assert((await acl(UT)) === "", "the shipped function has default privileges — a NULL ACL");
@@ -2204,7 +2207,7 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT_7} TO ob1_test_editor WITH GRANT OPTION`);
   await restoreShipped("update_thought", "upsert_thought");
   const granted = await acl(UT);
-  assert(!hasPublic(granted) && /ob1_test_editor=X\*\//.test(granted), `a revoke and a grant with grant option on the 7-argument form are carried to the eight-argument one (${granted})`);
+  assert(!hasPublic(granted) && /ob1_test_editor=X\*\//.test(granted), `a revoke and a grant with grant option on the 7-argument form are carried to the current one (${granted})`);
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO ob1_test_editor`);
   await pre021();
   assert(/ob1_test_editor=X\//.test(await acl(UT_7)), "default privileges give a re-created 7-argument form EXECUTE for the role");
@@ -2215,11 +2218,13 @@ console.log("\n[22] Migration 021: the vector's model rides with the vector");
   await db.exec(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM ob1_test_editor`);
   await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM PUBLIC`);
   await reapply("018");
-  // Both names: restoring update_thought re-runs 021 whole, and 021's CREATE
-  // OR REPLACE puts its 3-argument upsert_thought back over 022's.
+  // Both names, from when restoring update_thought re-ran 021 whole and 021's
+  // CREATE OR REPLACE put its 3-argument upsert_thought back over 022's; the
+  // last definer is 032 now, which touches no upsert_thought, and the pair is
+  // kept so the section stays right if that changes again.
   await restoreShipped("update_thought", "upsert_thought");
   const kept = await acl(UT);
-  assert(!hasPublic(kept) && (await functionsNamed("update_thought")) === 1, `a re-run of 021 over the two-form state drops the 7-argument form and leaves the hardened eight-argument form's ACL alone (${kept})`);
+  assert(!hasPublic(kept) && (await functionsNamed("update_thought")) === 1, `a re-run of the last definer over the two-form state drops the 7-argument form and leaves the hardened current form's ACL alone (${kept})`);
   await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
   await db.exec(`DROP ROLE ob1_test_editor`);
   await db.exec(`DELETE FROM thoughts`);
@@ -2312,7 +2317,13 @@ console.log("\n[23] Migration 022: a re-capture's windows stay while the label v
   await capture("a long capture", { metadata: {}, embedding_model: "model-d" }, unit(6));
   row = await rowOf(id);
   assert(row.windows === 1 && row.model === "model-d" && row.axis === 6, `…and a re-capture at another model leaves the windows under the moved vector again (${row.windows} window at model-d)`);
-  await restoreShipped("upsert_thought");
+  // 021 re-applied also put its 8-argument update_thought back BESIDE 032's
+  // (021 drops only the 7-argument form), so every call with eight arguments
+  // or fewer is ambiguous until the last definer drops it again — [32] asserts
+  // that state; here it is restored so the sections after this one can edit.
+  assert((await functionsNamed("update_thought")) === 2, "…and 021's 8-argument update_thought is back beside 032's");
+  await restoreShipped("update_thought", "upsert_thought");
+  assert((await functionsNamed("update_thought")) === 1, "…until 032 is re-applied");
   assert(/ob1:vector-replaces-chunks/.test(await bodyOf(UP3)), "022 re-applied: the sentinel is back");
   await capture("a long capture", { metadata: {}, embedding_model: "model-e" }, unit(7));
   row = await rowOf(id);
@@ -2783,8 +2794,10 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `SELECT status, superseding_id, review_note, reviewed_at FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
   assert(accRow.status === "accepted" && accRow.superseding_id === reversal && accRow.review_note === "confirmed in the June minutes" && accRow.reviewed_at !== null,
     "…the row is accepted, names the thought it wrote, and keeps the note");
+  // By created_at: thought_audit.id is a uuid, so `ORDER BY id` is a coin toss
+  // (this read ordered by it until SMD-1323's twin exposed the flake).
   const audit = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
-    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY id DESC LIMIT 1`, [reversal])).rows[0];
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [reversal])).rows[0];
   const auditAfter = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const supDiff = (audit?.diff as { supersedes?: { before?: unknown; after?: unknown } } | undefined)?.supersedes;
   assert(auditAfter === auditBefore + 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
@@ -3040,11 +3053,11 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   // check 7 reads it. Three names preflight's remedies spell as the last
   // definer are pinned here: when one moves, so must the remedy.
   const owned = ownedFunctionsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
-  // 36 at migration 031; the set can only grow, so a smaller one means the
+  // 37 at migration 032; the set can only grow, so a smaller one means the
   // reader lost definitions (a comment or body it failed to strip), not that
   // a migration went away.
-  assert(owned.size >= 36 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
-    `the owned set is read from the migrations: ${owned.size} functions (36 at 031, never fewer), names only — no word from a header comment quoting a statement`);
+  assert(owned.size >= 37 && [...owned.keys()].every((n) => /^[a-z][a-z0-9_]*$/.test(n)) && !owned.has("and") && !owned.has("keeps"),
+    `the owned set is read from the migrations: ${owned.size} functions (37 at 032, never fewer), names only — no word from a header comment quoting a statement`);
   assert(owned.get("upsert_thought") === "025_thought_provenance.sql" && owned.get("trace_provenance") === "026_trace_provenance_bounded.sql" && owned.get("release_thought") === "015_thought_work_claims.sql",
     "…and the last definers preflight's remedies name: upsert_thought 025, trace_provenance 026, release_thought 015");
   const ownedCols = ownedColumnCommentsIn(files.map((f) => [f, readFileSync(join(MIGRATIONS, f), "utf8")] as const));
@@ -3100,6 +3113,207 @@ console.log("\n[31] A vendored schema applied to a migrated brain replaces no fu
   assert(!/ob1:vector-replaces-chunks/.test(await srcOf(THREE)), "005 re-applied puts a pre-022 3-argument body back too (its file defines both forms), so the remedy for the 2-argument form has to say 'then 025 again'");
   await restoreShipped("upsert_thought", "trace_provenance");
   assert(JSON.stringify(await bodies()) === JSON.stringify(shipped), "…and the last definers re-applied put every owned body back, byte for byte");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+// ── 32. Migration 032 — provenance through the edit path ─────────────────────
+//
+// update_thought's ninth parameter is the envelope capture reads: an absent
+// key leaves the column, a JSON null clears it, a value sets it after the
+// checks 025 makes at capture plus 029's cycle walk. The review path writes
+// through it. [28] drives 029's outcomes and still passes over the new body;
+// this section is the envelope itself and what the redefinition must hold.
+
+console.log("\n[32] Migration 032: update_thought takes provenance — set, clear, a ghost and a loop refused, audited; the review path writes through it (SMD-1323)");
+{
+  await db.exec(`DELETE FROM thoughts`);
+  const UT = UPDATE_THOUGHT_SIGNATURE;
+  const UT_8 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text)"; // the form 032 dropped; 021 re-creates it
+  const UT_7 = "update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb)";
+  const GHOST = "00000000-0000-4000-8000-000000000000";
+  const cap = async (content: string, at: number) =>
+    (await db.query<{ r: { id: string } }>(`SELECT upsert_thought($1, '{"metadata":{"k":1}}'::jsonb, $2::vector) AS r`, [content, unit(at)])).rows[0].r.id;
+  type R = { ok: boolean; error?: string; supersedes?: string; detail?: string; current_updated_at?: string };
+  /** A provenance-only edit: nothing but the envelope, the actor and the guard. */
+  const edit = async (id: string, prov: unknown, extra: { actor?: unknown; since?: string } = {}) =>
+    (await db.query<{ r: R }>(
+      `SELECT update_thought($1::uuid, NULL::text, NULL::jsonb, NULL::vector, NULL::jsonb, $3::timestamptz, $4::jsonb, NULL::text, $2::jsonb) AS r`,
+      [id, prov === undefined ? null : JSON.stringify(prov), extra.since ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor)])).rows[0].r;
+  const rowOf = async (id: string) =>
+    (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: string }>(
+      `SELECT supersedes AS s, derived_from AS d, content, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis,
+              embedding_model AS m, (metadata->>'k')::int AS k, updated_at::text AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
+  // By created_at, not id — thought_audit.id is a uuid, so ordering by it is
+  // random ([28] had that flake latent). created_at is now(), the
+  // transaction's start, and every call here is its own transaction writing
+  // at most one audit row for the thought, so the newest is unambiguous.
+  const lastAudit = async (id: string) =>
+    (await db.query<{ actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> }>(
+      `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [id])).rows[0];
+  const audits = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
+  const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
+  const exists = async (sig: string) => (await db.query<{ e: boolean }>(`SELECT to_regprocedure($1) IS NOT NULL AS e`, [sig])).rows[0].e;
+
+  // The shape: one function of nine parameters, neither older form beside it,
+  // 032 the last definer of the three names it touches.
+  assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 9,
+    "one update_thought, of nine parameters");
+  assert(!(await exists(UT_8)) && !(await exists(UT_7)), "…neither the 8- nor the 7-argument form beside it");
+  assert(lastDefinerOf("update_thought").startsWith("032") && lastDefinerOf("review_supersession_proposal").startsWith("032") && lastDefinerOf("validate_derived_from").startsWith("032"),
+    `032 is the last definer of update_thought, review_supersession_proposal and validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
+  const src = await srcOf(UT);
+  for (const [re, what] of [
+    [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
+    [/pg_advisory_xact_lock\(hashtextextended/, "018's fingerprint lock"], [/content_fingerprint_of\(/, "016's fingerprint function"], [/elem->>'context'/, "013's context"],
+    [/date_trunc\('milliseconds'/, "009's guard"], [/p_embedding IS NULL THEN NULL/, "021's label CASE"],
+    [/validate_derived_from\(p_provenance->'derived_from'\)/, "032's one derived_from rule"], [/hashtext\('ob1:supersession-review'\)/, "029's supersession lock, taken here too"],
+    [/'SUPERSEDES_NOT_FOUND'/, "the ghost refusal"], [/'WOULD_CYCLE'/, "the loop refusal"],
+  ] as [RegExp, string][]) assert(re.test(src), `…carrying ${what}`);
+  const review = await srcOf("review_supersession_proposal(uuid, text, text, text, jsonb, boolean)");
+  assert(!/UPDATE\s+thoughts\b/i.test(review) && /update_thought\(/.test(review) && (review.match(/update_thought\(/g) ?? []).length === 2 && !/v_walk/.test(review),
+    "review_supersession_proposal writes thoughts through update_thought — two calls, no UPDATE of its own, no walk of its own");
+
+  // Set, leave, replace, clear — and what does not move.
+  const a = await cap("v1: the plan is A", 0);
+  const b = await cap("v2: the plan is B", 1);
+  const c = await cap("a source note", 2);
+  const before = await rowOf(b);
+  const auditsBefore = await audits();
+  let r = await edit(b, { supersedes: a }, { actor: { name: "editor", source: "test" } });
+  let row = await rowOf(b);
+  assert(r.ok === true && row.s === a, `an edit naming supersedes sets the pointer (${JSON.stringify(r)})`);
+  assert(row.content === before.content && row.fp === before.fp && row.axis === 1 && row.m === before.m && row.k === 1, "…and touches neither content, fingerprint, vector, label nor metadata");
+  assert(row.u > before.u, "…while updated_at moves: a provenance edit is an edit");
+  let audit = await lastAudit(b);
+  assert((await audits()) === auditsBefore + 1 && audit.actor_name === "editor" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === a && !("content" in audit.diff) && !("metadata" in audit.diff),
+    `…one audit row, the actor and the supersedes diff and nothing else (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
+  r = await edit(b, {});
+  assert(r.ok === true && (await rowOf(b)).s === a, "an envelope without the key leaves the pointer");
+  r = await edit(b, undefined);
+  assert(r.ok === true && (await rowOf(b)).s === a, "…as does no envelope — what every 8-argument caller sends");
+  assert((await audits()) === auditsBefore + 1, "…and neither writes an audit row: nothing changed");
+  r = await edit(b, { derived_from: [c, c.toUpperCase()] });
+  row = await rowOf(b);
+  assert(r.ok === true && JSON.stringify(row.d) === JSON.stringify([c]) && row.s === a, `derived_from is set canonical — lowercased, de-duplicated — and the pointer is left (${JSON.stringify(row.d)})`);
+  r = await edit(b, { supersedes: null });
+  row = await rowOf(b);
+  assert(r.ok === true && row.s === null && JSON.stringify(row.d) === JSON.stringify([c]), "a JSON null clears the pointer and leaves derived_from");
+  audit = await lastAudit(b);
+  assert(audit.diff.supersedes?.before === a && audit.diff.supersedes?.after === null, "…audited as before a, after null");
+  r = await edit(b, { derived_from: [] });
+  assert(r.ok === true && (await rowOf(b)).d === null, "an empty derived_from array clears the column — [] and null are one spelling");
+  r = await edit(b, { derived_from: [c], supersedes: a });
+  row = await rowOf(b);
+  assert(r.ok === true && row.s === a && JSON.stringify(row.d) === JSON.stringify([c]), "both keys set in one envelope");
+  audit = await lastAudit(b);
+  assert(audit.diff.supersedes?.after === a && JSON.stringify(audit.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${JSON.stringify(audit.diff)})`);
+  r = await edit(b, { derived_from: null, supersedes: null });
+  row = await rowOf(b);
+  assert(r.ok === true && row.s === null && row.d === null, "…both cleared in one envelope");
+
+  // Refusals: a ghost, a self-pointer, a loop direct and through a chain; the
+  // row and the audit untouched by each.
+  const auditsAtRefusals = await audits();
+  r = await edit(b, { supersedes: GHOST });
+  assert(r.ok === false && r.error === "SUPERSEDES_NOT_FOUND" && r.supersedes === GHOST, `a supersedes naming no thought is refused by name, not by the foreign key (${JSON.stringify(r)})`);
+  r = await edit(b, { supersedes: b });
+  assert(r.ok === false && r.error === "WOULD_CYCLE", `a thought cannot supersede itself (${r.error})`);
+  assert((await edit(b, { supersedes: a })).ok === true, "(b supersedes a)");
+  r = await edit(a, { supersedes: b });
+  assert(r.ok === false && r.error === "WOULD_CYCLE" && r.supersedes === b, `a pointer closing a direct loop is refused (${r.error})`);
+  assert((await edit(c, { supersedes: b })).ok === true, "(c supersedes b, which supersedes a)");
+  r = await edit(a, { supersedes: c });
+  assert(r.ok === false && r.error === "WOULD_CYCLE", `…and one closing a loop through a chain (${r.error})`);
+  assert((await rowOf(a)).s === null && (await rowOf(b)).s === a && (await rowOf(c)).s === b, "…the three pointers as they were");
+  assert((await audits()) === auditsAtRefusals + 2, "…two audit rows for the two writes among them, none for a refusal");
+  let raised = "";
+  try { await edit(a, { supersedes: "nope" }); } catch (e) { raised = (e as Error).message; }
+  assert(/supersedes must be a thought UUID string or null/.test(raised), "a supersedes that is not a UUID string raises, as capture does");
+  try { await edit(a, { derived_from: ["nope"] }); } catch (e) { raised = (e as Error).message; }
+  assert(/derived_from must contain only thought UUID strings/.test(raised), "a non-UUID derived_from element raises 025's message");
+  try { await edit(a, { derived_from: [GHOST] }); } catch (e) { raised = (e as Error).message; }
+  assert(/derived_from references a thought that does not exist/.test(raised), "…a ghost element too");
+  try { await edit(a, { derived_from: "x" }); } catch (e) { raised = (e as Error).message; }
+  assert(/derived_from must be a JSON array/.test(raised), "…and a non-array");
+  try { await db.query(`SELECT update_thought($1::uuid, NULL::text, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text, '"{\\"supersedes\\":null}"'::jsonb)`, [a]); } catch (e) { raised = (e as Error).message; }
+  assert(/p_provenance must be a JSON object, got string/.test(raised), "a double-encoded envelope is refused as 005 refuses a double-encoded payload");
+  r = await edit(c, { supersedes: null }, { since: "2000-01-01T00:00:00Z" });
+  assert(r.ok === false && r.error === "STALE_READ" && (await rowOf(c)).s === b, "if_unchanged_since guards a provenance edit as it guards every edit");
+
+  // The one rule: validate_derived_from answers as upsert_thought's inline
+  // copy does — same canonical form, same three messages — until SMD-1043
+  // hands the inline copy over.
+  const vdf = async (v: string | null) => (await db.query<{ r: unknown }>(`SELECT validate_derived_from($1::jsonb) AS r`, [v])).rows[0].r;
+  assert((await vdf(null)) === null && (await vdf("null")) === null && (await vdf("[]")) === null, "validate_derived_from: SQL NULL, JSON null and [] are NULL");
+  assert(JSON.stringify(await vdf(JSON.stringify([c.toUpperCase(), a, c]))) === JSON.stringify([a, c].sort()), "…a list comes back lowercased, de-duplicated, sorted");
+  const capRaise = async (v: unknown) => { try { await db.query(`SELECT upsert_thought('a synthesis 32', $1::jsonb, $2::vector)`, [JSON.stringify({ metadata: {}, derived_from: v }), unit(3)]); return ""; } catch (e) { return (e as Error).message; } };
+  const vdfRaise = async (v: unknown) => { try { await vdf(JSON.stringify(v)); return ""; } catch (e) { return (e as Error).message; } };
+  const tail = (m: string) => m.replace(/^[^:]*: /, "");
+  for (const bad of [["nope"], [GHOST], "x", [1]]) {
+    assert(tail(await capRaise(bad)) === tail(await vdfRaise(bad)) && (await vdfRaise(bad)) !== "", `…and refuses ${JSON.stringify(bad)} with the message upsert_thought's inline copy gives (${tail(await vdfRaise(bad)).slice(0, 50)}…)`);
+  }
+
+  // The review path writes through it: the acceptance's audit row is an
+  // update_thought row — the reviewer as actor, the supersedes diff — and a
+  // loop update_thought refuses comes back through the proposal with the
+  // pair named, as db/consolidate.ts reads it.
+  const p = await cap("review: the earlier note", 4);
+  const q = await cap("review: the later note", 4);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '5 days' WHERE id = $1`, [p]);
+  const propose = async (older: string, newer: string) =>
+    (await db.query<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.9, 'test', 0.99, 'consolidate:stub@p1', NULL) AS id`, [older, newer])).rows[0].id;
+  const reviewCall = async (id: string, decision: string) =>
+    (await db.query<{ r: Record<string, unknown> }>(`SELECT review_supersession_proposal($1::uuid, $2, NULL, NULL, '{"name":"reviewer","source":"test"}'::jsonb, false) AS r`, [id, decision])).rows[0].r;
+  const pid = await propose(p, q);
+  const auditsAtReview = await audits();
+  const acc = await reviewCall(pid, "accept");
+  assert(acc.ok === true && acc.written === true && (await rowOf(q)).s === p, `accept writes the pointer through update_thought (${JSON.stringify(acc)})`);
+  audit = await lastAudit(q);
+  assert((await audits()) === auditsAtReview + 1 && audit.actor_name === "reviewer" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === p,
+    `…one audit row, the reviewer as actor, the supersedes diff — update_thought's row (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
+  const rej = await reviewCall(pid, "reject");
+  assert(rej.ok === true && rej.cleared === true && (await rowOf(q)).s === null && (await lastAudit(q)).diff.supersedes?.after === null, "reject clears it through update_thought, audited the same way");
+  const x = await cap("loop: the earlier note", 5);
+  const y = await cap("loop: the later note", 5);
+  await db.query(`UPDATE thoughts SET created_at = now() - interval '5 days' WHERE id = $1`, [x]);
+  assert((await edit(x, { supersedes: y })).ok === true, "(x, the older, supersedes y by hand)");
+  const loopPid = await propose(x, y);
+  const loop = await reviewCall(loopPid, "accept");
+  assert(loop.ok === false && loop.error === "WOULD_CYCLE" && loop.id === loopPid && loop.superseding_id === y && loop.superseded_id === x,
+    `accepting a pointer that closes a loop is refused by update_thought's walk, and the proposal answers with the pair named (${JSON.stringify(loop)})`);
+  assert((await rowOf(y)).s === null && (await db.query<{ s: string }>(`SELECT status AS s FROM supersession_proposals WHERE id = $1`, [loopPid])).rows[0].s === "pending", "…nothing written, the proposal still pending");
+
+  // The trap this migration's DROP exists for: 021 re-applied by hand puts
+  // the 8-argument form back BESIDE 032's (021 drops only the 7-argument
+  // one), and every call with eight arguments or fewer — reembed.ts's, every
+  // PostgREST caller by name from before this change — is ambiguous. 032
+  // re-applied drops it again. And the ACL crosses the DROP from the
+  // 8-argument form, as 021 carried it from the 7-argument one.
+  await reapply("021");
+  assert((await functionsNamed("update_thought")) === 2 && (await exists(UT_8)), "021 re-applied over 032 leaves its 8-argument form beside the 9-argument one");
+  let ambiguous = "";
+  try { await db.query(`SELECT update_thought($1::uuid, 'x', NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`, [a]); }
+  catch (e) { ambiguous = (e as Error).message; }
+  assert(/not unique/.test(ambiguous), `…after which an 8-argument call — reembed.ts's — is "function is not unique" (${ambiguous.slice(0, 40)})`);
+  await restoreShipped("update_thought", "upsert_thought");
+  assert((await functionsNamed("update_thought")) === 1 && !(await exists(UT_8)), "…and 032 re-applied drops it");
+  const acl = async (sig: string) => String((await db.query<{ a: string | null }>(`SELECT proacl::text AS a FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0]?.a ?? "");
+  const hasPublic = (s: string) => /(^\{|,)=X\//.test(s);
+  await db.exec(`CREATE ROLE ob1_test_editor32`);
+  await db.exec(`DROP FUNCTION ${UT}`);
+  await reapply("021");
+  assert((await exists(UT_8)) && !(await exists(UT)), "(a pre-032 brain: 021's form alone)");
+  await db.exec(`REVOKE ALL ON FUNCTION ${UT_8} FROM PUBLIC`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${UT_8} TO ob1_test_editor32 WITH GRANT OPTION`);
+  await restoreShipped("update_thought", "upsert_thought");
+  const granted = await acl(UT);
+  assert(!hasPublic(granted) && /ob1_test_editor32=X\*\//.test(granted) && !(await exists(UT_8)), `a revoke and a grant with grant option on the 8-argument form are carried to the 9-argument one across the DROP (${granted})`);
+  await db.exec(`GRANT EXECUTE ON FUNCTION ${UT} TO PUBLIC`);
+  await db.exec(`REVOKE ALL ON FUNCTION ${UT} FROM ob1_test_editor32`);
+  await db.exec(`DROP ROLE ob1_test_editor32`);
+  assert(lastDefinerOf("trace_provenance").startsWith("026"), "(restoring upsert_thought re-ran 025 whole; [25]'s note applies)");
+  await restoreShipped("trace_provenance");
+  await db.exec(`DELETE FROM supersession_proposals`);
   await db.exec(`DELETE FROM thoughts`);
 }
 

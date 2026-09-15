@@ -277,6 +277,42 @@ console.log("\n[8b] Re-saving a legacy twin's own text is accepted, and the repl
   assert(/already exists/i.test(msg), "editing the twin INTO another thought's text is still refused");
 }
 
+console.log("\n[9] `supersedes` through the tool: set, clear, a loop and a ghost refused by name (migration 032)");
+{
+  const idOf = (reply: string) => reply.match(/id ([0-9a-f-]{36})/)?.[1] ?? "";
+  const older = idOf(await writer.call("capture_thought", { content: "the plan, first version: ship on Monday" }));
+  const newer = idOf(await writer.call("capture_thought", { content: "the plan, revised: ship on Wednesday" }));
+  assert(older.length === 36 && newer.length === 36, "(two versions captured)");
+  const pointer = async (id: string) => ((await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${id}::uuid`)[0] as { s: string | null }).s;
+
+  // A supersedes-only edit is an edit — not "would do nothing" — and the
+  // reply says what it did.
+  const set = await writer.call("update_thought", { id: newer, supersedes: older });
+  assert(/^Updated /.test(set) && new RegExp(`now supersedes ${older}`).test(set) && /updated_at:/.test(set), `the pointer is set and the reply names it (${set.split("\n")[0]})`);
+  assert((await pointer(newer)) === older, "…and the column holds it");
+  const [audit] = await sql`SELECT actor_name, diff FROM thought_audit WHERE thought_id = ${newer}::uuid AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`;
+  assert(audit?.actor_name === "laptop" && audit?.diff?.supersedes?.after === older, `…audited under the key's name with the supersedes diff (${JSON.stringify(audit?.diff)})`);
+
+  // The refusals, in the tool's words.
+  let msg = "";
+  try { await writer.call("update_thought", { id: older, supersedes: newer }); } catch (e) { msg = (e as Error).message; }
+  assert(/would close a loop/.test(msg) && /point the newer thought at the older/.test(msg), `pointing the older at the newer is refused as a loop, with the fix (${msg.slice(0, 60)})`);
+  try { await writer.call("update_thought", { id: newer, supersedes: "00000000-0000-4000-8000-000000000000" }); } catch (e) { msg = (e as Error).message; }
+  assert(/no thought with the id given as supersedes/.test(msg), `a pointer at no thought is refused by name (${msg.slice(0, 60)})`);
+  try { await writer.call("update_thought", { id: newer, supersedes: "null" }); } catch (e) { msg = (e as Error).message; }
+  assert(/must be a thought id/.test(msg) && /not "null"/.test(msg), `a value that is not an id — the word "null" included — is refused at the tool, not raised by the function (${msg.slice(0, 60)})`);
+  assert((await pointer(newer)) === older && (await pointer(older)) === null, "…and no refusal wrote anything");
+  const [{ c: rowsBefore }] = await sql`SELECT count(*)::int AS c FROM thoughts`;
+  try { await writer.call("capture_thought", { content: "a capture naming no id", supersedes: "not-an-id" }); } catch (e) { msg = (e as Error).message; }
+  assert(/must be a thought id/.test(msg) && Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c) === Number(rowsBefore), `capture_thought refuses a non-id supersedes the same way, before it embeds or writes (${msg.slice(0, 60)})`);
+
+  // null clears; omitting the key leaves.
+  const meta = await writer.call("update_thought", { id: newer, metadata_patch: { reviewed: true } });
+  assert(/^Updated /.test(meta) && !/supersedes/.test(meta) && (await pointer(newer)) === older, "an edit that omits supersedes leaves the pointer and says nothing about it");
+  const cleared = await writer.call("update_thought", { id: newer, supersedes: null });
+  assert(/supersedes cleared/.test(cleared) && (await pointer(newer)) === null, `null clears it, and the reply says so (${cleared.split("\n")[0]})`);
+}
+
 await sql.close();
 server.stop();
 provider.stop();

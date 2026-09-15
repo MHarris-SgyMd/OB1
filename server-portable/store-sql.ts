@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseAgentResolution, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -42,6 +42,7 @@ import type {
   ThoughtStats,
   ThoughtRecord,
   ThoughtStore,
+  UpdateProvenance,
   UpdateResult,
 } from "./store.ts";
 
@@ -277,13 +278,15 @@ export class SqlStore implements ThoughtStore {
     ifUnchangedSince?: string;
     actor?: Actor;
     embeddingModel?: string;
+    provenance?: UpdateProvenance;
   }): Promise<UpdateResult> {
     const chunks = (opts.chunks ?? []).map((c) => ({
       content: c.content,
       embedding: toVector(c.embedding),
       context: c.context ?? null,
     }));
-    // Eight arguments since migration 021: the model beside the vector.
+    // Nine arguments since migration 032: the model beside the vector (021),
+    // then the provenance envelope — NULL when the edit named none.
     const rows = await this.sql`
       SELECT update_thought(
         ${opts.id}::uuid,
@@ -293,7 +296,8 @@ export class SqlStore implements ThoughtStore {
         ${chunks.length ? chunks : null}::jsonb,
         ${opts.ifUnchangedSince ?? null}::timestamptz,
         ${actorPayload(opts.actor)}::jsonb,
-        ${opts.embeddingModel ?? null}::text
+        ${opts.embeddingModel ?? null}::text,
+        ${provenanceEnvelope(opts.provenance)}::jsonb
       ) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
   }

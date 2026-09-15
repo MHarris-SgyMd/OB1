@@ -69,6 +69,19 @@ console.log("[1] captureThought without chunks — the 3-arg RPC, unchanged");
   assert(edited.m === "unit-test-model-2" && edited.t === "note", `update_thought's p_embedding_model reaches the row by name, and a metadata-only edit leaves it (${edited.m})`);
   const [c] = await sql`SELECT count(*)::int AS c FROM thought_chunks WHERE thought_id = ${id}`;
   assert(c.c === 0, "no chunk rows for short content");
+  // The ninth argument by name (032): p_provenance sets, a call without it
+  // sends null and leaves, a JSON null in it clears; a refusal is the union.
+  const { id: older } = await store.captureThought({ content: "the earlier version, over PostgREST", payload: { metadata: {} }, embedding: vec(1) });
+  const prov = async () => (await sql`SELECT supersedes AS s, derived_from AS d FROM thoughts WHERE id = ${id}`)[0] as { s: string | null; d: string[] | null };
+  const set = await store.updateThought({ id, provenance: { supersedes: older, derivedFrom: [older] } });
+  assert(set.ok && (await prov()).s === older && JSON.stringify((await prov()).d) === JSON.stringify([older]), "p_provenance reaches update_thought by name: supersedes and derived_from written");
+  await store.updateThought({ id, metadataPatch: { type: "idea" } });
+  assert((await prov()).s === older, "…an edit naming no provenance leaves them");
+  const cleared = await store.updateThought({ id, provenance: { supersedes: null, derivedFrom: null } });
+  assert(cleared.ok && (await prov()).s === null && (await prov()).d === null, "…and null clears both");
+  const loop = await store.updateThought({ id: older, provenance: { supersedes: older } });
+  assert(!loop.ok && loop.error === "WOULD_CYCLE", `a self-pointer comes back as WOULD_CYCLE over PostgREST too (${JSON.stringify(loop)})`);
+  await sql`DELETE FROM thoughts WHERE id = ${older}`;
   await sql.close();
 }
 

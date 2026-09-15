@@ -92,6 +92,8 @@ const FUNCTIONS = [
   "list_supersession_proposals(text, int)",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
+  // 032 (SMD-1323)
+  "validate_derived_from(jsonb)",
 ];
 
 export type SchemaOptions = {

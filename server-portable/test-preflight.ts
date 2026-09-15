@@ -762,13 +762,14 @@ else {
    * the pass as the remedy; one wholly at the recorded model is ok, unlabelled
    * rows as detail; the record disagreeing with the configuration puts
    * --switch-model in the remedy; the column missing under this server fails;
-   * and the eight-argument update_thought is checked alone — 018 re-applied by
-   * hand beside it, or in its place, fails with the DROP or the migration.
+   * and the nine-argument update_thought is checked alone — 018 or 021
+   * re-applied by hand beside it, or in its place, fails with the DROP or the
+   * migration.
    */
   const noVec = await run(SQL_ENV);
   assert(/vector models\s+no vectors stored yet/.test(noVec.out) && /re-embed pass\s+none unfinished/.test(noVec.out), "with no vectors stored the rows have nothing to say, and say so");
-  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\\): the form the servers and reembed\\.ts call since migration 021 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
-         "the eight-argument update_thought is the only form");
+  assert(new RegExp(`edit signature\\s+update_thought\\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\\): the form the servers and reembed\\.ts call since migration 032 \\(${rx(UPDATE_THOUGHT_SIGNATURE)}\\), alone`).test(noVec.out),
+         "the nine-argument update_thought is the only form");
   const VEC = `('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector`;
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = '${EMBEDDING_MODEL}' WHERE id IN ('${ids[0]}', '${ids[1]}')`);
   await claims.unsafe(`UPDATE thoughts SET embedding = ${VEC}, embedding_model = 'other-model' WHERE id = '${ids[2]}'`);
@@ -842,8 +843,9 @@ else {
          "the column missing under this server does not start, naming 021");
   // 021 and 022 together leave 022's 3-argument body over 025's — the
   // pre-025 warning, exit 0; the pre-022 warning asserted further down arrives
-  // after 018 and then 021 alone.
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") });
+  // after 018 and then 021 alone. 032 follows, since 021 re-applied leaves its
+  // 8-argument update_thought beside 032's (asserted further down too).
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") || f.startsWith("032") });
   const restored = await run(SQL_ENV);
   assert(restored.code === 0 && new RegExp(`vector models\\s+no vector is known to be at ${rx(EMBEDDING_MODEL)}: 4 unlabelled \\(model unknown\\)`).test(restored.out) && /the pass takes every row nothing vouches for/.test(restored.out),
          `021 re-applied: the column is back, its labels gone — and a corpus with no vector known to be at its model is a warning with the pass as the remedy, not an ok (exit ${restored.code}: ${restored.out.split("\n").filter((l) => /vector models|fail/.test(l)).join(" | ").trim()})`);
@@ -855,15 +857,26 @@ else {
          "the updated_at trigger left disabled does not start, with the one-line remedy");
   await claims.unsafe("ALTER TABLE thoughts ENABLE TRIGGER thoughts_updated_at");
   assert(/updated_at trigger\s+thoughts_updated_at enabled/.test((await run(SQL_ENV)).out), "…and enabled again it is ok");
-  // 018 re-applied by hand puts the 7-argument form back BESIDE 021's.
+  // 018 re-applied by hand puts the 7-argument form back BESIDE 032's.
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const twoEdits = await run(SQL_ENV);
-  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\)/.test(twoEdits.out),
-         "018 re-applied over 021 leaves two update_thought forms, and the start is refused naming the extra one");
+  assert(twoEdits.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) — an earlier migration re-applied by hand over 032/.test(twoEdits.out),
+         "018 re-applied over 032 leaves two update_thought forms, and the start is refused naming the extra one");
   assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\);/.test(twoEdits.out), "…with the exact DROP as the remedy");
+  // 021 re-applied drops the 7-argument form — and puts its own 8-argument
+  // one beside 032's, the state SMD-1323's verify names: every caller sending
+  // eight arguments or fewer, reembed.ts's positional call among them, is
+  // "function is not unique".
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  const eightBeside = await run(SQL_ENV);
+  assert(eightBeside.code === 1 && /edit signature\s+beside the form the servers call there is an earlier one: update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) — an earlier migration re-applied by hand over 032 — so every call that sends fewer than nine arguments/.test(eightBeside.out),
+         "021 re-applied over 032 leaves the 8-argument form beside the 9-argument one, and the start is refused naming it");
+  assert(/DROP FUNCTION update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\);/.test(eightBeside.out) && !/timestamp with time zone,jsonb\);/.test(eightBeside.out),
+         "…with the 8-argument DROP as the remedy, and only that one");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("032") });
   const reapplied021 = await run(SQL_ENV);
-  assert(reapplied021.code === 0, "…which 021 re-applied performs");
+  assert(reapplied021.code === 0 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text,jsonb\): the form the servers and reembed\.ts call since migration 032/.test(reapplied021.out),
+         "…which 032 re-applied performs");
   // …and 021's CREATE OR REPLACE put its 3-argument upsert_thought back over
   // 022's: a chunkless re-capture would leave the previous vector's windows
   // again. A warning naming 022 — captures work, search is over-inclusive.
@@ -893,8 +906,9 @@ else {
          "an earlier 2-argument body over 005's is a warning naming 005, then 025 again");
   // Both bodies stale at once — 003's 2-argument and 021's 3-argument: one
   // warning says both, and the remedy is 005 then 025, not 025 alone (which
-  // would leave the 2-argument body for the next run to find).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  // would leave the 2-argument body for the next run to find). 032 follows
+  // 021 here so `edit signature` stays ok and only `atomic capture` speaks.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("032") });
   const bothStale = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, but the 3-argument body is from before migration 022 .*; and the 2-argument body is not 005's either — it does not refuse a non-object payload/.test(bothStale.out) && /Apply db\/migrations\/005_reject_non_object_payload\.sql \(the last definer of the 2-argument form\), then 025_thought_provenance\.sql again/.test(bothStale.out) && !/Apply db\/migrations\/025_thought_provenance\.sql — the last definer/.test(bothStale.out),
          "both bodies stale is one warning naming both, with 005 then 025 as the remedy rather than 025 alone");
@@ -913,15 +927,21 @@ else {
          "the 3-argument form missing is a refusal whose remedy is 025, the last definer — not 004, not 022");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("025") || f.startsWith("026") });
   assert((await run(SQL_ENV)).code === 0, "…which 025 re-applied performs");
-  // A database whose update_thought predates 021.
+  // A database whose update_thought predates 032: 018's form alone, then
+  // 021's alone — each named by its signature, 032 the remedy.
   await claims.unsafe(`DROP FUNCTION ${UPDATE_THOUGHT_SIGNATURE}`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("018") });
   const pre021 = await run(SQL_ENV);
-  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 021; the server sends p_embedding_model/.test(pre021.out) && /Apply db\/migrations\/021_embedding_model_per_row\.sql\./.test(pre021.out),
-         "a 018-era update_thought under a 021 server does not start, and is named by its signature with 021 as the remedy");
-  // 021 puts the column back; 022 and 025 put the shipped 3-argument body back
-  // over 021's (022 alone would leave 025's envelope out, a warning below).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") || f.startsWith("022") || f.startsWith("025") || f.startsWith("026") });
+  assert(pre021.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb\) is the form from before migration 032; the server sends p_provenance/.test(pre021.out) && /Apply db\/migrations\/032_update_thought_provenance\.sql\./.test(pre021.out),
+         "a 018-era update_thought under a 032 server does not start, and is named by its signature with 032 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("021") });
+  const pre032 = await run(SQL_ENV);
+  assert(pre032.code === 1 && /edit signature\s+update_thought\(uuid,text,jsonb,vector,jsonb,timestamp with time zone,jsonb,text\) is the form from before migration 032; the server sends p_provenance, which only 032's form takes — so every edit would fail, and db\/reembed\.ts refuses to run/.test(pre032.out) && /Apply db\/migrations\/032_update_thought_provenance\.sql\./.test(pre032.out),
+         "…and a 021-era one — a brain at 031 — likewise, with 032 as the remedy");
+  // 021 put the column back; 022 and 025 put the shipped 3-argument body back
+  // over 021's (022 alone would leave 025's envelope out, a warning below);
+  // 032 puts the 9-argument update_thought back over 021's.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("022") || f.startsWith("025") || f.startsWith("026") || f.startsWith("032") });
   assert(/provenance\s+trace_provenance and find_derivatives present; trace_provenance's body is 026's, the walk bounded/.test((await run(SQL_ENV)).out),
          "…and trace_provenance is 026's again: every 025 re-applied above was followed by 026, so no later healthy run carries the provenance warn");
   await claims.unsafe("UPDATE thoughts SET embedding = NULL");
