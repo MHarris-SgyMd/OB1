@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Fifty-nine numbered changes on top of the pin. Seven fix defects found in an
+Sixty numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–59 are the numbered `###` sections** further down, which is
+sections. Changes **18–60 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4620,7 +4620,7 @@ sentinel) — reads `derived_from`/`supersedes` from the payload envelope and
 `supersedes`' existence is the self-FK's. Both ride the envelope like the actor
 (008) and the model (021), so capture sets them and both stores stay in sync; a
 bare re-capture adds provenance but never clears it (that is `update_thought`'s, a
-follow-up — landed as change 59, migration 032). Capture is the only write path this change gives provenance —
+follow-up — landed as change 60, migration 032). Capture is the only write path this change gives provenance —
 `capture_thought` grows optional `derived_from`/`supersedes` inputs.
 
 **Read-back both ways.** `trace_provenance(id)` walks UP the `derived_from` chain
@@ -5669,7 +5669,7 @@ mechanism. So the accept function sets `ob1.actor` as 009's functions do, locks
 the superseding row and writes the column in one UPDATE; 025's audit trigger
 diffs `supersedes`, so the change is recorded with the reviewer as actor exactly
 as an edit would be. The envelope on `update_thought` is **SMD-1323**, and when
-it lands the accept path should call it. (It landed as change 59, migration
+it lands the accept path should call it. (It landed as change 60, migration
 032: the accept and reject paths call `update_thought`, and the UPDATE is gone.)
 
 **Measured** (`evals/eval-consolidate.ts`, `evals/README.md`), on the 576-issue
@@ -6608,7 +6608,7 @@ its own DB with a post-load `lme_q` completion pass, then scored through a slim 
 file reusing the S decomposition dump — recipe in `evals/README.md`. The loader's
 inability to `readFileSync` a >2 GB corpus is filed as a follow-up.
 
-### 59. `update_thought` takes provenance — `supersedes` and `derived_from` can be set, changed and cleared through the one edit function, and the review path writes through it (SMD-1323)
+### 60. `update_thought` takes provenance — `supersedes` and `derived_from` can be set, changed and cleared through the one edit function, and the review path writes through it (SMD-1323)
 
 Change 46 put `derived_from` and `supersedes` on `thoughts` and let
 `capture_thought` set them through the payload envelope, and deferred the other
