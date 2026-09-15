@@ -7215,11 +7215,17 @@ work — documented, but not enforced, since preflight cannot read a server env
 flag and the log is off by default.
 
 **Export → replay → gate (`evals/`).** `export-queries.ts` reads the log and
-writes an **ids-only** fixture (`query`, `relevant` = the touched ids, `baseline`
-= the recorded ranking); no thought content leaves the brain, so it is
-committable, and `scripts/check-fork-consistency.mjs` check 9 fails any committed
-fixture that carries a content-bearing field (self-tested both directions each
-run). `eval-replay.ts` replays a fixture through the shipped
+writes a fixture of query text and ids (`query`, `relevant` = the touched ids,
+`baseline` = the recorded ranking): no *thought content* leaves the brain, so it
+is committable — but the `query` strings are the searcher's own words, personal
+data, so committing an export fixture from a real brain commits real queries (a
+maintainer's call). `scripts/check-fork-consistency.mjs` check 9 is the guard: an
+allowlist, not a denylist of field names, so every committed string must be a
+thought id or free text under a known key (`query`/`note`) — a thought body, an
+array of chunks, or a content-derived `title` all fail closed. The attribution is
+click-through relevance — a proxy, a fetch can be a wrong guess — and it collapses
+distinct callers who typed the same query, and every anonymous caller (a NULL
+agent) into one bucket; kept beside the hand-labelled sets, not instead of them. `eval-replay.ts` replays a fixture through the shipped
 `search_thoughts_hybrid` over the live corpus and reports recall@k / MRR against
 `relevant` and rank drift against `baseline`, in `eval-real.ts`'s table shape.
 `db/test-replay.ts` is the CI gate (job *Retrieval replay gate*): offline PGlite,
@@ -7227,9 +7233,7 @@ no model or key, ~0.5 s, replaying a committed **content-free** synthetic fixtur
 (`build-replay-fixture.ts` — seeded vectors and ids) through `match_thoughts` and
 failing when mean recall@5 drops past the fixture's floor. It proves the floor has
 teeth by replaying random query vectors and watching recall collapse (0.154 <
-0.8), so a scrambling regression fails it without a git-revert to stage one. The
-`relevant` label is click-through relevance — a proxy, a fetch can be a wrong
-guess — kept beside the hand-labelled sets, not instead of them.
+0.8), so a scrambling regression fails it without a git-revert to stage one.
 
 Upstream status: **not applicable** — a fork-only measurement mechanism; the log
 is a self-hosting feature and the gate is fork CI. **Unfiled** upstream.

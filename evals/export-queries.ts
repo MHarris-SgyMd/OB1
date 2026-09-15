@@ -16,12 +16,19 @@
  * window. An action is attributed to the MOST RECENT prior search by the same
  * agent whose result set contained the id — a NULL agent is its own bucket.
  *
- * The fixture is ids only — query text, the ids the caller touched as
- * `relevant`, the shipped ranking as `baseline`. No thought content leaves the
+ * The fixture is query text and ids — the query, the ids the caller touched as
+ * `relevant`, the shipped ranking as `baseline`. No *thought content* leaves the
  * brain, so it can be committed without the corpus (checked by
- * scripts/check-fork-consistency.mjs). The `relevant` label is click-through
- * relevance — a proxy, not a judgement (a fetch can be a wrong guess); keep the
- * hand-labelled sets (eval-real.ts) as the second opinion.
+ * scripts/check-fork-consistency.mjs check 9). But the query strings are the
+ * searcher's own words — personal data — so committing an export fixture from a
+ * real brain commits real queries; that is a maintainer's call, not something
+ * the redaction guards. The `relevant` label is click-through relevance — a
+ * proxy, not a judgement (a fetch can be a wrong guess) — and it is coarse: it
+ * buckets by query TEXT, so distinct callers (or searches with different
+ * arguments) that typed the same words are merged, and every anonymous caller (a
+ * NULL agent, e.g. while the registry is unreachable) is one bucket, so a touch
+ * could be paired with another anonymous caller's search that returned the same
+ * id. Keep the hand-labelled sets (eval-real.ts) as the second opinion.
  *
  *   DATABASE_URL=postgres://… bun evals/export-queries.ts [out.json]
  *   OB1_EXPORT_WINDOW_MIN=30   # how long after a search a touch still counts
@@ -103,7 +110,7 @@ const fixture = {
   generated: new Date().toISOString(),
   source: "query_log",
   windowMinutes: WINDOW_MIN,
-  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Ids only — no thought content. `relevant` is a proxy (a fetch can be a wrong guess); `baseline` is the ranking the log recorded at export time.",
+  note: "Click-through relevance from OB1_QUERY_LOG (SMD-1295). Query text and ids — no thought content, but the query strings are the searcher's own (personal data). `relevant` is a proxy (a fetch can be a wrong guess), bucketed by query text; `baseline` is the ranking the log recorded at export time.",
   queries,
 };
 

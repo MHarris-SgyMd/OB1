@@ -2672,10 +2672,15 @@ on to open. This loop captures it and gates PRs on it.
    instead of them.
 2. **Export** — `bun export-queries.ts [out.json]` reads the log from
    `DATABASE_URL`, attributes each touch to the most recent prior search (same
-   agent, in a window) that returned its id, and writes an **ids-only** fixture:
-   `{ query, relevant, baseline }`. No thought content leaves the brain, so the
-   fixture can be committed without the corpus (`scripts/check-fork-consistency.mjs`
-   check 9 guards it).
+   agent, in a window) that returned its id, and writes a fixture of query text
+   and ids: `{ query, relevant, baseline }`. No *thought content* leaves the
+   brain, so the fixture can be committed without the corpus — but the `query`
+   strings are the searcher's own words (personal data), so committing an export
+   fixture from a real brain commits real queries; that is a maintainer's call.
+   `scripts/check-fork-consistency.mjs` check 9 guards thought content (an
+   allowlist: every committed string must be an id or free text under a known
+   key), not query text. Attribution collapses distinct callers who typed the
+   same query, and every anonymous (NULL-agent) caller, into one bucket — a proxy.
 3. **Replay** — `DATABASE_URL=… OB1_EVAL_EMBED=… bun eval-replay.ts fixture.json`
    re-runs each query through the shipped `search_thoughts_hybrid` over the live
    corpus and reports recall@k / MRR against `relevant` and rank drift against

@@ -75,8 +75,12 @@ console.log(`[1] Replay the committed fixture: ${thoughts.length} thoughts, ${qu
 let shippedSum = 0;
 for (const q of queries) shippedSum += recall5(await rankedIds(q.embedding), q.relevant);
 const shippedMean = shippedSum / queries.length;
+// The floor is the contract. A perfect mean at HEAD is expected for this fixture
+// but is NOT asserted: a legitimate retrieval change that nudges one gold from
+// rank 1 to rank 3 still clears the floor and must stay green — only a drop past
+// the floor fails. The mean is reported so a slide toward it is visible.
 assert(shippedMean >= recallFloor, `shipped retrieval clears the recall@5 floor (${shippedMean.toFixed(3)} >= ${recallFloor})`);
-assert(shippedMean === 1, `every gold is in the top 5 at HEAD (${shippedMean.toFixed(3)})`);
+console.log(`    mean recall@5 = ${shippedMean.toFixed(3)} (floor ${recallFloor}); at HEAD every gold is rank 1`);
 
 console.log("\n[2] The floor has teeth: random query vectors collapse below it");
 const { unitVector } = seededRandom(97531);

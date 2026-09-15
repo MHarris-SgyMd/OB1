@@ -3397,6 +3397,28 @@ console.log("\n[33] Migration 034: query_log shape + CHECKs, the export join, an
   const s1 = scores.result_scores[1] as number | null | undefined;
   assert(Array.isArray(scores.result_scores) && Math.abs(s0 - 0.42) < 1e-6 && (s1 == null || Number.isNaN(s1)), `result_scores carries a score and a null element (${JSON.stringify(scores.result_scores)})`);
 
+  // The window bound the export applies (export-queries.ts): a touch links only
+  // to a search within OB1_EXPORT_WINDOW_MIN before it. A search older than the
+  // window does not attribute, even though it returned the id — the clause
+  // [33] mirrors from the export so the window's behaviour is not unexercised.
+  const C = "33333333-3333-4333-8333-333333333333";
+  const AG2 = "88888888-8888-4888-8888-888888888888";
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores, logged_at)
+      VALUES ('search', 'search_thoughts', '${AG2}'::uuid, 'a stale search', 10, 0, 0, '{}'::jsonb,
+              ARRAY['${C}']::uuid[], ARRAY[0.9]::real[], now() - interval '2 hours');
+    INSERT INTO query_log (kind, tool, agent_id, target_id) VALUES ('action', 'fetch', '${AG2}'::uuid, '${C}'::uuid);`);
+  const windowed = (await db.query<{ from_query: string | null }>(`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.query IS NOT NULL
+               AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at
+               AND s.logged_at >= act.logged_at - make_interval(mins => 30)
+               AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG2}'::uuid`)).rows[0];
+  assert(windowed.from_query === null, "a search older than the export window does not attribute a later touch");
+
   // prune_query_log: default arg, bounded delete, and a refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
   const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;

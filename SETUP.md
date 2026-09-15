@@ -45,7 +45,8 @@ and nothing reads it on the capture or search path; the write is best-effort and
 never fails a search. `prune_query_log()` enforces a retention window
 (`OB1_QUERY_LOG_RETENTION_DAYS`, default 30), and `evals/export-queries.ts`
 redacts the log to ids and query text — no thought content — before it becomes a
-committable fixture. A self-hosted role needs `query_log` `INSERT` to record it
+fixture (the query strings are still your own words, so a committed export
+fixture carries them; only the synthetic gate fixture is content-free). A self-hosted role needs `query_log` `INSERT` to record it
 (`db/README.md`, "Grants for a capturing role").
 
 | Model | Width | Note |

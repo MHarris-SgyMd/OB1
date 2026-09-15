@@ -45,8 +45,9 @@
 --   data at rest (every query someone typed). prune_query_log(p_keep_days)
 --   deletes rows older than the window and returns the count; the default 30
 --   days matches OB1_QUERY_LOG_RETENTION_DAYS (db/config.mjs). The DELETE is
---   always bounded by logged_at, never unqualified. An operator schedules it (or
---   the server prunes opportunistically); either way the hot path never deletes.
+--   always bounded by logged_at, never unqualified. An operator (or a scheduler)
+--   runs it; the server never prunes on the hot path — preflight only reports the
+--   configured window.
 --
 -- What it does not touch
 --   The core `thoughts` table and every capture/search function are unchanged —
