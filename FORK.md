@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-two numbered changes on top of the pin. Seven fix defects found in an
+Sixty-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–62 are the numbered `###` sections** further down, which is
+sections. Changes **18–63 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -2334,7 +2334,7 @@ waiting on the *advisory* lock in `pg_locks` rather than on a transaction id,
 and gets ok with `duplicate_of` once the first commits. The same lock turns
 009's documented race for a genuine edit — two rows edited into the same new
 text at once — into `DUPLICATE_CONTENT` instead of a constraint error. It
-covered edits only until change 62: `upsert_thought` wrote fingerprints without
+covered edits only until change 63: `upsert_thought` wrote fingerprints without
 it, so a capture of text X committing while an edit to X was in flight still
 ended in the edit raising the unique violation, exactly as before this change
 (migration 033 takes the same lock in both capture forms). One lock per
@@ -3817,7 +3817,7 @@ pass's measurement, 1 ms with this lock). Two shapes the row lock cannot cover
 this text — find no row to lock, and remove nothing: the other writer's windows
 stay, as under 021, at another model the SMD-1175 state for that race only;
 SMD-1043's advisory lock on the fingerprint, which `update_thought` already
-takes, makes the read find the row and closes both (done in change 62). The label vouches exactly
+takes, makes the read find the row and closes both (done in change 63). The label vouches exactly
 when the
 row's vector was labelled with a model and the arriving vector is labelled with
 the same one: the windows were written in the same call as the vector before,
@@ -3880,7 +3880,8 @@ drop 005's guard, 008's actor, 021's label and 022's rule); a missing
 2-argument form names 005. The function is SECURITY INVOKER, so the DELETE runs
 as the calling role: a role that only ever captured chunklessly never needed
 DELETE on `thought_chunks` (007's 4-argument form and `update_thought` did),
-and does from here — a check of its own, `chunk delete privilege`, reads
+and does from here — a check of its own (`chunk delete privilege` then;
+since SMD-1226 the wider `write privileges`) reads
 `has_table_privilege` for the connection's role wherever the table exists,
 schema-qualified (the bare name resolves through `search_path` and raises for a
 relation it cannot see), and refuses to start without it, printing the GRANT.
@@ -3975,7 +3976,7 @@ a re-capture blocked behind an open `enqueue_thoughts` for its whole duration
 needs the privilege before Postgres looks for rows, and made two races the lock
 cannot cover destructive — a `FOUND` flag after the read bounds it to a
 re-capture, so those races remove nothing, as under 021, until SMD-1043's lock
-closes them (change 62); the read itself runs only when a vector arrives. The remedy for a
+closes them (change 63); the read itself runs only when a vector arrives. The remedy for a
 missing 2-argument form re-applied 005, which redefines the 3-argument body too
 — it says "then 022", and the missing form is a warning, since this server
 never calls it. The GRANT remedy quotes the role; the privilege check's ok text
@@ -4000,7 +4001,7 @@ join as a parameter — more to read than it saves.
 them from live ones; a `--job` pass is the remedy, and a brain upgraded through
 021 that has not run a pass should run one before re-saving long notes from a
 chunkless server. SMD-1043's advisory lock in both inserting overloads
-(change 62, migration 033) redefines this body and carries the locked read with its `FOUND`, the
+(change 63, migration 033) redefines this body and carries the locked read with its `FOUND`, the
 block and the sentinel forward, as 022's header lists; its fingerprint lock
 also closes the two races above. `server/index.ts` is
 unchanged: the migration fixes its path. The 4-argument form's body has no
@@ -4133,7 +4134,7 @@ list; no NULL row is ok, said as "missing", since a stale key on a row that has
 one doubles on capture too and is not read here. Presence is read from the
 catalog first, so a brain before 003 or 016 is a skip, not a raise; the
 `EXISTS` stops at the first pending row, so a brain before 023 answers at once.
-Over PostgREST a skip, beside `atomic capture` and `chunk delete privilege`;
+Over PostgREST a skip, beside `atomic capture` and `write privileges`;
 and the direct-connection block's checks are now one list, so a connection that
 fails between two of them leaves the first unreported carrying the error and
 every later one saying it was not reached — never a second row for a check that
@@ -4179,7 +4180,7 @@ read; the "apply 023" remedy on a `--baseline`d brain whose ledger already says
 missing table that could not be reached, since the same statement referenced
 the table — presence read from the catalog first; and the block's outer catch
 reported only `atomic capture`, so a failed catalog connection silenced this
-check and `chunk delete privilege` — both say so now. To a ticket: a census of
+check and `write privileges` — both say so now. To a ticket: a census of
 stale keys (a brain that ran the community recipe holds one on every row), which
 means hashing every fingerprinted row and belongs to a command, not a start.
 
@@ -4264,7 +4265,7 @@ UPDATE`.
 
 **Not done here.** A BEFORE INSERT trigger that computes the fingerprint a raw
 INSERT omits, and its sibling that NULLs a stale key (tickets, above). SMD-1043's advisory lock in both inserting
-`upsert_thought` overloads (done in change 62) — 023 redefines no function, and a capture racing an edit outside the
+`upsert_thought` overloads (done in change 63) — 023 redefines no function, and a capture racing an edit outside the
 backfill's transaction still ended as 018's header says until then. Deleting the extra twin
 stays the operator's call (`delete_thought`; the pairs list names them). 018's
 file is applied and hashed, so its disclaimers deferring to SMD-1042 stay as
@@ -6640,7 +6641,7 @@ of `pg_proc` by name, as [19] and [22] do). Three things the redefinition adds:
   null, JSON null and `[]` are NULL; otherwise an array whose every element is
   a UUID string naming an existing thought, returned lowercased, de-duplicated
   and sorted, or one of 025's three exceptions. `upsert_thought` keeps its
-  inline copy until its next redefinition (SMD-1043, change 62) takes this one — the
+  inline copy until its next redefinition (SMD-1043, change 63) takes this one — the
   shape 016's `content_fingerprint_of` took, with 018 the first caller — and
   [32] holds the two equal meanwhile, input by input, message by message.
 - **The `supersedes` checks.** Shape by regex (an exception, as capture);
@@ -6653,7 +6654,7 @@ of `pg_proc` by name, as [19] and [22] do). Three things the redefinition adds:
   `WOULD_CYCLE` when the target is the thought itself or the chain of pointers
   from the target reaches it, bounded at 1000 steps. A supersedes write takes
   029's advisory lock **before** the row lock, so every path acquires in one
-  order — supersession lock, row, fingerprint lock (change 62 moves the
+  order — supersession lock, row, fingerprint lock (change 63 moves the
   fingerprint lock before the row, for every writer) — and a hand edit and an
   acceptance are serialised with each other; the header states the order and
   why no pair crosses.
@@ -6756,7 +6757,7 @@ it still saying eight; CI runs that suite). Green: `test-schema`
 
 **Not done, and why.** `upsert_thought` still carries its inline copy of the
 derived_from rule — switching it is a redefinition of the other function, which
-SMD-1043 owns (change 62 does); whichever of the two lands second carries the first's body. No
+SMD-1043 owns (change 63 does); whichever of the two lands second carries the first's body. No
 `derived_from` input on the MCP tool (above). The three audit reads in the test
 suites that ordered by the audit table's uuid key now order by `created_at` —
 one of them, [28]'s, was a latent flake this section's twin assertion exposed.
@@ -7111,7 +7112,80 @@ in), `test-live` 419/419, `tsc` clean, fork checker PASS. Upstream status: **not
 applicable** — the migrator and `reembed.ts` are the fork's (changes 11 and
 29).
 
-### 62. A capture takes the fingerprint lock too — migration 033 redefines both inserting `upsert_thought` forms, so writers of one text are serialised whichever function they come through (SMD-1043)
+### 62. A capturing role's grants are documented and checked for the whole capture path, not `thoughts` alone — one list, a widened preflight check, and `migrate.ts --grant` (SMD-1226)
+
+Every function this fork adds is `SECURITY INVOKER` (the policy 010, 012 and 015
+state, and the default the capture writers in 005/007/008/022/025 rely on), so
+the writes they make run as the connecting role — and since 007 they reach past
+`thoughts`: a windowed capture INSERTs `thought_chunks` (and since 022 DELETEs
+them on a re-capture the label does not vouch for), an edit with content replaces
+those rows, and 008's trigger INSERTs `thought_audit` on every capture. A role
+granted `SELECT, INSERT, UPDATE, DELETE ON thoughts` alone — exactly what the
+getting-started guide's grant step gives — therefore captures **nothing** on a
+self-hosted brain: its first windowed capture fails on `thought_chunks`, its
+first capture of any kind on the audit trigger. Upstream never hit it because
+Supabase's `service_role` holds default privileges on the public schema; the
+non-Supabase path is where it bites. Found by change 58's (SMD-1175's) review
+passes, when 022 added a DELETE to the 3-argument path and the privilege class
+surfaced — the gap for the audit and chunk-insert writers predated it.
+
+`db/config.mjs`'s `ROLE_GRANTS` is now the single spelling: the tables and
+privileges the fork's writers need, grouped by role (`capture`, `server`, `worker`,
+`extraction`), each naming the migration that introduced it. Three consumers read
+it, so none can drift from the others:
+
+* Preflight's **`write privileges`** check (renamed from `chunk delete privilege`,
+  which checked DELETE on `thought_chunks` alone) reads `CAPTURE_WRITES` — the
+  `capture` group flattened — and refuses a server role missing any of it,
+  naming each missing privilege in `ROLE_GRANTS` order with its GRANT (quoted
+  role, schema-qualified `has_table_privilege`, gated on table presence so a
+  brain before 007/008 is a skip not a raise). It stays a refusal: a role that
+  cannot INSERT `thought_audit` fails every capture. One conditional addition
+  (found by the second and third review passes): 016 adds a trigger on `thoughts`
+  that runs as the caller on every capture and content-edit — it reads
+  `ob1_config` always, and upserts a `thought_work_claims` row while
+  `entity_extraction_key` is set. So the check reads `pg_trigger`: when the
+  trigger is present it folds `ob1_config` SELECT into the refusal set (a role
+  without it fails every capture in the trigger, even with extraction off), and
+  when the key is set it adds `thought_work_claims` INSERT/UPDATE too. A server
+  role that never runs a worker is thus refused at start-up on an extraction
+  brain instead of being blessed and then failing every capture. The `server`
+  group
+  (`ob1_config` read, and the agent tables — `resolve_agent` is SECURITY INVOKER
+  and *upserts* them, so they get the writes, not just `SELECT`, which the
+  ticket's own list had wrong) is documented and granted but not enforced:
+  attribution and preflight's config read degrade to a warn without it, not a
+  failed capture. Over PostgREST it is a skip, as the old check
+  was: table privileges are read over a direct connection.
+* **`migrate.ts --grant <role>`** issues the whole documented set — `USAGE ON
+  SCHEMA public` plus every group, for the tables that exist — in one
+  transaction. Guarded like `--baseline`: it records nothing in the ledger and is
+  refused beside `--baseline`/`--reapply`. It never creates a role or sets a
+  password (a missing role is an error naming `CREATE ROLE`), so no credential
+  passes through it; `--grant --dry-run` prints the statements for a role you
+  would rather grant by hand. There are no sequences to grant — every table's
+  primary key is a `uuid` or a natural key.
+* **`db/README.md`**'s "Grants for a capturing role" is the human table, and the
+  getting-started guide's grant step points a self-hoster at it. A
+  check-fork-consistency check (the config↔docs parity check beside change 58's
+  check 7) asserts the README names every table `ROLE_GRANTS` requires, in
+  backticks, so a table added to a group in config without a README line fails
+  CI rather than a self-hoster's first capture.
+
+No schema, migration or runtime-server change — a documentation, preflight and
+migrator change. `test-preflight.ts [5]` proves it end to end: a role with
+`thoughts` and `SELECT` everywhere is refused, each missing write named with its
+GRANT; after `migrate.ts --grant` a real windowed capture and an edit with
+content run through the role, its chunk and audit rows landing.
+
+Upstream status: **not applicable** — a self-hosting concern the Supabase path
+does not have. **Unfiled** upstream. Reproduce: on a migrated brain, `CREATE ROLE
+r LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON thoughts TO r; GRANT SELECT ON
+ALL TABLES IN SCHEMA public TO r;` then run preflight as `r` (refused, naming the
+chunk and audit writes), `bun db/migrate.ts --grant r` (granted), preflight again
+(ok), and a windowed `upsert_thought` through `r`.
+
+### 63. A capture takes the fingerprint lock too — migration 033 redefines both inserting `upsert_thought` forms, so writers of one text are serialised whichever function they come through (SMD-1043)
 
 Change 33 serialised `update_thought` calls that would take a fingerprint key on
 an advisory lock, so two edits into the same text get `DUPLICATE_CONTENT`

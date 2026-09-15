@@ -175,7 +175,7 @@
 --   against 5.0 and 5.7 ms (the HNSW insert is the cost); a re-capture
 --   without a vector 2.3–2.7 ms against 2.0–3.0 ms; with a vector at the same
 --   label 2.2–2.6 ms against 2.2–3.4 ms. Inside the run-to-run spread on
---   every line (FORK.md change 62 has the design).
+--   every line (FORK.md change 63 has the design).
 --   One cost is not per operation but a ceiling (third review pass): a
 --   capture NAMING supersedes holds the one brain-wide supersession key from
 --   before its label read to commit — through the HNSW insert — so such
