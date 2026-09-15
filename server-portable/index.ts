@@ -901,6 +901,12 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ content, derived_from, supersedes }) => {
       try {
+        // The shape before the two model calls, in the tool's words — as
+        // update_thought's `supersedes` is refused (032). upsert_thought would
+        // raise on it after the embedding and the metadata were already paid for.
+        if (supersedes !== undefined && !UUID_RE.test(supersedes)) {
+          return toolError(`Refused: \`supersedes\` must be a thought id (the ID: line of a search result), not "${supersedes.slice(0, 40)}".`);
+        }
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),

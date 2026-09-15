@@ -77,8 +77,12 @@
 --     version chain (025), and trace_provenance is cycle-guarded.
 --   * Lock order. A supersedes write takes 029's advisory lock
 --     (hashtext('ob1:supersession-review'), transaction-scoped) BEFORE the
---     row lock, so the walk reads committed pointers and two writers cannot
---     each close half a loop. Every path then acquires in one order —
+--     row lock, so the walk reads committed pointers and two writers through
+--     this function cannot each close half a loop. (upsert_thought's
+--     re-capture fills a NULL pointer without the lock — 025's "add if
+--     empty" — so a capture racing an edit can still close one; that is
+--     SMD-1043's redefinition to take the lock, and trace_provenance is
+--     cycle-guarded meanwhile.) Every path then acquires in one order —
 --     supersession lock, row, fingerprint lock: review takes the advisory
 --     lock, then the row, then calls update_thought (the advisory lock is
 --     re-entrant within a session, the row already held); a hand edit
@@ -665,4 +669,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb, boolean) IS
-  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so the column has one writer: accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029 / 032.';
+  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every edit of the column goes through the one edit function (a capture''s add-if-empty through upsert_thought aside): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. Migration 029 / 032.';

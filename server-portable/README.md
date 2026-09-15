@@ -200,12 +200,12 @@ rest; `db/README.md` §4 covers both routes.
 
 Upgrade every checkout that runs against the brain — this server, `db/*.ts`, a
 second workstation — together with the migrations. A signature-changing
-migration (020, 021, 032) leaves an older checkout's preflight refusing the
-newer brain with a misleading message (it looks for a form the migration
-dropped), its `reembed.ts` sending you to `--reapply`, and that older
-`--reapply` re-creating the dropped form beside the current one — after which
-every shorter call is `function is not unique` until a current checkout
-re-applies. The compose stack is in lockstep by construction; a hand-run server
+migration leaves an older checkout's preflight refusing the newer brain with a
+misleading message (it looks for a form the migration dropped) — 032 today, and
+the same shape at 020 and 021 — and, for 032, its `reembed.ts` sending you to
+`--reapply` and that older `--reapply` re-creating the dropped form beside the
+current one, after which every shorter call is `function is not unique` until a
+current checkout re-applies. The compose stack is in lockstep by construction; a hand-run server
 or a Supabase brain served from another machine is not (FORK.md change 59;
 SMD-1451 is the migrator refusing it).
 

@@ -302,6 +302,9 @@ console.log("\n[9] `supersedes` through the tool: set, clear, a loop and a ghost
   try { await writer.call("update_thought", { id: newer, supersedes: "null" }); } catch (e) { msg = (e as Error).message; }
   assert(/must be a thought id/.test(msg) && /not "null"/.test(msg), `a value that is not an id — the word "null" included — is refused at the tool, not raised by the function (${msg.slice(0, 60)})`);
   assert((await pointer(newer)) === older && (await pointer(older)) === null, "…and no refusal wrote anything");
+  const [{ c: rowsBefore }] = await sql`SELECT count(*)::int AS c FROM thoughts`;
+  try { await writer.call("capture_thought", { content: "a capture naming no id", supersedes: "not-an-id" }); } catch (e) { msg = (e as Error).message; }
+  assert(/must be a thought id/.test(msg) && Number((await sql`SELECT count(*)::int AS c FROM thoughts`)[0].c) === Number(rowsBefore), `capture_thought refuses a non-id supersedes the same way, before it embeds or writes (${msg.slice(0, 60)})`);
 
   // null clears; omitting the key leaves.
   const meta = await writer.call("update_thought", { id: newer, metadata_patch: { reviewed: true } });
