@@ -103,12 +103,11 @@ done
 #    "$BASE/health" is right whether or not the proxy strips. A Supabase Edge
 #    Function fails this check: upstream's server has no method guard (#424,
 #    their PR #425). One tally for the pair, so the count stays one per check.
-code=$(status "$BASE/"); hc=$(status "$BASE/health")
-if [ "$code" = "405" ] && [ "$hc" = "200" ]; then
-  ok "GET the endpoint → HTTP 405 (POST only), GET /health → HTTP 200 (the liveness target for GET-only probes)"
-else
-  bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server), GET /health → HTTP $hc (expected 200); FORK.md change 74"
-fi
+code=$(status "$BASE/"); hc=$(status "$BASE/health"); miss=""
+[ "$code" = "405" ] || miss="GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server)"
+[ "$hc" = "200" ]   || miss="${miss:+$miss; }GET /health → HTTP $hc (expected 200: route GET /health to the server as you route POST)"
+[ -z "$miss" ] && ok "GET the endpoint → HTTP 405 (POST only), GET /health → HTTP 200 (the liveness target for GET-only probes)" \
+               || bad "$miss; FORK.md change 74"
 
 # 4. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

@@ -56,7 +56,7 @@ async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
 }
 
 /**
- * A probe for the routing blocks ([11], [13]) that cannot hang or crash the
+ * A probe for the routing blocks ([3], [11], [13]) that cannot hang or crash the
  * suite: one 2 s abort that covers the body read too, a transport error reported
  * by its own name, and the body parsed by the same mcpBody() as [4]–[10] then
  * tested for the jsonrpc marker — a JSON body that is not an envelope must not
@@ -112,15 +112,15 @@ console.log("\n[2] Runtime neutrality");
 
 console.log("\n[3] CORS preflight");
 {
-  const r = await fetch(BASE, { method: "OPTIONS" });
-  assert(r.status === 200, "OPTIONS → 200");
-  assert(corsOk(r), "allow-origin *");
+  const p = await probe("", { method: "OPTIONS" });
+  assert(p.status === 200, `OPTIONS → 200 (${p.status})`);
+  assert(p.cors, "allow-origin *");
   // The exact list, because it is NOT the served list: the endpoint serves POST
   // only ([13]), but this header says what a browser may send so it can hear
   // our answer, and a browser-hosted SDK client holding a session id sends
   // DELETE and accepts the 405. Hiding GET or DELETE here would turn that 405
   // into a network error. FORK.md change 74.
-  assert(r.headers.get("access-control-allow-methods") === "GET, POST, OPTIONS, DELETE", "allow-methods advertises GET and DELETE, so a browser hears the 405");
+  assert(p.methods === "GET, POST, OPTIONS, DELETE", `allow-methods advertises GET and DELETE, so a browser hears the 405 (${p.methods})`);
 }
 
 console.log("\n[4] Auth failure — the real unauthorizedResponse(), not a copy of it");
@@ -225,8 +225,8 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   const discovery = "/.well-known/oauth-protected-resource";
 
   // Three asserts per row through the shared probe(), always executed, so the
-  // count is stable green or red. A deleted route now lands these GETs on the
-  // catch-all's 405 ([13]), not a hang — the status assertion still catches it.
+  // count is stable green or red. A deleted route now lands these GETs on
+  // notFound's 405 ([13]), not a hang — the status assertion still catches it.
   const rows: [string, string, RequestInit, number][] = [
     ["bare document, no key", discovery, {}, 404],
     ["path-suffixed form (the URL Supabase answered 401)", `${discovery}/functions/v1/open-brain-mcp`, {}, 404],
@@ -278,11 +278,11 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
 
 console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
 {
-  // The MCP handler is registered for POST only and a trailing route answers
+  // The MCP handler is registered for POST only and app.notFound answers
   // everything else with 405 before authenticate(); FORK.md change 74 has the
   // mechanism this closes (an authenticated GET opened an SSE stream the
   // per-request transport never closed). Drilled by registering the handler
-  // with app.all and dropping the trailing route — the pre-change shape: every
+  // with app.all and removing app.notFound — the pre-change shape: every
   // GET row holding a valid key fails as `TimeoutError`; the raw-socket row
   // below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get the
   // transport's own 405, after auth, with an `Allow` that names GET; the keyed
@@ -369,9 +369,17 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   }
   // Route exactness, not a status contract: what a stray GET gets is the
   // path-axis decision FORK.md change 42 defers (405 today, 404 under a mount).
+  // Either refusal, and nothing else — `!== 200` alone would pass the abort
+  // marker, i.e. a hang, which is the one outcome this whole block exists to
+  // refuse.
   for (const near of ["/healthz", "/Health", "/health/x", "/a/healthz"]) {
-    assert((await probe(near, {})).status !== 200, `GET ${near} is not /health`);
+    const p = await probe(near, {});
+    assert(p.status === 405 || p.status === 404, `GET ${near} is not /health, and does not hang (${p.status})`);
   }
+  // At a health path the refusal's Allow names the health resource's methods,
+  // not the MCP endpoint's.
+  const putHealth = await probe("/health", { method: "PUT" });
+  assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
 }
 
 server.stop();

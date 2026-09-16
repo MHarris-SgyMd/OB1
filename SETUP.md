@@ -354,9 +354,10 @@ new thought's id, which is what the other two take.
 ## Expected outcome
 
 `migrate` exits 0 having applied every migration under `db/migrations/`. `server`
-logs `preflight OK` and `Started server`. `smoke.sh` prints
-`8 checks: 8 passed, 0 failed`. A client shows ten tools for a write key, seven
-for a read key.
+logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
+(`deploy/README.md` has the count, and the liveness-probe target for a platform
+that can only GET). A client shows ten tools for a write key, seven for a read
+key.
 
 ## Where to run it for real
 
