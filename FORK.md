@@ -186,7 +186,7 @@ extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.
 extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 65 widened it to every vendored server
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
-<17 vendored files>              # change 65 (thirteen servers and samples onto _shared/auth.ts with scopes; three webhook receivers and a stub onto a timing-safe compare)
+<17 vendored files>              # change 65 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
 recipes/_shared/auth.ts          # change 65 (new file — server-portable/auth.ts byte for byte)
 integrations/_shared/auth.ts     # change 65 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 65 (new file — the same, beside the workers' existing _shared/)
@@ -7848,7 +7848,7 @@ its key.
 
 
 
-### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto a `_shared/auth.ts` with scopes, three webhook receivers and a stub onto a compare of digests, and check 8's exception list empty (SMD-1455)
+### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto scoped keys through a `_shared/auth.ts`, four onto a compare of digests (one of them through the same module), and check 8's exception list empty (SMD-1455)
 
 `server-portable/auth.ts` (one export added, the consumers paragraph), its six
 copies — `extensions/_shared/auth.ts`, and the new `recipes/_shared/auth.ts`,
@@ -7871,8 +7871,9 @@ and `examples/after/index.ts` (with `examples/after/server.ts`),
 `metadata-norm/index.ts`, `integrations/agent-memory-api/index.ts`,
 `integrations/open-brain-rest/index.ts`, `integrations/readwise-capture/index.ts`,
 `integrations/telegram-capture/README.md`,
-`docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs`; the READMEs of
-those servers and `recipes/editorial-policy/schedule.sql`;
+`docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs`.
+
+With them: the READMEs of those servers and `recipes/editorial-policy/schedule.sql`;
 `primitives/deploy-edge-function/README.md`; `extensions/test-auth.ts`,
 `extensions/package.json` and `extensions/README.md`;
 `server-portable/test-auth.ts`; `integrations/.dockerignore`;
@@ -7882,7 +7883,8 @@ those servers and `recipes/editorial-policy/schedule.sql`;
 `dashboards/open-brain-dashboard-next/README.md` and
 `open-brain-dashboard-pro/README.md`; `scripts/check-fork-consistency.mjs` and
 `.github/workflows/fork-checks.yml` (Linear SMD-1455, filed from change 64's
-implementation). No migration.
+implementation; the ticket's own text says "change 62", which is the
+capturing-role grants — 64 is meant). No migration.
 
 **The finding.** Change 64 made the seven extension servers consumers of the
 core server's auth module and gave the fork checker check 8: a value read from
@@ -7906,7 +7908,9 @@ that leaves it does not deploy. Four of the seventeen deploy today —
 `ob-graph`, `agent-memory-api` and `metadata-norm` on supabase-js through their
 `deno.json`, `kubernetes-deployment` from a Dockerfile — and the rest
 already import the SQL shim across the tree (fix 13; the state SMD-1480
-records for five extensions). So the module is a `_shared/auth.ts` beside each
+records for five extensions).
+
+So the module is a `_shared/auth.ts` beside each
 server, imported as `../_shared/auth.ts` — every function deploys one level
 under `supabase/functions/`, and that is the one import it can resolve there —
 which in this repository puts a copy in each directory that holds a function
@@ -7914,18 +7918,26 @@ directory: `recipes/_shared/`, `integrations/_shared/`, the consolidation
 workers' own `_shared/` (already their deploy-time shared directory beside
 `helpers.ts` and `network.ts`), `recipes/editorial-policy/_shared/` for the
 auditor and `recipes/edge-function-cost-optimization/examples/_shared/` for the
-two samples. (The implementation had the auditor and the samples reach the
-category copy by `../../` and `../../../`, which resolves in this tree and not
-in a deployed layout — the third pass's deployer found it.) Six copies of one
-file, each byte for byte `server-portable/auth.ts`; `bun run sync-auth` in
-`extensions/` rewrites them all, and the test fails if any differs or the tree,
-the list and the command disagree. The deploy primitive says any one of them
-serves. The Kubernetes image is
-built with `integrations/` as its context so the copy is inside it, the
-Dockerfile mirroring the repository layout; the README's build line changed.
+two samples. Six copies of one file, each byte for byte
+`server-portable/auth.ts`; `bun run sync-auth` in `extensions/` rewrites them
+all, and the test fails if any differs or the tree, the list and the command
+disagree. The deploy primitive says any one of them serves. (The implementation
+had the auditor and the samples reach the category copy by `../../` and
+`../../../`, which resolves in this tree and not in a deployed layout — the
+third pass's deployer found it.) The Kubernetes image is built with
+`integrations/` as its context so the copy is inside it, the Dockerfile
+mirroring the repository layout; the README's build line changed. Each
+converted file carries an `ob1-fork (SMD-1455)` header naming the module and
+this change; the three that deploy under Deno with no `_shared/` of their own
+— `ob-graph`, `agent-memory-api`, `kubernetes-deployment` — add that the
+`_shared` import is the file's first from outside its own directory, as the
+ticket asked and as fix 13's codemod does.
 
-**What each server became.** The MCP servers register a tool that writes only
-`if (canWrite(principal))`, as the extensions do. Where a server was built per
+**What each server became.** Each imports `authenticateRequest` and `canWrite`
+(the ticket wrote `authenticate` and `presentedKey`; change 64's
+`authenticateRequest` is the one that tries every presented form). The MCP
+servers register a tool that writes only `if (canWrite(principal))`, as the
+extensions do. Where a server was built per
 request (`ob-graph`, `kubernetes-deployment`'s `buildServer()`, the "before"
 sample) the principal is a parameter; where it was a module singleton
 (`delete-thought-mcp`, `update-thought-mcp`, `work-operating-model-activation`)
@@ -7936,6 +7948,7 @@ tool for a read-scoped principal (the two single-tool integrations) still
 declares a tools capability and lists an empty set — the SDK wires `tools/list`
 only when a tool is registered, and a client whose listing fails shows a broken
 connector, not an empty one; a call is still told the method does not exist.
+
 The two HTTP APIs resolve the principal in one `app.use("*")` middleware
 and put a `requireWrite` middleware on the routes that write — for
 `agent-memory-api` write-back, usage reporting and review; for
@@ -7943,15 +7956,23 @@ and put a `requireWrite` middleware on the routes that write — for
 ingest — answering 403 with the reason before the route parses a body. A
 recall is a read: under a write-scoped key it records itself — a trace row and
 its items, which the usage route later marks used or ignored, and that route
-is a write — and under a read-scoped key it records nothing and returns no
-request id, so a leaked read key cannot fill the trace tables with its
-payloads either (the first review pass; the implementation had let it). The
-four workers keep their fail-closed 503 when no key is configured
-and let a read-scoped key do the one thing that writes nothing: a dry run
+is a write — and under a read-scoped key it records nothing and returns
+`request_id: null`, so a leaked read key cannot fill the trace tables with its
+payloads either (the first review pass; the implementation had let it).
+
+The three integration workers keep their fail-closed 503 when no key is
+configured (the auditor, which never had one, answers 401) and let a
+read-scoped key do the one thing that writes nothing: a dry run
 (`?dry_run=true`, or the auditor's `dry_run` body flag); anything else is 403.
 The consolidation workers' undocumented `x-mcp-key` header went, and — after
-the third pass — so did the auditor's undocumented `x-auditor-key`; its keys
-are `AUDITOR_ACCESS_KEYS`, the older `AUDITOR_ACCESS_KEY` still accepted.
+the third pass — so did the auditor's undocumented `x-auditor-key`: neither
+appeared in any README or in the schedule, so neither was a rule a caller
+could learn, and the module's four documented forms replace them. The auditor
+keeps its own names, `AUDITOR_ACCESS_KEYS` with the older `AUDITOR_ACCESS_KEY`
+still accepted, because `schedule.sql` and every deployed cron URL already
+carry them; it hands them to the module under its `MCP_ACCESS_KEYS` and
+`MCP_ACCESS_KEY` slots, which is why its legacy-key principal is named
+`MCP_ACCESS_KEY`.
 Every server reads its keys per request, where they are used, so a rotation
 takes effect without a restart and the test can set and unset them. The
 "after" sample's session map remembers the scope a session was minted under:
@@ -8106,8 +8127,10 @@ test (and the Telegram revert by check 8 as well); the Docker build from
 `integrations/` succeeds and `deno check` inside the image resolves
 `../_shared/auth.ts`; an SDK probe of the empty-tools server answers `{ tools:
 [] }` and -32601 on a call, as this section says; every shim-importing file's
-`deno check` errors are the shim's (fix 13), none inside this branch's hunks
-— one, it turned out, was: see the fourth pass;
+`deno check` errors are the shim's (fix 13) or `main`'s own, none inside this
+branch's hunks (the fourth pass found three that were, hidden among the
+shim's, and fixed them; two casts in `work-operating-model-activation` are
+`main`'s);
 two overlapping requests to a module singleton hang on `main` and here alike —
 SMD-1497 has the trigger, any two, not a burst. Text: `metadata-norm` deploys
 through its `deno.json`, not an inline specifier; fourteen importers, not
@@ -8187,9 +8210,38 @@ outside import it never had (its `_shared/` helpers came first); the Kubernetes
 note said Supabase bundles what Docker copies; the other dashboard README named
 the single key against `open-brain-rest`. Run and held: every README layout
 assembled literally and `deno check`ed — clean for the four that deploy, the
-shim's errors alone for the rest; five mutations of the third pass's guards
+shim's errors alone for the rest (plus two casts `main` already had in
+`work-operating-model-activation`); five mutations of the third pass's guards
 each caught; `docker build` from `integrations/` with the image holding exactly
 three files; a bisect across the four commits before this one green at each.
+
+**Review, fifth pass** (at the user's call; two reviewers — one adversarial on
+the fourth pass's own changes and the rule's edges, one auditing this section
+against the tree as the record a later reader trusts — twenty-three items,
+none above low; twenty-one fixed). The rule: an object literal that never
+closes bound its name to everything read below it — the brace walk now binds
+nothing when it runs off the end; a bracket read behind `?.` is followed; the
+header names what the clause does not follow (a property assigned after the
+object was made, a nested property). The checker had been decoding a 71 MB
+walkthrough video as text on every run; media extensions are binary now. Two
+header notes read wrong after the fourth pass (the Kubernetes note gave its
+reason twice, `metadata-norm`'s "Deploy it" pointed at the test), and the
+"after" sample's first line still said "singleton". The record: this section
+said all four workers kept a fail-closed 503 — the auditor never had one and
+answers 401, as the test encodes; said a read-scoped recall "returns no
+request id" where the API returns `request_id: null`; counted the seven
+extensions' 243 assertions "among" today's 643, which was change 64's whole
+suite, not a separable subset; and its title read as an importer count when
+fourteen files import a copy. Two deviations from the ticket's sketch were
+unrecorded — `authenticateRequest` for its `presentedKey`, and the ticket's
+"change 62" for 64 — and three decisions were taken without being written
+down: why the undocumented headers went, why the auditor keeps its own env
+names, and that every converted file carries the fork header the ticket asked
+of four. The three longest paragraphs are split where a topic changes, with
+history moved behind the current fact. Noted, not changed: `readwise-capture`'s
+README says both "no redeploy is needed" and "redeploy" about a rotated secret,
+and frames an update as fetching `index.ts` alone — `main`'s prose, outside
+this ticket.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the
@@ -8197,14 +8249,13 @@ deployability of everything that imports the shim. `recipes/vercel-neon-telegram
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
-**Verified:** `extensions/test-auth.ts` 643/643 (the seven extensions' 243
-among them); `server-portable/test-auth.ts` 67/67, `test-server.ts` 73/73,
+**Verified:** `extensions/test-auth.ts` 643/643 (243 at change 64); `server-portable/test-auth.ts` 67/67, `test-server.ts` 73/73,
 `tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
 --node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
 `agent-memory-api`, `consolidation-workers/metadata-norm` and
 `kubernetes-deployment`, each from its own directory — the four CI now checks;
 `bun scripts/check-fork-consistency.mjs` PASS with the exception list empty
-(51 probes, 29 non-probes, no vendored hit). The ticket's verify grep —
+(52 probes, 30 non-probes, no vendored hit). The ticket's verify grep —
 `req.query("key")` under `extensions/`, `recipes/`, `integrations/` — returns
 nothing.
 

@@ -1,8 +1,8 @@
 // ✅ Unified edge function with Mcp-Session-Id reuse.
 //
 // Key elements:
-//  - Singleton McpServer + Supabase client at module scope (no per-request
-//    reconstruction)
+//  - One McpServer per key scope + Supabase client at module scope (no
+//    per-request reconstruction)
 //  - app.options("*") returns CORS preflights cheaply BEFORE auth
 //  - Mcp-Session-Id header is minted on first request and reused on
 //    subsequent ones, collapsing the 4-step MCP handshake

@@ -423,7 +423,7 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
 // Text is scanned by construction (checks 6 and 7): only known binary shapes
 // and lockfiles are skipped, so an extensionless Dockerfile, Procfile or CNAME
 // is read like everything else.
-const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock|mp3|mp4|mov|m4a|wav|webm)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
 
 /**
  * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
@@ -741,7 +741,9 @@ function checkCoreFunctions() {
 // Deno.env.get(…) }`, one line or many, the shape change 65's workers use),
 // whose credential-named properties, bracket reads and destructured names are
 // followed; a free property clause fired on `opts.MAX_TOKENS` and
-// `table.PRIMARY_KEY`, so it is anchored to those objects — a helper that
+// `table.PRIMARY_KEY`, so it is anchored to those objects (not followed: a
+// property assigned after the object was made, `cfg.API_KEY = process.env.API_KEY`;
+// a nested one, `cfg.auth.KEY`; a literal that never closes) — a helper that
 // returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable, a read
 // by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
@@ -790,6 +792,7 @@ function credentialComparesIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*\{`, "g"))) {
     let depth = 0, i = m.index + m[0].length - 1;
     for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
+    if (i === text.length) continue; // a literal that never closes (prose, a truncated block) binds nothing
     const block = text.slice(m.index, i + 1);
     if ([...block.matchAll(new RegExp(ENV_READ, "g"))].some((r) => CREDENTIAL_ENV_NAME.test(envNameOf(r.slice(1))))) objects.add(m[1]);
   }
@@ -822,7 +825,7 @@ function credentialComparesIn(text) {
   // `.trim()` allowed. Same guards as a bound name: not `typeof`, not against a
   // nullish, empty or string literal, not `.x`, `(`, `[` after it.
   for (const O of OBJECTS) {
-    const P = String.raw`(?<![\w$.])${O}(?:(?:\?\.|\.)(${IDENT})|\[\s*["'](${IDENT})["']\s*\])(?:(?:\?\.|\.)trim\(\))?`;
+    const P = String.raw`(?<![\w$.])${O}(?:(?:\?\.|\.)(${IDENT})|(?:\?\.)?\[\s*["'](${IDENT})["']\s*\])(?:(?:\?\.|\.)trim\(\))?`;
     const cred = (m) => CREDENTIAL_ENV_NAME.test(m[1] ?? m[2] ?? "");
     flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${P}(?!\s*(?:[.(\[]|\?\.))`, "g"), cred);
     flag(new RegExp(String.raw`(?<!typeof\s+)${P}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), cred);
@@ -895,6 +898,7 @@ const CREDENTIAL_COMPARE_PROBES = [
   'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys.MCP_ACCESS_KEY) deny();',
   'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nif (!provided || provided !== keys.MCP_ACCESS_KEY?.trim()) deny();',
   'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys["MCP_ACCESS_KEY"]) deny();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys?.["MCP_ACCESS_KEY"]) deny();',
   'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nconst { MCP_ACCESS_KEY } = keys;\nif (provided !== MCP_ACCESS_KEY) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
@@ -934,6 +938,8 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'if (col === table.PRIMARY_KEY) skip();',
   // A helper that returns the key is outside the rule, and said so above.
   'const cfg = accessKeys();\nif (k !== cfg.MCP_ACCESS_KEY) deny();',
+  // An object literal that never closes binds nothing, whatever is read below it.
+  'const keys = {\nconst KEY = Deno.env.get("KEY");\nif (p === keys.KEY) deny();',
 ];
 // Empty since SMD-1455 (FORK.md change 65) moved the seventeen files check 8's
 // first run found onto the shared module. The shape stays for the next audit: a
