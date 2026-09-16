@@ -227,6 +227,8 @@ const CHUNKED_SHARE = 0.2;
 const CHUNKS_PER = 2;
 /** Rows per INSERT statement during the load. */
 const BATCH = 2000;
+/** The two vector indexes the load drops and rebuilds, timed each; section L reads them by these names. */
+const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"] as const;
 /**
  * `maintenance_work_mem` for the HNSW builds, or "auto": pgvector builds the
  * graph in memory while it fits and falls back to a far slower on-disk phase
@@ -286,11 +288,12 @@ function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
   // share are the same rows under two names (5,000 rows at five million is
   // the 0.1% tier, 2,000 at 20,000 the 10% one); they are one tier, labelled
   // with both names, so nothing is measured twice and nothing vanishes.
+  const aliases = new Map<string, string[]>();
   const push = (t: Tier) => {
     const twin = out.find((o) => o.share === t.share);
     if (twin) {
-      twin.label = `${twin.label} (also the ${t.label} tier)`;
-      notes.push(`${t.label} is the ${twin.label.split(" (")[0]} tier at this scale`);
+      aliases.set(twin.key, [...(aliases.get(twin.key) ?? []), t.label]);
+      notes.push(`${t.label} is the ${twin.label} tier at this scale`);
     } else out.push(t);
   };
   for (const t of TIERS) {
@@ -308,6 +311,7 @@ function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
       notes.push(`${t.share * 100}% of ${n.toLocaleString()} rows is under one row; not planted`);
     }
   }
+  for (const t of out) if (aliases.has(t.key)) t.label = `${t.label} (also the ${aliases.get(t.key)!.join(" and the ")} tier)`;
   return { tiers: out.sort((a, b) => b.share - a.share), notes };
 }
 
@@ -425,11 +429,18 @@ type LoadStats = {
  * counted as the rows are generated, so no pass over the table is needed.
  */
 async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries: number[][]): Promise<{ stats: LoadStats; matches: Map<string, number> }> {
-  const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"];
+  // Every index on the two tables that a constraint does not own — the
+  // primary keys stay, and so would a UNIQUE constraint's index if one were
+  // added (none today; 003's unique partial index is a plain index).
   const secondary: { name: string; def: string }[] = await sql.unsafe(
-    `SELECT indexname AS name, indexdef AS def FROM pg_indexes
-     WHERE schemaname = 'public' AND tablename IN ('thoughts', 'thought_chunks') AND indexname NOT LIKE '%_pkey'
-     ORDER BY indexname`
+    `SELECT i.relname AS name, pg_get_indexdef(ix.indexrelid) AS def
+     FROM pg_index ix
+     JOIN pg_class i ON i.oid = ix.indexrelid
+     JOIN pg_class t ON t.oid = ix.indrelid
+     JOIN pg_namespace ns ON ns.oid = t.relnamespace
+     WHERE ns.nspname = 'public' AND t.relname IN ('thoughts', 'thought_chunks')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)
+     ORDER BY i.relname`
   );
   for (const name of HNSW_INDEXES) {
     if (!secondary.some((i) => i.name === name)) throw new Error(`index ${name} is not defined; the load cannot rebuild it`);
@@ -495,7 +506,7 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
     const t2 = performance.now();
     await sql.unsafe(def);
     const s = (performance.now() - t2) / 1000;
-    if (HNSW_INDEXES.includes(name)) buildS[name] = s;
+    if ((HNSW_INDEXES as readonly string[]).includes(name)) buildS[name] = s;
     else otherIndexesS += s;
   }
   for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`ALTER TABLE ${rel} ENABLE TRIGGER USER`);
@@ -514,6 +525,9 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
 }
 
 // ── The measurements ────────────────────────────────────────────────────────
+
+/** The `wants` key for the exact answer over the whole table (section A's control); no tier is keyed so. */
+const WHOLE_TABLE = "whole table";
 
 /** A filter for a tier: `{"tiers": ["t1"]}` — array containment, one key. */
 const tierFilter = (key: string) => JSON.stringify({ tiers: [key] });
@@ -541,27 +555,25 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
   // and the ceiling's: what asking for the most the function will return costs.
   // The default path's rows are also scored against the exact top-K over the
   // whole table — the index's recall with no filter in the way.
-  let overlap = 0;
-  const time = async (count: number) => {
+  const time = async (count: number): Promise<{ ms: number; overlap: number }> => {
     const times: number[] = [];
+    let overlap = 0;
     for (const [i, q] of queries.entries()) {
       const t0 = performance.now();
       const got = (await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`)).map((r: { id: string }) => r.id);
       times.push(performance.now() - t0);
-      if (count === K) overlap += got.filter((id) => wants[i].has(id)).length;
+      overlap += got.filter((id) => wants[i].has(id)).length;
     }
-    return median(times);
+    return { ms: median(times), overlap: overlap / queries.length };
   };
-  const ms10 = await time(K);
-  const msMax = await time(ASKS[ASKS.length - 1]);
-  const overlapDefault = overlap / queries.length;
+  const at10 = await time(K);
+  const atMax = await time(ASKS[ASKS.length - 1]);
   // The same default-path call with the index asked to look harder: the
   // function does not set ef_search, so a session SET reaches it.
-  overlap = 0;
   await sql.unsafe(`SET hnsw.ef_search = ${EF_SEARCH_RAISED}`);
-  const ms10Raised = await time(K);
+  const raised = await time(K);
   await sql.unsafe(`RESET hnsw.ef_search`);
-  return { counts, ms10, msMax, overlap: overlapDefault, ms10Raised, overlapRaised: overlap / queries.length };
+  return { counts, ms10: at10.ms, msMax: atMax.ms, overlap: at10.overlap, ms10Raised: raised.ms, overlapRaised: raised.overlap };
 }
 
 /**
@@ -682,13 +694,7 @@ type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
   const body = await extractBody(sql, branch, DIM);
-  const out: Record<string, PlanShape> = {};
-  // The generic plan twice: as the function would get it, and with JIT off.
-  // At ten million rows every generic plan carried 30–130 ms of startup its
-  // custom twin did not, and the flat estimate that makes a plan generic is
-  // also what carries its cost past jit_above_cost; the third arm reads that
-  // rather than inferring it (SMD-1018 review pass).
-  for (const [key, mode, jit] of [["custom", "force_custom_plan", true], ["generic", "force_generic_plan", true], ["genericNoJit", "force_generic_plan", false]] as const) {
+  const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets —
@@ -697,9 +703,37 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
       if (!jit) await tx.unsafe(`SET LOCAL jit = off`);
       return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode });
     });
-    out[key] = shapeOf(text, ms);
-  }
-  return out as Plans;
+    return shapeOf(text, ms);
+  };
+  // The generic plan twice: as the function would get it, and with JIT off.
+  // At ten million rows every generic plan carried 30–130 ms of startup its
+  // custom twin did not, and the flat estimate that makes a plan generic is
+  // also what carries its cost past jit_above_cost; the third arm reads that
+  // rather than inferring it (SMD-1018 review pass).
+  return { custom: await arm("force_custom_plan", true), generic: await arm("force_generic_plan", true), genericNoJit: await arm("force_generic_plan", false) };
+}
+
+/**
+ * PREPARE an extracted statement under the function's own settings and a
+ * plan mode, hand the caller an EXECUTE builder for it, and take everything
+ * down afterwards — the bracket sections D and E both open (session scope,
+ * since the EXECUTEs run outside a transaction; the caller's plan mode,
+ * since the two sections exist to pin different ones).
+ */
+async function withPrepared<T>(
+  name: string,
+  body: string,
+  mode: "force_custom_plan" | "force_generic_plan",
+  run: (via: (q: number[], filter: string) => string) => Promise<T>
+): Promise<T> {
+  const applied = await applyFunctionSettings(sql, { scope: "session" });
+  await sql.unsafe(`SET plan_cache_mode = ${mode}`);
+  await sql.unsafe(`PREPARE ${name}(vector(${DIM}), float, int, jsonb, float, float) AS ${body}`);
+  const result = await run((q, filter) => `EXECUTE ${name}('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`);
+  await sql.unsafe(`DEALLOCATE ${name}`);
+  await sql.unsafe(`RESET plan_cache_mode`);
+  for (const setting of applied) await sql.unsafe(`RESET ${setting}`);
+  return result;
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
@@ -718,7 +752,7 @@ async function reconnect(): Promise<void> {
 }
 
 type Arm = "before (001–013)" | "after (014 on)";
-type Cell = FilteredResult & { key: string; label: string; matches: number };
+type Cell = FilteredResult & { label: string; matches: number };
 type Result = {
   scale: number;
   arm: Arm;
@@ -830,7 +864,7 @@ for (const n of SCALES) {
   {
     const answers: Set<string>[] = [];
     for (const q of queries) answers.push(await oracle(sql, q, null));
-    wants.set("", answers);
+    wants.set(WHOLE_TABLE, answers);
     process.stdout.write(".");
   }
   console.log(" done");
@@ -868,11 +902,11 @@ for (const n of SCALES) {
       console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts; pgvector defaults ${HNSW_BOUNDS.map((b) => `${b}=${pgvectorDefaults[b]}`).join(", ")}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
-    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get("")!);
+    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get(WHOLE_TABLE)!);
     const cells: Cell[] = [];
     for (const t of withCounts) {
       const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-      cells.push({ ...r, key: t.key, label: t.label, matches: t.matches });
+      cells.push({ ...r, label: t.label, matches: t.matches });
       process.stdout.write(".");
     }
     // Plans only for the function under test: see shapeOf. Each branch is
@@ -932,14 +966,7 @@ for (const n of SCALES) {
     let exact: FilteredResult | undefined;
     if (t.matches <= EXACT_CEILING) {
       const body = await extractBody(sql, "exact", DIM, { overrides: { v_exact: String(t.matches + 1) } });
-      const applied = await applyFunctionSettings(sql, { scope: "session" });
-      await sql.unsafe(`SET plan_cache_mode = force_custom_plan`);
-      await sql.unsafe(`PREPARE bench_exact(vector(${DIM}), float, int, jsonb, float, float) AS ${body}`);
-      const viaExact = (q: number[], filter: string) => `EXECUTE bench_exact('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
-      exact = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaExact);
-      await sql.unsafe(`DEALLOCATE bench_exact`);
-      await sql.unsafe(`RESET plan_cache_mode`);
-      for (const name of applied) await sql.unsafe(`RESET ${name}`);
+      exact = await withPrepared("bench_exact", body, "force_custom_plan", (via) => filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via));
     }
     bounds.push({ scale: n, label: t.label, matches: t.matches, tuples: Math.round((routing.vFetch * n) / t.matches), seeded, defaults, raised, exact });
     process.stdout.write(".");
@@ -960,23 +987,18 @@ for (const n of SCALES) {
   // for its scale — the next scale resets the schema — so nothing needs
   // restoring.
   process.stdout.write("  the walk, forced  ");
+  // Under the function's own SET clauses — under 019 that is the scan mode AND
+  // enable_seqscan, and a plan the deployed function cannot produce is not
+  // worth timing — and a forced generic plan.
   const walkBody = await extractBody(sql, "walk", DIM);
-  // The function's own SET clauses, session-scoped since the EXECUTEs below run
-  // outside a transaction — under 019 that is the scan mode AND enable_seqscan,
-  // and a plan the deployed function cannot produce is not worth timing.
-  const applied = await applyFunctionSettings(sql, { scope: "session" });
-  await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
-  await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb, float, float) AS ${walkBody}`);
-  const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
   const thin = withCounts.filter((t) => t.matches <= routing.vExact);
-  for (const t of thin) {
-    const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);
-    walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
-    process.stdout.write(".");
-  }
-  await sql.unsafe(`DEALLOCATE bench_walk`);
-  await sql.unsafe(`RESET plan_cache_mode`);
-  for (const name of applied) await sql.unsafe(`RESET ${name}`);
+  await withPrepared("bench_walk", walkBody, "force_generic_plan", async (via) => {
+    for (const t of thin) {
+      const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via);
+      walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
+      process.stdout.write(".");
+    }
+  });
   console.log(" done");
 }
 
