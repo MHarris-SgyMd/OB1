@@ -7107,8 +7107,8 @@ the thought's audit ids across the one write, and the `updated_at` compare
 sleeps 2 ms first, since 001's trigger re-stamps the column on any UPDATE and
 disabling it would disarm what [9] tests; [9]'s own compare, `>=` across two
 statements, passed with the trigger dropped and now sleeps the same 2 ms and
-asserts `>`. [28]'s read is unordered and asserts what makes it safe:
-its thought has one update row when it is read.
+asserts `>`. [28]'s read is unordered and asserts what makes it safe: its
+thought has one update row when it is read.
 
 Upstream status: **not applicable** — upstream's `update_thought` (the
 `integrations/*-thought-mcp` recipe 009 ported) has neither the provenance

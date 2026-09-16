@@ -706,7 +706,7 @@ console.log("\n[9] updated_at trigger fires on update, created_at does not move"
   await db.exec(`UPDATE thoughts SET content = 'trigger probe edited'`);
   const after = await stamps();
   assert(after.rows[0].c === before.rows[0].c, "created_at unchanged");
-  assert(after.rows[0].u > before.rows[0].u, `updated_at advanced (${before.rows[0].u} -> ${after.rows[0].u})`);
+  assert(after.rows[0].u > before.rows[0].u, `updated_at advanced (${before.rows[0].u.toFixed(3)} -> ${after.rows[0].u.toFixed(3)})`);
 }
 
 // ── 10. No Supabase-isms left behind ─────────────────────────────────────────
@@ -3176,12 +3176,12 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   type Audit = { actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> };
   // The update row one write added: the thought's audit ids before the write,
   // excluded after it; `audit` is undefined when the write added none. Not
-  // `ORDER BY created_at DESC, id`: separate
-  // transactions do not promise distinct created_at — now() is read from a
-  // clock that under PGlite has millisecond grain (SMD-1498), so two edits a
-  // few statements apart can share it — and the tiebreak `id` is a uuid, a
-  // coin toss between them (two rows sharing created_at: the read picked the
-  // older 51 of 100 times, SMD-1514).
+  // `ORDER BY created_at DESC, id`: separate transactions do not promise
+  // distinct created_at — now() is read from a clock that under PGlite has
+  // millisecond grain (SMD-1498), so two edits a few statements apart can
+  // share it — and the tiebreak `id` is a uuid, a coin toss between them (two
+  // rows sharing created_at: the read picked the older 51 of 100 times,
+  // SMD-1514).
   const auditOfWrite = async <T>(id: string, write: () => Promise<T>): Promise<{ r: T; audit: Audit | undefined; added: number }> => {
     const seen = (await db.query<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1`, [id])).rows.map((x) => x.id);
     const r = await write();
@@ -3234,7 +3234,7 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   let row = await rowOf(b);
   assert(r.ok === true && row.s === a, `an edit naming supersedes sets the pointer (${JSON.stringify(r)})`);
   assert(row.content === before.content && row.fp === before.fp && row.axis === 1 && row.m === before.m && row.k === 1, "…and touches neither content, fingerprint, vector, label nor metadata");
-  assert(row.u > before.u, `…while updated_at moves: a provenance edit is an edit (${before.u} -> ${row.u})`);
+  assert(row.u > before.u, `…while updated_at moves: a provenance edit is an edit (${before.u.toFixed(3)} -> ${row.u.toFixed(3)})`);
   assert((await audits()) === auditsBefore + 1 && added === 1 && audit?.actor_name === "editor" && audit?.diff.supersedes?.before === null && audit?.diff.supersedes?.after === a && !("content" in (audit?.diff ?? {})) && !("metadata" in (audit?.diff ?? {})),
     `…one audit row, the actor and the supersedes diff and nothing else (${added}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
   r = await edit(b, {});
