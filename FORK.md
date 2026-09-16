@@ -8394,7 +8394,9 @@ had assumed each statement's `now()` is later than the last's, which PGlite's
 millisecond clock does not promise, and its wipe assertion flaked once). The
 window's unit is asserted too (SMD-1515): the section had checked the default
 over rows hours old and rows going only at 0, which a body counting hours
-passes; now a 31-day row goes and a 29-day row stays under the default.
+passes; now a row half a day past 30 days goes and one half a day inside
+stays under the default — half a day, since rows a whole day out let a 31- or
+29-day window through whenever the insert and the prune share a `now()`.
 `db/config.mjs`'s `QUERY_LOG` is the one spelling of the flag, names, tool sets
 and retention, read by the server, preflight and the tests; a `querylog` grant
 group (query_log `INSERT`, since 034) means a self-hosted role that runs
