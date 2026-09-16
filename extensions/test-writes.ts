@@ -68,13 +68,15 @@
  * columns and indexes the enhanced sidecar adds to `thoughts`, stay until the
  * next suite's reset drops the table — nothing a later suite reads.
  *
- * One limit of the fixture, said here: the SQL shim binds a JS number array
- * as a Postgres array literal, so a vendored write that regressed to a raw
- * `.update({ embedding })` with a `number[]` fails at the shim ("invalid input
- * syntax for type vector"), before this suite's column assertions — loudly,
- * but not where the labels say. Over real PostgREST that raw write would
- * succeed and the assertions would name the stale columns; with the vector
- * as text (`[…]`, update-thought-mcp's old spelling) they do here too.
+ * A limit of the fixture that change 75 (SMD-1588) removed, said here for the
+ * record: until then the SQL shim handed a JS number array to a `vector`
+ * column as Bun's `String()` of it, so a vendored write that regressed to a
+ * raw `.update({ embedding })` with a `number[]` failed at the shim ("invalid
+ * input syntax for type vector") before this suite's column assertions —
+ * loudly, but not where the labels say. The shim now binds a value by its
+ * column's declared type, a `vector` column's as the JSON text Postgres
+ * coerces, so that raw write succeeds here as it would over PostgREST, and
+ * the assertions name the stale columns as the labels say.
  *
  *   ../db/with-postgres.sh bun test-writes.ts
  */

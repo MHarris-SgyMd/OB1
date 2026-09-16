@@ -134,7 +134,7 @@ PORT=8787 bun extensions/meal-planning/index.ts
 
 `SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
 
-> **Two of this server's six tools fail on the fork today** — `get_meal_plan` and `generate_shopping_list` (PostgREST embedded selects, `recipes:recipe_id (…)`, which the shim refuses at runtime); `update_recipe`'s error path renders `[object Object]` (the shim's error is not an `Error`); the other four work. SMD-1588 holds the shim fixes; FORK.md change 74's second review pass drove every tool against a real Postgres and found them.
+> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` beside `ingredients` into `JSONB` in one insert, the tag and ingredient filters, the recipe embedded on each meal (`recipes:recipe_id (…)`), the shopping list aggregated from it, and `update_recipe`'s error path carrying the database's message (FORK.md change 75, SMD-1588; change 74's review had found two of the six failing on the shim).
 
 ### 4. Connect to Your AI
 
@@ -199,7 +199,7 @@ PORT=8788 bun extensions/meal-planning/shared-server.ts
 
 `SUPABASE_HOUSEHOLD_KEY`, the restricted Supabase key the Edge Function version read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
 
-> **One of the shared server's four tools fails on the fork today** — `view_meal_plan` (an embedded select the shim refuses at runtime); `view_shopping_list`'s error path renders `[object Object]`; `view_recipes` and `mark_item_purchased` work. SMD-1588 holds the shim fixes.
+> **Every tool of the shared server runs on the fork.** `extensions/test-tools.ts` drives all four in CI on the rows the primary server's tools planted — the embedded recipe on `view_meal_plan`, the tag filter on `view_recipes`, `view_shopping_list`'s error path carrying the database's message (FORK.md change 75, SMD-1588).
 
 Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
 

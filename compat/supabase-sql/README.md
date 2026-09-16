@@ -105,22 +105,30 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`84 assertions: 84 passed, 0 failed` and `PASS`. A migrated file behaves
+`131 assertions: 131 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
+`extensions/test-tools.ts` then drives every tool of the five extension servers
+on the shim against their own schemas — the migrated files this shim is judged by.
 
 ## What is supported
 
 | | |
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
-| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` |
-| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is jsonb containment on a column |
+| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` |
+| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is containment with the column's own operator |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
+| Embedding | one hop: `relation (cols)`, `alias:fk_column (cols)`, `relation(*)` — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]` |
+| Arrays | a JavaScript array is bound by the column's or the function argument's declared type: an array literal for `text[]`, JSON for `jsonb`, JSON text for `vector` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
 inclusive at both ends; `.in([])` selects nothing; `.single()` on zero rows is an
-error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is jsonb
-`@>`; errors resolve as `{ error }` rather than throwing; a JSON path compares
+error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is `@>`
+with the column's operator — array containment on `text[]`, jsonb containment on
+`jsonb` — and `.or()` takes `cs` the same way; `.not(col, op, v)` is `IS NOT` for
+`is` and `NOT (…)` otherwise; errors resolve as `{ error }` rather than throwing,
+and the error is a `PostgrestError`, an `Error` subclass carrying `code`, so a
+file's `throw error` renders the database's message; a JSON path compares
 the key's *text*, so a number against `meta->>score` is a text comparison
 (`"5" >= "20"`), as it is through PostgREST — a numeric comparison on a JSON
 key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
@@ -135,8 +143,12 @@ does not — no migrated file reads one.
 
 Each of these throws with an explanation instead of guessing:
 
-- **Resource embedding** — `.select("*, other_table(*)")` needs foreign-key
-  introspection to become a join. Four files use it.
+- **A nested embed, or an embedding hint** — `applications!inner(*,
+  job_postings(*))`, `graph_nodes!graph_edges_target_node_id_fkey(…)`. One hop is
+  served through the catalog's foreign-key read (above); a second hop, `!inner`
+  and a named key are not, nor is a relation with no foreign key to the table or
+  with two (name the column: `alias:fk_column (…)`), nor an embed in a
+  `RETURNING` list.
 - **Nested `.or()`** — `or(and(a.eq.1,b.eq.2),c.eq.3)` needs a real parser. The flat
   form, which is the only one this repo uses, works.
 - **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
@@ -156,8 +168,31 @@ validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws. A
 JSON path's keys are held to the same shape and rendered as quoted string
 literals (`"meta"->>'key'`). Values always travel as bound parameters — against
 a path, cast to text, so a number or a null in an `.in()` list compares as its
-text where a plain text column would refuse the integer. A test asserts that a
-value containing `'; DROP TABLE …` is stored as data and the table survives.
+text where a plain text column would refuse the integer; an array for an array
+column as one parameter holding the array literal, its elements quoted and
+escaped, cast to the declared type. A test asserts that a value containing
+`'; DROP TABLE …` is stored as data and the table survives.
+
+## The catalog
+
+PostgREST knows the schema; a supabase-js caller leans on that without knowing
+it. The shim reads the same three things once per name per process, cached by
+connection URL: a table's column types (`pg_attribute` — which columns are
+arrays, which jsonb), its foreign keys in both directions (`pg_constraint`), and
+a function's argument names and types (`pg_proc`). Bun's driver serialises a
+parameter by the type the server describes for it and has no array-literal
+form, so a JavaScript array reached a `text[]` column as its `String()` (`a,b`,
+`""` for `[]`) and was refused as malformed — while the same array into a `jsonb`
+column beside it was right. Value shape cannot decide that (`tags TEXT[]` and
+`instructions JSONB` take the same `string[]`); the column's declared type does.
+A schema change after the first query is not seen until the process restarts,
+as with PostgREST's own cache. `toSQL()` reads the catalog too, so it is a
+promise.
+
+Clients on one connection URL share one pool. The vendored servers build a
+client inside each request and close none — an Edge Function's shape — and
+under Bun a pool per request held its connection for the life of the process
+(84 after the tool suite's calls, against a default limit of 100).
 
 ## Two gotchas worth knowing
 
@@ -175,15 +210,17 @@ development — the test caught it.
 
 - **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers
   cannot pool connections at all. The servers on it run as `bun <file>` (step 3).
-- **Most migrated files are not individually tested.** Most need live credentials —
-  Gmail, Slack, Readwise. The shim is tested; each migrated file is verified to
-  parse, and `extensions/test-writes.ts` drives the writers among them against a
-  real Postgres (the bio worker, the one that filters on a JSON path, found the
-  two gaps change 73 closed). Exercise the ones you actually run before trusting
-  them: change 74's review drove every extension tool and found seven of
-  twenty-five failing — no `.not()`, a JavaScript array bound as its `String()`,
-  and four embedded selects the codemod's blocker regex let through (a space or
-  an alias before the parenthesis) — SMD-1588 holds them.
+- **Most migrated recipes and integrations are not individually tested.** Most
+  need live credentials — Gmail, Slack, Readwise. The shim is tested; each
+  migrated file is verified to parse; `extensions/test-writes.ts` drives the
+  writers among them against a real Postgres (the bio worker, the one that
+  filters on a JSON path, found the two gaps change 73 closed); and
+  `extensions/test-tools.ts` drives every tool of the five extension servers
+  against their own schemas (change 74's review had found seven of twenty-nine
+  failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
+  four embedded selects the codemod's blocker regex let through — and driving
+  every argument branch found two more; change 75 closed them all). Exercise
+  the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.
@@ -196,6 +233,7 @@ development — the test caught it.
 ## Related
 
 - `../../scripts/migrate-to-sql-shim.mjs` — the codemod
+- `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
 - `../deno-on-bun.ts` — Deno's two globals on Bun, for the servers on the shim
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against

@@ -7,12 +7,14 @@
  * them. Every assertion below pins a behaviour those files depend on, including
  * the ones that are easy to get wrong — inclusive ranges, `{ data, error }`
  * instead of throwing, `.single()` on no rows, empty `.in()`, jsonb containment,
- * identifier safety, JSON-path filter columns and a timestamp's shape.
+ * identifier safety, JSON-path filter columns, a timestamp's shape, `.not()`,
+ * arrays bound by their column's type, the error's class and one hop of
+ * resource embedding (SMD-1588).
  *
  *   ../../db/with-postgres.sh bun test-compat.ts
  */
 
-import { createClient } from "./index.ts";
+import { createClient, PostgrestError } from "./index.ts";
 import { createAssert } from "../../db/test-support.ts";
 import { SQL } from "bun";
 
@@ -37,8 +39,29 @@ if (!URL_) {
       score      int,
       meta       jsonb DEFAULT '{}'::jsonb,
       retired    boolean DEFAULT false,
+      labels     text[] DEFAULT '{}',
       created_at timestamptz DEFAULT now()
     )`;
+  // One hop of embedding, both directions: a gizmo belongs to a widget; a link names two widgets (the ambiguous case).
+  await admin`DROP TABLE IF EXISTS gizmos CASCADE`;
+  await admin`DROP TABLE IF EXISTS links CASCADE`;
+  await admin`
+    CREATE TABLE gizmos (
+      id         serial PRIMARY KEY,
+      widget_id  int REFERENCES widgets(id) ON DELETE CASCADE,
+      label      text NOT NULL,
+      made_on    date DEFAULT '2026-09-20'
+    )`;
+  await admin`
+    CREATE TABLE links (
+      id    serial PRIMARY KEY,
+      a_id  int REFERENCES widgets(id),
+      b_id  int REFERENCES widgets(id)
+    )`;
+  await admin`
+    CREATE OR REPLACE FUNCTION widgets_labelled(p_labels text[], p_kind text DEFAULT NULL)
+    RETURNS TABLE (id int, name text) LANGUAGE sql STABLE AS $$
+      SELECT id, name FROM widgets WHERE labels @> p_labels AND (p_kind IS NULL OR kind = p_kind) ORDER BY id $$`;
   await admin`
     CREATE OR REPLACE FUNCTION widget_score_total(p_kind text DEFAULT NULL)
     RETURNS int LANGUAGE sql STABLE AS $$
@@ -63,6 +86,13 @@ console.log("[1] createClient keeps the supabase-js signature");
   let threw = "";
   try { createClient("https://project.supabase.co", "key"); } catch (e) { threw = (e as Error).message; }
   assert(/expected a postgres:\/\/ connection URL/.test(threw), "a project URL is rejected with an explanatory message");
+  // The vendored servers build a client per request and close none; under Bun that was a pool per request (SMD-1588).
+  const twin = createClient(URL_, "ignored-service-key");
+  assert(twin.sql === db.sql, "two clients on one URL share one pool");
+  await twin.close();
+  await twin.close();
+  const still = await db.from("widgets").select("id", { count: "exact", head: true });
+  assert(still.error === null, `…and closing one (twice) leaves the other's pool open (${still.error?.message ?? "ok"})`);
 }
 
 console.log("\n[2] insert, and RETURNING via .select()");
@@ -230,17 +260,19 @@ console.log("\n[10] Injection safety and honest refusals");
   const survived = await db.from("widgets").select("id", { count: "exact", head: true });
   assert(survived.count === 2, "…and the table still exists");
 
-  // Embedded selects must fail loudly rather than return subtly wrong rows.
+  // An embed the shim cannot serve fails loudly rather than returning subtly wrong rows ([17] has the served forms).
   let embedMsg = "";
   try { await db.from("widgets").select("*, other_table(*)"); } catch (e) { embedMsg = (e as Error).message; }
-  assert(/resource embedding/.test(embedMsg), "refuses PostgREST resource embedding");
-  assert(/not supported/.test(embedMsg), "…saying so explicitly rather than guessing at a join");
+  assert(/no foreign key joins it/.test(embedMsg), "refuses embedding a relation with no foreign key to this table");
+  let nestedMsg = "";
+  try { await db.from("widgets").select("*, gizmos(*, other(*))"); } catch (e) { nestedMsg = (e as Error).message; }
+  assert(/nests one resource embedding inside another/.test(nestedMsg) && /not supported/.test(nestedMsg), "refuses a nested embed, saying so rather than guessing at a join");
 }
 
 console.log("\n[11] The generated SQL is inspectable");
 {
   const q = db.from("widgets").select("id, name").eq("kind", "tool").order("score", { ascending: false }).limit(5);
-  const { text, values } = q.toSQL();
+  const { text, values } = await q.toSQL();
   assert(/SELECT "id", "name" FROM "widgets"/.test(text), "columns and table are quoted");
   assert(/WHERE "kind" = \$1/.test(text), "filters are parameterised, not interpolated");
   assert(/ORDER BY "score" DESC LIMIT 5/.test(text), "modifiers compile as expected");
@@ -276,7 +308,7 @@ try {
   assert(ordered[0]?.name === "epsilon", "order() by a path");
 
   const q = db.from("widgets").select("id").eq("meta->>owner", "ann").is("meta->>generated_by", null).order("meta->>owner");
-  const { text, values } = q.toSQL();
+  const { text, values } = await q.toSQL();
   assert(/WHERE "meta"->>'owner' = \$1::text AND "meta"->>'generated_by' IS NULL ORDER BY "meta"->>'owner' ASC/.test(text),
     `the column is a quoted identifier, the key a quoted literal, the value a parameter cast to text (${text})`);
   assert(values.length === 1 && values[0] === "ann", "…and the value travels as a parameter");
@@ -295,7 +327,7 @@ try {
   const refused = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("meta->>owner"))), "a path in a select list is still refused — not a filter column");
   assert(/Identifiers must match/.test(await refused(() => db.from("widgets").update({ "meta->>owner": "x" }).eq("name", "delta"))), "a path as a payload key is still refused");
-  assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("id").contains("meta->>owner", {}))), "contains() refuses a path — it is jsonb containment on a column, and text @> jsonb has no operator");
+  assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("id").contains("meta->>owner", {}))), "contains() refuses a path — it is containment with the column's own operator, and text @> jsonb has no operator");
   const survived = await db.from("widgets").select("id", { count: "exact", head: true });
   assert(survived.count === 4, "…and the table still exists");
 } catch (e) {
@@ -317,6 +349,130 @@ try {
   assert(nulled[0]?.kind === null && typeof nulled[0]?.created_at === "string", "a NULL stays null; only a Date is reshaped");
 } catch (e) {
   assert(false, `[13] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[14] .not() negates a filter (SMD-1588)");
+try {
+  // Rows: alpha, beta, delta, epsilon; epsilon's kind is NULL after [13].
+  const notNull = namesOf(await db.from("widgets").select("name").not("kind", "is", null).order("id"), "not is null");
+  assert(notNull === "alpha,beta,delta", `not("kind", "is", null) is IS NOT NULL — the two calls in the tree (${notNull})`);
+  const notEq = namesOf(await db.from("widgets").select("name").not("kind", "eq", "tool").order("id"), "not eq");
+  assert(notEq === "delta", `not("kind", "eq", …) is NOT (kind = …), which leaves a NULL out as PostgREST's does (${notEq})`);
+  const notIn = namesOf(await db.from("widgets").select("name").not("name", "in", ["alpha", "beta"]).order("id"), "not in");
+  assert(notIn === "delta,epsilon", `not("name", "in", […]) is NOT (name IN (…)) (${notIn})`);
+  const notEmptyIn = rowsOf(await db.from("widgets").select("name").not("name", "in", []), "not in []");
+  assert(notEmptyIn.length === 4, "not in([]) selects everything — the negation of in([])'s nothing");
+  const notIlike = namesOf(await db.from("widgets").select("name").not("name", "ilike", "%A%").order("id"), "not ilike");
+  assert(notIlike === "epsilon", `not(…, "ilike", …) (${notIlike})`);
+  const notCs = namesOf(await db.from("widgets").select("name").not("meta", "cs", { owner: "ann" }).order("id"), "not cs");
+  assert(notCs === "alpha,beta,epsilon", `not(…, "cs", …) is NOT (col @> …) (${notCs})`);
+  const { text } = await db.from("widgets").select("id").not("kind", "is", null).not("score", "gt", 5).toSQL();
+  assert(/WHERE "kind" IS NOT NULL AND NOT \("score" > \$1\)/.test(text), `the two renderings (${text})`);
+  let bad = "";
+  try { await db.from("widgets").select("id").not("kind", "bogus", 1); } catch (e) { bad = (e as Error).message; }
+  assert(/operator "bogus" is not supported/.test(bad), "an unknown operator is refused at the call");
+} catch (e) {
+  assert(false, `[14] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[15] A JavaScript array is bound by its column's type (SMD-1588)");
+try {
+  // An array column takes an array literal; a jsonb column takes the array as JSON. Bun's own binding of a
+  // JS array is its String() — `a,b`, `""` for [] — which a text[] column refuses as malformed (22P02).
+  const empty = rowsOf(await db.from("widgets").insert({ name: "zeta", kind: "tool", score: 1, labels: [], meta: ["j", "k"] }).select("labels, meta"), "insert []");
+  assert(Array.isArray(empty[0]?.labels) && (empty[0].labels as unknown[]).length === 0, `[] into text[] stores an empty array (${JSON.stringify(empty[0]?.labels)})`);
+  assert(JSON.stringify(empty[0]?.meta) === '["j","k"]', `…and the same insert's array into jsonb stores a JSON array (${JSON.stringify(empty[0]?.meta)})`);
+  const two = rowsOf(await db.from("widgets").insert({ name: "eta", kind: "tool", score: 2, labels: ["ai", "with, comma", 'quo"te'] }).select("labels"), "insert [a, b]");
+  assert(JSON.stringify(two[0]?.labels) === '["ai","with, comma","quo\\"te"]', `elements with a comma and a quote survive the literal (${JSON.stringify(two[0]?.labels)})`);
+  const upd = rowsOf(await db.from("widgets").update({ labels: ["ai", "ops"] }).eq("name", "zeta").select("labels"), "update");
+  assert(JSON.stringify(upd[0]?.labels) === '["ai","ops"]', "update binds an array the same way");
+  // contains(): the column's operator — array containment on text[], jsonb containment on jsonb.
+  const csArr = namesOf(await db.from("widgets").select("name").contains("labels", ["ai"]).order("id"), "contains text[]");
+  assert(csArr === "zeta,eta", `contains() on a text[] column is array @> (${csArr})`);
+  const csText = namesOf(await db.from("widgets").select("name").contains("labels", '{"ops"}').order("id"), "contains literal");
+  assert(csText === "zeta", `…and takes PostgREST's literal text too (${csText})`);
+  const csJson = namesOf(await db.from("widgets").select("name").contains("meta", ["j"]), "contains jsonb array");
+  assert(csJson === "zeta", `contains() on a jsonb column with an array is jsonb @> (${csJson})`);
+  const orCs = namesOf(await db.from("widgets").select("name").or('meta.cs.["k"],score.gt.90').order("id"), "or cs");
+  assert(orCs === "alpha,zeta", `or() takes a cs term — the value parsed to JSON and bound as such, not as a JSON string (${orCs})`);
+  const orCsArr = namesOf(await db.from("widgets").select("name").or('labels.cs.{"ops"},score.gt.90').order("id"), "or cs on text[]");
+  assert(orCsArr === "alpha,zeta", `…and on an array column, PostgREST's literal (${orCsArr})`);
+  // rpc: a text[] argument by the function's declaration.
+  const fn = rowsOf(await db.rpc("widgets_labelled", { p_labels: ["ai"] }), "rpc text[]");
+  assert(fn.map((r) => r.name).join() === "zeta,eta", `a text[] argument is bound as an array literal (${fn.map((r) => r.name).join()})`);
+  const fnEmpty = rowsOf(await db.rpc("widgets_labelled", { p_labels: [], p_kind: "gadget" }), "rpc []");
+  assert(fnEmpty.map((r) => r.name).join() === "delta", `…and [] as an empty one — every gadget contains it; epsilon's kind is NULL since [13] (${fnEmpty.map((r) => r.name).join()})`);
+  const { text, values } = await db.from("widgets").insert({ name: "x", labels: ["a"], meta: ["a"] }).select("id").toSQL();
+  assert(/VALUES \(\$1, \$2::text\[\], \$3\)/.test(text) && values[1] === '{"a"}' && Array.isArray(values[2]),
+    `the literal travels cast to the declared type; the jsonb value travels as itself (${text}; ${JSON.stringify(values)})`);
+  await db.from("widgets").delete().in("name", ["zeta", "eta"]);
+} catch (e) {
+  assert(false, `[15] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[16] The error is an Error (SMD-1588)");
+{
+  const { error } = await db.from("widgets").insert({ name: "alpha" }).select("id");
+  assert(error instanceof Error, "a database error is an Error instance — `throw error` in a caller renders its message, not [object Object]");
+  assert(error instanceof PostgrestError && error.name === "PostgrestError" && error.code === "23505", `…of the exported class, carrying the SQLSTATE (${error?.code})`);
+  assert(String(error).includes("duplicate key"), `String(error) is the message (${String(error).slice(0, 50)})`);
+  const missing = await db.from("widgets").select("name").eq("name", "nope").single();
+  assert(missing.error instanceof PostgrestError && missing.error.code === "PGRST116", "the shim's own PGRST116 is one too");
+  const fn = await db.rpc("no_such_function");
+  assert(fn.error instanceof PostgrestError && fn.error.code === "42883", `an rpc error is one too (${fn.error?.code})`);
+}
+
+console.log("\n[17] Resource embedding, one hop (SMD-1588)");
+try {
+  const alpha = rowsOf(await db.from("widgets").select("id").eq("name", "alpha").limit(1), "alpha id")[0]?.id as number;
+  const beta = rowsOf(await db.from("widgets").select("id").eq("name", "beta").limit(1), "beta id")[0]?.id as number;
+  rowsOf(await db.from("gizmos").insert([{ widget_id: alpha, label: "g1" }, { widget_id: alpha, label: "g2" }, { widget_id: null, label: "orphan" }]).select("id"), "gizmos");
+  // Many-to-one by the table's name, with a column list and whitespace anywhere (the tree's spelling).
+  const byTable = rowsOf(await db.from("gizmos").select(`
+      *,
+      widgets (
+        id,
+        name
+      )
+    `).order("id"), "by table");
+  assert(byTable.length === 3 && (byTable[0].widgets as { name: string })?.name === "alpha" && Object.keys(byTable[0].widgets as object).join() === "id,name",
+    `many-to-one by table name: an object with the named columns, keyed by the table (${JSON.stringify(byTable[0]?.widgets)})`);
+  assert(byTable[2].widgets === null, "…and null where the key is null, as PostgREST's is");
+  assert(byTable[0].label === "g1" && typeof byTable[0].made_on === "string", "the base row's own columns are there, JSON-shaped");
+  // By the foreign-key column, with an alias.
+  const byCol = rowsOf(await db.from("gizmos").select("label, w:widget_id (name, score)").eq("label", "g2"), "by column");
+  assert(JSON.stringify(byCol[0]?.w) === JSON.stringify({ name: "alpha", score: 99 }), `many-to-one by the key column, keyed by the alias (${JSON.stringify(byCol[0])})`);
+  const byColNoAlias = rowsOf(await db.from("gizmos").select("widget_id (name)").eq("label", "g2"), "by column, no alias");
+  assert(JSON.stringify(byColNoAlias[0]) === JSON.stringify({ widget_id: { name: "alpha" } }), `…keyed by the column when there is no alias (${JSON.stringify(byColNoAlias[0])})`);
+  // One-to-many, with (*).
+  const o2m = rowsOf(await db.from("widgets").select("name, gizmos(*)").in("name", ["alpha", "beta"]).order("id"), "one-to-many");
+  assert(Array.isArray(o2m[0]?.gizmos) && (o2m[0].gizmos as { label: string }[]).map((g) => g.label).sort().join() === "g1,g2",
+    `one-to-many by table name: an array of the rows with every column (${JSON.stringify(o2m[0]?.gizmos)})`);
+  assert((o2m[0].gizmos as Record<string, unknown>[])[0].made_on === "2026-09-20", "an embedded date carries Postgres's spelling, as PostgREST's does");
+  assert(Array.isArray(o2m[1]?.gizmos) && (o2m[1].gizmos as unknown[]).length === 0, "…and [] where there are none");
+  // Embeds compose with filters, order and single().
+  const one = await db.from("gizmos").select("label, widgets (name)").eq("label", "g1").single();
+  assert(one.error === null && (one.data as unknown as { widgets: { name: string } }).widgets?.name === "alpha", "an embed under single()");
+  const { text } = await db.from("gizmos").select("*, widgets (name)").eq("label", "g1").toSQL();
+  assert(/SELECT \*, \(SELECT row_to_json\(__r\) FROM \(SELECT __e\."name" FROM "widgets" AS __e WHERE __e\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
+    `the embed is a correlated subquery on the foreign key (${text})`);
+  // Refusals, each naming why.
+  const refusedMsg = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("*, widgets(name)"))), "two foreign keys to the same table are refused, naming the column form");
+  rowsOf(await db.from("links").insert({ a_id: alpha, b_id: beta }).select("id"), "links setup");
+  const links = rowsOf(await db.from("links").select("a:a_id (name), b:b_id (name)"), "links read");
+  assert(JSON.stringify(links[0]) === JSON.stringify({ a: { name: "alpha" }, b: { name: "beta" } }), `…and the column form serves them (${JSON.stringify(links[0])})`);
+  assert(/embedding hint/.test(await refusedMsg(() => db.from("gizmos").select("*, widgets!inner(name)"))), "!inner is refused as a hint");
+  assert(/embedding hint/.test(await refusedMsg(() => db.from("gizmos").select("*, widgets!gizmos_widget_id_fkey(name)"))), "!fk_name is refused as a hint");
+  assert(/not a single-column foreign key/.test(await refusedMsg(() => db.from("gizmos").select("*, label(name)"))), "a column that is not a foreign key is refused");
+  assert(/RETURNING list/.test(await refusedMsg(() => db.from("gizmos").insert({ label: "x" }).select("*, widgets(name)"))), "an embed in a RETURNING list is refused");
+  assert(/Identifiers must match/.test(await refusedMsg(() => db.from("gizmos").select("widgets(name, meta->>k)"))), "a JSON path inside an embed is refused");
+  assert(/with no columns/.test(await refusedMsg(() => db.from("gizmos").select("count()"))), "an aggregate — a name with empty parentheses — is refused");
+  assert(/not a column or a one-hop embed/.test(await refusedMsg(() => db.from("gizmos").select("widgets(name)x"))), "text around an embed is refused");
+  const survived = await db.from("widgets").select("id", { count: "exact", head: true });
+  assert(survived.count === 4, "…and the table still exists");
+} catch (e) {
+  assert(false, `[17] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 await db.close();
