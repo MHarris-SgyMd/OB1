@@ -1,5 +1,5 @@
 -- ============================================================================
--- 035 — delete_thought joins the writers' lock order: it takes the supersession
+-- 036 — delete_thought joins the writers' lock order: it takes the supersession
 --        advisory lock before its DELETE, so an accept racing a delete of the
 --        superseded thought no longer deadlocks (SMD-1462)
 --
@@ -42,7 +42,7 @@
 --   — a fresh cycle of the same two functions, seen 10 of 40 while building
 --   this migration with the delete fixed but the review not. (The shipped
 --   db/test-live.ts [6g] does not reproduce that intermediate state; its arm 2
---   and test-schema [35] guard the reorder.) The two orderings only meet if
+--   and test-schema [36] guard the reorder.) The two orderings only meet if
 --   BOTH writers take the advisory lock before any row the other needs. With
 --   (1)+(2) they do: a delete and a review contend on the lock first, and
 --   whichever wins runs to commit — the review writing its pointer, or the
@@ -100,12 +100,12 @@
 --
 -- Verify
 --   db/test-live.ts [6g]: the review-vs-delete race, forty tries each — the
---   pre-035 lockless delete deadlocks, the shipped pair does not, and the
+--   pre-036 lockless delete deadlocks, the shipped pair does not, and the
 --   cascade still removes the proposal. [6h]: the update-supersedes-vs-delete
 --   race, forty tries, never a raw 23503 — always SUPERSEDES_NOT_FOUND or a
---   clean write. db/test-schema.ts [35] pins 035 as the last definer of both
+--   clean write. db/test-schema.ts [36] pins 036 as the last definer of both
 --   functions and the lock before the row; [32]'s definer assertion moves
---   review_supersession_proposal 032 -> 035 (its behaviour assertions are
+--   review_supersession_proposal 032 -> 036 (its behaviour assertions are
 --   unchanged); [28] unchanged. server-portable/test-update-delete.ts
 --   unchanged.
 -- ============================================================================
@@ -124,7 +124,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
 
-  -- 035: take the supersession advisory lock before the DELETE — the key
+  -- 036: take the supersession advisory lock before the DELETE — the key
   -- review_supersession_proposal and update_thought take (029/032/033) — so a
   -- delete of a superseded thought serialises with an acceptance writing that
   -- pointer instead of deadlocking against it through 029's cascade. Taken
@@ -146,7 +146,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION delete_thought(uuid, jsonb) IS
-  'Hard-delete a thought by id. Chunks go by cascade; migration 008 audits the delete with previous_content preserved, which is what makes a hard delete recoverable. Takes the supersession advisory lock before the DELETE (035) — the one review_supersession_proposal and update_thought take — so a delete of a superseded thought serialises with an acceptance writing that pointer rather than deadlocking against 029''s ON DELETE CASCADE. Returns {ok:false, error:NOT_FOUND} rather than succeeding silently.';
+  'Hard-delete a thought by id. Chunks go by cascade; migration 008 audits the delete with previous_content preserved, which is what makes a hard delete recoverable. Takes the supersession advisory lock before the DELETE (036) — the one review_supersession_proposal and update_thought take — so a delete of a superseded thought serialises with an acceptance writing that pointer rather than deadlocking against 029''s ON DELETE CASCADE. Returns {ok:false, error:NOT_FOUND} rather than succeeding silently.';
 
 
 -- ---------------------------------------------------------------------------
@@ -200,7 +200,7 @@ BEGIN
     PERFORM set_config('ob1.actor', p_actor::text, true);
   END IF;
 
-  -- 035 (SMD-1462): the supersession advisory lock BEFORE the proposal row.
+  -- 036 (SMD-1462): the supersession advisory lock BEFORE the proposal row.
   -- delete_thought now takes this same lock before its DELETE, and 029's ON
   -- DELETE CASCADE from a deleted thought reaches the proposals that name it;
   -- taking the lock before P — not only at the acceptance below — is what keeps
@@ -252,7 +252,7 @@ BEGIN
   END IF;
 
   -- Acceptances are serialised on the advisory lock taken at the top of this
-  -- function since 035 (before 035 it was taken here, after the proposal row):
+  -- function since 036 (before 036 it was taken here, after the proposal row):
   -- the walk in update_thought reads other rows' pointers, and two accepts
   -- running at once — A over B in one, B over A in the other — would each walk a
   -- chain the other has not committed yet and both write, closing the loop the
@@ -310,4 +310,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION review_supersession_proposal(uuid, text, text, text, jsonb, boolean) IS
-  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every edit of the column goes through the one edit function (a capture''s add-if-empty through upsert_thought aside): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. The supersession advisory lock moved before the proposal row in 035, so a delete of the superseded thought (which takes the same lock before its DELETE) cannot deadlock the review through 029''s cascade. Migration 029 / 032 / 035.';
+  'The reviewer''s decision on one proposal, and the only path from the table to thoughts.supersedes — through update_thought since migration 032, so every edit of the column goes through the one edit function (a capture''s add-if-empty through upsert_thought aside): accept sets the pointer on the thought the verdict (or p_direction, required for an undirected verdict) names as current, refusing a pointer at a third thought, one that would close a loop (update_thought''s walk), or a pair whose text changed since it was judged unless p_force; reject marks the row and clears an accepted write of its own while it still stands. p_actor is set on ob1.actor for the audit trigger. The supersession advisory lock moved before the proposal row in 036, so a delete of the superseded thought (which takes the same lock before its DELETE) cannot deadlock the review through 029''s cascade. Migration 029 / 032 / 036.';
