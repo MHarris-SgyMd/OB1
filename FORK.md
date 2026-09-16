@@ -416,15 +416,16 @@ one write lands first.
   row shares its transaction. The reverse orphan — a vector for a row that rolled
   back — cannot occur, because the vector write is keyed off a committed outbox
   row.
-- *`updateThought` / `deleteThought`.* A content edit re-embeds and must overwrite
-  the external vector; a delete must remove it. In Postgres today the chunk
-  vectors are `ON DELETE CASCADE` (migration 007) — a foreign key does this for
-  free. A second store has no such key: the delete becomes a second,
-  non-transactional call, and a crash between them leaves a vector whose row is
-  gone (a search hit
-  that resolves to nothing). Handling: the same outbox drains deletes and
-  re-embeds; `getThought` already resolves every hit by id, so a stale vector
-  surfaces as a dropped hit, not as wrong content — the reader is never lied to,
+- *`updateThought` / `deleteThought`.* A content edit re-embeds and must
+  overwrite the external vector; a delete must remove it. In Postgres today
+  the chunk vectors are `ON DELETE CASCADE` (migration 007) — a foreign key
+  does this for free. A second store has no such key: the delete becomes a
+  second, non-transactional call, and a crash between them leaves a vector
+  whose row is gone (a search hit that resolves to nothing). Handling: the
+  same outbox drains deletes and re-embeds; and because content is always read
+  from Postgres — in the two-store shape the vector store returns ids and
+  Postgres resolves the rows — a stale vector id resolves to no row and drops
+  the hit rather than returning wrong content. The reader is never lied to,
   only under-served until the drain catches up.
 - *Bulk re-embed (SMD-946).* A model change rebuilds every vector. Against an
   external index this is an index rebuild in the second store, not just an
@@ -450,8 +451,9 @@ one write lands first.
 reports at least one of:
 
 1. a **recall gap against exact** at a filter tier the product actually uses
-   (SMD-1037 measures 36% down to 0.7%) — pgvector materially below the
-   comparator where a real deployment filters, not in the abstract;
+   (SMD-1037's filter tiers span 36% down to 0.7% selectivity) — pgvector
+   materially below the comparator where a real deployment filters, not in the
+   abstract;
 2. a **latency gap** (p95) at a row count **within a stated multiple of the
    largest real deployment** — a crossover we can reach, not one at 10M rows if
    no corpus approaches 10M;
