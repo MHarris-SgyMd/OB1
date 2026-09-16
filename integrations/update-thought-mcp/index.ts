@@ -49,7 +49,7 @@
  *   MCP_ACCESS_KEYS (or the older single MCP_ACCESS_KEY)
  */
 
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";

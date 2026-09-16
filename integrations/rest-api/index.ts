@@ -48,6 +48,7 @@
  *   - Optional: Knowledge graph schema (schemas/knowledge-graph) for /entities routes
  */
 
+import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
   embedText,

@@ -48,7 +48,10 @@
  * servers still on supabase-js run their PostgREST calls as SQL against the
  * same database the others reach through the shim. The model provider is
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
- * recognisable — and everything below the tool or route boundary is real.
+ * recognisable — and everything below the tool or route boundary is real. The
+ * shim-migrated files import compat/deno-on-bun.ts first (change 74), which
+ * installs nothing where `Deno` is already defined, so the stand-in still
+ * captures each handler; test-auth.ts is where they start under bun for real.
  *
  * The database is the fork's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write

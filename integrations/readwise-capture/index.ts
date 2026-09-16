@@ -25,6 +25,7 @@
 // `readwise_books` table so highlights can carry book title/author
 // without one Readwise API call per highlight.
 
+import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import { secretMatches } from "../_shared/auth.ts";
 
