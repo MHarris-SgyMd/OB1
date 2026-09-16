@@ -200,7 +200,7 @@
  */
 
 import { SQL } from "bun";
-import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
+import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, hasKeptCorpus, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { digestOf, markerAnswers } from "./bench-oracle.ts";
 import type { OracleAnswer, OracleCache } from "./bench-oracle.ts";
@@ -593,8 +593,7 @@ const when = (iso: string) => iso.slice(0, 16).replace("T", " ");
 // Bun.deepEquals: jsonb hands an object back with its keys in its own order,
 // so a text compare of a round trip is not a compare of the value.
 async function readMarker(sql: SQL): Promise<Marker | null> {
-  const [{ has }] = await sql`SELECT to_regclass(${MARKER}) IS NOT NULL AS has`;
-  if (!has) return null;
+  if (!(await hasKeptCorpus(sql))) return null;
   try {
     const [row] = await sql.unsafe(`SELECT corpus FROM ${MARKER}`);
     if (!row) throw new Error("the table exists but holds no row, so nothing vouches for what is under it");
@@ -1518,13 +1517,13 @@ for (const n of SCALES) {
   // the key) and this run asked fewer; an entry that answered for every
   // query is left as it is, however many more it holds; other keys' entries
   // are never touched.
-  const oracleRecord: OracleCache = { queries: digests, answers };
+  const entry = (): OracleCache => ({ queries: digests, answers });
   if (!kept && KEPT) {
-    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [shape]: oracleRecord } });
+    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [shape]: entry() } });
     console.log(`  corpus kept: marker written, with the exact pass's answers for ${Q} queries`);
   } else if (kept && have < Q) {
     if (KEPT) {
-      await amendOracle(sql, shape, oracleRecord);
+      await amendOracle(sql, shape, entry());
       console.log(`  marker extended: the exact pass's answers for ${Q} queries (${had === 0 ? "had none" : `had ${had}, ${have} of them this run's`})`);
     } else {
       console.log(`  (the exact pass's answers were not kept: no OB1_PG_KEEP)`);

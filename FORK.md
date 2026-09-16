@@ -11047,6 +11047,19 @@ runs and names the two planted ones; the marker's binding comment names
 no ternary in front of it; and the 25-line JSDoc the extraction left behind
 is the entry's, in its module.
 
+**Boyscout, while the files were open** (what the passes cut for space, no
+behaviour change): the marker-table probe is one `hasKeptCorpus` the bench,
+the suite and `dropSchema` share, where three had spelled the `to_regclass`;
+the digest uses `node:crypto`'s `createHash`, as `migrate.ts` and `auth.ts`
+do, in place of Bun's hasher; the suite's two table readers share one cell
+splitter and the section-L reader finds the data row from the separator
+rather than by position; and the oracle entry is built where it is written
+rather than on every path. Left as they were, being behaviour or outside the
+touched files: test-live's own by-hand `OB1_*` strips, which
+`shellWithoutOb1` could replace; a `--json` report the suite could compare
+as data rather than scraped markdown; and prewarming the metadata GIN on
+both paths so a reused row's first tier queries find it warm.
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for

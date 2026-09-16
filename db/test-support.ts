@@ -24,6 +24,11 @@ const MIGRATIONS = join(HERE, "migrations");
 
 /** bench-hnsw.ts's kept-corpus marker table (SMD-1493): the bench writes and reads it by this name, the reuse suite plants and drops its own, and `dropSchema` refuses a database holding one. */
 export const BENCH_MARKER = "bench_hnsw_corpus";
+/** Whether the database holds the marker table — the one probe the bench, the reuse suite and `dropSchema` share. */
+export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
+  const [{ has }] = await sql`SELECT to_regclass(${BENCH_MARKER}) IS NOT NULL AS has`;
+  return Boolean(has);
+}
 
 /**
  * Every table the schema owns, in drop order — dependents first. `thoughts` is
@@ -217,8 +222,7 @@ export async function dropSchema(url: string): Promise<void> {
     // marker; a suite run under the same OB1_PG_KEEP name would drop it here
     // with no word. The bench itself never reaches this with a marker present
     // (it reuses or refuses first), so a marker here means another caller.
-    const [{ kept }] = await admin`SELECT to_regclass(${BENCH_MARKER}) IS NOT NULL AS kept`;
-    if (kept && process.env.OB1_DROP_KEPT_CORPUS !== "1") {
+    if ((await hasKeptCorpus(admin)) && process.env.OB1_DROP_KEPT_CORPUS !== "1") {
       throw new Error(`this database holds a kept bench-hnsw corpus (${BENCH_MARKER}); a schema reset would drop it. Run this suite without OB1_PG_KEEP, or set OB1_DROP_KEPT_CORPUS=1 to drop the corpus deliberately.`);
     }
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);

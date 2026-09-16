@@ -51,7 +51,7 @@
 import { SQL } from "bun";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BENCH_MARKER, REMOTE_DB_FLAGS, assertThrowawayDatabase, createAssert, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
+import { BENCH_MARKER, REMOTE_DB_FLAGS, assertThrowawayDatabase, createAssert, hasKeptCorpus, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +98,11 @@ async function bench(q: number, expect = 0): Promise<{ code: number; out: string
   return r;
 }
 
+/** A markdown table row's cells, trimmed. */
+const cells = (row: string) => row.slice(1, -1).split(" | ").map((c) => c.trim());
+/** Whether a table row is the header's separator (`| ---: | --- |`). */
+const separator = (row: string) => /^:?-+:?$/.test(cells(row)[0]);
+
 /**
  * Sections A, B, D and E of a report — the tables scored against the oracle —
  * with every timing column dropped (a header naming `ms`), as one string. Two
@@ -115,14 +120,14 @@ function scored(out: string): string {
       continue;
     }
     if (!/^[ABDE]$/.test(section) || !line.startsWith("| ")) continue;
-    const cells = line.slice(1, -1).split(" | ").map((c) => c.trim());
+    const row = cells(line);
     if (!mask) {
-      mask = cells.map((header) => !/\bms\b/.test(header));
+      mask = row.map((header) => !/\bms\b/.test(header));
       continue;
     }
-    if (/^:?-+:?$/.test(cells[0])) continue;
+    if (separator(line)) continue;
     const keep = mask;
-    kept.push(`${section}: ${cells.filter((_, i) => keep[i]).join(" | ")}`);
+    kept.push(`${section}: ${row.filter((_, i) => keep[i]).join(" | ")}`);
   }
   return kept.join("\n");
 }
@@ -140,18 +145,18 @@ function sameScored(a: { out: string; label: string }, b: { out: string; label: 
 function loadCell(out: string, header: string): string | null {
   const lines = out.split("\n");
   const at = lines.findIndex((l) => l.startsWith("### L."));
+  if (at < 0) return null;
   const table = lines.slice(at + 1).filter((l) => l.startsWith("| "));
-  if (at < 0 || table.length < 3) return null;
-  const cells = (l: string) => l.slice(1, -1).split(" | ").map((c) => c.trim());
-  const i = cells(table[0]).indexOf(header);
-  return i < 0 ? null : (cells(table[2])[i] ?? null);
+  const sep = table.findIndex(separator);
+  const row = sep > 0 ? table[sep + 1] : undefined;
+  const i = sep > 0 ? cells(table[sep - 1]).indexOf(header) : -1;
+  return row === undefined || i < 0 ? null : (cells(row)[i] ?? null);
 }
 /** The confound line — the one number the oracle alone decides. */
 const confound = (out: string) => /nearest query-to-row cosine (\d\.\d{3}) over this run's/.exec(out)?.[1] ?? null;
 
 const sql = new SQL(URL_);
-const [{ has }] = await sql`SELECT to_regclass(${BENCH_MARKER}) IS NOT NULL AS has`;
-if (has) {
+if (await hasKeptCorpus(sql)) {
   console.error(`test-bench-reuse.ts: this database already holds a ${BENCH_MARKER} marker — a kept corpus's, which this suite would neither replace nor drop. Run the suite against a throwaway database (./with-postgres.sh without OB1_PG_KEEP).`);
   await sql.close();
   process.exit(2);

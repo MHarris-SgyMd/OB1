@@ -7,6 +7,7 @@
  * guards mutant-blind (review pass). The bench keeps what needs a server:
  * the statement, the shape's key, the plan check, the reads and writes.
  */
+import { createHash } from "node:crypto";
 
 /** One query's exact answer: the top-K ids in distance order, and the nearest row's cosine (−1 where nothing matched). */
 export type OracleAnswer = { ids: string[]; top: number };
@@ -37,7 +38,7 @@ export type OracleAnswer = { ids: string[]; top: number };
 export type OracleCache = { queries: string[]; answers: Record<string, OracleAnswer[]> };
 
 /** A short digest for the cache — of a query's literal, of the statement's forms, of the server's kernel probe. */
-export const digestOf = (value: unknown): string => new Bun.CryptoHasher("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+export const digestOf = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 
 /**
  * The answers an entry gives this run: for each of THESE keys, the leading
