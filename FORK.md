@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-one numbered changes on top of the pin. Seven fix defects found in an
+Seventy-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–71 are the numbered `###` sections** further down, which is
+sections. Changes **18–72 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -195,6 +195,7 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
+compat/supabase-sql/index.ts     # change 72 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -10078,7 +10079,8 @@ real:** the SQL shim's `ident()` refuses a JSON-path filter column
 (`metadata->>generated_by`), so `consolidation-bio` as shipped on the fork
 answers 500 at its first query and never reaches `upsertProfile` — the
 reason it can only be read here, not driven; the shim fix and the drive are
-SMD-1544. A fresh worktree needs `bun install` in `extensions/` before
+SMD-1544 — done in change 72, which found a second gap (a `Date` where
+PostgREST gives a string) one step past the first. A fresh worktree needs `bun install` in `extensions/` before
 `test-writes.ts` (eight MCP assertions fail without the packages); CI
 installs.
 
@@ -10120,7 +10122,7 @@ own structured-capture path), so it stays; the pass-1 note above says so.
 
 **Not done here.** SMD-1544 (the shim refuses a JSON-path filter column, so
 `consolidation-bio` cannot run on the fork; with that fixed, bio joins the
-driven set). SMD-1541 (change 69's five servers hold a principal and
+driven set) — done in change 72. SMD-1541 (change 69's five servers hold a principal and
 pass no actor to `update_thought`/`upsert_thought`; their headers claim the
 actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
@@ -10153,6 +10155,120 @@ and the test.
 function they now call is this fork's. The classification example's
 nonexistent columns and the bio worker's vectorless first row are upstream
 defects on their own terms; **unfiled** upstream.
+
+### 72. The SQL shim takes PostgREST's JSON-path column and hands a timestamp back as a string — `consolidation-bio` runs on the fork, and `test-writes.ts` drives both of its write paths (SMD-1544)
+
+`compat/supabase-sql/index.ts`, `compat/supabase-sql/test-compat.ts`,
+`compat/supabase-sql/README.md`; a header on
+`integrations/consolidation-workers/bio/index.ts` and its README;
+`extensions/test-writes.ts`; comments in `server-portable/store.ts` and
+`server-portable/test-store-postgrest.ts` (Linear SMD-1544, filed from change
+71's third review pass).
+
+Change 71's running reviewer drove the bio worker for real and found it
+could not be driven: `gatherSourceThoughts()` filters on
+`.is("metadata->>generated_by", null)` and `findExistingProfile()` on three
+`.eq("metadata->>…")` equalities, and the shim's `ident()` — which holds
+every column name to `^[A-Za-z_][A-Za-z0-9_]*$` and quotes it — threw on the
+path. On the fork, then, the worker answered 500 at its first query and had
+never reached `upsertProfile()`: the rewrite through `update_thought` (change
+69), the embedded first run through the 3-argument `upsert_thought`, the
+sidecar and the actor (change 71) were held by `test-writes.ts`'s text guards
+alone. The worker is the only shim-migrated file that filters on a JSON path
+(`metadata-norm` does too, and stays on supabase-js for its nested `.or()`).
+Driving it found a second gap the ticket had not named: Bun.sql hands a
+`timestamptz` back as a `Date`, PostgREST as a JSON string, and the worker's
+prompt does `created_at.slice(0, 10)` — a 500 at the prompt, one step past
+the first.
+
+**The mechanism.** A filter or ORDER BY column goes through `column()`, which
+accepts a plain identifier as before or PostgREST's path
+`col(->key)*->>key`, the column quoted as an identifier and every key —
+identifier-shaped, held to it — as a string literal:
+`"metadata"->>'generated_by'`. The path's result is text, so the bound value
+is cast to it (`= $1::text`): PostgREST renders the value as an unknown
+literal against a text expression, which is a text comparison, and without
+the cast Bun binds a JavaScript number as an integer and Postgres has no
+`text >= integer` — the probe that decided it. `.eq/.neq/.gt/.gte/.lt/.lte/
+.like/.ilike/.is/.in/.match`, an `.or()` term and `.order()` take the path;
+`ident()` still holds a select list, an insert or update payload key, a
+conflict target, a table, a function and its argument names. Rows from a
+table verb and from `rpc()` pass through `jsonShaped()`: a `Date` with a
+finite time becomes its `toISOString()` string; everything else — the number
+±Infinity Bun gives an infinite timestamp, `Date(NaN)` for a BC date,
+numerics as text — stays as Bun returns it, which `server-portable/store.ts`'s
+`isoTimestamp` already knows. `test-compat.ts` pins both: [12] a path in
+every filter, in `.or()` and `.order()`, a nested `meta->a->>b`, `is(null)`
+selecting the rows without the key, a number comparing as text, the
+generated SQL's shape, and five refusals; [13] a timestamp as a string on a
+one-row, a many-row and a set-returning function's result, a NULL staying
+null. `test-writes.ts` drives the worker: seven sources planted through the
+function with their enhanced columns set beside it; `POST /?name=Test`
+gathers exactly the two person notes and the one decision it should — the
+restricted note, the minor decision and a note an earlier bio run generated
+are kept out, the last by the path filter — dates each in the prompt from a
+string, stores the profile through the 3-argument form, judged column by
+column with the enhanced columns, the metadata, 008's `capture` row naming
+the key and the worker, and a `consolidation_log` row; a second run finds
+the profile through three path equalities, keeps the profile row itself out
+of its sources, feeds it to the prompt and rewrites it through
+`update_thought`, judged against the oracle edit with 022's planted windows
+gone and a `model-before` label replaced; another subject gets its own row,
+a dry run writes and logs nothing, a name with no sources is 404. The worker
+leaves the read set: its header names SMD-1544, the per-ticket header guard
+holds it in the driven set for all three tickets, and the eight text guards
+the drive now proves are gone — the Anthropic-only refusal stays read,
+because the worker reads its keys at import.
+
+**Decisions.** A path ending in `->` is refused, not rendered: it yields
+jsonb, and what a bound value means against it depends on the value's
+JavaScript type and Bun's binding — the probe answered `"meta"->'owner' =
+$1` one row for `"ann"` and none for `'"ann"'`, which is not PostgREST's
+reading (it parses the value as JSON) — so the message names `->>` for the
+key's text and `.contains()` for containment; nothing in the tree uses the
+form. The string form is `toISOString()`'s (`Z`, milliseconds), not
+Postgres's own (`+00:00`, microseconds) that PostgREST would give: both
+parse, both slice to the same date, and a consumer comparing the spellings
+had a bug on either client; the store's helper normalises both to the
+same result, and its tests say which form the fixture now hands it. Only a
+finite `Date` is reshaped, so the two cases the store's comments describe
+(±Infinity, `Date(NaN)`) reach it as before. The sources are planted through
+`upsert_thought` and a raw update of the enhanced columns, not a raw
+`INSERT`: `test-writes.ts` is check 10's counted exception for one line, its
+`plant()`, and a second insert of content would fail the count. The bio
+worker's log table is created from `schemas/entity-extraction/schema.sql`'s
+own `CREATE TABLE` alone rather than by applying that sidecar: its other
+tables include a `thought_entities` migration 016 owns, and the suite's
+teardown drops every table a sidecar creates. The comments in `store.ts` and
+`test-store-postgrest.ts` that described the shim handing back a `Date`
+are corrected here rather than left to describe the old behaviour.
+
+**Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
+before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
+184/184 under podman (157 before: eight bio text guards gone, the header guard's third ticket and the drive's thirty-four added); with `jsonShaped()`
+removed the bio block fails four assertions — the first `POST` answers 500 at
+the prompt's `.slice` and the run ends there — and with `column()` reduced
+to `ident()` the ticket's own 500 returns at the first query (five); `bun
+test-store-postgrest.ts` 86/86, the store still normalising what the fixture
+hands it; `bun test-auth.ts` 643/643; `bun scripts/check-fork-consistency.mjs`
+PASS; `bun scripts/migrate-to-sql-shim.mjs` triages as before (the shim's
+new column form changes no file's eligibility — the one nested `.or()`
+stays a blocker). The ticket's verify — `POST /` to the bio worker under
+test-writes' prelude answers 200 with a stored profile; `test-compat.ts`
+holds the JSON-path filter; test-writes drives bio on both paths — is the
+suite.
+
+**Not done here.** SMD-1480 (deployability: the worker still imports the
+Bun-only shim and reads `Deno.env`; it runs under `test-writes.ts`'s stand-in,
+not under `supabase functions deploy`). A path ending in `->`, an array
+index, and a path in a select list stay refused until a file needs one. The
+other shapes a PostgREST consumer might read differently — numerics as text,
+`int8` — are left as Bun gives them; nothing driven has needed more.
+`metadata-norm`'s `metadata->>confidence` term would parse now, and its
+nested `.or()` keeps it off the shim. SMD-1541 and SMD-1525 as before.
+
+**Upstream status:** not applicable — the shim is this fork's (fix 13); the
+worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**
 
 ## Detached from the fork network
 

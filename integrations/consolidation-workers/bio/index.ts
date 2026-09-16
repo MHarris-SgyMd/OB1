@@ -14,6 +14,11 @@
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
 // and the key's name reaches 008's audit row as the actor on both paths (the
 // functions record an actor only when the caller names one; change 69 named none).
+// SMD-1544 (change 72): the source and profile queries filter on JSON paths
+// (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
+// refused — a 500 at the first query on the fork — and renders now; the shim
+// also hands created_at back as the string PostgREST would, which the prompt
+// slices. extensions/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still

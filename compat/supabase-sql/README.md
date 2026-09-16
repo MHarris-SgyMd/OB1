@@ -54,7 +54,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`61 assertions: 61 passed, 0 failed` and `PASS`. A migrated file behaves
+`84 assertions: 84 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 
 ## What is supported
@@ -63,12 +63,18 @@ identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
 | Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` |
+| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in every filter, in `.or()` terms and in `.order()` |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
 inclusive at both ends; `.in([])` selects nothing; `.single()` on zero rows is an
 error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is jsonb
-`@>`; errors resolve as `{ error }` rather than throwing.
+`@>`; errors resolve as `{ error }` rather than throwing; a JSON path compares
+the key's *text*, so a number against `meta->>score` is a text comparison
+(`"5" >= "20"`), as it is through PostgREST; and a timestamp arrives as an ISO
+string (`toISOString()`'s form), as PostgREST's JSON has it, not as the Date
+Bun hands back — a migrated file's `created_at.slice(0, 10)` works (FORK.md
+change 72, SMD-1544).
 
 ## What is deliberately refused
 
@@ -78,6 +84,10 @@ Each of these throws with an explanation instead of guessing:
   introspection to become a join. Four files use it.
 - **Nested `.or()`** — `or(and(a.eq.1,b.eq.2),c.eq.3)` needs a real parser. The flat
   form, which is the only one this repo uses, works.
+- **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
+  means against it depends on the value's JavaScript type. End the path in `->>`
+  for the key's text, or use `.contains()`. An array index (`->0`), and a path in
+  a select list, a payload or a conflict target, are refused too.
 - **Type-only imports** — `import type { Session, User } from "@supabase/supabase-js"`.
   The shim exports different types.
 - **`.auth`, `.storage`, `.channel`, `.functions.invoke`** — nothing here uses them.
@@ -87,8 +97,9 @@ The codemod treats all of these as blockers and refuses to touch those files.
 ## Safety
 
 Identifiers cannot be parameterised in Postgres, so table and column names are
-validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws.
-Values always travel as bound parameters. A test asserts that a value containing
+validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws. A
+JSON path's keys are held to the same shape and rendered as quoted string
+literals (`"meta"->>'key'`). Values always travel as bound parameters. A test asserts that a value containing
 `'; DROP TABLE …` is stored as data and the table survives.
 
 ## Two gotchas worth knowing
@@ -107,9 +118,11 @@ development — the test caught it.
 
 - **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers
   cannot pool connections at all.
-- **The migrated files are not individually tested.** Most need live credentials —
-  Gmail, Slack, Readwise. The shim is tested; each migrated file is verified only
-  to parse. Exercise the ones you actually run before trusting them.
+- **Most migrated files are not individually tested.** Most need live credentials —
+  Gmail, Slack, Readwise. The shim is tested; each migrated file is verified to
+  parse, and `extensions/test-writes.ts` drives the writers among them against a
+  real Postgres (the bio worker was the first, and found the two gaps change 72
+  closed). Exercise the ones you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.

@@ -160,9 +160,11 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
   assert(Number.isFinite(hits[0]?.score) && Number.isFinite(hits[0]?.similarity),
          "similarity and score arrive as finite numbers, not NaN from a missing column");
 
-  // The fixture hands the store a Date; real PostgREST hands it Postgres's own
-  // JSON spelling, which no suite here can produce. Feed the helper both, plus
-  // the spellings of an infinite timestamp on each client (see [3d]).
+  // The fixture hands the store an ISO string in JS's spelling (the shim renders
+  // Bun's Date so, since FORK.md change 72); real PostgREST hands it Postgres's
+  // own JSON spelling, which no suite here can produce; the SQL store a Date.
+  // Feed the helper all three, plus the spellings of an infinite timestamp on
+  // each client (see [3d]).
   assert(isoTimestamp("2026-09-14T16:27:09.123456+00:00") === "2026-09-14T16:27:09.123Z", "PostgREST's +00:00 string normalises to the SQL store's form");
   assert(isoTimestamp("2026-09-14 16:27:09+00") === "2026-09-14T16:27:09.000Z", "a space-separated timestamptz text form normalises too");
   assert(isoTimestamp(new Date("2026-09-14T16:27:09.123Z")) === "2026-09-14T16:27:09.123Z", "a Date passes through unchanged");
