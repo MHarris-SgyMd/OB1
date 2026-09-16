@@ -39,8 +39,10 @@
  * finding). A database that already holds a marker is refused up front —
  * that marker is a kept corpus's, not this suite's to drop — so the marker
  * found at the end is the suite's own and is dropped, on a normal exit and
- * after a signal (Bun runs no `finally` on one: the signal is noted, the run
- * in flight finishes, no further run starts), and a shared database
+ * after a signal (Bun runs no `finally` on one: the signal is noted, no
+ * further run starts, and the run in flight ends as the signal reached it —
+ * killed with the process group under a terminal's Ctrl-C, or left to finish
+ * if the signal came to this process alone), and a shared database
  * (ci-parity.sh's) is left as the other suites expect it. About three
  * minutes.
  *
@@ -49,7 +51,7 @@
 import { SQL } from "bun";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BENCH_MARKER, assertThrowawayDatabase, createAssert, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
+import { BENCH_MARKER, REMOTE_DB_FLAGS, assertThrowawayDatabase, createAssert, requireDatabaseUrl, runScript, shellWithoutOb1 } from "./test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -64,25 +66,32 @@ const SCALE = 150_000;
  * stripped (a width or a query count from the shell would change what is
  * measured), and runScript keeps db/.env out of the spawned bun too.
  */
-const PASS_THROUGH = ["OB1_BENCH_BUILD_WORKERS", "OB1_BENCH_MAINTENANCE_MEM", "OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"];
+const PASS_THROUGH = ["OB1_BENCH_BUILD_WORKERS", "OB1_BENCH_MAINTENANCE_MEM", ...REMOTE_DB_FLAGS];
 
-/** The exit code a signal asked for, once one has arrived; the run in flight finishes, nothing else starts, `finally` drops the marker. */
+/** The exit code a signal asked for, once one has arrived: no further run starts (a run in flight ends as the signal reached it — with the process group under a terminal's Ctrl-C, or on its own if the signal came to this process alone), and `finally` drops the marker. */
 let interrupted: number | null = null;
 for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
   process.on(signal, () => {
     if (interrupted !== null) return;
     interrupted = code;
-    console.error(`\n  ${signal}: finishing the run in flight, then dropping the marker and leaving`);
+    console.error(`\n  ${signal}: no further run starts; dropping the marker and leaving once the run in flight has ended`);
   });
 }
 class Interrupted extends Error {}
 
-/** One bench run against this database, told it is kept, Q queries. */
-async function bench(q: number): Promise<{ code: number; out: string }> {
+/**
+ * One bench run against this database, told it is kept, Q queries, expected
+ * to exit as given: any other exit stops the suite with the run's output (a
+ * tallied failure), rather than letting later runs cascade `null`s from it.
+ */
+async function bench(q: number, expect = 0): Promise<{ code: number; out: string }> {
+  if (interrupted !== null) throw new Interrupted();
   const env = shellWithoutOb1();
   for (const k of PASS_THROUGH) if (process.env[k] !== undefined) env[k] = process.env[k]!;
   const r = await runScript(["bun", "bench-hnsw.ts"], { cwd: HERE, env: { ...env, DATABASE_URL: URL_, OB1_PG_KEEP: "test-reuse", OB1_BENCH_SCALES: String(SCALE), OB1_BENCH_QUERIES: String(q) } });
   if (interrupted !== null) throw new Interrupted();
+  assert(r.code === expect, `the run exits ${expect} (exit ${r.code})`);
+  if (r.code !== expect) throw new Error(`the bench exited ${r.code}, not ${expect}:\n${r.out}`);
   return r;
 }
 
@@ -153,21 +162,17 @@ const entryKey = async (): Promise<string> => {
 try {
   console.log(`[1] build at ${SCALE.toLocaleString()} rows with Q=5, kept in this database`);
   const r1 = await bench(5);
-  assert(r1.code === 0, `the build runs (exit ${r1.code})`);
   assert(loadCell(r1.out, "source") === "loaded" && loadCell(r1.out, "oracle") === "computed", `section L says loaded, oracle computed (${loadCell(r1.out, "source")}, ${loadCell(r1.out, "oracle")})`);
   assert(r1.out.includes("corpus kept: marker written, with the exact pass's answers for 5 queries"), "the marker is written with the exact pass's five answers per key");
-  if (r1.code !== 0) throw new Error(`the build failed:\n${r1.out}`);
 
   console.log("[2] reuse with Q=3: every answer from the marker");
   const r2 = await bench(3);
-  assert(r2.code === 0, `the reuse runs (exit ${r2.code})`);
   assert(loadCell(r2.out, "oracle") === "reused", `section L says oracle reused (${loadCell(r2.out, "oracle")})`);
   assert(!r2.out.includes("marker extended"), "a marker answering for every query is left as it is");
 
   console.log("[3] the marker's answers removed (as a marker from before SMD-1562 has none); Q=3 computes and extends");
   await sql.unsafe(`UPDATE ${BENCH_MARKER} SET corpus = corpus - 'oracle'`);
   const r3 = await bench(3);
-  assert(r3.code === 0, `the reuse runs (exit ${r3.code})`);
   assert(loadCell(r3.out, "oracle") === "computed", `section L says oracle computed (${loadCell(r3.out, "oracle")})`);
   assert(r3.out.includes("marker extended: the exact pass's answers for 3 queries (had none)"), "the marker is extended with the three computed answers");
   sameScored({ out: r2.out, label: "from the marker" }, { out: r3.out, label: "computed" }, "sections A, B, D and E from the marker's answers equal the ones from computed answers, on the same index");
@@ -183,35 +188,30 @@ try {
     [ids, `${ids}/0`]
   );
   const r3b = await bench(3);
-  assert(r3b.code === 0, `the reuse runs (exit ${r3b.code})`);
   assert(loadCell(r3b.out, "oracle") === "computed", `section L says oracle computed (${loadCell(r3b.out, "oracle")})`);
-  assert(r3b.out.includes("marker extended: the exact pass's answers for 3 queries (had none)"), "a malformed entry counts as none, and a whole one is written back");
+  assert(r3b.out.includes("marker extended: the exact pass's answers for 3 queries (had 3, 0 of them this run's)"), "a malformed entry is found, answers for nothing, and a whole one is written back");
   sameScored({ out: r3.out, label: "computed" }, { out: r3b.out, label: "computed again" }, "and the tables are the same");
 
   console.log("[3c] the entry's second query digest changed: one answer from the marker, two computed");
   await sql.unsafe(`UPDATE ${BENCH_MARKER} SET corpus = jsonb_set(corpus, string_to_array($1, '/'), '"not-this-run"'::jsonb)`, [["oracle", key, "queries", "1"].join("/")]);
   const r3c = await bench(3);
-  assert(r3c.code === 0, `the reuse runs (exit ${r3c.code})`);
   assert(loadCell(r3c.out, "oracle") === "1 of 3 reused, the rest computed", `section L says one of three reused (${loadCell(r3c.out, "oracle")})`);
   assert(r3c.out.includes("marker extended: the exact pass's answers for 3 queries (had 3, 1 of them this run's)"), "the entry is written back whole");
   sameScored({ out: r3.out, label: "computed" }, { out: r3c.out, label: "one reused" }, "and the tables are the same");
 
   console.log("[4] Q=6: three from the marker, three computed, the marker extended");
   const r4 = await bench(6);
-  assert(r4.code === 0, `the reuse runs (exit ${r4.code})`);
   assert(loadCell(r4.out, "oracle") === "3 of 6 reused, the rest computed", `section L says three of six reused (${loadCell(r4.out, "oracle")})`);
   assert(r4.out.includes("marker extended: the exact pass's answers for 6 queries (had 3, 3 of them this run's)"), "the marker now holds six");
 
   console.log("[5] Q=6 again: all six from the marker, the tables as run 4's");
   const r5 = await bench(6);
-  assert(r5.code === 0, `the reuse runs (exit ${r5.code})`);
   assert(loadCell(r5.out, "oracle") === "reused", `section L says oracle reused (${loadCell(r5.out, "oracle")})`);
   sameScored({ out: r4.out, label: "extended" }, { out: r5.out, label: "from the marker" }, "sections A, B, D and E from the extended marker equal the run that extended it");
 
   console.log("[6] a corpus marked rewritten is refused before the oracle is consulted");
   await sql.unsafe(`UPDATE ${BENCH_MARKER} SET corpus = corpus || '{"rewritten":["test-bench-reuse.ts marked it"]}'::jsonb`);
-  const r6 = await bench(3);
-  assert(r6.code === 2, `the run is refused (exit ${r6.code})`);
+  const r6 = await bench(3, 2);
   assert(r6.out.includes("had its tables changed by migrations applied onto it on an earlier run"), "with the rewritten refusal");
   assert(!r6.out.includes("exact oracle"), "and the cached answers were never read");
 } catch (err) {

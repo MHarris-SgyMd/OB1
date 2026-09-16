@@ -22,13 +22,14 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "migrations");
 
+/** bench-hnsw.ts's kept-corpus marker table (SMD-1493): the bench writes and reads it by this name, the reuse suite plants and drops its own, and `dropSchema` refuses a database holding one. */
+export const BENCH_MARKER = "bench_hnsw_corpus";
+
 /**
  * Every table the schema owns, in drop order — dependents first. `thoughts` is
  * dropped CASCADE, which removes constraints pointing AT it but not the tables
  * holding them, so anything with a foreign key has to be named before it.
  */
-/** bench-hnsw.ts's kept-corpus marker table (SMD-1493): the bench writes it, the reuse suite plants and drops its own, and `dropSchema` refuses a database holding one. */
-export const BENCH_MARKER = "bench_hnsw_corpus";
 const TABLES = [
   "thought_audit",
   "thought_chunks",
@@ -176,8 +177,10 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
  * honoured too so a shell profile that set it keeps working.
  */
+/** The deliberate overrides of the loopback rule, named once so a suite that spawns another checked script can pass them on. */
+export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
 export function assertThrowawayDatabase(url: string): void {
-  if (process.env.OB1_ALLOW_REMOTE_DB === "1" || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
+  if (REMOTE_DB_FLAGS.some((flag) => process.env[flag] === "1")) return;
   let host: string | null = null;
   try {
     host = new URL(url).hostname.toLowerCase();

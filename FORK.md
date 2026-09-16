@@ -197,6 +197,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
 db/test-bench-reuse.ts           # change 74 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
+db/bench-oracle.ts               # change 74 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [35])
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -10793,16 +10794,18 @@ space, and its boyscout left it out as new behaviour.
 
 **The cache (`db/bench-hnsw.ts`).** The marker gains one field, `oracle`: a
 map from the *shape* of the exact pass — a digest of the oracle's statement
-in both filter forms (K inside it), the tier filter's form, the planner
-settings the scan runs under and a probe of how a vector is rendered into
-its literal — to that shape's entry: a digest of each query's literal, in
+in both filter forms (K inside it), the tier filter's form, a probe of how a
+vector is rendered into its literal, and a probe of the server's distance
+kernel — to that shape's entry: a digest of each query's literal, in
 order, and for each tier key and the whole table one answer per query, the
 exact top-K ids in distance order and the nearest row's cosine (the whole
 table's is the confound the run prints). A build writes it with the marker,
 after the exact pass — the marker was already written last, once the pass's
 own confound gate had passed, so a refused build still leaves nothing. A
 reuse looks up its own shape's entry, checks it whole (one well-formed answer
-per query for every key: at most K distinct ids and a finite cosine), and
+per query for every key: distinct ids, exactly as many as the exact answer
+holds — K, or every matching row where fewer match — and a finite cosine),
+and
 takes answers from the front while the entry's query digests match its own:
 the queries are drawn from the seeded stream after the rows' draws, so the
 first Q of a longer run's queries *are* a shorter run's, and a run asking
@@ -10991,6 +10994,30 @@ line's prose. Declined: rewriting the statement as an `OFFSET 0` fence so
 exactness holds by construction — the plan check already asserts it, and
 the fence would trade a measured parallel top-N (Gather Merge over
 per-worker sorts) for an unmeasured leader-side sort.
+
+**Sixth pass — the stop signal.** Its top findings were the fifth's fixes:
+the kernel probe keyed the cache on a float8's *text*, which the session's
+`extra_float_digits` shortens (a role default set by some other tool would
+have keyed a volume away from itself), so the probe renders under a pinned
+setting; the tie-break had left the plan check's refusal blaming a database
+setting its own `SET LOCAL` excludes, so the check judges by node kind (any
+`Index Scan` over the one relation) and says what can still cause it; a
+signal between runs still spawned the next bench, so the check comes before
+the spawn too, and the header says what happens to a run in flight under a
+group signal; a tier answer of any length up to K was trusted, so every key
+is held to the exact answer's own size (K, or the rows that match); and a
+malformed entry had read as `had none` again, so it counts what it held.
+The guards themselves had been mutant-blind under two twenty-second
+container runs — five of seven clauses could go and the suite would pass —
+and the bench is a script that connects at import, so the pure part moved
+to `db/bench-oracle.ts` and `test-schema.ts` [35] drives it in milliseconds
+with the mechanism removed a clause at a time. Then: a run that exits other
+than expected stops the suite with its output rather than cascading nulls
+through the runs after it; the marker's DML reads the table's name from the
+one constant; the remote-database flags are named once beside the guard
+that honours them; and this section's lead names the kernel probe and not
+the settings. Two passes had opened with the previous pass's fixes as the
+top findings, which is where the loop stops.
 
 ## Detached from the fork network
 

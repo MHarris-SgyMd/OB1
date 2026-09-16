@@ -56,6 +56,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, seededRandom } from "./test-support.ts";
+import { markerAnswers } from "./bench-oracle.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -3956,6 +3957,59 @@ console.log("\n[36] Migration 036: delete_thought and review_supersession_propos
   assert(!/UPDATE\s+thoughts\b/i.test(review) && (review.match(/update_thought\(/g) ?? []).length === 2 && !/v_walk/.test(review),
     "…and 032's shape is intact: two update_thought calls, no UPDATE and no walk of its own");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[35] bench-hnsw's oracle cache: what of a marker's entry a run may trust (SMD-1562, bench-oracle.ts)");
+{
+  // A pure function of the entry: the container suite drives the bench's
+  // reads and writes; the guards are held here, in milliseconds, with the
+  // mechanism removed one clause at a time (review passes counted five of
+  // seven mutant-blind under the container suite's two planted cases).
+  const keys = ["t50", "whole table"];
+  const size = (key: string) => (key === "whole table" ? 3 : 2);
+  const answer = (i: number, n: number) => ({ ids: Array.from({ length: n }, (_, j) => `id-${i}-${j}`), top: 0.5 + i / 100 });
+  const entry = (q: number) => ({ queries: Array.from({ length: q }, (_, i) => `d${i}`), answers: { t50: Array.from({ length: q }, (_, i) => answer(i, 2)), "whole table": Array.from({ length: q }, (_, i) => answer(i, 3)) } });
+  const digests = ["d0", "d1", "d2"];
+  const whole = markerAnswers(entry(5), keys, digests, size);
+  assert(whole.have === 3 && whole.had === 5 && whole.taken["whole table"].length === 3 && whole.taken["whole table"][2].ids[0] === "id-2-0", `a whole entry answers for this run's leading queries (have ${whole.have}, had ${whole.had})`);
+  const longer = markerAnswers(entry(2), keys, digests, size);
+  assert(longer.have === 2 && longer.had === 2 && longer.taken.t50.length === 2, "an entry shorter than the run answers for what it holds");
+  const drifted = markerAnswers(entry(5), keys, ["d0", "x1", "d2"], size);
+  assert(drifted.have === 1 && drifted.had === 5, `a digest that stops matching ends the prefix there (have ${drifted.have})`);
+  const foreign = markerAnswers(entry(5), keys, ["x0", "d1", "d2"], size);
+  assert(foreign.have === 0 && foreign.had === 5, "a first digest that differs answers for nothing, and the entry is still counted");
+  for (const [what, e] of [
+    ["absent", undefined],
+    ["null", null],
+    ["a string", "oracle"],
+    ["no queries", { answers: {} }],
+    ["empty queries", { queries: [], answers: {} }],
+  ] as const) {
+    const r = markerAnswers(e, keys, digests, size);
+    assert(r.have === 0 && r.had === 0 && r.taken.t50.length === 0, `${what}: nothing, had none`);
+  }
+  const broken = (mutate: (e: ReturnType<typeof entry>) => void) => {
+    const e = entry(3);
+    mutate(e);
+    return markerAnswers(e, keys, digests, size);
+  };
+  for (const [what, mutate] of [
+    ["a key missing", (e) => delete (e.answers as Record<string, unknown>).t50],
+    ["a key with fewer answers than queries", (e) => e.answers.t50.pop()],
+    ["a tier answer one id short", (e) => e.answers.t50[1].ids.pop()],
+    ["a whole-table answer one id short", (e) => e.answers["whole table"][0].ids.pop()],
+    ["an answer one id long", (e) => e.answers.t50[0].ids.push("extra")],
+    ["a duplicated id", (e) => (e.answers["whole table"][2].ids[2] = e.answers["whole table"][2].ids[0])],
+    ["a non-string id", (e) => ((e.answers.t50[0].ids as unknown[])[0] = 7)],
+    ["a null cosine", (e) => ((e.answers["whole table"][1] as { top: unknown }).top = null)],
+    ["an infinite cosine", (e) => (e.answers["whole table"][1].top = Infinity)],
+    ["a non-string digest", (e) => ((e.queries as unknown[])[0] = 0)],
+    ["an answer that is not an object", (e) => ((e.answers.t50 as unknown[])[2] = "x")],
+  ] as [string, (e: ReturnType<typeof entry>) => void][]) {
+    const r = broken(mutate);
+    assert(r.have === 0 && r.had === 3 && r.taken["whole table"].length === 0, `${what}: the entry answers for nothing, and is counted as found (had ${r.had})`);
+  }
+  assert(markerAnswers(entry(3), keys, digests, () => 2).have === 0, "an expected size the entry does not meet answers for nothing");
 }
 
 report();

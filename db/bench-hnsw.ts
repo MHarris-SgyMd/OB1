@@ -202,6 +202,8 @@
 import { SQL } from "bun";
 import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
+import { digestOf, markerAnswers } from "./bench-oracle.ts";
+import type { OracleAnswer, OracleCache } from "./bench-oracle.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
@@ -531,7 +533,7 @@ type LoadStats = {
 // a run asking for another scale is refused rather than replacing thirty
 // minutes of build without being asked (a corpus this run built itself is
 // this run's to replace: a run over several scales keeps the last).
-/** The marker table — test-support's name, which its schema reset and the reuse suite share. Spelled out again in the tagged templates below: an interpolated `${MARKER}` there would bind as a parameter, not an identifier. */
+/** The marker table — test-support's name, which its schema reset and the reuse suite share; every statement below reads it from here (through `unsafe`, since a tagged template would bind it as a parameter, not an identifier). */
 const MARKER = BENCH_MARKER;
 /**
  * Bumped when the marker's MEANING changes — a new key in `matches`, a
@@ -573,11 +575,8 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
  * is computed for and extended, not refused — the answers are derivable, the
  * build is not (review passes).
  */
-type OracleAnswer = { ids: string[]; top: number };
-/** One entry of the marker's oracle map: the map's key is the shape (K inside it), so the entry carries only the queries and the answers. */
-type OracleCache = { queries: string[]; answers: Record<string, OracleAnswer[]> };
-/** A short digest for the cache — of a query vector (the same doubles serialise the same) or of the oracle's statement. */
-const digestOf = (value: unknown) => new Bun.CryptoHasher("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+// OracleAnswer, OracleCache, digestOf and markerAnswers live in
+// bench-oracle.ts, the pure part, which test-schema.ts drives.
 /**
  * The marker's payload. The scale and build time live in `stats` (the one
  * copy the report reads); `physical` is the four relations' state at the
@@ -619,7 +618,7 @@ async function readMarker(sql: SQL): Promise<Marker | null> {
   const [{ has }] = await sql`SELECT to_regclass(${MARKER}) IS NOT NULL AS has`;
   if (!has) return null;
   try {
-    const [row] = await sql`SELECT corpus FROM bench_hnsw_corpus`;
+    const [row] = await sql.unsafe(`SELECT corpus FROM ${MARKER}`);
     if (!row) throw new Error("the table exists but holds no row, so nothing vouches for what is under it");
     const corpus = row.corpus as Marker;
     const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && corpus.physical && corpus.stats.scale > BEFORE_ARM_MAX;
@@ -643,52 +642,23 @@ async function writeMarker(sql: SQL, marker: Marker): Promise<void> {
     // exact pass's value over the build's queries (the marker is written after
     // that pass); the load's client-side accumulator was the early abort.
     await tx.unsafe(`CREATE TABLE ${MARKER} (one boolean PRIMARY KEY DEFAULT true CHECK (one), scale bigint GENERATED ALWAYS AS ((corpus->'stats'->>'scale')::bigint) STORED, built_at timestamptz NOT NULL, corpus jsonb NOT NULL)`);
-    await tx`INSERT INTO bench_hnsw_corpus (built_at, corpus) VALUES (${marker.stats.builtAt}::timestamptz, ${marker}::jsonb)`;
+    await tx.unsafe(`INSERT INTO ${MARKER} (built_at, corpus) VALUES ($1::timestamptz, $2::jsonb)`, [marker.stats.builtAt, marker]);
   });
 }
 
 /** Fields of the marker's payload updated in place (`rewritten`, on a refusal). A top-level key is replaced whole. */
 async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
-  await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
+  await sql.unsafe(`UPDATE ${MARKER} SET corpus = corpus || $1::jsonb`, [patch]);
 }
 
 /** This tree's entry in the marker's oracle map, written or replaced under its key; other keys' entries stay. A map that is not an object (a hand-cleared `null`) is started over — `||` on it would build an array, and the cache would be dead from then on (review pass). */
 async function amendOracle(sql: SQL, shape: string, record: OracleCache): Promise<void> {
-  await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || jsonb_build_object('oracle', COALESCE(CASE WHEN jsonb_typeof(corpus->'oracle') = 'object' THEN corpus->'oracle' END, '{}'::jsonb) || ${{ [shape]: record }}::jsonb)`;
+  await sql.unsafe(`UPDATE ${MARKER} SET corpus = corpus || jsonb_build_object('oracle', CASE WHEN jsonb_typeof(corpus->'oracle') = 'object' THEN corpus->'oracle' ELSE '{}'::jsonb END || $1::jsonb)`, [{ [shape]: record }]);
 }
 
-/**
- * The answers the marker's oracle entry for this shape gives this run: for
- * each of THESE keys, the leading answers whose queries are this run's
- * (`taken`, `have` of them), and how many the entry holds (`had`). The entry
- * must be whole — one well-formed answer per query for every key: distinct
- * string ids, at most K of them and exactly K over the whole table (a kept
- * scale has more than K rows, and a trimmed list would read as recall lost),
- * and a finite cosine — and its digests are matched against
- * this run's queries from the front, so a changed stream answers for nothing
- * past the change. Nothing, and `had` 0, where the entry is absent or
- * malformed — computed for, never refused (the answers are a function of the
- * rows the fingerprint has just vouched for; a malformed field would
- * otherwise be a TypeError after the checks were paid, or a silently skewed
- * recall — review passes). Built here, where the shape was proven, so the
- * caller asserts nothing. Ids are not re-checked against the table: the same
- * fingerprint says no row was written since they were read.
- */
-function markerAnswers(marker: Marker, shape: string, keys: string[], digests: string[]): { have: number; had: number; taken: Record<string, OracleAnswer[]> } {
-  const c = marker.oracle?.[shape];
-  const nothing = { have: 0, had: 0, taken: Object.fromEntries(keys.map((key) => [key, []])) };
-  if (!c || typeof c !== "object" || !Array.isArray(c.queries) || c.queries.length < 1) return nothing;
-  const n = c.queries.length;
-  const answer = (key: string) => (a: unknown): a is OracleAnswer => {
-    const { ids, top } = (a ?? {}) as OracleAnswer;
-    return Array.isArray(ids) && (key === WHOLE_TABLE ? ids.length === K : ids.length <= K) && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string") && Number.isFinite(top);
-  };
-  const whole = c.queries.every((d) => typeof d === "string") && keys.every((key) => Array.isArray(c.answers?.[key]) && c.answers[key].length === n && c.answers[key].every(answer(key)));
-  if (!whole) return nothing;
-  let have = 0;
-  while (have < Math.min(n, digests.length) && c.queries[have] === digests[have]) have++;
-  return { have, had: n, taken: Object.fromEntries(keys.map((key) => [key, c.answers[key].slice(0, have)])) };
-}
+// `markerAnswers` (bench-oracle.ts) judges the entry; the ids it hands back
+// are not re-checked against the table — the fingerprint the reuse has just
+// passed says no row was written since they were read.
 
 /** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
 async function physicalState(sql: SQL): Promise<Physical> {
@@ -1075,8 +1045,15 @@ const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleSt
 async function oracleShapeOn(sql: SQL): Promise<string> {
   const a = lit(Array.from({ length: DIM }, (_, i) => Math.sin(i + 1)));
   const b = lit(Array.from({ length: DIM }, (_, i) => Math.cos(3 * i + 1) / (i + 2)));
-  const [{ d }] = await sql.unsafe(`SELECT ('${a}'::vector <=> '${b}'::vector)::text AS d`);
-  return digestOf([ORACLE_SHAPE, String(d)]);
+  // Rendered under a pinned extra_float_digits: the text of a float8 is the
+  // session's to shorten, and a role default set by some other tool would
+  // otherwise key the cache away from itself (review pass).
+  const d: string = await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL extra_float_digits = 3`);
+    const [row] = await tx.unsafe(`SELECT ('${a}'::vector <=> '${b}'::vector)::text AS d`);
+    return String(row.d);
+  });
+  return digestOf([ORACLE_SHAPE, d]);
 }
 /**
  * The plan the exact scan gets on THIS server, once per scale before any
@@ -1091,11 +1068,17 @@ async function assertOracleExact(sql: SQL): Promise<void> {
     const rows = await tx.unsafe(`EXPLAIN ${oracleStatement(lit(Array(DIM).fill(0)), null)}`);
     return rows.map((r: Record<string, string>) => String(Object.values(r)[0]));
   });
-  const viaIndex = plan.find((line) => /_embedding_idx/.test(line));
+  // By node kind, not index name: the statement reads one relation, and an
+  // Index Scan of any name over it is the vector index doing the ordering
+  // (a bitmap over the GIN is not an Index Scan node). Under both settings
+  // and the tie-break the planner has no ordered index path left — the gate
+  // reproduced when it had (enable_seqscan forced off, ORDER BY d alone) and
+  // fires now only on an edit in this tree or a planner that learned a new
+  // path; a refusal with its reason, like every other gate before a
+  // measurement (review passes).
+  const viaIndex = plan.find((line) => /\bIndex (Only )?Scan\b/.test(line));
   if (viaIndex) {
-    // A refusal with its reason, like every other gate before a measurement
-    // (reproduced by forcing enable_seqscan off: the plan line names the index).
-    console.error(`\nbench-hnsw.ts: the exact pass would read the vector index on this server (${viaIndex.trim()}), so its answers would not be exact; a setting in force on this database or role keeps the planner off the sequential scan. Nothing was measured.`);
+    console.error(`\nbench-hnsw.ts: the exact pass would read an index on this server (${viaIndex.trim()}), so its answers would not be exact: the statement, its settings or the planner no longer keep the sequential scan. Nothing was measured.`);
     process.exit(1);
   }
 }
@@ -1503,7 +1486,10 @@ for (const n of SCALES) {
   // `oracle` column and the confound's note; where the answers went is the
   // marker lines' to say (review passes).
   const shape = await oracleShapeOn(sql);
-  const { have, had, taken } = kept ? markerAnswers(kept, shape, keys, digests) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
+  // An exact answer holds K ids, or every matching row where fewer match
+  // (the load inserts no NULL vector, and the fingerprint says no row moved).
+  const exactSize = (key: string) => Math.min(K, key === WHOLE_TABLE ? n : matches.get(key)!);
+  const { have, had, taken } = kept ? markerAnswers(kept.oracle?.[shape], keys, digests, exactSize) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
   const note =
     have === Q
       ? { column: "reused", run: `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})`, confound: " (all of them the marker's)" }
