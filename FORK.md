@@ -7882,7 +7882,11 @@ keys both rows share — the acting agent (010) and the returned id, within a
 window — a NULL agent its own bucket, not a wildcard. `prune_query_log(p_keep_days)`
 is the retention window (default 30, `OB1_QUERY_LOG_RETENTION_DAYS`; the DELETE
 always bounded by `logged_at`), part of this version because the log is personal
-data at rest — every query typed. `db/config.mjs`'s `QUERY_LOG` is the one
+data at rest — every query typed. The bound is strict: a row logged in the
+prune's own transaction shares its `now()` and stays, which `test-schema` [34]
+asserts in one transaction since SMD-1498 — under PGlite's millisecond clock the
+section had assumed each statement's `now()` is later than the last's, and its
+wipe assertion flaked once. `db/config.mjs`'s `QUERY_LOG` is the one
 spelling of the flag, names, tool sets and retention, read by the server,
 preflight and the tests; a `querylog` grant group (query_log `INSERT`, since 034)
 means a self-hosted role that runs `--grant` can turn the flag on and have it
