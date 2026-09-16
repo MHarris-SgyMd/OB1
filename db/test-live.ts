@@ -33,7 +33,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -53,7 +53,7 @@ const { assert, skip, report } = createAssert();
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
 function migrate(...extra: string[]): Promise<{ code: number; out: string }> {
-  return runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_!, ...extra], { cwd: HERE });
+  return runMigrator(URL_!, undefined, ...extra);
 }
 
 const unit = (i: number) => {

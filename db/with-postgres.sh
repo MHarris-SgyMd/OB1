@@ -109,15 +109,13 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# An interrupt is noted, not acted on: the command below sees the signal
-# itself (a psql cancelling a query, a bench exiting on Ctrl-C), the script
-# exits once through the EXIT trap with the command's own status — or the
-# signal's, where the command did not survive it — rather than running
-# cleanup for the signal and again for the exit (bash 3.2 does both) or
-# replacing a clean exit with 130 (review pass, reproduced).
-INTERRUPTED=""
-trap 'INTERRUPTED=130' INT
-trap 'INTERRUPTED=143' TERM
+# Until the command runs there is no child to see a signal, so an interrupt
+# here ends the script through the EXIT trap — once, with the signal's status
+# (a trap that also ran cleanup would run it twice on bash 3.2). While the
+# command runs the trap changes (below) so that the command, which sees the
+# terminal's signal itself, decides the outcome.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # /dev/shm: both runtimes give a container 64 MB, and Postgres puts its dynamic
 # shared memory there — a parallel HNSW build keeps the whole graph in it, sized
@@ -157,17 +155,14 @@ if [ -n "$KEEP" ]; then
   if [ -n "$STALE" ]; then
     STATUS="${STALE%% *}"
     case "$STATUS" in
-      exited|stopped|dead) "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true ;;
-      created)
-        # Created and never started: an interrupt that landed between the
-        # runtime accepting `create` and the ID reaching the shell (tens of
-        # milliseconds, reproduced) left a shell cleanup could not know about,
-        # and every later run would refuse it for ever. Another invocation
-        # between its own two steps looks the same for about as long; it
-        # loses its start with a clear error and nothing else, the volume
-        # being shared and untouched. Removed by the inspected ID.
-        "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true
-        ;;
+      # Exited, or created and never started — the latter an interrupt that
+      # landed between the runtime accepting `create` and the ID reaching the
+      # shell (tens of milliseconds, reproduced), which cleanup could not
+      # know about and every later run would refuse for ever. Another
+      # invocation between its own two steps looks the same for about as
+      # long; it loses its start with a clear error and nothing else, the
+      # volume being shared and untouched. Removed by the inspected ID.
+      exited|stopped|dead|created) "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true ;;
       *)
         echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -fv $NAME" >&2
         exit 2
@@ -247,9 +242,11 @@ export DATABASE_URL="postgres://postgres:$PASSWORD@127.0.0.1:$PORT/$DB"
 echo "▸ DATABASE_URL=$DATABASE_URL"
 echo
 
-# The command's own status is the script's; a signal that reached the wrapper
-# while the command ran is reported only where the command did not survive it.
-STATUS=0
-"$@" || STATUS=$?
-if [ "$STATUS" != 0 ] && [ -n "$INTERRUPTED" ]; then STATUS="$INTERRUPTED"; fi
-exit "$STATUS"
+# The command's own status is the script's. Its INT and TERM are the
+# command's to handle (a psql cancelling one query and going on; a bench dying
+# of Ctrl-C and exiting 130 by itself), so the wrapper's trap is now a no-op
+# body — not an empty string, which a child would inherit as "ignore" and
+# never see the signal (review pass, reproduced) — and `set -e` carries a
+# failing command's status out through the EXIT trap.
+trap ':' INT TERM
+"$@"

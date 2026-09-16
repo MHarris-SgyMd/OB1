@@ -9206,6 +9206,36 @@ chunk-context default too. The denylist copies left in test-live,
 test-search-path and measure-1288 predate this change and are on the boyscout
 list.
 
+**Ninth pass.** Two mechanisms rebuilt at the root rather than patched. The
+interrupt handling: the eighth pass's note-only traps had made a signal to
+the wrapper before its command ran vanish — a `kill` during a thirty-minute
+readiness wait set a flag nothing read, the wait ran out, the bench started
+and the wrapper exited 0 — and its status remap reported any non-zero exit
+after any signal as 130 (reproduced under bash 3.2). Now the trap acts
+(`exit 130`/`143`) until the command runs, when it becomes a no-op body — not
+an empty string, which a child inherits as "ignore" and never sees the
+signal — and the command's own status carries out through the EXIT trap. The
+fingerprint: the counters half is lost to a crash recovery, so a rewrite that
+committed before a recovery and was never judged (the run died before its
+own comparison) left counters below the build's, said and not refused, with
+the file unchanged — invisible. Each relation's main-fork size joined the
+record: DML over the rows grows it, nothing resets it, and growth past a
+tenth of the build's is the refusal; the counters are no longer
+load-bearing, which also covers a server with `track_counts` off (said when
+seen). Then: a marker table that exists with no row is a refusal, not "no
+corpus" (the fresh path would have dropped what stood under it); the marker
+is written after the exact pass's confound gate, so a refused build leaves
+nothing to reuse, and that gate refuses in the named form rather than
+throwing; the loop's tail is one `if (kept)`/`else` with no non-null
+assertions, and the dead `!beforeArm` on the marker write went with it. The
+spawned migrator runs with `--no-env-file`: Bun loads `db/.env` into a child
+for every variable the passed environment lacks — every `OB1_*` name after
+the strip — so the allowlist had a hole the size of the file the fork
+documents as the migrator's own (reproduced); `runMigrator` takes an
+optional environment and the three suites still spelling the spawn use it;
+one `migrationFiles()` lists the directory for the bare apply, the ledger
+comparison and test-upgrade's count.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

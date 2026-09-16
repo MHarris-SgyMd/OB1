@@ -19,10 +19,9 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, ledgerStrangers, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { applyMigrations, createAssert, dropSchema, ledgerStrangers, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -30,9 +29,7 @@ const { assert, report } = createAssert();
 
 const OPTS = { dim: 8, model: "stub-embed" };
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS = readdirSync(join(HERE, "migrations"))
-  .filter((f) => f.endsWith(".sql"))
-  .sort();
+const MIGRATIONS = migrationFiles();
 
 /** The migrator, from the fixture's shell (test-support's migratorEnv: the test width and model, the overrides the runner would refuse stripped). */
 const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
@@ -427,7 +424,6 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // pinned the same chunk-context default, so the two halves of the fixture
   // agree. reembed.ts --status takes the same shell.
   const env = MIGRATOR_ENV;
-  const statusEnv = env;
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
 
@@ -462,7 +458,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: statusEnv, cwd: HERE });
+  const status = await runScript(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env, cwd: HERE });
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&

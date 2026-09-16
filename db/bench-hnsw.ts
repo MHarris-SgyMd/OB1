@@ -516,9 +516,18 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
  * run, not only the one that found it (review pass).
  */
 type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[]; physical: Physical; rewritten?: string[] };
-/** Per relation: rows inserted + updated + deleted so far (the cumulative counters, which autovacuum does not reset) and the file the relation lives in (which DML never changes and a rewrite always does). */
-type Physical = Record<string, { tuples: number; file: number }>;
+/**
+ * Per relation: rows inserted + updated + deleted so far (the cumulative
+ * counters, which autovacuum does not reset but a crash recovery does), the
+ * file the relation lives in (which DML never changes and a rewrite always
+ * does), and the main fork's size in bytes (which DML over the rows grows and
+ * nothing resets — the witness that survives a recovery; review pass).
+ */
+type Physical = Record<string, { tuples: number; file: number; bytes: number }>;
+/** Growth of a relation's main fork past this share of the build's is a rewrite; a vacuum's or a truncate's jitter is far below it. */
+const GROWTH_TOLERANCE = 0.1;
 const PHYSICAL_RELATIONS: readonly string[] = ["thoughts", "thought_chunks", ...HNSW_INDEXES];
+const mb = (b: number) => (b / 1048576).toFixed(0);
 
 const corpusParams = (tiers: Tier[]): CorpusParams => ({ format: MARKER_FORMAT, dim: DIM, tiers: tiers.map((t) => ({ key: t.key, share: t.share })), chunkedShare: CHUNKED_SHARE, chunksPer: CHUNKS_PER });
 /** A build time for a console line or a table cell: one spelling, from the ISO stamp `stats` carries. */
@@ -535,7 +544,7 @@ async function readMarker(sql: SQL): Promise<Marker | null> {
   if (!has) return null;
   try {
     const [row] = await sql`SELECT corpus FROM bench_hnsw_corpus`;
-    if (!row) return null;
+    if (!row) throw new Error("the table exists but holds no row, so nothing vouches for what is under it");
     const corpus = row.corpus as Marker;
     const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && corpus.physical && corpus.stats.scale > BEFORE_ARM_MAX;
     if (!shaped) throw new Error("its row is not the shape this bench writes");
@@ -569,17 +578,23 @@ async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
 
 /** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
 async function physicalState(sql: SQL): Promise<Physical> {
+  const [{ counted }] = await sql`SELECT current_setting('track_counts') = 'on' AS counted`;
+  if (!counted) console.log("  (track_counts is off on this server: the row counters are frozen, and only each relation's file and size can say what moved)");
   const rows = await sql.unsafe(`
-    SELECT c.relname, c.relfilenode::bigint AS file, COALESCE(s.n_tup_ins + s.n_tup_upd + s.n_tup_del, 0)::bigint AS tuples
+    SELECT c.relname, c.relfilenode::bigint AS file, pg_relation_size(c.oid, 'main')::bigint AS bytes,
+           COALESCE(s.n_tup_ins + s.n_tup_upd + s.n_tup_del, 0)::bigint AS tuples
     FROM pg_class c LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
     WHERE c.relname = ANY($1) AND c.relnamespace = 'public'::regnamespace`, [sql.array([...PHYSICAL_RELATIONS], "TEXT")]);
-  return Object.fromEntries(rows.map((r: { relname: string; file: string | number; tuples: string | number }) => [r.relname, { tuples: Number(r.tuples), file: Number(r.file) }]));
+  return Object.fromEntries(rows.map((r: { relname: string; file: string | number; bytes: string | number; tuples: string | number }) => [r.relname, { tuples: Number(r.tuples), file: Number(r.file), bytes: Number(r.bytes) }]));
 }
 
 /**
- * What moved since the build, in words, or nothing. A counter that went DOWN
- * is a statistics reset (a crash-recovered data directory), not a rewrite —
- * said, not refused, since the files still vouch for the heap and the graphs.
+ * What moved since a recorded state, in words, or nothing: another file, a
+ * main fork grown past the tolerance, or rows the counters saw. A counter that
+ * went DOWN is a statistics reset (a crash-recovered data directory) — said,
+ * not refused, since the file and the size still judge the heap and the
+ * graphs: rows a migration rewrote before the reset grew the fork, and that
+ * growth is what the size catches (review pass).
  */
 function physicalMoves(since: Physical, now: Physical, sinceWhat: string): string[] {
   const out: string[] = [];
@@ -591,8 +606,9 @@ function physicalMoves(since: Physical, now: Physical, sinceWhat: string): strin
       continue;
     }
     if (c.file !== b.file) out.push(`${rel}: rewritten into another file since ${sinceWhat}`);
+    else if (c.bytes > b.bytes * (1 + GROWTH_TOLERANCE)) out.push(`${rel}: grew from ${mb(b.bytes)} to ${mb(c.bytes)} MiB since ${sinceWhat}`);
     else if (c.tuples > b.tuples) out.push(`${rel}: ${(c.tuples - b.tuples).toLocaleString()} rows inserted, updated or deleted since ${sinceWhat}`);
-    else if (c.tuples < b.tuples) console.log(`  (${rel}: its row counters are below ${sinceWhat}'s — reset by a crash recovery; the file is the same, and DML this run applies is judged against this run's own read)`);
+    else if (c.tuples < b.tuples) console.log(`  (${rel}: its row counters are below ${sinceWhat}'s — reset by a crash recovery; the file and the size are ${sinceWhat}'s)`);
   }
   return out;
 }
@@ -1151,19 +1167,17 @@ for (const n of SCALES) {
 
   // A kept corpus is this scale's, above the before arm's (the block above
   // and readMarker's shape refused every other case), and is reused.
-  const reuse = kept !== null;
-
-  let stats!: LoadStats;
-  let matches!: Map<string, number>;
+  let stats: LoadStats;
+  let matches: Map<string, number>;
   let appliedFiles: string[] = [];
-  if (reuse) {
-    console.log(`▸ ${n.toLocaleString()} rows — reusing the corpus kept in this database (built ${when(kept!.stats.builtAt)})`);
+  if (kept) {
+    console.log(`▸ ${n.toLocaleString()} rows — reusing the corpus kept in this database (built ${when(kept.stats.builtAt)})`);
     // The rows first — two counts and two indexed probes, needing only 001's
     // and 007's objects — so a table that is not the generator's is refused
     // before the migrator walks it (a pending backfill over ten million rows
     // is the better part of an hour).
     try {
-      await assertKeptCorpus(sql, n, tiers, kept!);
+      await assertKeptCorpus(sql, n, tiers, kept);
     } catch (err) {
       console.error(`bench-hnsw.ts: ${(err as Error).message}. The kept table is not the corpus its marker describes — a migration applied onto it on an earlier run may have changed rows; remove the kept volume and build again (db/README.md names the command). Nothing was touched.`);
       process.exit(1);
@@ -1198,7 +1212,7 @@ for (const n of SCALES) {
     // build's figure (review passes). The refusal records the evidence — what
     // moved, not a guess at which file did it — so every later run refuses.
     const physicalNow = await physicalState(sql);
-    const moved = [...new Set([...physicalMoves(kept!.physical, physicalNow, "the build"), ...physicalMoves(physicalBefore, physicalNow, "this run's migrator")])];
+    const moved = [...new Set([...physicalMoves(kept.physical, physicalNow, "the build"), ...physicalMoves(physicalBefore, physicalNow, "this run's migrator")])];
     if (moved.length > 0) {
       await amendMarker(sql, { rewritten: moved });
       console.error(
@@ -1206,8 +1220,8 @@ for (const n of SCALES) {
       );
       process.exit(1);
     }
-    stats = { ...kept!.stats, source: "reused" };
-    matches = new Map(Object.entries(kept!.matches));
+    stats = { ...kept.stats, source: "reused" };
+    matches = new Map(Object.entries(kept.matches));
     console.log(`  ${n.toLocaleString()} thoughts and ${stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched`);
     console.log(appliedFiles.length ? `  migrations applied onto it this run: ${appliedFiles.join(", ")}` : "  schema already at the tree's; nothing applied");
   } else {
@@ -1231,38 +1245,27 @@ for (const n of SCALES) {
   }
   for (const note of notes) console.log(`  (${note})`);
   const queries = queriesFor(n);
-  if (!reuse) {
-    process.stdout.write("  inserting         ");
-    ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
-    console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
-    console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, ${stats.otherIndexes.length} other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
-  }
-  // The oracle's premise, checked on the build before the marker, and on a
-  // reuse whenever the ledger differs from the one it last passed under — a
-  // migration applied onto the table is the one way a kept chunk vector can
-  // change, and a check that threw after a file was recorded must not be
-  // skipped by the re-run — since the join over every chunk row costs a
-  // minute at ten million rows (review passes). The marker records the
-  // ledger it passed under, after it passes.
-  if (reuse) {
-    // Keyed on the durable comparison, not on what THIS run's migrator
-    // recorded: a run interrupted between the migrator's commits and here
-    // would otherwise leave the next run vacuuming nothing and skipping
-    // nothing it should not (review pass).
+  // The oracle's premise — every chunk carries its parent's vector — is
+  // checked on a build, and on a reuse whenever the ledger differs from the
+  // one it last passed under: a migration applied onto the table is the one
+  // way a kept chunk vector can change, a check that threw after a file was
+  // recorded must not be skipped by the re-run, and the join over every chunk
+  // row costs a minute at ten million rows (review passes).
+  if (kept) {
+    stats = { ...kept.stats, source: "reused" };
+    matches = new Map(Object.entries(kept.matches));
     const ledger = (await ledgerNames(sql)) ?? [];
-    if (!Bun.deepEquals(ledger, kept!.verifiedLedger)) {
+    if (!Bun.deepEquals(ledger, kept.verifiedLedger)) {
       await chunksCarryParentVectors(sql);
       await amendMarker(sql, { verifiedLedger: ledger });
       console.log(`  ledger differs from the one the corpus was last verified under: oracle premise re-checked`);
     }
   } else {
+    process.stdout.write("  inserting         ");
+    ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
+    console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
+    console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, ${stats.otherIndexes.length} other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
     await chunksCarryParentVectors(sql);
-    // The marker last, once everything a reuse would skip has finished and
-    // passed: an interrupted load leaves nothing that reads as a corpus. Only
-    // where the database is kept: a throwaway container's marker would serve
-    // nothing, and a persistent database reached some other way is not this
-    // bench's to mark.
-    if (KEPT && !beforeArm) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, verifiedLedger: (await ledgerNames(sql)) ?? [], physical: await physicalState(sql) });
   }
   loads.push(stats);
 
@@ -1291,13 +1294,28 @@ for (const n of SCALES) {
       answers.push(ids);
       nearest = Math.max(nearest, top);
     }
-    stats.confound = Confound.check(nearest);
+    try {
+      stats.confound = Confound.check(nearest);
+    } catch (err) {
+      // The one gate a reuse with more queries than its build meets first;
+      // a refusal with its reason, like every other kept-corpus path.
+      console.error(`\nbench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
+      process.exit(1);
+    }
     console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
     process.stdout.write("                    ");
     wants.set(WHOLE_TABLE, answers);
     process.stdout.write(".");
   }
   console.log(" done");
+  // The marker last, once everything a reuse would skip — the load, the
+  // builds, the premise check, the exact pass's own confound gate — has
+  // finished and passed: an interrupted or refused build leaves nothing that
+  // reads as a corpus. Only where the database is kept (the one-scale rule
+  // at parse makes this the scale above the before arm's): a throwaway
+  // container's marker would serve nothing, and a persistent database reached
+  // some other way is not this bench's to mark.
+  if (!kept && KEPT) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, verifiedLedger: (await ledgerNames(sql)) ?? [], physical: await physicalState(sql) });
 
   // Both HNSW relations are read into the page cache here, on BOTH paths,
   // after the exact oracle and just before the first section that walks
@@ -1453,8 +1471,6 @@ for (const n of SCALES) {
 await sql.close();
 
 // ── Report ──────────────────────────────────────────────────────────────────
-
-const mb = (b: number) => (b / 1048576).toFixed(0);
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
 console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together, with how many there were (the set differs by schema: 023's and 025's three exist only under the whole one). Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MiB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated.\n");

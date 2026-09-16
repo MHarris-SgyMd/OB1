@@ -237,10 +237,7 @@ export async function applyMigrations(url: string, opts: SchemaOptions): Promise
     // schema so 001's bare `vector({{EMBEDDING_DIM}})` resolves. A no-op on the
     // normal container, where pgvector installs into public.
     await alignVectorSearchPath(admin);
-    const files = readdirSync(MIGRATIONS)
-      .filter((f) => f.endsWith(".sql"))
-      .filter((f) => opts.only?.(f) ?? true)
-      .sort();
+    const files = migrationFiles().filter((f) => opts.only?.(f) ?? true);
     for (const f of files) {
       await admin.unsafe(substitute(readFileSync(join(MIGRATIONS, f), "utf8"), opts));
     }
@@ -415,8 +412,19 @@ export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "mode
  * suites still spell the spawn for themselves. Exit code and combined output,
  * as runScript gives them.
  */
-export function runMigrator(url: string, env: Record<string, string>, ...flags: string[]): Promise<{ code: number; out: string }> {
-  return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { env, cwd: HERE });
+export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string }> {
+  // --no-env-file: Bun loads db/.env into a child for every variable the
+  // passed environment lacks — which after migratorEnv's strip is every
+  // OB1_* name, and db/.env is where a migrator-only flag is documented to
+  // live. A fixture's shell is the one it was given (review pass, reproduced).
+  return runScript(["bun", "--no-env-file", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
+}
+
+/** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
+export function migrationFiles(): string[] {
+  return readdirSync(MIGRATIONS)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
 }
 
 /**
@@ -432,7 +440,7 @@ export function runMigrator(url: string, env: Record<string, string>, ...flags: 
 export async function ledgerStrangers(sql: SQL): Promise<string[] | null> {
   const names = await ledgerNames(sql);
   if (names === null) return null;
-  const files = new Set(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")));
+  const files = new Set(migrationFiles());
   return names.filter((name) => !files.has(name));
 }
 
