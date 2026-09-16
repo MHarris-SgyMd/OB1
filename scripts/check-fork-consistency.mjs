@@ -1189,7 +1189,8 @@ function thoughtWritesAroundIn(text) {
   // SQL: `INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` — the column list naming either
   // column (SMD-1524). No list, no rule: `INSERT INTO thoughts VALUES …` and `… SELECT …` say nothing.
   for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(([^()]*)\)/gi)) {
-    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(m[1])) lines.add(lineOf(m.index));
+    // A `-- comment` inside a multi-line list is not a column (the first review pass).
+    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(m[1].replace(/--[^\n]*/g, ""))) lines.add(lineOf(m.index));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -1266,6 +1267,8 @@ const THOUGHT_WRITE_PROBES = [
   'INSERT INTO "public"."thoughts" ("content", "metadata") VALUES ($1, $2);',
   'INSERT INTO thoughts AS t (content, embedding) VALUES ($1, $2::vector) ON CONFLICT DO NOTHING;',
   'INSERT INTO thoughts (content, metadata) SELECT body, \'{}\'::jsonb FROM staging;',
+  // The first review pass: a column list over lines with a comment beside a column.
+  'INSERT INTO thoughts (\n  content, -- the text\n  metadata\n) VALUES ($1, $2);',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1311,6 +1314,8 @@ const THOUGHT_WRITE_NON_PROBES = [
   'Any code path that writes a raw `INSERT INTO thoughts` — a webhook handler — will insert a row with a NULL fingerprint.',
   'await supabase.rpc("upsert_thought", { p_content: content, p_payload: { metadata: meta, embedding_model: EMBEDDING_MODEL }, p_embedding: embedding });',
   'thoughts = [build_thought(h, book) for h in batch]\nsupabase.table("thoughts").insert(thoughts).execute()',
+  // The first review pass: a comment naming the column is not the column.
+  'INSERT INTO thoughts (\n  metadata -- not content\n) VALUES ($1);',
 ];
 const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([

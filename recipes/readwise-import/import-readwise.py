@@ -30,6 +30,7 @@ Requires environment variables (or a .env file loaded by your shell):
 """
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -192,10 +193,11 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
     it. A text Open Brain already holds is not a unique violation but the
     function's `existed` — its metadata is merged, its vector replaced, and
     the highlight is counted as already present. The enhanced-thoughts
-    columns the function does not know (source_type, type) follow by an
-    update that carries neither content nor vector, on a fresh row only.
+    columns the function does not know (source_type, type — the same for
+    every highlight) follow by ONE update per batch that carries neither
+    content nor vector, over the fresh rows only.
     """
-    fresh = 0
+    fresh_ids: list[str] = []
     for thought in thoughts:
         result = (
             supabase.rpc(
@@ -211,14 +213,41 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
             )
             .execute()
         )
-        data = result.data if isinstance(result.data, dict) else {}
-        if not data.get("id") or data.get("existed"):
+        data = _rpc_object(result.data)
+        if not data.get("id"):
+            # The function always answers an id; anything else is a client or
+            # schema fault (an older brain without the 3-argument form, a
+            # client version wrapping the reply another way) — not a row to skip.
+            raise RuntimeError(
+                f"upsert_thought returned no id for highlight "
+                f"{thought['metadata'].get('readwise_highlight_id')}: {result.data!r}"
+            )
+        if data.get("existed"):
             continue
+        fresh_ids.append(str(data["id"]))
+    if fresh_ids:
         supabase.table("thoughts").update(
-            {"source_type": thought["source_type"], "type": thought["type"]}
-        ).eq("id", data["id"]).execute()
-        fresh += 1
-    return fresh
+            {"source_type": thoughts[0]["source_type"], "type": thoughts[0]["type"]}
+        ).in_("id", fresh_ids).execute()
+    return len(fresh_ids)
+
+
+def _rpc_object(data) -> dict:
+    """The JSON object a scalar-jsonb function returns, however the client wraps it.
+
+    postgrest-py hands back the parsed body — a dict for `RETURNS jsonb` — but
+    has wrapped scalar replies in a one-element list, and a JSON string is what
+    an older client gives a jsonb it did not decode. Unwrap the shapes that are
+    the object; anything else is {} and the caller refuses it.
+    """
+    if isinstance(data, list) and len(data) == 1:
+        data = data[0]
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return {}
+    return data if isinstance(data, dict) else {}
 
 
 def already_imported(supabase, highlight_ids: list[int]) -> set[int]:

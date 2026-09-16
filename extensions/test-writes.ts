@@ -25,6 +25,10 @@
  * are driven here; the rest are read. Three more deployments write a raw row
  * into a database of their own, where the functions are not, and say so in
  * their headers and READMEs — they are check 10's counted exceptions, read here.
+ * The text guards below are spelling-sensitive by design: a rewrite of a
+ * read-only file that keeps the mechanism but respells the call fails one
+ * assertion whose message names the mechanism, and the guard is updated with
+ * the file — the cost of holding behaviour this suite cannot drive.
  *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
@@ -548,13 +552,14 @@ spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
 spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought", \{\s*p_id: existingId,\s*p_content: profileContent,/s, " rewrites the profile through update_thought");
 // SMD-1524: the first run, the example capture, the two Python recipes and the two README samples capture through the function.
-spells("integrations/consolidation-workers/bio/index.ts", /rpc\("upsert_thought", \{\s*p_content: profileContent,\s*p_payload: \{ metadata: profileMetadata, embedding_model: embeddingModelUsed\(\) \},\s*p_embedding: embedding,/s, " captures the first profile through the 3-argument upsert_thought, embedded, with its label");
+spells("integrations/consolidation-workers/bio/index.ts", /rpc\("upsert_thought", \{(?=[^;]*p_content: profileContent)(?=[^;]*embedding_model: embeddingModelUsed\(\))(?=[^;]*p_embedding: embedding)/s, " captures the first profile through the 3-argument upsert_thought, embedded, with its label (the three arguments in any order)");
 spells("integrations/consolidation-workers/bio/index.ts", /if \(result\.existed === true\) \{\s*return \{ id: thoughtId, created: false \};/s, "…and leaves a concurrent run's row its columns");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
 spells("recipes/local-ollama-embeddings/embed-local.py", /\/rest\/v1\/rpc\/upsert_thought/, " posts to the function, not the table");
 spells("recipes/local-ollama-embeddings/embed-local.py", /"p_payload": \{"metadata": metadata_dict, "embedding_model": model\},\s*"p_embedding": embedding,/s, "…with the vector and the Ollama model's name as its label");
 spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
-spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\) or data\.get\("existed"\):\s*continue\s*supabase\.table\("thoughts"\)\.update\(\s*\{"source_type": thought\["source_type"\], "type": thought\["type"\]\}/s, "…and writes the enhanced columns on a fresh row only");
+spells("recipes/readwise-import/import-readwise.py", /if data\.get\("existed"\):\s*continue\s*fresh_ids\.append\(str\(data\["id"\]\)\)\s*if fresh_ids:\s*supabase\.table\("thoughts"\)\.update\(\s*\{"source_type": thoughts\[0\]\["source_type"\], "type": thoughts\[0\]\["type"\]\}\s*\)\.in_\("id", fresh_ids\)/s, "…and writes the enhanced columns over the fresh rows only, one update per batch");
+spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
   spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");
 }

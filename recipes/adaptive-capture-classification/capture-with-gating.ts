@@ -217,7 +217,11 @@ async function writeToOB1(classified: Classified): Promise<void> {
   // the row waits for a re-embed pass (db/reembed.ts). The OB1 capture MCP tool
   // embeds as it captures — if you use it, call it here instead. The
   // classifier's fields ride in metadata: `thoughts` has no tags/project/
-  // due_date columns, and `type` is the enhanced-thoughts sidecar's.
+  // due_date columns, and `type` as a column is the enhanced-thoughts
+  // schema's — a brain that has it can write the column beside the call, as
+  // integrations/readwise-capture does. Note the 2-argument form answers
+  // `{id, fingerprint}` only, no `existed`: to write a column on a fresh row
+  // only, pass the 3-argument form (p_embedding: null) and read `existed`.
   const { error } = await db.rpc("upsert_thought", {
     p_content: classified.title,
     p_payload: {

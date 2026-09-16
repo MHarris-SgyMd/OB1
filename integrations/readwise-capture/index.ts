@@ -243,6 +243,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }
     }
 
+    // The book's counter counts highlights, as Readwise does — an `existed` row is still one.
     if (book) {
       await supabase.rpc("increment_book_highlight_count", {
         p_book_id: event.book_id,

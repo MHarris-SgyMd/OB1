@@ -308,6 +308,7 @@ def main():
     # Process
     embedded = 0
     ingested = 0
+    already_present = 0
     errors = 0
 
     for i, thought in enumerate(thoughts, 1):
@@ -330,7 +331,9 @@ def main():
             print(f"   -> OK (dry run)")
             continue
 
-        # Build metadata
+        # Build metadata. `embedding_model` here is the recipe's own key, kept
+        # for readers of metadata; the row's label is the embedding_model
+        # COLUMN, written by upsert_thought from the payload (021).
         metadata = {
             "source": thought.get("source") or args.source,
             "embedding_model": args.model,
@@ -342,10 +345,11 @@ def main():
         # Ingest
         result = ingest_thought(content, embedding, metadata, args.model)
         if result.get("ok"):
-            ingested += 1
             if result.get("existed"):
+                already_present += 1
                 print(f"   -> Already present (metadata merged, vector replaced)")
             else:
+                ingested += 1
                 print(f"   -> Ingested")
         else:
             errors += 1
@@ -361,6 +365,8 @@ def main():
     print(f"  Embedded:  {embedded}")
     if not args.dry_run:
         print(f"  Ingested:  {ingested}")
+        if already_present:
+            print(f"  Present:   {already_present} (text already held; metadata merged, vector replaced)")
     print(f"  Errors:    {errors}")
     print(f"  API cost:  $0.00 (local)")
     print("-" * 50)

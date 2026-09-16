@@ -9322,7 +9322,10 @@ so a re-capture leaves a hand-set tier alone, change 69's escalation-only
 stance. Where the writer makes no vector — the auditor's report, the
 classification example — `{p_content, p_payload}` resolves to the 2-argument
 form and the row waits, labelled NULL as a vectorless row should be, for a
-re-embed pass; the files say so. The readwise receiver and the auditor are
+re-embed pass; the files say so, and say that this form answers `{id,
+fingerprint}` only — no `existed` — so a vectorless writer that wants a
+fresh-row gate must pass the 3-argument form with a JSON `null` vector (the
+review pass ran both through real PostgREST). The readwise receiver and the auditor are
 driven in `test-writes.ts` (the receiver behind a stubbed Readwise book
 lookup and the `readwise-books` sidecar, now the third the suite applies and
 drops); the bio worker's first run, the classification example, the two
@@ -9360,8 +9363,8 @@ outside the rule, said so). The one insert the non-probe list carried as
 shape and the forms a rebase could bring — and ten non-probes: another
 table's insert with a `content` column, the other columns, no column list,
 a metadata-only row, the remedy, prose naming the statement, the
-comprehension the rule cannot see. Forty-nine probes, thirty-six non-probes, each
-probe held to its verb's line. **Exceptions, seven, the list's first
+comprehension the rule cannot see. Fifty probes, thirty-seven non-probes
+(one of each from the review pass), each probe held to its verb's line. **Exceptions, seven, the list's first
 entries** — none a bypass a fix here could remove, each a file whose header
 or README says what its rows lack: three deployments whose database is their
 own, built from the guide's shape, where the fork's functions are not —
@@ -9404,6 +9407,41 @@ either way. `INSERT INTO thoughts VALUES (…)` without a column list stays
 outside the rule: the statement does not say which columns it writes, and
 none is in the tree.
 
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with real PostgREST v12.2.3 beside the database; eleven
+findings, none above MEDIUM, nine fixed). The readwise backfill read the
+function's reply with `isinstance(data, dict) else {}` and skipped any other
+shape as "already present" — a client wrapping the reply in a list or a
+string would have stored every row and written no sidecar, silently; the
+reply is unwrapped from those two shapes now and a reply naming no id raises
+(both reviewers, independently; the running one confirmed postgrest-py's
+current shape is the dict). The backfill's sidecar was one update per row —
+two round trips per highlight, and the README's "a few minutes per 10K"
+undercounted by an order — and is one update per batch over the fresh ids
+now, the README saying ten to twenty minutes. The classification example's
+comment and README promised the enhanced `type` column and wrote only
+metadata; reworded, with the 3-argument-with-null path named for a writer
+that wants a fresh-row gate. The receiver's book counter still counts an
+`existed` highlight (Readwise's semantics) — said in the README. The Ollama
+recipe's summary counted an `existed` row as ingested; a separate line now,
+and its own `metadata.embedding_model` key explained beside the column. A
+`-- comment` inside a multi-line SQL column list read as a column; stripped,
+one probe and one non-probe added (50/37). The bio guards in the test
+matched one spelling of the call; they hold the three arguments in any
+order, and the header says the guards are spelling-sensitive by design. Not
+fixed, and said: `computeContentFingerprint` in the workers' helpers has no
+importer left (boyscout); check 10 catches a column-listed `INSERT INTO
+thoughts (content)` in a comment or README sentence, by design. Run for
+real: the shim and PostgREST both resolve `{p_content, p_payload}` to the
+2-argument form and `{…, p_embedding: null}` to the 3-argument one, the
+latter answering `existed`; a 768-wide vector is refused with SQLSTATE 22000
+(HTTP 400), so the recipes' status checks report it per thought; a restored
+raw insert in the receiver fails check 10 at its line and two test
+assertions — as `500` from the shim's array binding, the limit change 69's
+header states, not by naming the columns; five runs on one container, and a
+run after a SIGKILL, all green; `dropSidecars` drops the readwise-books
+table and both functions.
+
 **Not done here.** SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
 `readwise-capture`, `consolidation-bio` and the auditor among them; their
@@ -9414,9 +9452,9 @@ thoughts` statements are the fork's fixtures and benches, outside the scan
 as they were for the update rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
-eight hits in eight files before the conversions and PASS after (49 probes,
-36 non-probes, each probe caught on its verb's line; seven exceptions, each
-matching its one line); `../db/with-postgres.sh bun test-writes.ts` 147/147
+eight hits in eight files before the conversions and PASS after (50 probes,
+37 non-probes, each probe caught on its verb's line; seven exceptions, each
+matching its one line); `../db/with-postgres.sh bun test-writes.ts` 148/148
 under podman — the receiver's capture judged column by column, its retry
 answered `duplicate` before any write, the same passage highlighted again one
 row with the newer highlight id and a hand-set tier kept, the book cached and

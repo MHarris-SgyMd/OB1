@@ -100,7 +100,9 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > invisible to dedup. It makes no vector, so the 2-argument form is resolved and the row
 > waits for a re-embed pass (`db/reembed.ts`); the OB1 capture MCP tool embeds as it
 > captures, and is the better call there. The classifier's `type`, `tags`, `project` and
-> `due_date` ride in `metadata` — `thoughts` has no such columns.
+> `due_date` ride in `metadata` — `thoughts` has no such columns; a brain with the
+> enhanced-thoughts schema can write its `type` column beside the call, on a fresh row, as
+> `integrations/readwise-capture` does.
 
 Replace your current direct call to the OB1 `capture` MCP tool with the following pattern.
 

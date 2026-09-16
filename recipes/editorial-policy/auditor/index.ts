@@ -468,7 +468,8 @@ async function storeAuditReport(result: AuditResult): Promise<string> {
   // No vector: the report is a record, not a search target, so the 2-argument
   // form is resolved and the row carries no label (a re-embed pass may give it
   // one). The window's timestamps are in the text, so two reports are two rows;
-  // an identical text would come back `existed`, its metadata merged.
+  // an identical text would be merged into the earlier row — the 2-argument
+  // form answers `{id, fingerprint}` only, no `existed`, and this needs neither.
   const { data, error } = await supabase.rpc("upsert_thought", {
     p_content: content,
     p_payload: {
