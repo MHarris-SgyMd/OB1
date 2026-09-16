@@ -692,11 +692,21 @@ console.log("\n[9] updated_at trigger fires on update, created_at does not move"
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.query(`SELECT upsert_thought('trigger probe', '{}'::jsonb)`);
-  const before = await db.query<{ c: string; u: string }>(`SELECT created_at::text c, updated_at::text u FROM thoughts`);
+  const stamps = () => db.query<{ c: string; u: number }>(`SELECT created_at::text c, extract(epoch FROM updated_at)::float8 u FROM thoughts`);
+  const before = await stamps();
+  // now() is read from a clock that under PGlite has millisecond grain
+  // (SMD-1498); adjacent statements share it 96 of 100 times, and the two
+  // stamps here are two statements apart. Without the sleep, review mutants
+  // (SMD-1514) had a `>=` compare pass with the trigger dropped and a `>`
+  // fail 1 run in 5. The row cannot be aged by an UPDATE while the trigger
+  // under test is armed, so a sleep: pg_sleep is a wall-clock lower bound and
+  // each statement its own transaction, so the UPDATE's now() is at least
+  // 2 ms past the capture's — past the millisecond boundary.
+  await db.exec(`SELECT pg_sleep(0.002)`);
   await db.exec(`UPDATE thoughts SET content = 'trigger probe edited'`);
-  const after = await db.query<{ c: string; u: string }>(`SELECT created_at::text c, updated_at::text u FROM thoughts`);
+  const after = await stamps();
   assert(after.rows[0].c === before.rows[0].c, "created_at unchanged");
-  assert(after.rows[0].u >= before.rows[0].u, "updated_at advanced");
+  assert(after.rows[0].u > before.rows[0].u, `updated_at advanced (${before.rows[0].u.toFixed(3)} -> ${after.rows[0].u.toFixed(3)})`);
 }
 
 // ── 10. No Supabase-isms left behind ─────────────────────────────────────────
@@ -2797,14 +2807,20 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `SELECT status, superseding_id, review_note, reviewed_at FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
   assert(accRow.status === "accepted" && accRow.superseding_id === reversal && accRow.review_note === "confirmed in the June minutes" && accRow.reviewed_at !== null,
     "…the row is accepted, names the thought it wrote, and keeps the note");
-  // By created_at: thought_audit.id is a uuid, so `ORDER BY id` is a coin toss
-  // (this read ordered by it until SMD-1323's twin exposed the flake).
-  const audit = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
-    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [reversal])).rows[0];
+  // Not ordered: neither `id` (a uuid — this read ordered by it until
+  // SMD-1323's twin exposed the flake) nor `created_at` (separate transactions
+  // can share now(), SMD-1514) picks the newest row. What makes the read safe
+  // is that the reversal has exactly one update row here — its capture wrote
+  // a capture row, and seed()'s created_at UPDATE an empty diff, which 008's
+  // guard in the audit trigger (025's body is the last definer) records as
+  // nothing — and that is asserted.
+  const auditRows = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update'`, [reversal])).rows;
+  const audit = auditRows[0];
   const auditAfter = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const supDiff = (audit?.diff as { supersedes?: { before?: unknown; after?: unknown } } | undefined)?.supersedes;
-  assert(auditAfter === auditBefore + 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
-    `the write is one audit row with the reviewer as actor and the supersedes diff (${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
+  assert(auditAfter === auditBefore + 1 && auditRows.length === 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
+    `the write is one audit row — the reversal's only update row — with the reviewer as actor and the supersedes diff (${auditRows.length}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
   const again = await review(pid, "accept");
   assert(again.ok === false && again.error === "ALREADY_ACCEPTED", "accepting an accepted proposal is refused, not re-written");
   assert((await candidates(reversal)).length === 1 && (await candidates(reversal))[0].older_id === farAxis, "a thought already superseded is not a candidate on either side");
@@ -3154,16 +3170,25 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
       `SELECT update_thought($1::uuid, NULL::text, NULL::jsonb, NULL::vector, NULL::jsonb, $3::timestamptz, $4::jsonb, NULL::text, $2::jsonb) AS r`,
       [id, prov === undefined ? null : JSON.stringify(prov), extra.since ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor)])).rows[0].r;
   const rowOf = async (id: string) =>
-    (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: string }>(
+    (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: number }>(
       `SELECT supersedes AS s, derived_from AS d, content, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis,
-              embedding_model AS m, (metadata->>'k')::int AS k, updated_at::text AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
-  // By created_at, not id — thought_audit.id is a uuid, so ordering by it is
-  // random ([28] had that flake latent). created_at is now(), the
-  // transaction's start, and every call here is its own transaction writing
-  // at most one audit row for the thought, so the newest is unambiguous.
-  const lastAudit = async (id: string) =>
-    (await db.query<{ actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> }>(
-      `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [id])).rows[0];
+              embedding_model AS m, (metadata->>'k')::int AS k, extract(epoch FROM updated_at)::float8 AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
+  type Audit = { actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> };
+  // The update row one write added: the thought's audit ids before the write,
+  // excluded after it; `audit` is undefined when the write added none. Not
+  // `ORDER BY created_at DESC, id`: separate transactions do not promise
+  // distinct created_at — now() is read from a clock that under PGlite has
+  // millisecond grain (SMD-1498), so two edits a few statements apart can
+  // share it — and the tiebreak `id` is a uuid, a coin toss between them (two
+  // rows sharing created_at: the read picked the older 51 of 100 times,
+  // SMD-1514).
+  const auditOfWrite = async <T>(id: string, write: () => Promise<T>): Promise<{ r: T; audit: Audit | undefined; added: number }> => {
+    const seen = (await db.query<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1`, [id])).rows.map((x) => x.id);
+    const r = await write();
+    const rows = (await db.query<Audit>(
+      `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' AND NOT (id = ANY($2::uuid[]))`, [id, seen])).rows;
+    return { r, audit: rows[0] as Audit | undefined, added: rows.length };
+  };
   const audits = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
   const exists = async (sig: string) => (await db.query<{ e: boolean }>(`SELECT to_regprocedure($1) IS NOT NULL AS e`, [sig])).rows[0].e;
@@ -3193,14 +3218,25 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   const c = await cap("a source note", 2);
   const before = await rowOf(b);
   const auditsBefore = await audits();
-  let r = await edit(b, { supersedes: a }, { actor: { name: "editor", source: "test" } });
+  // The capture a few statements back can share the edit's now(): PGlite's
+  // clock has millisecond grain (SMD-1498), and adjacent statements read the
+  // same value 96 of 100 times — at this site, with a capture between, 0 of
+  // 20 runs did (SMD-1514's probes), so the sleep turns odds into a proof
+  // rather than closing a seen flake. The row cannot be aged by an UPDATE
+  // while 001's trigger is armed (it re-stamps updated_at = now()), and
+  // disabling the trigger would disarm what [9] tests; so a sleep, the one
+  // place it is honest here. pg_sleep is a wall-clock lower bound and each
+  // statement its own transaction, so the edit's now() is at least 2 ms past
+  // the capture's — past the millisecond boundary (measured 200 of 200).
+  await db.exec(`SELECT pg_sleep(0.002)`);
+  let r: R, audit: Audit | undefined, added: number;
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { supersedes: a }, { actor: { name: "editor", source: "test" } })));
   let row = await rowOf(b);
   assert(r.ok === true && row.s === a, `an edit naming supersedes sets the pointer (${JSON.stringify(r)})`);
   assert(row.content === before.content && row.fp === before.fp && row.axis === 1 && row.m === before.m && row.k === 1, "…and touches neither content, fingerprint, vector, label nor metadata");
-  assert(row.u > before.u, "…while updated_at moves: a provenance edit is an edit");
-  let audit = await lastAudit(b);
-  assert((await audits()) === auditsBefore + 1 && audit.actor_name === "editor" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === a && !("content" in audit.diff) && !("metadata" in audit.diff),
-    `…one audit row, the actor and the supersedes diff and nothing else (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
+  assert(row.u > before.u, `…while updated_at moves: a provenance edit is an edit (${before.u.toFixed(3)} -> ${row.u.toFixed(3)})`);
+  assert((await audits()) === auditsBefore + 1 && added === 1 && audit?.actor_name === "editor" && audit?.diff.supersedes?.before === null && audit?.diff.supersedes?.after === a && !("content" in (audit?.diff ?? {})) && !("metadata" in (audit?.diff ?? {})),
+    `…one audit row, the actor and the supersedes diff and nothing else (${added}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
   r = await edit(b, {});
   assert(r.ok === true && (await rowOf(b)).s === a, "an envelope without the key leaves the pointer");
   r = await edit(b, undefined);
@@ -3209,18 +3245,16 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   r = await edit(b, { derived_from: [c, c.toUpperCase()] });
   row = await rowOf(b);
   assert(r.ok === true && JSON.stringify(row.d) === JSON.stringify([c]) && row.s === a, `derived_from is set canonical — lowercased, de-duplicated — and the pointer is left (${JSON.stringify(row.d)})`);
-  r = await edit(b, { supersedes: null });
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { supersedes: null })));
   row = await rowOf(b);
   assert(r.ok === true && row.s === null && JSON.stringify(row.d) === JSON.stringify([c]), "a JSON null clears the pointer and leaves derived_from");
-  audit = await lastAudit(b);
-  assert(audit.diff.supersedes?.before === a && audit.diff.supersedes?.after === null, "…audited as before a, after null");
+  assert(added === 1 && audit?.diff.supersedes?.before === a && audit?.diff.supersedes?.after === null, "…audited as before a, after null");
   r = await edit(b, { derived_from: [] });
   assert(r.ok === true && (await rowOf(b)).d === null, "an empty derived_from array clears the column — [] and null are one spelling");
-  r = await edit(b, { derived_from: [c], supersedes: a });
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { derived_from: [c], supersedes: a })));
   row = await rowOf(b);
   assert(r.ok === true && row.s === a && JSON.stringify(row.d) === JSON.stringify([c]), "both keys set in one envelope");
-  audit = await lastAudit(b);
-  assert(audit.diff.supersedes?.after === a && JSON.stringify(audit.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${JSON.stringify(audit.diff)})`);
+  assert(added === 1 && audit?.diff.supersedes?.after === a && JSON.stringify(audit?.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${added}; ${JSON.stringify(audit?.diff)})`);
   r = await edit(b, { derived_from: null, supersedes: null });
   row = await rowOf(b);
   assert(r.ok === true && row.s === null && row.d === null, "…both cleared in one envelope");
@@ -3282,13 +3316,15 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
     (await db.query<{ r: Record<string, unknown> }>(`SELECT review_supersession_proposal($1::uuid, $2, NULL, NULL, '{"name":"reviewer","source":"test"}'::jsonb, false) AS r`, [id, decision])).rows[0].r;
   const pid = await propose(p, q);
   const auditsAtReview = await audits();
-  const acc = await reviewCall(pid, "accept");
+  const accepted = await auditOfWrite(q, () => reviewCall(pid, "accept"));
+  const acc = accepted.r;
   assert(acc.ok === true && acc.written === true && (await rowOf(q)).s === p, `accept writes the pointer through update_thought (${JSON.stringify(acc)})`);
-  audit = await lastAudit(q);
-  assert((await audits()) === auditsAtReview + 1 && audit.actor_name === "reviewer" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === p,
-    `…one audit row, the reviewer as actor, the supersedes diff — update_thought's row (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
-  const rej = await reviewCall(pid, "reject");
-  assert(rej.ok === true && rej.cleared === true && (await rowOf(q)).s === null && (await lastAudit(q)).diff.supersedes?.after === null, "reject clears it through update_thought, audited the same way");
+  audit = accepted.audit;
+  assert((await audits()) === auditsAtReview + 1 && accepted.added === 1 && audit?.actor_name === "reviewer" && audit?.diff.supersedes?.before === null && audit?.diff.supersedes?.after === p,
+    `…one audit row, the reviewer as actor, the supersedes diff — update_thought's row (${accepted.added}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
+  const rejected = await auditOfWrite(q, () => reviewCall(pid, "reject"));
+  const rej = rejected.r;
+  assert(rej.ok === true && rej.cleared === true && (await rowOf(q)).s === null && rejected.added === 1 && rejected.audit?.diff.supersedes?.after === null, "reject clears it through update_thought, audited the same way");
   const x = await cap("loop: the earlier note", 5);
   const y = await cap("loop: the later note", 5);
   await db.query(`UPDATE thoughts SET created_at = now() - interval '5 days' WHERE id = $1`, [x]);
