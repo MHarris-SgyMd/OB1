@@ -398,8 +398,11 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   // .env into a child for every variable the passed environment lacks — which
   // after a fixture's strip is every OB1_* name, and db/.env is where a
   // migrator-only flag is documented to live — so `--no-env-file` rides on
-  // every `bun` spawn that passes an env (review passes, reproduced).
-  const argv = opts.env && cmd[0] === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
+  // every `bun` spawn that passes an env (review passes, reproduced) — after
+  // the FIRST `bun` token, since a spawn fronted by with-postgres.sh runs bun
+  // just the same (SMD-1562's suite; reproduced with a flag in db/.env).
+  const bun = opts.env ? cmd.indexOf("bun") : -1;
+  const argv = bun >= 0 ? [...cmd.slice(0, bun + 1), "--no-env-file", ...cmd.slice(bun + 1)] : cmd;
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
   return { code: await p.exited, out };

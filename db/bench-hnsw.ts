@@ -540,6 +540,8 @@ const MARKER = "bench_hnsw_corpus";
  * field added is caught by name (LOAD_STATS_KEYS), not by this number; 2 dates
  * from the merge that brought `otherIndexes` in, when both mechanisms were new.
  * The seed lives in `seedFor`; a change there is caught by the regenerated rows.
+ * The oracle cache is not this number's either: it names its own inputs (K,
+ * ORACLE_SHAPE, a digest per query) and is recomputed where they differ.
  */
 const MARKER_FORMAT = 2;
 /** Every field section L reads, named once: a marker missing one is refused before the run, not a TypeError in the report after it. The compiler keeps this list whole when LoadStats grows. */
@@ -547,20 +549,29 @@ const LOAD_STATS_KEYS: Record<keyof LoadStats, true> = { scale: true, schema: tr
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
 /**
  * The exact pass's answers, kept in the marker (SMD-1562): for each tier key
- * and for the whole table, the exact top-K ids of each query in distance
- * order, and for each whole-table query the nearest row's cosine (the
+ * and for the whole table, one answer per query — the exact top-K ids in
+ * distance order and the nearest row's cosine (the whole table's is the
  * confound). At ten million rows the pass is most of a reuse's minutes —
  * some 450 full scans — and its answers are a pure function of the rows, the
- * queries (both from the seed and the scale) and K, the same on every reuse.
- * The stream's first `q` queries are a prefix of any longer run's, so a run
- * asking fewer takes the first Q of these and a run asking more computes the
- * rest and extends. Valid exactly while the rows are: the cache rides inside
- * the marker whose physical fingerprint a reuse judges first, and a corpus
- * that changed is refused before this is read. A marker without one (written
- * before this field, or under another K) is computed for and extended, not
- * refused — the answers are derivable, the build is not.
+ * queries, K and the oracle's statement, the same on every reuse. What they
+ * are a function of is named in the record: `k`; `shape`, ORACLE_SHAPE when
+ * they were computed; and `queries`, a digest of each query vector in order.
+ * The stream's first queries are a prefix of any longer run's, so a run
+ * asking fewer takes the answers whose digests match its own queries — the
+ * leading ones, all of them where the stream is unchanged — and a run asking
+ * more computes the rest and extends. Valid exactly while the rows are: the
+ * cache rides inside the marker whose physical fingerprint a reuse judges
+ * first, and a corpus that changed is refused before this is read. A marker
+ * without one, or with one under another K or shape, or whose digests stop
+ * matching, is computed for and extended, not refused — the answers are
+ * derivable, the build is not (review pass).
  */
-type OracleCache = { k: number; q: number; answers: Record<string, string[][]>; nearest: number[] };
+type OracleAnswer = { ids: string[]; top: number };
+type OracleCache = { k: number; shape: number; queries: string[]; answers: Record<string, OracleAnswer[]> };
+/** Bumped when `oracle()`'s statement or `tierFilter`'s shape changes what an answer IS, so kept answers are recomputed rather than trusted; the queries and K are checked by value. */
+const ORACLE_SHAPE = 1;
+/** A query vector's digest for the cache: the same doubles serialise the same. */
+const digestOf = (q: number[]) => new Bun.CryptoHasher("sha256").update(JSON.stringify(q)).digest("hex").slice(0, 16);
 /**
  * The marker's payload. The scale and build time live in `stats` (the one
  * copy the report reads); `physical` is the four relations' state at the
@@ -635,18 +646,29 @@ async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
 }
 
 /**
- * The marker's oracle cache where it can answer for THESE keys at this K:
- * every key holds at least `q` answers and the confound has as many. Null
- * where it is absent, at another K, or short — computed for, never refused
- * (the answers are a function of the rows the fingerprint has just vouched
- * for). Ids are not re-checked against the table: the same fingerprint says
- * no row was written since they were read.
+ * How many of this run's leading queries the marker's oracle cache answers
+ * for (`have`), and how many it holds (`had`): the cache must be at this K
+ * and shape and whole — one well-formed answer per query for each of THESE
+ * keys — and its digests are matched against this run's queries from the
+ * front, so a changed stream answers for nothing past the change. Zero where
+ * it is absent, at another K or shape, or malformed — computed for, never
+ * refused (the answers are a function of the rows the fingerprint has just
+ * vouched for; a malformed field would otherwise be a TypeError after the
+ * checks were paid, or a silent zero — review pass). Ids are not re-checked
+ * against the table: the same fingerprint says no row was written since they
+ * were read.
  */
-function usableOracle(marker: Marker, keys: string[]): OracleCache | null {
+function markerAnswers(marker: Marker, keys: string[], digests: string[]): { have: number; had: number } {
   const c = marker.oracle;
-  if (!c || c.k !== K || !Number.isInteger(c.q) || c.q < 1) return null;
-  const holds = (a: unknown) => Array.isArray(a) && a.length >= c.q;
-  return holds(c.nearest) && keys.every((key) => holds(c.answers?.[key])) ? c : null;
+  const none = { have: 0, had: 0 };
+  if (!c || c.k !== K || c.shape !== ORACLE_SHAPE || !Array.isArray(c.queries) || c.queries.length < 1) return none;
+  const n = c.queries.length;
+  const answer = (a: unknown): a is OracleAnswer => typeof a === "object" && a !== null && Array.isArray((a as OracleAnswer).ids) && (a as OracleAnswer).ids.every((id) => typeof id === "string") && Number.isFinite((a as OracleAnswer).top);
+  const whole = c.queries.every((d) => typeof d === "string") && keys.every((key) => Array.isArray(c.answers?.[key]) && c.answers[key].length === n && c.answers[key].every(answer));
+  if (!whole) return none;
+  let have = 0;
+  while (have < Math.min(n, digests.length) && c.queries[have] === digests[have]) have++;
+  return { have, had: n };
 }
 
 /** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
@@ -1383,37 +1405,34 @@ for (const n of SCALES) {
   // computed here and the marker extended to hold them (SMD-1562).
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
   const keys = [...withCounts.map((t) => t.key), WHOLE_TABLE];
-  const cache = kept ? usableOracle(kept, keys) : null;
-  const have = Math.min(cache?.q ?? 0, Q);
+  const digests = queries.map(digestOf);
+  // One three-way state — every answer the marker's, some, none — named once
+  // and rendered from here: the run line, section L's cell, the confound's
+  // and the marker's lines (review pass).
+  const { have, had } = kept ? markerAnswers(kept, keys, digests) : { have: 0, had: 0 };
+  const fromMarker = have === Q ? "all" : have > 0 ? String(have) : "";
   const oracleSource = have === Q ? "reused" : have > 0 ? `extended (${have} of ${Q} from the marker)` : "computed";
-  process.stdout.write(`  exact oracle      ${have === Q ? `reused from the marker (${cache!.q === Q ? `all ${Q} queries` : `the first ${Q} of the ${cache!.q} it keeps`})` : have > 0 ? `${have} of ${Q} queries from the marker, computing the rest ` : ""}`);
+  process.stdout.write(`  exact oracle      ${have === Q ? `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})` : have > 0 ? `${have} of ${Q} queries from the marker, computing the rest ` : ""}`);
   const wants = new Map<string, Set<string>[]>();
-  const answers: Record<string, string[][]> = {};
-  const nearest: number[] = cache ? cache.nearest.slice(0, have) : [];
+  const answers: Record<string, OracleAnswer[]> = {};
   for (const key of keys) {
-    const rows: string[][] = cache ? cache.answers[key].slice(0, have) : [];
-    for (const q of queries.slice(have)) {
-      const { ids, top } = await oracle(sql, q, key === WHOLE_TABLE ? null : tierFilter(key));
-      rows.push(ids);
-      if (key === WHOLE_TABLE) nearest.push(top);
-    }
+    const rows: OracleAnswer[] = have > 0 ? kept!.oracle!.answers[key].slice(0, have) : [];
+    for (const q of queries.slice(have)) rows.push(await oracle(sql, q, key === WHOLE_TABLE ? null : tierFilter(key)));
     answers[key] = rows;
-    wants.set(key, rows.map((ids) => new Set(ids)));
+    wants.set(key, rows.map((a) => new Set(a.ids)));
     if (have < Q) process.stdout.write(".");
   }
   console.log(" done");
-  {
-    const max = Math.max(-1, ...nearest);
-    try {
-      stats.confound = Confound.check(max);
-    } catch (err) {
-      // The one gate a reuse with more queries than its build meets first;
-      // a refusal with its reason, like every other kept-corpus path.
-      console.error(`bench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
-      process.exit(1);
-    }
-    console.log(`  nearest query-to-row cosine ${max.toFixed(3)} over this run's ${Q} queries, from the exact pass${have > 0 ? ` (${have === Q ? "all" : have} of them the marker's)` : ""} (a repeat would read 1.000)`);
+  const max = answers[WHOLE_TABLE].reduce((m, a) => Math.max(m, a.top), -1);
+  try {
+    stats.confound = Confound.check(max);
+  } catch (err) {
+    // The one gate a reuse with more queries than its build meets first;
+    // a refusal with its reason, like every other kept-corpus path.
+    console.error(`bench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
+    process.exit(1);
   }
+  console.log(`  nearest query-to-row cosine ${max.toFixed(3)} over this run's ${Q} queries, from the exact pass${fromMarker ? ` (${fromMarker} of them the marker's)` : ""} (a repeat would read 1.000)`);
   loads.push({ ...stats, oracle: oracleSource });
   // The marker last, once everything a reuse would skip — the load, the
   // builds, the premise check, the exact pass and its own confound gate — has
@@ -1422,16 +1441,18 @@ for (const n of SCALES) {
   // at parse makes this the scale above the before arm's): a throwaway
   // container's marker would serve nothing, and a persistent database reached
   // some other way is not this bench's to mark. A kept marker that answered
-  // for fewer queries than this run asked (or none: written before the cache
-  // existed, or under another K) is extended to what was computed; one that
-  // holds more keeps them.
-  const oracleRecord: OracleCache = { k: K, q: Q, answers, nearest };
+  // for fewer of this run's queries than it asked is replaced by what this
+  // run holds — the answers it took plus the ones it computed — which is a
+  // shorter record where the marker's were unusable (another K or shape, a
+  // changed stream) and this run asked fewer; a marker that answered for
+  // every query is left as it is, however many more it holds.
+  const oracleRecord: OracleCache = { k: K, shape: ORACLE_SHAPE, queries: digests, answers };
   if (!kept && KEPT) {
     await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: oracleRecord });
     console.log(`  corpus kept: marker written, with the exact pass's answers for ${Q} queries`);
   } else if (kept && have < Q) {
     await amendMarker(sql, { oracle: oracleRecord });
-    console.log(`  marker extended: the exact pass's answers for ${Q} queries${cache ? ` (had ${cache.q})` : " (had none)"}`);
+    console.log(`  marker extended: the exact pass's answers for ${Q} queries (${had === 0 ? (kept.oracle ? "had some, unusable" : "had none") : `had ${had}, ${have} of them this run's`})`);
   }
 
   // Both HNSW relations are read into the page cache here, on BOTH paths,

@@ -1276,7 +1276,7 @@ suite of their own, which drives `with-postgres.sh` itself and so runs
 without it:
 
 ```bash
-bun test-bench-reuse.ts   # six bench runs at 150,000 rows under one kept name, ~3 min; removes the volume it kept
+bun test-bench-reuse.ts   # six bench runs at 150,000 rows under one kept name, ~3 min; removes the volume it kept (on an interrupt too)
 ```
 
 It builds once with five queries, reuses with three (every answer the

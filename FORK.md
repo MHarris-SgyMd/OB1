@@ -10616,7 +10616,34 @@ marker's, the tables as the run that extended it); then the corpus marked
 `rewritten` as a refused reuse leaves it, and a run refused before the
 oracle is consulted. The suite drives `with-postgres.sh` itself, removes the
 volume it kept, and runs in about three minutes; it is not in CI (no container
-runtime there) nor in `ci-parity.sh` (it starts its own containers).
+runtime there) nor in `ci-parity.sh` (it starts its own containers). A mutant
+that takes the *last* answers the marker holds instead of the first fails
+exactly the equality.
+
+**First review pass.** The cache named the rows it was valid for (through the
+marker's fingerprint) but not the queries or the oracle's statement it was a
+function of; it now carries a digest of each query vector and an
+`ORACLE_SHAPE` number beside K, and a reuse takes answers from the front only
+while the digests match its own queries — a changed stream, another K or
+shape, or a malformed field answers for nothing and is computed for, and
+each element is checked to be an answer before any is trusted (a marker
+edited by hand would otherwise have been a bare `TypeError` after the
+fingerprint was paid, or a silent recall of zero). The answers are one
+record per (key, query), `{ids, top}`, where the confound had been a parallel
+array aligned only by the loop that filled it; the three-way state — every
+answer the marker's, some, none — is named once and rendered from there; the
+spread over Q arguments that would have died at a million queries is a
+reduce; and the marker line says what the marker had and how many of them
+were this run's, where it had said `had none` for a record it was replacing.
+`runScript` puts `--no-env-file` after the first `bun` token, not only a
+leading one: the new suite's spawns are fronted by `with-postgres.sh`, and
+the inner bun was loading `db/.env` for every `OB1_*` name the suite had
+just stripped (reproduced with a flag in the file). The suite removes what
+it kept on an interrupt too — a signal handler removes the container and the
+volume by the name both carry, and the wrapper's own cleanup is by then
+writing into a dead pipe — names the volume up front, turns a thrown stop
+into a failure with a tally rather than a stack trace, and compares the two
+scored tables through one helper that carries the rows guard to both sites.
 
 ## Detached from the fork network
 
