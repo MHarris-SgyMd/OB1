@@ -216,9 +216,7 @@ const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
 // And since SMD-1493 an untimed pass over the default call precedes section
 // A on both paths, so its median at K is a warm-cache figure where the
 // published one followed the build's cache as it happened to be.
-const SCALES = (process.env.OB1_BENCH_SCALES ?? "10000,100000")
-  .split(",")
-  .map((s) => Number(s.trim()));
+const SCALES = [...new Set((process.env.OB1_BENCH_SCALES ?? "10000,100000").split(",").map((s) => Number(s.trim())))];
 if (SCALES.some((n) => !Number.isInteger(n) || n <= 0)) {
   // Validated up front like Q: a fraction would pass every step until the
   // generator's skip refused it, after the schema had been rebuilt.
@@ -269,6 +267,8 @@ const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"] 
  */
 const MAINTENANCE_MEM = process.env.OB1_BENCH_MAINTENANCE_MEM ?? "auto";
 const BUILD_WORKERS = Number(process.env.OB1_BENCH_BUILD_WORKERS ?? 4);
+/** Workers per exact-oracle scan: the build's count, and never below the image's own two (a serial build is still a parallel oracle). */
+const ORACLE_WORKERS = Math.max(2, BUILD_WORKERS);
 if (!Number.isInteger(BUILD_WORKERS) || BUILD_WORKERS < 0) {
   console.error(`OB1_BENCH_BUILD_WORKERS must be a non-negative integer (got ${JSON.stringify(process.env.OB1_BENCH_BUILD_WORKERS)})`);
   process.exit(2);
@@ -383,10 +383,9 @@ function queriesFor(n: number): number[][] {
 {
   const a = seedFor(1);
   const b = seedFor(1);
-  a.rnd();
-  a.unitVector(DIM);
-  b.skip(1 + 2 * DIM);
-  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip(1 + 2 * DIM) does not reproduce one row's draws; the queries would not be the published ones");
+  rowFrom(a, 0, []);
+  b.skip(DRAWS_PER_ROW);
+  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip(DRAWS_PER_ROW) does not reproduce one rowFrom()'s draws; the queries and a kept corpus's regenerated rows would be off the stream");
 }
 
 type Row = { doc: number; v: number[]; tiers: string[] };
@@ -500,13 +499,16 @@ type LoadStats = {
 // this run's to replace: a run over several scales keeps the last).
 const MARKER = "bench_hnsw_corpus";
 /**
- * Bumped when the marker's shape changes — a LoadStats field the report reads,
- * a new key in `matches` — so a marker an earlier bench wrote is refused up
- * front with the remedies (as a parameter change is) rather than passing every
- * check and failing in the report after the run. The seed lives in `seedFor`;
- * a change there is caught by the regenerated rows.
+ * Bumped when the marker's MEANING changes — a new key in `matches`, a
+ * physical field read differently — so a marker an earlier bench wrote is
+ * refused up front with the remedies (as a parameter change is). A LoadStats
+ * field added is caught by name (LOAD_STATS_KEYS), not by this number; 2 dates
+ * from the merge that brought `otherIndexes` in, when both mechanisms were new.
+ * The seed lives in `seedFor`; a change there is caught by the regenerated rows.
  */
-const MARKER_FORMAT = 2; // 2: LoadStats gained `otherIndexes` (SMD-1018 pass 4)
+const MARKER_FORMAT = 2;
+/** Every field section L reads, named once: a marker missing one is refused before the run, not a TypeError in the report after it. The compiler keeps this list whole when LoadStats grows. */
+const LOAD_STATS_KEYS: Record<keyof LoadStats, true> = { scale: true, schema: true, confound: true, insertS: true, chunkRows: true, chunkS: true, buildS: true, otherIndexes: true, otherIndexesS: true, sizes: true, maintenanceMem: true, workers: true, builtAt: true, source: true };
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
 /**
  * The marker's payload. The scale and build time live in `stats` (the one
@@ -516,7 +518,10 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
  * that rewrote rows on a reuse — a corpus so marked is refused on every later
  * run, not only the one that found it (review pass).
  */
-type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[]; rewritten?: string[] };
+type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[]; physical: Physical; rewritten?: string[] };
+/** Per relation: rows inserted + updated + deleted so far (the cumulative counters, which autovacuum does not reset) and the file the relation lives in (which DML never changes and a rewrite always does). */
+type Physical = Record<string, { tuples: number; file: number }>;
+const PHYSICAL_RELATIONS = ["thoughts", "thought_chunks", "thoughts_embedding_idx", "thought_chunks_embedding_idx"];
 
 const corpusParams = (tiers: Tier[]): CorpusParams => ({ format: MARKER_FORMAT, dim: DIM, tiers: tiers.map((t) => ({ key: t.key, share: t.share })), chunkedShare: CHUNKED_SHARE, chunksPer: CHUNKS_PER });
 /** A build time for a console line or a table cell: one spelling, from the ISO stamp `stats` carries. */
@@ -535,8 +540,10 @@ async function readMarker(sql: SQL): Promise<Marker | null> {
     const [row] = await sql`SELECT scale, corpus FROM bench_hnsw_corpus`;
     if (!row) return null;
     const corpus = row.corpus as Marker;
-    const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && typeof corpus.stats.builtAt === "string" && Number(row.scale) === corpus.stats.scale;
+    const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && corpus.physical && Number(row.scale) === corpus.stats.scale;
     if (!shaped) throw new Error("its row is not the shape this bench writes");
+    const missing = Object.keys(LOAD_STATS_KEYS).filter((k) => !(k in corpus.stats));
+    if (missing.length) throw new Error(`its stats lack ${missing.join(", ")}`);
     return corpus;
   } catch (err) {
     // The one kept-corpus refusal that would otherwise be a stack trace.
@@ -558,15 +565,34 @@ async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
   await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
 }
 
+/** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
+async function physicalState(sql: SQL): Promise<Physical> {
+  const rows = await sql.unsafe(`
+    SELECT c.relname, c.relfilenode::bigint AS file, COALESCE(s.n_tup_ins + s.n_tup_upd + s.n_tup_del, 0)::bigint AS tuples
+    FROM pg_class c LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+    WHERE c.relname IN (${PHYSICAL_RELATIONS.map((r) => `'${r}'`).join(", ")}) AND c.relnamespace = 'public'::regnamespace`);
+  return Object.fromEntries(rows.map((r: { relname: string; file: string | number; tuples: string | number }) => [r.relname, { tuples: Number(r.tuples), file: Number(r.file) }]));
+}
+
 /**
- * Rows rewritten so far in the two tables — the cumulative update and delete
- * counters, which autovacuum does not reset (n_dead_tup would) — read before
- * and after the migrator on a reuse; the migrator's backends flush their
- * statistics when they exit, so the second read sees what the files did.
+ * What moved since the build, in words, or nothing. A counter that went DOWN
+ * is a statistics reset (a crash-recovered data directory), not a rewrite —
+ * said, not refused, since the files still vouch for the heap and the graphs.
  */
-async function rowRewrites(sql: SQL): Promise<Record<string, number>> {
-  const rows = await sql`SELECT relname, (n_tup_upd + n_tup_del)::bigint AS n FROM pg_stat_user_tables WHERE relname IN ('thoughts', 'thought_chunks')`;
-  return Object.fromEntries(rows.map((r: { relname: string; n: string | number }) => [r.relname, Number(r.n)]));
+function physicalMoves(built: Physical, now: Physical): string[] {
+  const out: string[] = [];
+  for (const rel of PHYSICAL_RELATIONS) {
+    const b = built[rel];
+    const c = now[rel];
+    if (!b || !c) {
+      out.push(`${rel}: ${!c ? "gone" : "not recorded at the build"}`);
+      continue;
+    }
+    if (c.file !== b.file) out.push(`${rel}: rewritten into another file`);
+    else if (c.tuples > b.tuples) out.push(`${rel}: ${(c.tuples - b.tuples).toLocaleString()} rows inserted, updated or deleted`);
+    else if (c.tuples < b.tuples) console.log(`  (${rel}: its row counters are below the build's — reset by a crash recovery, not a rewrite; the file is the build's)`);
+  }
+  return out;
 }
 
 /** Both HNSW relations into the page cache, on a reuse. False where pg_prewarm cannot be had. */
@@ -837,6 +863,12 @@ async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ i
   // twice per row — 12–15% of every exact scan (review pass, EXPLAIN VERBOSE).
   const rows = await sql.begin(async (tx: SQL) => {
     await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+    // The scan is parallel-eligible (Limit over a Gather Merge over a Parallel
+    // Seq Scan; the distance operator is parallel safe) and the image's cap is
+    // two workers; raised to the build's worker count, so the exact pass — most
+    // of a reuse's minutes at ten million rows — uses the machine the build
+    // did (review pass; the saving itself is not measured here).
+    await tx.unsafe(`SET LOCAL max_parallel_workers_per_gather = ${ORACLE_WORKERS}`);
     return tx.unsafe(`
       SELECT t.id, t.embedding <=> '${lit(q)}'::vector AS d FROM thoughts t
       WHERE t.embedding IS NOT NULL${filter === null ? "" : ` AND t.metadata @> '${filter}'::jsonb`}
@@ -1081,13 +1113,34 @@ const EXACT_CEILING = 110_000;
 // first's measurements, printed only after the loop). Under OB1_PG_KEEP the
 // list is one scale already (judged where it was parsed); this also covers a
 // persistent database reached some other way.
+// Read once: only the pre-loop marker can ever be reused (a marker is written
+// only under OB1_PG_KEEP, where the list is one scale, and a fresh load drops
+// the table), so every rule about it is judged here and the loop reads none.
+const kept = await readMarker(sql);
 {
-  const kept = await readMarker(sql);
   const others = SCALES.filter((s) => s !== kept?.stats.scale);
   if (kept && others.length > 0) {
     console.error(
       `bench-hnsw.ts: the database holds a kept ${kept.stats.scale.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}); this run asks for ${others.map((s) => s.toLocaleString()).join(", ")} rows, which would replace it.\n` +
         `  Reuse it with OB1_BENCH_SCALES=${kept.stats.scale}; run other scales without OB1_PG_KEEP (a throwaway container) or under another OB1_PG_KEEP name; or remove the kept volume (db/README.md names the command), or the ${MARKER} table where the database is your own. Nothing was touched.`
+    );
+    process.exit(2);
+  }
+  // The same refusal for a corpus of the right scale that stopped matching —
+  // built from other parameters or under another marker format, or with rows
+  // or files changed by migrations an earlier run applied — whichever way: a
+  // kept build is never dropped without being asked (review passes).
+  if (kept && kept.rewritten) {
+    console.error(
+      `bench-hnsw.ts: the kept ${kept.stats.scale.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) had its rows or files changed by migrations applied onto it on an earlier run (${kept.rewritten.join(", ")}); its heap and HNSW graphs are not the build's, and it was refused then.\n` +
+        `  Remove the kept volume and build again under the new schema (db/README.md names the command). Nothing was touched.`
+    );
+    process.exit(2);
+  }
+  if (kept && !Bun.deepEquals(kept.params, corpusParams(tiersAt(kept.stats.scale).tiers))) {
+    console.error(
+      `bench-hnsw.ts: the database holds a kept ${kept.stats.scale.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) built from other parameters — width, tiers, chunk share or marker format — than this bench's; measuring it would be measuring another corpus.\n` +
+        `  Build it again under another OB1_PG_KEEP name, or remove the kept volume (db/README.md names the command). Nothing was touched.`
     );
     process.exit(2);
   }
@@ -1099,26 +1152,9 @@ for (const n of SCALES) {
   const { tiers, notes } = tiersAt(n);
   const params = corpusParams(tiers);
 
-  // What the database holds: a corpus of this scale built from the same
-  // parameters is reused (above the before arm's scales — see the section
-  // above); one built from other parameters, or under an older marker
-  // format, is refused with the remedies — a kept build is never dropped
-  // without being asked; one of another scale is this run's own earlier
-  // scale (the block above refused any other).
-  const kept = await readMarker(sql);
-  const reuse = kept !== null && !beforeArm && kept.stats.scale === n && Bun.deepEquals(kept.params, params) && !kept.rewritten;
-  if (kept && kept.stats.scale === n && !reuse) {
-    // The same refusal a scale mismatch gets: a kept build is never dropped
-    // without being asked, whichever way it stopped matching (review pass).
-    console.error(
-      kept.rewritten
-        ? `bench-hnsw.ts: the kept ${n.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) had rows rewritten by migrations applied onto it on an earlier run (${kept.rewritten.join(", ")}); its heap and HNSW graphs are not the build's, and it was refused then.\n` +
-            `  Remove the kept volume and build again under the new schema (db/README.md names the command). Nothing was touched.`
-        : `bench-hnsw.ts: the database holds a kept ${n.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) built from other parameters — width, tiers, chunk share or marker format — than this bench's; measuring it would be measuring another corpus.\n` +
-            `  Build it again under another OB1_PG_KEEP name, or remove the kept volume (db/README.md names the command). Nothing was touched.`
-    );
-    process.exit(2);
-  }
+  // A kept corpus is this scale's (the block above refused every other
+  // case), and above the before arm's scales it is reused.
+  const reuse = kept !== null && !beforeArm;
 
   let stats!: LoadStats;
   let matches!: Map<string, number>;
@@ -1145,35 +1181,27 @@ for (const n of SCALES) {
       process.exit(1);
     }
     // migrate.ts onto the corpus: pending files applied, a drifted file refused first.
-    const rewritesBefore = await rowRewrites(sql);
     appliedFiles = await migrateWhole(sql, "kept");
     await reconnect();
-    // A migration of 023's kind — an apply-time UPDATE or DELETE over the
-    // rows — leaves the heap at twice its pages and the HNSW graphs as
-    // incrementally inserted twins, repaired: not the bulk-built state the
-    // marker's sizes describe and the published tables measure (SMD-1018's
-    // fourth pass judged a plain VACUUM insufficient for exactly this, and a
-    // VACUUM FULL at ten million rows is the rebuild the reuse exists to
-    // avoid). Such a corpus is refused, not measured as-is (review pass).
-    const rewrites = await rowRewrites(sql);
-    const rewritten = Object.entries(rewrites).filter(([rel, n]) => n > (rewritesBefore[rel] ?? 0));
-    if (rewritten.length > 0) {
-      // Recorded in the marker before the refusal, so the next run refuses
-      // too: the ledger has already advanced, and a re-run would otherwise
-      // find nothing pending, count the same rows and measure the repaired
-      // graph the refusal exists to keep out of the tables (review pass).
-      await amendMarker(sql, { rewritten: [...(kept!.rewritten ?? []), ...appliedFiles] });
+    // The tables' physical state against the BUILD's, recorded in the marker:
+    // a migration of 023's kind (an apply-time UPDATE or DELETE over the
+    // rows) leaves the heap at twice its pages and the HNSW graphs as
+    // incrementally inserted twins, repaired, and a rewrite without DML (a
+    // column type change, a re-created index) changes a relation's file —
+    // neither is the bulk-built state the marker's sizes describe and the
+    // published tables measure (SMD-1018's fourth pass judged a plain VACUUM
+    // insufficient for exactly this, and a VACUUM FULL at ten million rows is
+    // the rebuild the reuse exists to avoid). Judged against the build rather
+    // than against this run's own first read, so a migrator that committed a
+    // rewriting file and failed on the next, or a statistics flush that landed
+    // after the read, is caught by the run after (review passes). The
+    // refusal is recorded in the marker first, so every later run refuses too.
+    const moved = physicalMoves(kept!.physical, await physicalState(sql));
+    if (moved.length > 0) {
+      await amendMarker(sql, { rewritten: [...(kept!.rewritten ?? []), ...(appliedFiles.length ? appliedFiles : ["(files applied on an earlier, interrupted run)"])] });
       console.error(
-        `bench-hnsw.ts: the migrations applied onto the kept corpus rewrote rows (${rewritten.map(([rel, n]) => `${rel}: ${(n - (rewritesBefore[rel] ?? 0)).toLocaleString()}`).join(", ")}); its heap and HNSW graphs are no longer the bulk-built ones the marker describes, so measuring it would not be measuring the build. The marker now says so, and every later run under this name refuses too. Remove the kept volume and build again under the new schema (db/README.md names the command).`
+        `bench-hnsw.ts: the kept corpus's tables have changed since the build (${moved.join("; ")}); its heap and HNSW graphs are no longer the bulk-built ones the marker describes, so measuring it would not be measuring the build. The marker now says so, and every later run under this name refuses too. Remove the kept volume and build again under the new schema (db/README.md names the command).`
       );
-      process.exit(1);
-    }
-    // The counts and the two rows once more, after the migrator: a file that
-    // inserted or deleted rows without an UPDATE counter moving is caught here.
-    try {
-      await assertKeptCorpus(sql, n, tiers, kept!);
-    } catch (err) {
-      console.error(`bench-hnsw.ts: after the migrations, ${(err as Error).message}. Remove the kept volume and build again under the new schema (db/README.md names the command).`);
       process.exit(1);
     }
     stats = { ...kept!.stats, source: "reused" };
@@ -1232,7 +1260,7 @@ for (const n of SCALES) {
     // where the database is kept: a throwaway container's marker would serve
     // nothing, and a persistent database reached some other way is not this
     // bench's to mark.
-    if (KEPT && !beforeArm) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, verifiedLedger: (await ledgerNames(sql)) ?? [] });
+    if (KEPT && !beforeArm) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, verifiedLedger: (await ledgerNames(sql)) ?? [], physical: await physicalState(sql) });
   }
   loads.push(stats);
 

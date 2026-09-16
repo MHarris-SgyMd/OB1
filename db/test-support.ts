@@ -14,7 +14,7 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,9 +130,12 @@ export type SchemaOptions = {
  * by name.
  */
 export function substitute(sql: string, opts: SchemaOptions): string {
+  // chunkContext pinned to the default as trgm is: 013 records it into
+  // ob1_config, and a fixture applied bare here and through migrate.ts (whose
+  // shell migratorEnv strips) must not disagree by which helper applied it.
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, backfillLimit: opts.backfillLimit ?? null })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: opts.backfillLimit ?? null })
   );
 }
 
@@ -388,8 +391,9 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
  * The migrator's shell for a fixture: this process's environment with every
  * `OB1_*` variable REMOVED — an allowlist, so a flag the shell happens to
  * carry (a truncation request, a backfill batch, a chunk-context choice 013
- * records into ob1_config) cannot reach the fixture, today's or a future
- * one — then the fixture's width, model and trigram choice. For running
+ * records into ob1_config) cannot reach the spawned migrator, today's flag or
+ * a future one — then the fixture's width, model and trigram choice; the bare
+ * apply (`substitute`) pins the same values from the fixture. For running
  * `migrate.ts` through `runMigrator` where a suite or bench wants the ledger
  * the runner keeps — test-upgrade's incremental cases, bench-hnsw.ts's kept
  * corpus — rather than `applyMigrations`' bare apply. (The first draft was a

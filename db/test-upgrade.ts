@@ -422,14 +422,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // were, and a ledger that says every migration. reembed.ts refuses to run
   // there and names the remedy; this is the remedy.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
-  // The migrator's shell: the parent's, with the suite's width and model. The
-  // schema above was applied with the parent's OB1_CHUNK_CONTEXT (applyMigrations
-  // reads it), so the child must see the same value or --reapply rightly refuses
-  // to re-record it. reembed.ts --status gets the narrower environment test-live
-  // gives it.
+  // The migrator's shell: the parent's without its OB1_* variables, plus the
+  // suite's width and model (test-support's migratorEnv); the bare apply above
+  // pinned the same chunk-context default, so the two halves of the fixture
+  // agree. reembed.ts --status takes the same shell.
   const env = MIGRATOR_ENV;
-  const statusEnv: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) if (k !== "OB1_CHUNK_CONTEXT") statusEnv[k] = v;
+  const statusEnv = env;
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
 
@@ -1093,7 +1091,7 @@ console.log("\n[14] A kept bench corpus's ledger against the tree: a schema appl
   await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('999_from_another_branch.sql', '000000000000')`;
   assert(JSON.stringify(await ledgerStrangers(sql)) === JSON.stringify(["999_from_another_branch.sql"]), "a recorded name no file carries is reported by name");
   const again = await migrate();
-  assert(again.code === 0 && /^applied 0, skipped \d+$/m.test(again.out), `…which a plain run of the migrator does not notice: it skips everything and exits 0 ${shown(again)}`);
+  assert(again.code === 0 && /^applied 0, skipped \d+$/m.test(again.out), `…which a plain run of the migrator does not notice: it skips everything and exits 0 — the blind spot SMD-1504 closes, when this assertion inverts ${shown(again)}`);
   await sql.close();
 }
 

@@ -9152,6 +9152,32 @@ no longer says "replacing"; test-upgrade's four remaining hand-spelled
 migrator spawns use `runMigrator`; and the bench's dry run and
 `ledgerStrangers` are labelled the stand-ins for SMD-1504 they are.
 
+**Seventh pass.** The rewrite check had compared the row counters against
+this run's own first read, which three findings got past: a migrator that
+committed a rewriting file and failed on the next exited through the refusal
+before the comparison, a statistics flush that landed after the read left the
+delta at zero, and a rewrite without DML — a column type change, a re-created
+index — moved no counter at all. One durable fingerprint replaces it: at the
+build the marker records, for the two heaps and the two HNSW indexes, the
+cumulative insert-update-delete counters and the file each relation lives in
+(`relfilenode`, which DML never changes and a rewrite always does); a reuse
+compares the current state against the build's, refuses on any movement and
+records the refusal, so the run after an interrupted migrator catches what
+the interrupted one could not; a counter that went *down* is a statistics
+reset after a crash recovery, said and not refused, since the files still
+vouch. That subsumed the second count-and-rows check. The marker is read once,
+before the loop, and every rule about it is judged there — the in-loop read,
+its second refusal family and six non-null assertions went; a duplicated
+scale is folded at parse. The exact oracle runs under the build's worker
+count (`max_parallel_workers_per_gather`, the image's cap is two) — a setting,
+not a measured saving. The skip self-check exercises the shared row recipe
+rather than a hand-spelled copy of it; a marker's `stats` are checked for
+every field section L reads by name (a compiler-held list), not by the format
+number, whose comment now says what it is for; `substitute` pins the
+chunk-context default as it pins the trigram one, so a fixture applied bare
+and through the migrator agree on what 013 records; test-upgrade's [7] no
+longer describes a refusal the migrator does not make.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

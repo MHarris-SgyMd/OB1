@@ -1043,9 +1043,10 @@ then the migrator's ledger against the tree (the whole-schema arm is applied
 through `migrate.ts` for this) — a recorded name the tree has no file for is
 refused; then `migrate.ts --dry-run` and `migrate.ts` — a file edited since
 the build is refused on the dry run's `DRIFTED` before anything runs, a
-migration added since is applied onto the corpus, and one that rewrote rows
-refuses the corpus (its heap and graphs are no longer the bulk-built ones)
-and marks it so every later run refuses too;
+migration added since is applied onto the corpus, and any change to the
+tables' rows or files since the build — the marker records each relation's
+counters and file — refuses the corpus (its heap and graphs are no longer
+the bulk-built ones) and marks it so every later run refuses too;
 then both HNSW relations are read into the page cache, this run's queries'
 confound is taken from the exact pass, and the oracle's premise is re-checked
 whenever the ledger differs from the one it last passed under. Section L's
