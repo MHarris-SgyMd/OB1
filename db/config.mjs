@@ -662,7 +662,7 @@ export const CHUNK_CONTEXT = resolveChunkContext(ENV.OB1_CHUNK_CONTEXT);
  * defect is a value defined twice, and adding a third variable to three copies is
  * how that happens again.
  *
- * @param {{ dim?: number, model?: string, trgm?: boolean, chunkContext?: boolean, backfillLimit?: number | null }} overrides
+ * @param {{ dim?: number, model?: string, trgm?: boolean, chunkContext?: boolean, backfillLimit?: number | null, routeEstimateMinPages?: number }} overrides
  */
 export function migrationValues(overrides = {}) {
   return {
@@ -683,6 +683,12 @@ export function migrationValues(overrides = {}) {
     HNSW_SEED_MAX_SCAN_TUPLES: String(HNSW_SEED_MAX_SCAN_TUPLES),
     HNSW_SEED_SCAN_MEM_MULTIPLIER: String(HNSW_SEED_SCAN_MEM_MULTIPLIER),
     MATCH_COUNT_CEILING: String(MATCH_COUNT_CEILING),
+    // 036's gate on the routing count: the pages it samples, and the heap size
+    // under which it does not sample at all. The floor is the one value a
+    // suite overrides — to 0, so a table of a few thousand rows reaches the
+    // gate (test-schema [8e], test-live [5d]); the shipped default otherwise.
+    ROUTE_SAMPLE_PAGES: String(ROUTE_SAMPLE_PAGES),
+    ROUTE_ESTIMATE_MIN_PAGES: String(overrides.routeEstimateMinPages ?? ROUTE_ESTIMATE_MIN_PAGES),
     SHARED_SETTING_SOURCES: SHARED_SETTING_SOURCES.map((s) => `'${s}'`).join(", "),
   };
 }
@@ -1154,6 +1160,28 @@ export const BOUNDS_IN_FORCE_SQL =
  * hand a model, not this cost bound. The bench measures asked-500.
  */
 export const MATCH_COUNT_CEILING = 500;
+
+/**
+ * The gate on match_thoughts' routing count (migration 036, SMD-1463). Every
+ * filtered call used to open with the capped GIN collection — `SELECT id …
+ * WHERE metadata @> filter … LIMIT v_exact + 1` — and GIN builds its whole
+ * bitmap before the LIMIT can stop anything, so that statement cost the
+ * number of MATCHING rows (~50 ns each: 25 ms at 50% of a million rows, 240
+ * at 50% of ten million) before the walk began. 036 samples the heap first —
+ * ROUTE_SAMPLE_PAGES pages through TABLESAMPLE SYSTEM, ~0.15 ms whatever the
+ * table holds — and skips the collection when the sample says the filter is
+ * far too broad for the exact branch. The sample runs only on a heap of at
+ * least ROUTE_ESTIMATE_MIN_PAGES pages (64 MB; some 150,000 rows at the
+ * bench's width, fewer with long content): under that the whole bitmap costs
+ * a few milliseconds at worst and the sample would be paid on every filtered
+ * call for nothing. Both are templated into the file so the header, the bench
+ * and the tests cannot disagree about them; a suite lowers the floor to reach
+ * the gate on a small table (SchemaOptions.routeEstimateMinPages). Not an
+ * operator knob — the exact branch's threshold and the walk's bounds are the
+ * tuning surface, and the gate's job is to leave them alone.
+ */
+export const ROUTE_SAMPLE_PAGES = 8;
+export const ROUTE_ESTIMATE_MIN_PAGES = 8192;
 
 /**
  * The two search functions' signatures, as regprocedure text — the forms the

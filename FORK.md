@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-seven numbered changes on top of the pin. Seven fix defects found in an
+Sixty-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–67 are the numbered `###` sections** further down, which is
+sections. Changes **18–68 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -1890,7 +1890,7 @@ tier's whole latency. The mitigation the twelfth review pass declined for want
 of a number — estimate the match count from `pg_class.reltuples` and the
 planner's `@>` selectivity, or a `TABLESAMPLE`, and run the capped collection
 only when the estimate is plausibly under the threshold — now has its number
-and is SMD-1463. And the plan mode: plpgsql runs a statement's first five
+and is SMD-1463 (done: migration 036, change 68). And the plan mode: plpgsql runs a statement's first five
 executions on custom plans and may switch to a generic one after; for the walk
 branch the generic plan has the filter as a parameter and a flat estimate, and
 section C shows what that costs at a million rows — the 50% tier 292 ms

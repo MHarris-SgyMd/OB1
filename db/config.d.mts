@@ -139,6 +139,7 @@ export function migrationValues(overrides?: {
   chunkContext?: boolean;
   /** Rows migration 023's one call writes: NULL for every row waiting (the default), an integer for one batch. */
   backfillLimit?: number | null;
+  routeEstimateMinPages?: number;
 }): Record<string, string>;
 
 /** Substitute a migration template; throws on an unknown `{{VARIABLE}}`. */
@@ -226,6 +227,9 @@ export function quoteIdent(name: unknown): string;
 export const BOUNDS_IN_FORCE_SQL: string;
 /** match_thoughts clamps match_count to this inside the function (014). */
 export const MATCH_COUNT_CEILING: number;
+/** 036's gate on match_thoughts' routing count: the heap pages it samples, and the heap size in pages under which it does not sample. */
+export const ROUTE_SAMPLE_PAGES: number;
+export const ROUTE_ESTIMATE_MIN_PAGES: number;
 /** The signature the servers call, as regprocedure text (020: six arguments). */
 export const MATCH_THOUGHTS_SIGNATURE: string;
 /** The signature the servers call, as regprocedure text (020: seven arguments). */

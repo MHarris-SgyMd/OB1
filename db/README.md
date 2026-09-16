@@ -199,7 +199,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 67, 035 change 66).
+034 change 67, 035 change 66, 036 change 68).
 
 ## What changed relative to the guide
 
@@ -974,6 +974,10 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 # build serially in backend memory.
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
+
+# Before/after a redefinition of match_thoughts, from one tree: the after
+# arm's schema stops at the named migration (the function before 036 here).
+OB1_BENCH_UPTO=035 ./with-postgres.sh bun bench-hnsw.ts
 ```
 
 Queries are random vectors, not perturbed copies of a target. A perturbed copy
@@ -997,7 +1001,9 @@ filtered branch's statement with its plpgsql variables rewritten as parameters,
 and EXPLAINs it under both custom and generic planning on the filter the
 function routes to it (the walk on the thinnest tier above the threshold, the
 exact branch on the broadest under it, the routing count on the broadest, the
-thinnest and the empty filter), because plpgsql may use either plan. Section D
+thinnest and the empty filter, and 036's sample of the heap — which gates that
+count on a large table — on the same three), because plpgsql may use either
+plan. Section D
 runs the walk's own statement on the thin and empty filters — which the
 function never walks for — under a forced generic plan, to show what the seeded
 scan bounds do when the walk is reached with next to nothing to find. Section

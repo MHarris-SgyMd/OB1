@@ -98,7 +98,15 @@ const DIRECT_CHECKS = [
   "candidate scan", "chunk context", "trigram index", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "migration ledger", "query log",
 ];
-const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
+/**
+ * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
+ * call; 027 last defines search_thoughts_hybrid (the relative floor) and 036
+ * match_thoughts (the routing gate), both under 020's signatures. A remedy
+ * that applied 020 alone would leave 020's bodies over theirs — the
+ * stale-body state the ledger then cannot see — so the signature remedies
+ * name all three, in order.
+ */
+const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql and 036_match_thoughts_route_estimate.sql (the last definers of search_thoughts_hybrid and match_thoughts).";
 /**
  * PostgREST answers a call it cannot resolve with PGRST202 both when the
  * function is missing and while its schema cache predates the migration that
@@ -106,7 +114,7 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql.";
  * has just applied it back to the migrator (first review pass of 021).
  */
 const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/020_match_thoughts_recency.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
+const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/036_match_thoughts_route_estimate.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends, 036 last defines match_thoughts. ${RELOAD_HINT}`;
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_032 = "Apply db/migrations/032_update_thought_provenance.sql.";
 /**
