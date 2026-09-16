@@ -4,6 +4,12 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 /**
  * rest-api — REST API gateway for Open Brain.
  *
@@ -45,6 +51,7 @@
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
   embedText,
+  embeddingModelUsed,
   extractMetadata,
   fallbackMetadata,
   detectSensitivity,
@@ -200,9 +207,15 @@ function isAuthorized(req: Request): boolean {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Validate that a string represents a valid integer ID (digits only). Returns the string as-is for BIGINT safety. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Validate a thought id: a UUID (thoughts.id on this fork) or an integer
+ * (upstream's enhanced schema). Returns the string as-is — never parsed to a
+ * number, for BIGINT safety. Digits only used to be the rule, so every
+ * /thought/:id route here answered 404 to a fork's row (upstream #379's class).
+ */
 function validateId(raw: string): string | null {
-  return /^\d+$/.test(raw) ? raw : null;
+  return /^\d+$/.test(raw) || UUID_RE.test(raw) ? raw : null;
 }
 
 /**
@@ -211,6 +224,7 @@ function validateId(raw: string): string | null {
  *   - { thought_id: 42, action: "inserted", content_fingerprint: "..." }
  *   - { id: 42 }
  *   - { id: 42, action: "inserted", content_fingerprint: "..." }
+ *   - this fork's (db/migrations/035): { id: "<uuid>", fingerprint: "...", existed: false, supersedes: null }
  * Returns the ID as a string for BIGINT safety, or null if extraction fails.
  */
 function extractThoughtId(data: unknown): { id: string; action: string; fingerprint: string | null } | null {
@@ -219,7 +233,7 @@ function extractThoughtId(data: unknown): { id: string; action: string; fingerpr
   // Scalar number or string
   if (typeof data === "number" || typeof data === "string") {
     const s = String(data);
-    return /^\d+$/.test(s) ? { id: s, action: "inserted", fingerprint: null } : null;
+    return validateId(s) ? { id: s, action: "inserted", fingerprint: null } : null;
   }
 
   if (!isRecord(data)) return null;
@@ -229,12 +243,13 @@ function extractThoughtId(data: unknown): { id: string; action: string; fingerpr
   const rawId = rec.thought_id ?? rec.id;
   if (rawId == null) return null;
   const idStr = String(rawId);
-  if (!/^\d+$/.test(idStr)) return null;
+  if (!validateId(idStr)) return null;
 
+  const fingerprint = rec.content_fingerprint ?? rec.fingerprint;
   return {
     id: idStr,
-    action: typeof rec.action === "string" ? rec.action : "inserted",
-    fingerprint: typeof rec.content_fingerprint === "string" ? rec.content_fingerprint : null,
+    action: typeof rec.action === "string" ? rec.action : rec.existed === true ? "updated" : "inserted",
+    fingerprint: typeof fingerprint === "string" ? fingerprint : null,
   };
 }
 
@@ -301,7 +316,7 @@ Deno.serve(async (req) => {
     if (path === "/stats") return await handleStats(url);
 
     // /thought/:id routes
-    const thoughtMatch = path.match(/^\/thought\/(\d+)$/);
+    const thoughtMatch = path.match(/^\/thought\/([^/]+)$/);
     if (thoughtMatch) {
       const id = validateId(thoughtMatch[1]);
       if (!id) return json({ error: "Invalid thought ID" }, 400);
@@ -310,14 +325,14 @@ Deno.serve(async (req) => {
       if (req.method === "DELETE") return await handleDeleteThought(id);
     }
 
-    const connectionsMatch = path.match(/^\/thought\/(\d+)\/connections$/);
+    const connectionsMatch = path.match(/^\/thought\/([^/]+)\/connections$/);
     if (connectionsMatch && req.method === "GET") {
       const connId = validateId(connectionsMatch[1]);
       if (!connId) return json({ error: "Invalid thought ID" }, 400);
       return await handleGetConnections(connId, url);
     }
 
-    const enrichMatch = path.match(/^\/thought\/(\d+)\/enrich$/);
+    const enrichMatch = path.match(/^\/thought\/([^/]+)\/enrich$/);
     if (enrichMatch && req.method === "PATCH") {
       const enrichId = validateId(enrichMatch[1]);
       if (!enrichId) return json({ error: "Invalid thought ID" }, 400);
@@ -460,20 +475,35 @@ async function handleCapture(req: Request): Promise<Response> {
     skip_classification: body.skip_classification === true,
   });
 
+  // The 3-argument upsert_thought (db/migrations/004, last redefined by 035):
+  // the vector and its label (021) land with the row, the fingerprint with
+  // the text, and a re-capture replaces the previous vector's chunk rows
+  // (022). The envelope carries what the function reads — `metadata`,
+  // `embedding_model` — and the enhanced-thoughts columns follow by a raw
+  // update that carries neither content nor vector (the function never read
+  // them; upstream's removed schema section did). This used to put the vector
+  // inside the payload, where the fork's function does not look, so no
+  // capture here stored one.
+  const embedding = safeEmbedding(prepared.embedding) ?? null;
   const { data, error } = await supabase.rpc("upsert_thought", {
     p_content: prepared.content,
     p_payload: {
-      type: prepared.type, sensitivity_tier: prepared.sensitivity_tier,
-      importance: prepared.importance, quality_score: prepared.quality_score,
-      source_type: prepared.source_type, metadata: prepared.metadata,
-      created_at: new Date().toISOString(),
-      ...(safeEmbedding(prepared.embedding) && { embedding: prepared.embedding }),
+      metadata: prepared.metadata,
+      ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
     },
+    p_embedding: embedding,
   });
 
   if (error) throw new Error(`capture failed: ${error.message}`);
   const result = extractThoughtId(data);
   if (!result) throw new Error("upsert_thought returned no result");
+
+  const { error: sidecarErr } = await supabase.from("thoughts").update({
+    type: prepared.type, sensitivity_tier: prepared.sensitivity_tier,
+    importance: prepared.importance, quality_score: prepared.quality_score,
+    source_type: prepared.source_type,
+  }).eq("id", result.id);
+  if (sidecarErr) throw new Error(`capture stored thought #${result.id} but the enhanced columns failed: ${sidecarErr.message}`);
 
   return json({
     thought_id: result.id, action: result.action, type: prepared.type,
@@ -540,26 +570,44 @@ async function handleUpdateThought(id: string, req: Request): Promise<Response> 
     ? resolveSensitivityTier(detected.tier)
     : resolveSensitivityTier(detected.tier, existingTier);
 
-  let embedding = null;
+  let embedding: number[] | null = null;
   try { embedding = await embedText(content); } catch { /* continue */ }
 
-  const updates: Record<string, unknown> = { content, updated_at: new Date().toISOString() };
-  if (embedding) updates.embedding = embedding;
+  // Content, vector and metadata through update_thought (db/migrations/033):
+  // the fingerprint follows the text (003/018), the label the vector (021),
+  // the previous vector's chunk rows go (022), the patch is shallow-merged.
+  // When the embedding call failed, the function sets the vector and its
+  // label NULL rather than leaving the old vector under the new text — a
+  // stale vector is what a raw update here used to leave, and what 021 calls
+  // a raw write's defect; PATCH /thought/:id/enrich?fill=embedding refills it.
+  const tierChanged = resolvedTier !== existingTier;
+  const { data: edited, error: editErr } = await supabase.rpc("update_thought", {
+    p_id: id,
+    p_content: content,
+    p_metadata_patch: tierChanged ? { sensitivity_reasons: detected.reasons } : null,
+    p_embedding: embedding,
+    p_embedding_model: embedding ? embeddingModelUsed() : null,
+  });
+  if (editErr) throw new Error(`update failed: ${editErr.message}`);
+  const edit = (edited ?? {}) as Record<string, unknown>;
+  if (edit.ok !== true) {
+    const reason = String(edit.error ?? "unknown");
+    return json({ error: `update_thought refused: ${reason}` }, reason === "NOT_FOUND" ? 404 : 409);
+  }
+
+  // The enhanced-thoughts columns the function does not know: a raw update
+  // that carries neither content nor vector, so nothing it writes goes stale.
+  const updates: Record<string, unknown> = {};
   if (body.type) updates.type = sanitizeType(String(body.type));
   if (body.importance !== undefined) {
     const rawImp = Number(body.importance);
     updates.importance = Math.min(Math.max(Number.isFinite(rawImp) ? rawImp : 3, 0), 6);
   }
-  if (resolvedTier !== existingTier) {
-    updates.sensitivity_tier = resolvedTier;
-    const existingMeta = isRecord(existing.metadata) ? { ...existing.metadata as Record<string, unknown> } : {};
-    existingMeta.sensitivity_reasons = detected.reasons;
-    updates.metadata = existingMeta;
+  if (tierChanged) updates.sensitivity_tier = resolvedTier;
+  if (Object.keys(updates).length > 0) {
+    const { error: updateErr } = await supabase.from("thoughts").update(updates).eq("id", id);
+    if (updateErr) throw new Error(`update failed: ${updateErr.message}`);
   }
-
-  const { error: updateErr } = await supabase.from("thoughts").update(updates).eq("id", id);
-  if (updateErr) throw new Error(`update failed: ${updateErr.message}`);
-  const tierChanged = resolvedTier !== existingTier;
   return json({
     id,
     action: "updated",
@@ -781,13 +829,34 @@ async function handleEnrichThought(thoughtId: string, url: URL): Promise<Respons
   existingMetadata.last_enriched_at = new Date().toISOString();
   existingMetadata.enrichment_fills = fills;
 
-  const columnUpdates: Record<string, unknown> = { metadata: existingMetadata, updated_at: new Date().toISOString() };
-  if (enriched.embedding) columnUpdates.embedding = enriched.embedding;
+  // Metadata, and the new vector when one was made, through update_thought
+  // (db/migrations/033). A vector arrives only with content, so the row's own
+  // text is passed back: an unchanged edit, which 018 never refuses, that sets
+  // the vector and its label (021) and replaces the chunk rows (022) — the
+  // windows of the previous vector go, which the fill is for. Without a new
+  // vector the call is metadata-only and touches neither. A raw update of
+  // `embedding` here left the label describing the previous vector and the
+  // previous vector's windows in place.
+  const { data: edited, error: editErr } = await supabase.rpc("update_thought", {
+    p_id: thoughtId,
+    p_content: enriched.embedding ? content : null,
+    p_metadata_patch: existingMetadata,
+    p_embedding: enriched.embedding ?? null,
+    p_embedding_model: enriched.embedding ? embeddingModelUsed() : null,
+  });
+  if (editErr) throw new Error(`enrich update failed: ${editErr.message}`);
+  const edit = (edited ?? {}) as Record<string, unknown>;
+  if (edit.ok !== true) throw new Error(`enrich update failed: update_thought refused (${String(edit.error ?? "unknown")})`);
+
+  // The enhanced-thoughts columns the function does not know: a raw update
+  // that carries neither content nor vector, so nothing it writes goes stale.
+  const columnUpdates: Record<string, unknown> = {};
   if (enriched.type) columnUpdates.type = enriched.type;
   if (enriched.sensitivity_tier) columnUpdates.sensitivity_tier = enriched.sensitivity_tier;
-
-  const { error: updateErr } = await supabase.from("thoughts").update(columnUpdates).eq("id", thoughtId);
-  if (updateErr) throw new Error(`enrich update failed: ${updateErr.message}`);
+  if (Object.keys(columnUpdates).length > 0) {
+    const { error: updateErr } = await supabase.from("thoughts").update(columnUpdates).eq("id", thoughtId);
+    if (updateErr) throw new Error(`enrich update failed: ${updateErr.message}`);
+  }
 
   const { data: updated } = await supabase.from("thoughts")
     .select("id, content, type, source_type, importance, quality_score, sensitivity_tier, metadata, created_at, updated_at")

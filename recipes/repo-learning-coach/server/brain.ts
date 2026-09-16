@@ -197,9 +197,15 @@ export const captureLearningArtifact = async ({
     ],
   }
 
+  // The 3-argument upsert_thought (db/migrations/004, last redefined by 035):
+  // the vector and its label (021) land with the row and the fingerprint with
+  // the text. This used to be the 2-argument form and a raw update of the
+  // vector after it, which left embedding_model NULL — a vector of unknown
+  // model to preflight and the re-embed (FORK.md change 68, SMD-1228).
   const { data, error } = await supabase.rpc('upsert_thought', {
     p_content: artifactContent,
-    p_payload: { metadata },
+    p_payload: { metadata, embedding_model: APP_ENV.openrouterEmbeddingModel },
+    p_embedding: embedding,
   })
 
   if (error) {
@@ -210,15 +216,6 @@ export const captureLearningArtifact = async ({
 
   if (!thoughtId) {
     throw new Error('upsert_thought did not return an id.')
-  }
-
-  const { error: embeddingError } = await supabase
-    .from('thoughts')
-    .update({ embedding })
-    .eq('id', thoughtId)
-
-  if (embeddingError) {
-    throw new Error(`Failed to store embedding: ${embeddingError.message}`)
   }
 
   return {

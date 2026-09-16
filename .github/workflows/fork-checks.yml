@@ -422,6 +422,22 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
+      # Every vendored writer of a thought's content or vector goes through
+      # update_thought or the 3-argument upsert_thought (change 68, SMD-1228):
+      # each is driven as deployed against this database — the fork's schema
+      # plus the two sidecars the writers assume, dropped again at the end —
+      # and the row it leaves is compared with the row update_thought leaves
+      # for the same edit. Last in the job because it applies those sidecars.
+      - name: Install the vendored servers' pinned test dependencies
+        working-directory: extensions
+        run: bun install --frozen-lockfile
+
+      - name: Vendored writers leave what update_thought leaves
+        working-directory: extensions
+        run: bun test-writes.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-latest

@@ -60,7 +60,7 @@ The SQL also creates the `updated_at` trigger helper and grants `service_role` a
 </details>
 
 > [!IMPORTANT]
-> This recipe does **not** modify the core `thoughts` table. The only Open Brain integration is through the existing `upsert_thought` and `match_thoughts` path your OB1 setup already provides.
+> This recipe does **not** modify the core `thoughts` table. The only Open Brain integration is through the existing `upsert_thought` and `match_thoughts` path your OB1 setup already provides — a capture is one call to the 3-argument `upsert_thought`, the vector and its model label (`OPENROUTER_EMBEDDING_MODEL`) in the same call, so nothing is written to the row around it (FORK.md change 68).
 
 ✅ **Done when:** The new `repo_learning_*` tables appear in Supabase Table Editor and the query finishes without errors.
 

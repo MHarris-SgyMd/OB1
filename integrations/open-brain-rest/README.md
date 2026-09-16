@@ -48,6 +48,8 @@ The function expects `thoughts.id` to be a UUID. The dashboard now treats though
 | `/ingestion-jobs` | GET | Smart-ingest placeholder for dashboard compatibility |
 | `/ingest` | POST | Current v1 fallback captures input as one thought |
 
+> **On this fork (FORK.md change 68, SMD-1228).** `POST /capture` and `PUT /thought/:id` write a thought's content and vector through the database's own functions — the 3-argument `upsert_thought` (`db/migrations/035`) and `update_thought` (`033`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; a `PUT`'s `metadata` is shallow-merged inside the function, and the enhanced-thoughts columns (`type`, `importance`, `quality_score`, `sensitivity_tier`, `status`) are written beside it by an update that carries neither content nor vector. A `PUT` of text another thought already holds answers 409 with the function's `DUPLICATE_CONTENT`. `extensions/test-writes.ts` drives both routes against Postgres.
+
 ## Deploy
 
 > **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.

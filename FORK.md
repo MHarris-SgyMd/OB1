@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-seven numbered changes on top of the pin. Seven fix defects found in an
+Sixty-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–67 are the numbered `###` sections** further down, which is
+sections. Changes **18–68 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -192,6 +192,8 @@ recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — th
 recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same)
 integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
+<9 vendored files>               # change 68 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
+extensions/test-writes.ts        # change 68 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -3833,7 +3835,8 @@ update-delete 39 (before the pass below).
 3-argument `upsert_thought`, which predate this change (SMD-1175) — done in
 change 40; the community integrations `update-thought-mcp` and `enhanced-mcp`, which write
 content and vector with a raw update around `update_thought` and so leave a
-stale label as they leave a stale fingerprint. A label for the rows no finished pass
+stale label as they leave a stale fingerprint — done in change 68, with seven
+more files the check found. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
 labels them, and says how many before it runs. `--accept-failed` and
 `--retire` (SMD-1067) — done in change 39, where accepting a row means exactly
@@ -8858,7 +8861,7 @@ servers' write tools beside the extensions' (six copies follow); the test's
 Deno stand-in and postgres stub lines are wrapped.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
-(integrations writing around `update_thought`). SMD-1480 holds the
+(integrations writing around `update_thought`) — done in change 68. SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
@@ -8876,6 +8879,186 @@ nothing.
 
 **Upstream status:** not applicable — the compares are upstream's; the module
 they now use is this fork's.
+
+
+### 68. The vendored writers of a thought's content and vector go through the functions that own them — nine files off a raw update of `thoughts`: edits through `update_thought`, captures through the 3-argument `upsert_thought`, the enhanced columns beside them, and check 10 holds it (SMD-1228)
+
+`integrations/update-thought-mcp/index.ts`, `integrations/enhanced-mcp/index.ts`
+(and its `_shared/helpers.ts`), `integrations/agent-memory-api/index.ts`,
+`integrations/open-brain-rest/index.ts`, `integrations/rest-api/index.ts` (and
+its `_shared/helpers.ts`), `integrations/consolidation-workers/bio/index.ts`,
+`recipes/repo-learning-coach/server/brain.ts`,
+`recipes/provenance-chains/mcp-tools.ts`, the sample in
+`integrations/telegram-capture/README.md`; `scripts/check-fork-consistency.mjs`
+(check 10); `extensions/test-writes.ts` (new); their READMEs; the CI workflow
+(Linear SMD-1228, named under change 38's "Not done here"). The
+ticket named three integrations that updated a thought's `content` or
+`embedding` with a raw PostgREST `.update(…)` on `thoughts` rather than
+through `update_thought`. Check 10's first run over the seven category
+directories and `docs/` found nine files with eleven such statements: the two
+MCP servers (`update-thought-mcp`'s one tool; `enhanced-mcp`'s `update_thought`),
+three HTTP APIs (`agent-memory-api`'s write-back, `open-brain-rest`'s capture
+and edit, `rest-api`'s edit and enrich), a worker (`consolidation-bio`'s
+profile rewrite), a recipe's server (`repo-learning-coach`'s capture), a
+recipe's paste-in snippet (`provenance-chains`' `capture_derived_thought`) and
+a README's sample (`telegram-capture`'s edit path). Every rule this fork put
+into the writers was bypassed by each: 003/018's `content_fingerprint` left
+describing the previous text — the row 018's `fingerprint_held_by` report
+exists for; 021's `embedding_model` left describing the previous vector, or
+NULL where the vector was written after a 2-argument `upsert_thought` — 021's
+header calls a raw vector write "the operator's", and these are shipped
+tools; 022's chunk rows of the previous vector left under the new one — 022's
+"the three writers leave no new stale set" held for the three alone; and no
+actor set for 008's audit row. The upstream survey added a third failure
+mode (upstream #379), and the audit confirmed it twice over: `enhanced-mcp`
+and `rest-api` read `thought_id`, or digits only, from `upsert_thought`'s
+return — this fork's returns `id`, a UUID — so every capture through them
+threw *after* the row was written; both put the vector inside `p_payload` of
+the 2-argument form, where the fork's function does not look, so no capture
+through either had stored a vector at all; and `rest-api`'s `/thought/:id`
+routes matched `\d+`, so none could reach a row here.
+
+**The rule, and where it differs from the ticket's sketch.** Every write of a
+thought's content or vector goes through the function that owns the row's
+invariants. An edit is one `.rpc("update_thought", { p_id, p_content,
+p_metadata_patch, p_embedding, p_embedding_model[, p_if_unchanged_since] })`
+— named arguments, so the ticket's "021's eight-argument form" is moot: the
+function has taken nine since migration 032 (change 60), and a caller that
+names what it passes never spells an arity. A capture is one
+`.rpc("upsert_thought", { p_content, p_payload: { metadata, embedding_model },
+p_embedding })` — the 3-argument form, vector and label in the same statement,
+where four of these files called the 2-argument form and wrote the vector
+after it. The columns the functions do not know — `type`, `importance`,
+`sensitivity_tier`, `quality_score`, `source_type`, `status`, which
+`schemas/enhanced-thoughts` adds and upstream's removed schema section used
+to mirror (change 58) — are written beside the call by one raw update that
+carries neither content nor vector: outside the rule by construction, and
+nothing it writes goes stale. Metadata that these files read, spread and
+wrote back whole now rides `p_metadata_patch`, which is `metadata || patch`
+under the function's row lock — the same result, without the read. The
+label is the caller's, as 021 requires: the four files that hard-coded
+OpenRouter's model name pass it as a constant, `repo-learning-coach` passes
+`OPENROUTER_EMBEDDING_MODEL`, and the two `_shared/helpers.ts` gained
+`embeddingModelUsed()` — OpenRouter's name when that key is configured
+(`embedText()`'s first choice), else OpenAI's under the same `openai/`
+prefix, so one model has one label whichever path served it. The
+provenance snippet's `derived_from` and `supersedes` ride the envelope (025)
+and are validated there; its own `derivation_layer`/`derivation_method`
+follow by an update of those two; on a re-capture of existing text the
+function leaves that row's pointers as they were (change 66), where the
+snippet's raw update overwrote them and its comment called that intended.
+Migration 035's return — `id`, `fingerprint`, `existed` — is read beside
+upstream's shape in both files that misread it, and `rest-api`'s `validateId`
+and routes take a UUID or digits.
+
+**File by file.** `update-thought-mcp`: the read before the write is gone —
+it served a concurrency check the function makes under the row's lock (009's
+point, and the race upstream's version has) and a metadata spread the patch
+replaces; `NOT_FOUND`, `STALE_READ` (with the function's
+`current_updated_at`) and `DUPLICATE_CONTENT` are the tool's three refusals,
+and `duplicate_of`/`fingerprint_held_by` are reported as notes.
+`enhanced-mcp`: `update_thought` takes the thought's UUID (the file's other
+tools still take upstream's integer ids — SMD-1525), its own SHA-256 of the
+normalised text no longer travels with the row (the function computes 003's),
+and `brain_capture_thought` reads both return shapes and reports the
+function's fingerprint. `agent-memory-api`: the write-back's thought is one
+3-argument call. `open-brain-rest`: capture and edit both; an edit into text
+another thought holds answers 409. `rest-api`: capture, edit and enrich; an
+enrich passes the row's own text back — an unchanged edit, which 018 never
+refuses — so the new vector takes its label and the previous vector's windows
+go; an edit whose embedding call failed leaves the row without a vector and
+without a label, not with the old vector under the new text — 021's rule,
+and what the raw update used to leave — and the enrich route refills it.
+`consolidation-bio`: the profile's text through `update_thought` with no
+vector, which the profile row has never had. `repo-learning-coach` and the
+provenance snippet: the 3-argument form. The Telegram sample: the edit branch
+through `update_thought`, the model a named constant.
+
+**Check 10.** The mechanism, not the nine files' spelling: a PostgREST table
+verb that replaces columns — `.update(` or `.upsert(` — on `thoughts`
+(`.from("thoughts")` in either quote, Python's `.table("thoughts")`, line
+breaks allowed before the verb) whose payload carries a `content` or
+`embedding` key — an object literal, quoted or bare or the shorthand
+`{ embedding }`, or an identifier the file binds to one anywhere (`const
+update = { embedding, … }`, `updates.content = …`, `patch["embedding"] = …`,
+the braces walked) — and the SQL form, `UPDATE thoughts … SET` with either
+column in the SET list before its WHERE, `public.` and an alias allowed.
+Word-bounded: `content_fingerprint =` and `embedding_model =` are other
+columns. In every non-binary, non-ignored file under the seven category
+directories and `docs/`, prose included. Outside the rule, and said so: an
+`.insert(` (a fresh row around the functions — no fingerprint, no label — is
+a different defect, SMD-1524), a metadata-only update, a payload spread from
+another object, a hand-built REST `PATCH` (none in the tree), and the remedy
+itself. Seventeen probes — one per statement the audit found, in its own
+shape, plus the forms a rebase could bring — and nineteen non-probes run on
+every invocation through the scan's own function; exceptions are per file and
+counted, as checks 6–8's are, for a file whose README says it bypasses the
+functions and what it leaves stale; the list is empty. The checker's header
+now also names check 9 (change 65's fixture redaction), which it had not.
+
+**The test.** `extensions/test-writes.ts` (99 assertions), in the required
+"SQL data layer against real Postgres" job, last: each writer that can run is
+imported as deployed — the stand-in for Deno's two globals and the loader for
+Deno's specifiers from `test-auth.ts`, plus one rewrite, `@supabase/supabase-js`
+to `compat/supabase-sql`, so the two servers still on supabase-js run their
+PostgREST calls as SQL against the same throwaway database — with the model
+provider stubbed to a unit vector keyed off the text. The database is the
+fork's migrations plus the two sidecars the writers assume,
+`schemas/enhanced-thoughts` and `schemas/agent-memory`, applied as shipped
+(Supabase's three roles created first, as the sidecar's header says) and
+dropped again at the end, because CI shares one Postgres across the job. For
+each edit a row is planted as an older write left it — text, fingerprint, a
+vector under its own label, two chunk rows of that vector — the writer edits
+it, and the row is judged column by column and against a twin `update_thought`
+edited directly with the same inputs: fingerprint of its own text, label,
+vector, chunk count. Each capture's row is judged for the 3-argument form's
+work. Also driven: `update-thought-mcp`'s `STALE_READ`, `NOT_FOUND` and
+`DUPLICATE_CONTENT`, and a metadata-only edit leaving vector, label and
+fingerprint alone; `enhanced-mcp`'s and `rest-api`'s captures returning a UUID
+id rather than throwing; `rest-api`'s enrich relabelling and clearing planted
+windows; the enhanced columns landing beside each call. The snippet, the
+sample and the worker are read, not run — a paste-in with free variables, a
+README, and a run that needs an LLM pass over person notes — and a guard holds
+the set of `.ts` files naming this change equal to the set driven or read.
+
+**Decisions.** Updates, not inserts: the ticket's rule and the carry-forward
+comment named the update, and an insert leaves nothing *stale* — it leaves
+the pre-003 shape the backfills repair; six sites are filed as SMD-1524 with
+the widening of check 10 they need. The enhanced columns stay a raw update
+beside the function rather than a payload key: the function never read them,
+and adding them would put a vendored schema's columns into a core function.
+`rest-api`'s failed-embedding edit blanks the vector rather than keeping the
+old one — the function's rule, stated in its README. `enhanced-mcp`'s read
+tools keep their integer ids (SMD-1525): the ticket was about writes. The
+top-level `type`/`importance`/… keys those two files put in `p_payload` are
+dropped, since the fork's function ignored them and the sidecar update
+carries them now.
+
+**Not done here.** SMD-1524 (six raw inserts of content and vector, and check
+10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
+a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
+`open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim;
+their behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun.
+`server/index.ts`, upstream's Edge Function, is untouched. The `docs/` READMEs
+that show a SQL `UPDATE thoughts SET metadata …` are metadata-only and outside
+the rule.
+
+**Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
+eleven hits in nine files before the conversions and PASS after, exception
+list empty (17 probes, 19 non-probes); `../db/with-postgres.sh bun
+test-writes.ts` 99/99 under podman; `bun test-auth.ts` 643/643 on the
+converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
+for `enhanced-mcp` and `agent-memory-api`, the two that resolve under Deno;
+every shim-migrated file still parses. The ticket's verify — the check fails
+on the files today and passes after; an edit through each leaves
+`content_fingerprint`, `embedding_model` and `thought_chunks` as
+`update_thought` would, one round trip each against `with-postgres.sh` — is
+the test.
+
+**Upstream status:** not applicable — the raw writes are upstream's, the
+functions they now call are this fork's. Upstream #379 reports the
+return-shape half against its own tree; the two files that misread the
+return here read both shapes now.
 
 
 ## Detached from the fork network
@@ -8954,8 +9137,15 @@ vendored wholesale at the pin. That means we ship its worst advice with its
 best, under this repository's name, in a repo whose stated differentiator is
 that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
-carries the audit so a rebase cannot quietly undo it. Three rules are audited
-today. Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
+carries the audit so a rebase cannot quietly undo it. Four rules are audited
+today. Writes around the functions (SMD-1228, change 68): check 10 fails the
+build on a PostgREST `.update(`/`.upsert(` on `thoughts` whose payload carries
+`content` or `embedding` — inline or through an object the file fills — and on
+a SQL `UPDATE thoughts … SET` of either column: the raw write nine vendored
+files made around `update_thought` and the 3-argument `upsert_thought`, leaving
+a stale fingerprint, a stale model label and the previous vector's windows,
+with counted per-file exceptions for a file whose README says it bypasses the
+functions (none today). Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
 the build on a value read from the environment under a credential's name
 compared with an equality operator — the one shared plaintext key seven
 extension servers, and then seventeen more vendored files, compared with `!==`
@@ -8977,9 +9167,10 @@ check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64 and SMD-1455 as change 67; one ticket holds the rest of the standard
-— SMD-1228 (integrations writing around `update_thought`) — and it should land
-the same way.
+change 64, SMD-1455 as change 67 and SMD-1228 as change 68 — the four rules
+named when the standard was decided are all audited and held; the next
+finding (SMD-1524, the raw inserts change 68 left outside its rule) lands the
+same way.
 
 ### Landing a rebase on `main`, which is protected
 

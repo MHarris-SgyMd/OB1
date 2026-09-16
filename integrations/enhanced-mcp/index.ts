@@ -1,3 +1,9 @@
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -8,6 +14,7 @@ import { createClient } from "@supabase/supabase-js";
 
 import {
   embedText,
+  embeddingModelUsed,
   extractMetadata,
   detectSensitivity,
   resolveSensitivityTier,
@@ -51,10 +58,18 @@ type ThoughtRow = {
   rank?: number;
 };
 
+// What upsert_thought returns: this fork's (db/migrations/035) — `id` (a UUID),
+// `fingerprint`, `existed` — or upstream's enhanced-thoughts shape, which the
+// removed section of that schema wrote (`thought_id`, `action`,
+// `content_fingerprint`). Reading only the latter threw after every capture
+// here (upstream #379's orphaned write); both are read now.
 type UpsertThoughtResult = {
-  thought_id: number;
-  action: string;
-  content_fingerprint: string;
+  id?: string;
+  fingerprint?: string;
+  existed?: boolean;
+  thought_id?: number | string;
+  action?: string;
+  content_fingerprint?: string;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -455,7 +470,9 @@ server.registerTool(
     description:
       "Update the content of an existing thought. Re-generates embedding and metadata.",
     inputSchema: z.object({
-      id: z.number().int().min(1).describe("Thought ID to update"),
+      // thoughts.id is a UUID on this fork (the other tools here still take
+      // upstream's integer ids; SMD-1228's "Not done here" holds them).
+      id: z.string().uuid().describe("Thought UUID to update"),
       content: z
         .string()
         .min(1)
@@ -464,12 +481,7 @@ server.registerTool(
   },
   async (params) => {
     try {
-      const id = asInteger(
-        (params as Record<string, unknown>).id,
-        0,
-        1,
-        Number.MAX_SAFE_INTEGER,
-      );
+      const id = asString((params as Record<string, unknown>).id, "").trim();
       const content = asString(
         (params as Record<string, unknown>).content,
         "",
@@ -527,7 +539,6 @@ server.registerTool(
       const oldMetadata = isRecord(existing.metadata)
         ? existing.metadata
         : {};
-      const fingerprint = await computeContentFingerprint(content);
 
       // Escalation-only tier resolution — never downgrade the stored tier.
       // If an existing `personal` thought is edited to remove the sensitive
@@ -554,22 +565,42 @@ server.registerTool(
 
       const finalizedMetadata = applyEvergreenTag(content, metadata);
 
-      const { error: updateError } = await supabase
+      // Content, vector and metadata through update_thought (db/migrations/033):
+      // the fingerprint is computed there by 003's rule (this tool's own
+      // SHA-256 of the normalised text no longer travels with the row), the
+      // label lands beside the vector (021), the previous vector's chunk rows
+      // go (022), and the merged metadata is shallow-merged in — the same
+      // result the spread above produced — under the row's lock. A raw update
+      // of these columns left the fingerprint and label describing the old
+      // text and vector, and the old windows in place.
+      const { data: edited, error: updateError } = await supabase.rpc("update_thought", {
+        p_id: id,
+        p_content: content,
+        p_metadata_patch: finalizedMetadata,
+        p_embedding: embedding,
+        p_embedding_model: embeddingModelUsed(),
+      });
+      if (updateError) {
+        throw new Error(`update_thought failed: ${updateError.message}`);
+      }
+      const edit = (edited ?? {}) as Record<string, unknown>;
+      if (edit.ok !== true) {
+        return toolFailure(`update_thought refused: ${String(edit.error ?? "unknown")}`);
+      }
+
+      // The enhanced-thoughts columns the function does not know: a raw
+      // update that carries neither content nor vector, so nothing it writes
+      // goes stale.
+      const { error: sidecarError } = await supabase
         .from("thoughts")
         .update({
-          content,
-          content_fingerprint: fingerprint,
-          embedding,
           type: extracted.type,
           sensitivity_tier: resolvedTier,
           importance: existing.importance ?? 3,
-          metadata: finalizedMetadata,
-          updated_at: new Date().toISOString(),
         })
         .eq("id", id);
-
-      if (updateError) {
-        throw new Error(`update_thought failed: ${updateError.message}`);
+      if (sidecarError) {
+        throw new Error(`update_thought failed: ${sidecarError.message}`);
       }
 
       const newType = asString(
@@ -667,20 +698,23 @@ server.registerTool(
         metadata: extraMetadata,
       });
 
+      // The 3-argument upsert_thought (db/migrations/004, last redefined by
+      // 035): the vector and its label (021) land with the row, the
+      // fingerprint with the text, and a re-capture replaces the previous
+      // vector's chunk rows (022). The envelope carries what the function
+      // reads — `metadata`, `embedding_model` — and the enhanced-thoughts
+      // columns follow by a raw update that carries neither content nor
+      // vector (the function never read them; upstream's removed schema
+      // section did). This used to put the vector inside the payload, where
+      // the fork's function does not look, so no capture here stored one.
+      const embedding = safeEmbedding(prepared.embedding) ?? null;
       const { data, error } = await supabase.rpc("upsert_thought", {
         p_content: prepared.content,
         p_payload: {
-          type: prepared.type,
-          sensitivity_tier: prepared.sensitivity_tier,
-          importance: prepared.importance,
-          quality_score: prepared.quality_score,
-          source_type: prepared.source_type,
           metadata: prepared.metadata,
-          created_at: new Date().toISOString(),
-          ...(safeEmbedding(prepared.embedding) && {
-            embedding: prepared.embedding,
-          }),
+          ...(embedding ? { embedding_model: embeddingModelUsed() } : {}),
         },
+        p_embedding: embedding,
       });
 
       if (error) {
@@ -688,16 +722,33 @@ server.registerTool(
       }
 
       const result = data as UpsertThoughtResult | null;
-      if (!result?.thought_id) {
+      const thoughtId = result?.id ?? result?.thought_id;
+      if (!thoughtId) {
         throw new Error("upsert_thought returned no result");
+      }
+      const action = result?.action ?? (result?.existed ? "updated" : "inserted");
+      const contentFingerprint = result?.fingerprint ?? result?.content_fingerprint;
+
+      const { error: sidecarError } = await supabase
+        .from("thoughts")
+        .update({
+          type: prepared.type,
+          sensitivity_tier: prepared.sensitivity_tier,
+          importance: prepared.importance,
+          quality_score: prepared.quality_score,
+          source_type: prepared.source_type,
+        })
+        .eq("id", thoughtId);
+      if (sidecarError) {
+        throw new Error(`upsert_thought succeeded but the enhanced columns failed: ${sidecarError.message}`);
       }
 
       return toolSuccess(
-        `${result.action === "inserted" ? "Captured new" : "Updated"} thought #${result.thought_id} as ${prepared.type}.`,
+        `${action === "inserted" ? "Captured new" : "Updated"} thought #${thoughtId} as ${prepared.type}.`,
         {
-          thought_id: result.thought_id,
-          action: result.action,
-          content_fingerprint: result.content_fingerprint,
+          thought_id: thoughtId,
+          action,
+          content_fingerprint: contentFingerprint,
           type: prepared.type,
           sensitivity_tier: prepared.sensitivity_tier,
           metadata: prepared.metadata,

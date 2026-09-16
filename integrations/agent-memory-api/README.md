@@ -95,7 +95,7 @@ The API accepts the runtime-neutral core schema versions and the OpenClaw launch
 | --- | --- | --- |
 | `/health` | GET | Verify deployment |
 | `/recall` | POST | Retrieve scoped memories before work starts (under a `read` key no trace is stored and `request_id` is `null`) |
-| `/writeback` | POST | Save compact operational memory after work finishes |
+| `/writeback` | POST | Save compact operational memory after work finishes — each memory's thought through the 3-argument `upsert_thought`, its vector and model label in the same call (FORK.md change 68) |
 | `/recall/:request_id/usage` | POST | Report which recalled memories were used or ignored |
 | `/memories` | GET | List memories by workspace, project, status, runtime, type, or task prefix |
 | `/memories/review` | GET | List pending agent-written memories |

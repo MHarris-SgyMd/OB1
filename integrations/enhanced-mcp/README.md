@@ -125,7 +125,7 @@ If you also have the original `server/` connector active, you will see both tool
 | 1 | `brain_search_thoughts` | Semantic vector or full-text search with date and metadata filters | Enhanced Thoughts |
 | 2 | `brain_list_thoughts` | Paginated browsing with type, source, date filters and sorting | Enhanced Thoughts |
 | 3 | `get_thought` | Fetch a single thought by ID with full metadata | Enhanced Thoughts |
-| 4 | `update_thought` | Update content with automatic re-embedding and re-classification | Enhanced Thoughts |
+| 4 | `update_thought` | Update content with automatic re-embedding and re-classification, through the database's `update_thought`; takes the thought's UUID | Enhanced Thoughts |
 | 5 | `brain_capture_thought` | Capture with dedup, sensitivity detection, and LLM classification | Enhanced Thoughts |
 | 6 | `brain_thought_stats` | Type and topic statistics via server-side aggregation | Enhanced Thoughts |
 | 7 | `search_thoughts_text` | Direct full-text search (faster for exact phrase matching) | Enhanced Thoughts |
@@ -133,6 +133,8 @@ If you also have the original `server/` connector active, you will see both tool
 | 9 | `related_thoughts` | Find thoughts connected by shared topics or people | Enhanced Thoughts |
 | 10 | `ops_capture_status` | Ingestion health: job status, error rates, recent failures | Smart Ingest |
 | 11 | `graph_search` | Search knowledge graph entities with thought counts | Knowledge Graph |
+
+> **On this fork (FORK.md change 68, SMD-1228).** `update_thought` and `brain_capture_thought` write a thought's content and vector through the database's own functions — `update_thought` (`db/migrations/033`) and the 3-argument `upsert_thought` (`035`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns this schema adds (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither content nor vector. `brain_capture_thought` reads the fork's return — `id` (a UUID), `fingerprint`, `existed` — as well as upstream's; before, every capture here threw after the row was written. `update_thought` takes the thought's UUID, which is what `thoughts.id` is on this fork; the other tools still take upstream's integer ids and cannot address a row here. `extensions/test-writes.ts` drives both tools against Postgres.
 | 12 | `entity_detail` | Full entity profile: aliases, linked thoughts, relationship edges | Knowledge Graph |
 | 13 | `ops_source_monitor` | Per-source ingestion volume, errors, and failure samples | Ops Views |
 

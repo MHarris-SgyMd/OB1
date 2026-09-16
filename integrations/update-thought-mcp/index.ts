@@ -4,6 +4,12 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -58,6 +64,9 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector this function produces (021): the
+// model name as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 async function getEmbedding(text: string): Promise<number[]> {
@@ -68,7 +77,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBEDDING_MODEL,
       input: text,
     }),
   });
@@ -120,54 +129,7 @@ function buildServer(principal: Principal): McpServer {
     },
     async ({ id, content, metadata_patch, if_unchanged_since }) => {
       try {
-        // Fetch existing row. We need updated_at for the concurrency check and
-        // metadata for the shallow-merge.
-        const { data: existing, error: fetchError } = await supabase
-          .from("thoughts")
-          .select("id, content, metadata, created_at, updated_at")
-          .eq("id", id)
-          .single();
-
-        if (fetchError || !existing) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Thought not found: ${id}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Optimistic concurrency check. Reject if stored updated_at is strictly
-        // newer than the caller's reference timestamp.
-        if (if_unchanged_since) {
-          const storedMs = new Date(
-            (existing.updated_at as string) ?? (existing.created_at as string),
-          ).getTime();
-          const clientMs = new Date(if_unchanged_since).getTime();
-          if (
-            Number.isFinite(storedMs) &&
-            Number.isFinite(clientMs) &&
-            storedMs > clientMs
-          ) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text:
-                    `STALE_READ: thought has been modified since ${if_unchanged_since}. ` +
-                    `Current updated_at: ${existing.updated_at}. Re-fetch and retry.`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        }
-
-        const updates: Record<string, unknown> = {};
-
+        let embedding: number[] | null = null;
         if (content !== undefined) {
           if (!OPENROUTER_API_KEY) {
             return {
@@ -181,20 +143,10 @@ function buildServer(principal: Principal): McpServer {
               isError: true,
             };
           }
-          const embedding = await getEmbedding(content);
-          updates.content = content;
-          updates.embedding = `[${embedding.join(",")}]`;
+          embedding = await getEmbedding(content);
         }
 
-        if (metadata_patch !== undefined) {
-          const merged = {
-            ...((existing.metadata as Record<string, unknown>) || {}),
-            ...metadata_patch,
-          };
-          updates.metadata = merged;
-        }
-
-        if (Object.keys(updates).length === 0) {
+        if (content === undefined && metadata_patch === undefined) {
           return {
             content: [
               {
@@ -205,12 +157,22 @@ function buildServer(principal: Principal): McpServer {
           };
         }
 
-        const { data, error } = await supabase
-          .from("thoughts")
-          .update(updates)
-          .eq("id", id)
-          .select("id, content, metadata, created_at, updated_at")
-          .single();
+        // One call, one statement. update_thought (db/migrations/033) locks the
+        // row, decides `if_unchanged_since` against it as it is now — the check
+        // this tool used to make from a read a moment earlier — writes the new
+        // fingerprint with the text (003/018), the label with the vector (021),
+        // replaces the chunk rows (022; none here, so none stay), shallow-merges
+        // the patch into metadata as this tool always did, and refuses an edit
+        // into another row's text as DUPLICATE_CONTENT rather than as a
+        // constraint error. A raw update of `thoughts` left all four stale.
+        const { data, error } = await supabase.rpc("update_thought", {
+          p_id: id,
+          p_content: content ?? null,
+          p_metadata_patch: metadata_patch ?? null,
+          p_embedding: embedding,
+          p_if_unchanged_since: if_unchanged_since ?? null,
+          p_embedding_model: embedding ? EMBEDDING_MODEL : null,
+        });
 
         if (error) {
           return {
@@ -224,11 +186,32 @@ function buildServer(principal: Principal): McpServer {
           };
         }
 
+        const result = (data ?? {}) as Record<string, unknown>;
+        if (result.ok !== true) {
+          const reason = String(result.error ?? "unknown");
+          const text =
+            reason === "NOT_FOUND"
+              ? `Thought not found: ${id}`
+              : reason === "STALE_READ"
+                ? `STALE_READ: thought has been modified since ${if_unchanged_since}. ` +
+                  `Current updated_at: ${result.current_updated_at}. Re-fetch and retry.`
+                : reason === "DUPLICATE_CONTENT"
+                  ? `DUPLICATE_CONTENT: another thought already holds this exact text; edit that one, or delete it first.`
+                  : `update_thought refused: ${reason}`;
+          return { content: [{ type: "text" as const, text }], isError: true };
+        }
+
         const parts = [
-          `Updated thought ${data.id}`,
+          `Updated thought ${id}`,
           content !== undefined ? "  · content replaced and re-embedded" : null,
           metadata_patch !== undefined ? "  · metadata merged" : null,
-          `  · updated_at: ${data.updated_at}`,
+          `  · updated_at: ${result.updated_at}`,
+          result.duplicate_of
+            ? `  · note: thought ${result.duplicate_of} holds the same text (a twin, not refused — the text did not change)`
+            : null,
+          result.fingerprint_held_by
+            ? `  · note: thought ${result.fingerprint_held_by} holds a stale fingerprint for this text; this row's stays unset until that is repaired`
+            : null,
         ].filter(Boolean);
 
         return {
