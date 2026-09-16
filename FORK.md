@@ -10958,6 +10958,39 @@ than a row count both reports could lack a section under; and this
 section's lead now describes the shipped mechanism rather than the first
 draft with the passes as errata.
 
+**Fifth pass, on the tree merged with main** (SMD-1544 took change 73; this
+section became 74). The exact statement orders by distance *and id*: the
+column is `vector(64)` and the cosine accumulates in float4, so distinct
+rows can tie at rank K, and without the tie-break the id kept was whichever
+worker's stream it landed in — an answer the marker keeps must not depend
+on the plan that computed it. The map's key gains the server's side: a probe
+of the distance kernel (the cosine between two fixed vectors, as text),
+since the kernel's last bits differ between pgvector builds and CPUs, a
+pinned image *tag* does not fix that and `extversion` does not show it; and
+the planner settings leave the key — they decide the plan, which the plan
+check holds, and a reordered `SET LOCAL` should not cost a recomputation.
+An entry's whole-table answers must hold exactly K ids (a kept scale has
+more than K rows; a trimmed list had passed and would have read as recall
+lost). The suite: it had proved no marker existed when it started, so the
+marker it finds at the end is its own and is dropped whether or not it
+read run 1's line saying so (the line came after the commit; a Ctrl-C in
+between would have left the marker); a signal is noted rather than acted
+on, the run in flight finishes, the next run throws, and the drop happens
+once in `finally` before the signal's exit — the handler had been dropping
+the marker while the main flow, whose child had died of the same signal,
+went on to spawn the next bench onto the dropped marker, which would have
+rebuilt the corpus and written a new one. Two planted malformations join
+the runs — a duplicated id in one whole-table answer, and a query digest
+changed at index 1 — asserted to be computed for (`had none`) and to answer
+for one query only (`1 of 3 reused`), so the guards and the prefix walk are
+no longer mutant-blind; the remote-database flags pass through to the
+spawned bench, which had refused a database the suite accepted; the marker
+table's name is one exported constant the suite, the bench and `dropSchema`
+share; and the suite reads section L's `oracle` cell rather than the run
+line's prose. Declined: rewriting the statement as an `OFFSET 0` fence so
+exactness holds by construction — the plan check already asserts it, and
+the fence would trade a measured parallel top-N (Gather Merge over
+per-worker sorts) for an unmeasured leader-side sort.
 
 ## Detached from the fork network
 

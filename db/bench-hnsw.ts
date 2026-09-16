@@ -200,7 +200,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
+import { BENCH_MARKER, applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
@@ -531,8 +531,8 @@ type LoadStats = {
 // a run asking for another scale is refused rather than replacing thirty
 // minutes of build without being asked (a corpus this run built itself is
 // this run's to replace: a run over several scales keeps the last).
-/** The marker table. Spelled out again in the tagged templates below: an interpolated `${MARKER}` there would bind as a parameter, not an identifier. */
-const MARKER = "bench_hnsw_corpus";
+/** The marker table — test-support's name, which its schema reset and the reuse suite share. Spelled out again in the tagged templates below: an interpolated `${MARKER}` there would bind as a parameter, not an identifier. */
+const MARKER = BENCH_MARKER;
 /**
  * Bumped when the marker's MEANING changes — a new key in `matches`, a
  * physical field read differently — so a marker an earlier bench wrote is
@@ -540,9 +540,10 @@ const MARKER = "bench_hnsw_corpus";
  * field added is caught by name (LOAD_STATS_KEYS), not by this number; 2 dates
  * from the merge that brought `otherIndexes` in, when both mechanisms were new.
  * The seed lives in `seedFor`; a change there is caught by the regenerated rows.
- * The oracle cache is not this number's either: it names its own inputs (K,
- * a digest of the oracle's statement, a digest per query) and is recomputed
- * where they differ.
+ * The oracle cache is not this number's either: it names its own inputs (a
+ * digest of the oracle's statement and the server's kernel as the map's key,
+ * a digest per query) and is computed afresh under a new key where they
+ * differ.
  */
 const MARKER_FORMAT = 2;
 /** Every field section L reads, named once: a marker missing one is refused before the run, not a TypeError in the report after it. The compiler keeps this list whole when LoadStats grows. */
@@ -556,12 +557,12 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
  * some 450 full scans — and its answers are a pure function of the rows, the
  * queries, K and the oracle's statement, the same on every reuse. What they
  * are a function of is named by value: the marker's `oracle` is a map keyed
- * by ORACLE_SHAPE — a digest of the oracle's statement (K inside it), the
- * filter's form, the settings the scan runs under and how a vector is
- * rendered — so a tree that differs in any of them writes an entry of its
- * own beside this one rather than over it (a kept volume outlives branches;
- * review passes); and each entry carries `queries`, a digest of each query's
- * literal as the server parsed it, in order. The
+ * by shape (`oracleShapeOn`) — a digest of the oracle's statement (K inside
+ * it), the filter's form, how a vector is rendered, and the server's
+ * distance kernel — so a tree or a server that differs in any of them writes
+ * an entry of its own beside this one rather than over it (a kept volume
+ * outlives branches; review passes); and each entry carries `queries`, a
+ * digest of each query's literal as the server parsed it, in order. The
  * stream's first queries are a prefix of any longer run's, so a run asking
  * fewer takes the answers whose digests match its own queries — the leading
  * ones, all of them where the stream is unchanged — and a run asking more
@@ -651,17 +652,19 @@ async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
   await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
 }
 
-/** This tree's entry in the marker's oracle map, written or replaced; other shapes' entries stay. A map that is not an object (a hand-cleared `null`) is started over — `||` on it would build an array, and the cache would be dead from then on (review pass). */
-async function amendOracle(sql: SQL, record: OracleCache): Promise<void> {
-  await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || jsonb_build_object('oracle', COALESCE(CASE WHEN jsonb_typeof(corpus->'oracle') = 'object' THEN corpus->'oracle' END, '{}'::jsonb) || ${{ [ORACLE_SHAPE]: record }}::jsonb)`;
+/** This tree's entry in the marker's oracle map, written or replaced under its key; other keys' entries stay. A map that is not an object (a hand-cleared `null`) is started over — `||` on it would build an array, and the cache would be dead from then on (review pass). */
+async function amendOracle(sql: SQL, shape: string, record: OracleCache): Promise<void> {
+  await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || jsonb_build_object('oracle', COALESCE(CASE WHEN jsonb_typeof(corpus->'oracle') = 'object' THEN corpus->'oracle' END, '{}'::jsonb) || ${{ [shape]: record }}::jsonb)`;
 }
 
 /**
  * The answers the marker's oracle entry for this shape gives this run: for
  * each of THESE keys, the leading answers whose queries are this run's
  * (`taken`, `have` of them), and how many the entry holds (`had`). The entry
- * must be whole — one well-formed answer per query for every key: at most K
- * distinct ids and a finite cosine — and its digests are matched against
+ * must be whole — one well-formed answer per query for every key: distinct
+ * string ids, at most K of them and exactly K over the whole table (a kept
+ * scale has more than K rows, and a trimmed list would read as recall lost),
+ * and a finite cosine — and its digests are matched against
  * this run's queries from the front, so a changed stream answers for nothing
  * past the change. Nothing, and `had` 0, where the entry is absent or
  * malformed — computed for, never refused (the answers are a function of the
@@ -671,16 +674,16 @@ async function amendOracle(sql: SQL, record: OracleCache): Promise<void> {
  * caller asserts nothing. Ids are not re-checked against the table: the same
  * fingerprint says no row was written since they were read.
  */
-function markerAnswers(marker: Marker, keys: string[], digests: string[]): { have: number; had: number; taken: Record<string, OracleAnswer[]> } {
-  const c = marker.oracle?.[ORACLE_SHAPE];
+function markerAnswers(marker: Marker, shape: string, keys: string[], digests: string[]): { have: number; had: number; taken: Record<string, OracleAnswer[]> } {
+  const c = marker.oracle?.[shape];
   const nothing = { have: 0, had: 0, taken: Object.fromEntries(keys.map((key) => [key, []])) };
   if (!c || typeof c !== "object" || !Array.isArray(c.queries) || c.queries.length < 1) return nothing;
   const n = c.queries.length;
-  const answer = (a: unknown): a is OracleAnswer => {
+  const answer = (key: string) => (a: unknown): a is OracleAnswer => {
     const { ids, top } = (a ?? {}) as OracleAnswer;
-    return Array.isArray(ids) && ids.length <= K && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string") && Number.isFinite(top);
+    return Array.isArray(ids) && (key === WHOLE_TABLE ? ids.length === K : ids.length <= K) && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string") && Number.isFinite(top);
   };
-  const whole = c.queries.every((d) => typeof d === "string") && keys.every((key) => Array.isArray(c.answers?.[key]) && c.answers[key].length === n && c.answers[key].every(answer));
+  const whole = c.queries.every((d) => typeof d === "string") && keys.every((key) => Array.isArray(c.answers?.[key]) && c.answers[key].length === n && c.answers[key].every(answer(key)));
   if (!whole) return nothing;
   let have = 0;
   while (have < Math.min(n, digests.length) && c.queries[have] === digests[have]) have++;
@@ -1034,23 +1037,47 @@ async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ i
  * scale rather than trusting them.
  */
 const ORACLE_SETTINGS = ["SET LOCAL enable_indexscan = off", "SET LOCAL enable_seqscan = on"] as const;
-/** The exact scan's statement, one place: what `oracle()` runs and what ORACLE_SHAPE digests. */
+/**
+ * The exact scan's statement, one place: what `oracle()` runs and what the
+ * shape digests. The tie-break on id makes a K-boundary tie between rows at
+ * the same float4 distance the statement's to resolve, not the worker's
+ * whose stream they landed in — an answer the marker keeps must not depend
+ * on the plan that computed it (review pass).
+ */
 const oracleStatement = (vector: string, filter: string | null) => `
       SELECT t.id, t.embedding <=> '${vector}'::vector AS d FROM thoughts t
       WHERE t.embedding IS NOT NULL${filter === null ? "" : ` AND t.metadata @> '${filter}'::jsonb`}
-      ORDER BY d LIMIT ${K}`;
+      ORDER BY d, t.id LIMIT ${K}`;
 /**
- * What an answer IS, by value: a digest of the oracle's statement in both
- * filter forms and the tier filter's form as rendered over placeholders, the
- * settings the scan runs under, and a probe of how a vector is rendered into
+ * What an answer IS, by value, on the client's side: a digest of the
+ * oracle's statement in both filter forms and the tier filter's form as
+ * rendered over placeholders, and a probe of how a vector is rendered into
  * the literal (the per-query digests are of that literal, so two trees that
- * render differently must not share an entry — review pass). An edit to any
- * of them — a tie-break, another operator, another containment shape — is
- * another key in the marker's map: every kept answer under the old key stays
- * for the tree that wrote it, and this tree computes its own (a hand-bumped
- * number was the first draft; review passes).
+ * render differently must not share an entry — review pass). The planner
+ * settings are not in it: they decide the plan, `assertOracleExact` holds
+ * the plan, and a reordered SET LOCAL should not cost a recomputation
+ * (review pass). `oracleShapeOn` adds the server's side.
  */
-const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleStatement("<vector>", null), tierFilter("<key>"), ...ORACLE_SETTINGS, lit([0.1, -1 / 3, 1e-7, 2])]);
+const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleStatement("<vector>", null), tierFilter("<key>"), lit([0.1, -1 / 3, 1e-7, 2])]);
+/**
+ * The key of this tree's entry in the marker's oracle map, on THIS server:
+ * ORACLE_SHAPE with a probe of the distance kernel — the cosine pgvector
+ * computes between two fixed vectors, as text. The kernel accumulates in
+ * float4 and its last bits differ between pgvector builds and CPUs, which a
+ * pinned image TAG does not fix and `extversion` does not show; a rank-K
+ * near-tie resolved differently is a stale id trusted as exact, so a
+ * server whose kernel rounds differently gets an entry of its own (review
+ * pass). An edit to any input — a tie-break, another operator, another
+ * containment shape, another kernel — is another key: every kept answer
+ * under the old key stays for the tree that wrote it, and this tree
+ * computes its own (a hand-bumped number was the first draft; review passes).
+ */
+async function oracleShapeOn(sql: SQL): Promise<string> {
+  const a = lit(Array.from({ length: DIM }, (_, i) => Math.sin(i + 1)));
+  const b = lit(Array.from({ length: DIM }, (_, i) => Math.cos(3 * i + 1) / (i + 2)));
+  const [{ d }] = await sql.unsafe(`SELECT ('${a}'::vector <=> '${b}'::vector)::text AS d`);
+  return digestOf([ORACLE_SHAPE, String(d)]);
+}
 /**
  * The plan the exact scan gets on THIS server, once per scale before any
  * answer is computed: refused if it reaches the vector index, since an
@@ -1475,7 +1502,8 @@ for (const n of SCALES) {
   // once as the three lines it is rendered as: the run line, section L's
   // `oracle` column and the confound's note; where the answers went is the
   // marker lines' to say (review passes).
-  const { have, had, taken } = kept ? markerAnswers(kept, keys, digests) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
+  const shape = await oracleShapeOn(sql);
+  const { have, had, taken } = kept ? markerAnswers(kept, shape, keys, digests) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
   const note =
     have === Q
       ? { column: "reused", run: `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})`, confound: " (all of them the marker's)" }
@@ -1519,11 +1547,11 @@ for (const n of SCALES) {
   // other shapes' entries are never touched.
   const oracleRecord: OracleCache = { queries: digests, answers };
   if (!kept && KEPT) {
-    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [ORACLE_SHAPE]: oracleRecord } });
+    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [shape]: oracleRecord } });
     console.log(`  corpus kept: marker written, with the exact pass's answers for ${Q} queries`);
   } else if (kept && have < Q) {
     if (KEPT) {
-      await amendOracle(sql, oracleRecord);
+      await amendOracle(sql, shape, oracleRecord);
       console.log(`  marker extended: the exact pass's answers for ${Q} queries (${had === 0 ? "had none" : `had ${had}, ${have} of them this run's`})`);
     } else {
       console.log(`  (the exact pass's answers were not kept: no OB1_PG_KEEP)`);

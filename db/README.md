@@ -22,7 +22,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows;
-  `test-bench-reuse.ts` the same and about three minutes (six bench runs at
+  `test-bench-reuse.ts` the same and about three minutes (eight bench runs at
   150,000 rows).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
@@ -1278,19 +1278,21 @@ The kept corpus and the exact answers its marker keeps (SMD-1562) have a
 suite of their own:
 
 ```bash
-./with-postgres.sh bun test-bench-reuse.ts   # six bench runs at 150,000 rows against one database, ~3 min
+./with-postgres.sh bun test-bench-reuse.ts   # eight bench runs at 150,000 rows against one database, ~3 min
 ```
 
-It runs the bench six times against the wrapper's one throwaway database,
+It runs the bench eight times against the wrapper's one throwaway database,
 telling only the bench that the database is kept (to the bench, "kept" is
 the variable and the marker row; the volume is the wrapper's concern): a
 build with five queries, a reuse with three (every answer the marker's), the
 marker's answers stripped as a marker from before SMD-1562 has none and three
-again (computed, and the marker extended), then six (three from the marker,
-three computed) and six again (all from the marker) — asserting sections A,
-B, D and E agree, timings aside, between each run that read the marker and
-the run on the same index that computed; then the corpus marked `rewritten`
-and the next run refused before the oracle is consulted. Two builds would
+again (computed, and the marker extended), an answer given a duplicated id
+and a query digest changed (computed for; one of three reused), then six
+(three from the marker, three computed) and six again (all from the marker)
+— asserting sections A, B, D and E agree, timings aside, between each run
+that read the marker and the run on the same index that computed; then the
+corpus marked `rewritten` and the next run refused before the oracle is
+consulted. Two builds would
 give two HNSW graphs and two recall figures, which is why every comparison
 is on one index. It drops its marker table on the way out. Not in CI or
 `ci-parity.sh`, for the three minutes of exact passes it costs.
