@@ -330,32 +330,13 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
   // The other shape: a base URL with a trailing slash doubles the slash, and
   // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
-  // catch-all and hung. Bun's fetch() collapses `//` to `/` before sending — the
-  // row above would have probed the 404 route — so this one writes the request
-  // line itself over a socket. A direct worker.fetch(new Request(…)) would keep
-  // the `//` too, but only the socket proves that Bun.serve's parser passes it
-  // through un-normalised to the router, which is the property the hang stood
-  // on. The status code is enough: 405 means the guard answered, and a hang is
-  // reported as the timeout marker. The reason phrase is Bun's, not Hono's
-  // (Hono sets no statusText), so it is not asserted.
-  const rawStatusLine = (line: string) =>
-    new Promise<string>((resolve) => {
-      let buf = "";
-      const done = (s: string) => { clearTimeout(timer); resolve(s); };
-      const timer = setTimeout(() => done("<no status line within 2 s>"), 2000);
-      Bun.connect({
-        hostname: "127.0.0.1",
-        port: PORT,
-        socket: {
-          open(s) { s.write(`${line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`); },
-          data(s, d) { buf += new TextDecoder().decode(d); if (buf.includes("\r\n")) { done(buf.split("\r\n")[0]); s.end(); } },
-          close() { done(buf.split("\r\n")[0] || "<closed with no status line>"); },
-          error() { done("<socket error>"); },
-        },
-      }).catch((e) => done(`<connect failed: ${e instanceof Error ? e.message : String(e)}>`));
-    });
-  const doubled = await rawStatusLine(`GET //.well-known/oauth-protected-resource?key=${KEY}`);
-  assert(doubled.startsWith("HTTP/1.1 405"), `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
+  // catch-all and hung. Bun's fetch() collapses `//` to `/` on the wire — a
+  // fetch row would probe the 404 route — but a Request object keeps it and
+  // worker.fetch hands it to the router as is, which is the routing question
+  // this row asks. The status is read before any body, so under the pre-change
+  // shape this reports the 200 the stream flushes at once, not a hang.
+  const doubled = await worker.fetch(new Request(`${BASE}//.well-known/oauth-protected-resource?key=${KEY}`));
+  assert(doubled.status === 405 && corsOk(doubled), `GET, doubled-slash discovery path with the key → 405 (${doubled.status})`);
 
   // The CORS preflight still advertises GET and DELETE — asserted in [3], where
   // the preflight is probed. POST reaching the transport is [7].
@@ -384,13 +365,17 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     const p = await probe(near, {});
     assert(p.status === 405 || p.status === 404, `GET ${near} is not /health, and does not hang (${p.status})`);
   }
+  // Under /.well-known/ the discovery route owns the prefix and answers first.
+  assert((await probe("/.well-known/health", {})).status === 404, "GET /.well-known/health → 404 (the discovery route owns that prefix)");
   // At a health path the refusal's Allow names the health resource's methods:
   // GET and HEAD from the health route, POST because the MCP handler serves
   // every path — `POST /health` IS the endpoint.
   const putHealth = await probe("/health", { method: "PUT" });
   assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, POST, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, POST, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
-  const postHealth = await probe("/health", { method: "POST", headers: H, body: INIT });
-  assert(postHealth.status === 200 && postHealth.envelope, `POST /health is the MCP endpoint (${postHealth.status})`);
+  // With the key, so the 200 is the transport's initialize result and not the
+  // JSON-RPC refusal a keyless POST gets anywhere.
+  const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(2000) });
+  assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
 server.stop();

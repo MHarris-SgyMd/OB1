@@ -58,7 +58,8 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (it needs no `bun install` —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` prints `9 checks: 9 passed, 0 failed`.
+followed by `Started server`. `smoke.sh` ends with `0 failed` and exits 0 (its
+checks are the numbered comments in the script; the summary line counts them).
 
 Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) — the URL
 you configure outside the proxy is the one to use; the exact match rule is the
@@ -127,7 +128,8 @@ there, for that check to pass.
   Checks 3 and 4 fail too: upstream's `server/index.ts` has no method guard, so
   a GET answers 200 instead of 405 — with a key it hangs (upstream
   [#424](https://github.com/NateBJones-Projects/OB1/issues/424)) — and it has no
-  `/health` route (FORK.md change 74).
+  `/health` route, so that GET gets the same 200 JSON-RPC refusal instead of
+  `ok` (FORK.md change 74).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.

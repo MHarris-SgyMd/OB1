@@ -103,13 +103,16 @@ code=$(status "$BASE/")
 [ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (POST only; the SDK client's expected answer to its stream probe)" \
                     || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 74)"
 
-# 4. GET /health is 200: the liveness target for a platform probe that can only
-#    GET. "$BASE/health" is right whether or not the proxy strips its prefix;
-#    the match rule is the HEALTH_PATH comment in server-portable/index.ts. No
-#    key, for the same reasons as check 3. Upstream's server has no such route.
-code=$(status "$BASE/health")
-[ "$code" = "200" ] && ok "GET /health → HTTP 200 (the liveness target for GET-only probes)" \
-                    || bad "GET /health → HTTP $code (expected 200: route GET /health to the server as you route POST; FORK.md change 74)"
+# 4. GET /health is 200 with the body `ok`: the liveness target for a platform
+#    probe that can only GET. "$BASE/health" is right whether or not the proxy
+#    strips its prefix; the match rule is the HEALTH_PATH comment in
+#    server-portable/index.ts. No key, for the same reasons as check 3. The body
+#    is asserted because a 200 alone proves nothing here: upstream's server has
+#    no such route and answers a keyless GET with a 200 JSON-RPC refusal, and a
+#    proxy that redirects unknown paths to a landing page answers 200 too.
+hb=$(curl -sL --max-redirs 5 --max-time 20 "$BASE/health")
+[ "$hb" = "ok" ] && ok "GET /health → 200 ok (the liveness target for GET-only probes)" \
+                 || bad "GET /health → '$(printf '%s' "$hb" | head -c 60)' (expected the body 'ok': route GET /health to the server as you route POST; FORK.md change 74)"
 
 # 5. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

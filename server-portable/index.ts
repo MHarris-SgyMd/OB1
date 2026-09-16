@@ -1306,8 +1306,9 @@ const REVOKED_MESSAGE =
   "Unauthorized: this access key has been revoked. Its history is retained; request a new key.";
 
 /**
- * Read the request body as text without consuming the original request's
- * body stream for downstream handlers. Returns null on read failure. No
+ * Read the request body as text. This CONSUMES the body: both callers return a
+ * refusal right after, so nothing downstream needs it. Returns null on read
+ * failure. No
  * bodyless-method branch: `req.text()` on a request without a body resolves to
  * "", and extractJsonRpcId("") is null, so the method never mattered here.
  */
@@ -1403,7 +1404,8 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
 // HEAD probe gets a bodiless 200. Matched as the last path segment under any
 // prefix a proxy leaves on the request (`/mcp/health`,
-// `/functions/v1/open-brain-mcp/health`), with at most one trailing slash —
+// `/functions/v1/open-brain-mcp/health`) except `/.well-known/`, which the
+// route above owns, with at most one trailing slash —
 // deploy/README.md anticipates an unstripped prefix, and a probe aimed at
 // `<base>/health` must not 405 there. The breadth ("health under anything") is
 // a stand-in for a base-path setting the server does not have; a mount (the
