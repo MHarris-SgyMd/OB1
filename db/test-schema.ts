@@ -3597,6 +3597,11 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
 
 console.log("\n[35] Migration 035: delete_thought and review_supersession_proposal both take the supersession lock before their contended row (SMD-1462)");
 {
+  // Self-contained: restore both bodies 035 last-defines rather than trusting
+  // that an earlier block's reapply/restore left them shipped ([33] reapplies
+  // 032, which defines review). A block inserted before this one that reapplied
+  // 032/029/009 without restoring would otherwise silently give us a stale body.
+  await restoreShipped("delete_thought", "review_supersession_proposal");
   await db.exec(`DELETE FROM thoughts`);
   // 035 is the only redefinition of delete_thought since 009; the body is
   // 009's plus one advisory-lock line, so a future edit that drops the lock —

@@ -859,7 +859,10 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   // closes. (033's pass measured 23 of 40 against the 032 review; this arm
   // races the shipped 035 review, but the cycle is on the rows Z and P and does
   // not depend on where the review takes the advisory lock — so the count
-  // varies run to run and the arm only asserts it happens at all.)
+  // varies run to run and the arm only asserts it happens at all.) This is the
+  // one deliberately stochastic assertion in the suite: with the delete fully
+  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
+  // on the order of 1e-15 — a spurious pass is not a practical risk.
   {
     const connR = new SQL({ url: URL_, max: 1 });
     const connD = new SQL({ url: URL_, max: 1 });
