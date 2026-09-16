@@ -482,12 +482,14 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // [15] holds that floor (the first run of this section left 020's hybrid
     // behind and [15] failed on it); the table emptied; the index rebuilt
     // (instant on no rows).
+    // The table and the index first — they depend on nothing — so a throw
+    // from the re-apply cannot leave them behind (second review pass).
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(String(hnswDef));
     await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
     assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
     assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
       "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
-    await sql`DELETE FROM thoughts`;
-    await sql.unsafe(String(hnswDef));
   }
 }
 

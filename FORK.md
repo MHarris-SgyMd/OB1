@@ -8926,12 +8926,17 @@ goes straight to the walk — only when all three hold:
    rule is weakest against sits between those two: a few matches a page over
    hundreds of pages — a tag on four captures a day for most of a year —
    where three sampled pages already hold eight hits. For `v_exact` rows four
-   to a page that is C(8,3) × (250 / heap pages)³: about 7e-4 at the floor,
-   2e-5 at a million rows, 3e-8 at ten million. The first review pass found
-   the layout; measured on a 6,826-page heap, 995 such rows were skipped 13
-   times in 20,000 draws (`hit_pages ≥ 4` would make it 4, at two to three
-   points of the broad filters' skip rate — the knob if that band matters;
-   the rule ships as measured).
+   to a page that is C(8,3) × (250 / heap pages)³: about 2e-3 at the floor,
+   7e-6 at a million rows, 7e-9 at ten million. The first review pass found
+   the layout; measured on a 6,826-page heap, where the formula says 2.8e-3,
+   995 such rows were skipped 13 times in 20,000 draws — 6.5e-4, under the
+   bound because condition 1 is marginal with exactly three hit pages
+   (twelve hits scale to barely ten times the threshold and fail it whenever
+   the draw reached nine pages). The second pass corrected the figures here,
+   which had quoted that measurement as the formula's output. `hit_pages ≥ 4`
+   would make the bound C(8,4) × f⁴, about 2e-4 at the floor (4 of 20,000
+   measured), at two to three points of the broad filters' skip rate — the
+   knob if that band matters; the rule ships as measured.
 
 Anything less runs the collection exactly as before — the same statement,
 token for token, indented two spaces further inside an `IF` (test-schema [20]
@@ -8978,8 +8983,12 @@ the bench's shape before the file was written.**
   and the empty one, because the cost is the rows read, not the rows that
   pass. Eight pages: a 10% filter puts sixteen expected hits in 160 sampled
   rows and was skipped in 908 of 1,000 draws, a 50% filter in 984 (the misses
-  are draws that landed on fewer than three pages — `SYSTEM` picks a binomial
-  number of them); sixteen pages bought 998 and 1,000 for 0.1 ms more on every
+  are mostly draws with fewer than eight hits — `SYSTEM` picks a binomial
+  number of pages, and two hits a page compound that variance; on a
+  6,826-page heap the first review pass counted 1,109 such, 345 that failed
+  condition 1 at that small heap, and 45 that reached fewer than three pages,
+  of 1,499 misses in 20,000 draws); sixteen pages bought 998 and 1,000 for
+  0.1 ms more on every
   filtered call, and the empty filter's own probe is 0.012 ms, so the sample
   is already the larger part of that call. No `REPEATABLE` seed: a fixed seed
   reads the same pages every call, which is a warm cache and a systematically
@@ -9081,9 +9090,10 @@ Read down the tables and four things fall out.
 - **The broad tiers lose the collection, and at ten million rows that is
   most of the call.** 50% at ten million: 241 ms → 13, the 250 ms bitmap
   gone; at a million 36.5 → 10.4. 10%: 138 → 45 and 47 → 37 — the gate
-  skips a 10% filter nine times in ten (a binomial draw of eight pages
-  sometimes lands on fewer than three), and the walk that follows costs what
-  it always cost. The recall columns are the index's and did not move (0.8
+  skips a 10% filter nine times in ten (the misses are mostly draws with
+  fewer than eight hits; the page count is binomial and two hits a page
+  compound its variance), and the walk that follows costs what it always
+  cost. The recall columns are the index's and did not move (0.8
   and 2.1 at ten million, 2.8 and 5.4 at a million — change 28's floor).
 - **The thin tiers and the exact branch are unchanged, plus the sample.**
   900 rows: 9.8 → 10.9 ms at ten million, 6.4 → 4.3 at a million (cache
@@ -9096,8 +9106,9 @@ Read down the tables and four things fall out.
   (526,000). This section's first draft blamed uncached page reads against
   the image's 128 MB `shared_buffers`; the first review pass read the
   bench's own section C the other way (0.11 / 0.21 / 0.99 ms at 5,000 /
-  50,000 / 500,000 heap pages is a line through the origin, not a cache
-  effect) and the measurement agreed: one row a page, every page warm in
+  50,000 / 500,000 heap pages is a line — a tenth of a millisecond for the
+  eight pages' rows plus ~2 ns a page — not a cache effect) and the
+  measurement agreed: one row a page, every page warm in
   `shared_buffers`, the statement costs 0.038 ms at 2,000 pages, 0.094 at
   20,000, 0.459 at 200,000. `TABLESAMPLE SYSTEM` decides per page by hashing
   every block number against its cutoff, so the eight page reads are the

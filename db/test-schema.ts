@@ -766,12 +766,22 @@ console.log("\n[8e] Migration 036: the routing count is gated by a sample of the
   // The gate's own input on this table, computed as the body computes it: the
   // sample scaled to the heap is under ten times the threshold, which is why
   // the collection ran above — and why the skip needs test-live's table.
-  const [{ hits, hit_pages, pages_seen }] = (await db.query<{ hits: number; hit_pages: number; pages_seen: number }>(
-    `SELECT count(*) FILTER (WHERE s.hit)::int AS hits, count(DISTINCT s.blk) FILTER (WHERE s.hit)::int AS hit_pages, count(DISTINCT s.blk)::int AS pages_seen
-     FROM (SELECT (t.metadata @> '{"kind":"broad"}' AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
-           FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`)).rows;
-  assert(hits > 0 && hit_pages > 0 && pages_seen >= hit_pages && hits * pages < 10 * 1000 * pages_seen,
-    `the sample on 1,000 rows: ${hits} hits on ${hit_pages} of ${pages_seen} pages — scaled to ${pages} pages, under ten times the threshold of 1,000, so the gate cannot skip here`);
+  // Five independent draws, each judged by the body's own three conditions:
+  // a draw is random and may reach no page at all (one run here drew none),
+  // and the rule must say "collect" whatever it drew — on 1,000 rows the
+  // scaled estimate can never reach ten times the threshold (second review pass).
+  const draws: string[] = [];
+  let wouldSkip = 0;
+  for (let i = 0; i < 5; i++) {
+    const [{ hits, hit_pages, pages_seen }] = (await db.query<{ hits: number; hit_pages: number; pages_seen: number }>(
+      `SELECT count(*) FILTER (WHERE s.hit)::int AS hits, count(DISTINCT s.blk) FILTER (WHERE s.hit)::int AS hit_pages, count(DISTINCT s.blk)::int AS pages_seen
+       FROM (SELECT (t.metadata @> '{"kind":"broad"}' AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
+             FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`)).rows;
+    draws.push(`${hits}/${hit_pages}/${pages_seen}`);
+    if (hits >= 8 && hit_pages >= 3 && hits * pages >= 10 * 1000 * pages_seen) wouldSkip++;
+  }
+  assert(wouldSkip === 0,
+    `five draws of the sample on 1,000 rows (hits/hit pages/pages seen: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here`);
   const restored = await restoreShipped("match_thoughts");
   assert(restored.length === 1 && restored[0].startsWith("036") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
