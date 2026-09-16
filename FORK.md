@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-two numbered changes on top of the pin. Seven fix defects found in an
+Seventy-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–72 are the numbered `###` sections** further down, which is
+sections. Changes **18–73 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -195,6 +195,7 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
+db/test-bench-reuse.ts           # change 73 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -10556,6 +10557,66 @@ which predate this change.
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.
+
+### 73. The kept bench corpus answers the exact oracle from its marker — `bench-hnsw.ts` records the exact pass's answers when it builds, and a reuse takes the first Q of them and computes only what the marker lacks (SMD-1562)
+
+Change 72 made a `bench-hnsw.ts` pass at ten million rows reusable: 37 min 9 s
+for the run that built the corpus, 7 min 24 s for the one that reused it. Most
+of the seven minutes was the exact oracle — for each of the eight tiers and
+once over the whole table, for each of fifty queries, an exact scan of ten
+million rows with the vector index kept out of the plan: about 450 full scans.
+Its answers are a pure function of the corpus (the seed and the scale), the
+query count and K — the same on every reuse, and recomputed on every reuse.
+Change 72's eighth and ninth review passes named it as the first thing cut for
+space, and its boyscout left it out as new behaviour.
+
+**The cache (`db/bench-hnsw.ts`).** The marker gains one field, `oracle`: for
+each tier key and for the whole table, every query's exact top-K ids in
+distance order, and for each whole-table query the nearest row's cosine (the
+confound the run prints and section L records), with the K and the query count
+they were computed for. A build writes it with the marker, after the exact
+pass — the marker was already written last, once the pass's own confound gate
+had passed, so a refused build still leaves nothing. A reuse reads it where it
+can answer for this run's keys at this K, and takes the first Q of the queries
+it holds: the queries are drawn from the seeded stream after the rows'
+draws, so the first Q of a longer run's queries *are* a shorter run's, and a
+run asking fewer needs nothing computed. A run asking more computes the
+queries the marker lacks — per key, only those — and extends the marker with
+the whole set (`corpus || {oracle}` replaces the key); a marker holding more
+than a run asked is left as it is. The confound is the largest nearest-cosine
+over the first Q whole-table queries, the number a computing run prints for
+the same queries, and the gate on it stays. No new invalidation: the answers
+are valid exactly while the rows are, and they ride inside the marker whose
+physical fingerprint a reuse judges first — every refusal (another scale,
+other parameters, a `rewritten` corpus, counts or regenerated rows that
+differ, a ledger stranger, a drifted migration, a relation that moved, a row
+written since the build's transaction id) exits before the oracle is
+consulted. A marker without the field — written before this change, or
+under another K — is computed for and extended, not refused: the answers are
+derivable, the thirty-minute build is not, and `MARKER_FORMAT` stays at 2
+because an optional field's absence has one meaning. The oracle hands its ids
+back in distance order (the marker's form) and the arms build their sets from
+that; the run line says `reused from the marker (…)`, `n of Q queries from the
+marker, computing the rest` or nothing, as before; and section L's `source`
+cell for a reused corpus ends `oracle reused`, `oracle computed` or `oracle
+extended (n of Q from the marker)`. At ten million rows and fifty queries the
+field is nine keys × fifty × ten uuids, under 200 KB of jsonb.
+
+**Held to the computation (`db/test-bench-reuse.ts`, new).** The claim that
+matters is that what a reuse takes from the marker is what it would have
+computed, and two builds cannot test it — the parallel HNSW build gives two
+graphs, and two recall figures — so the suite runs the bench six times under
+one kept name at 150,000 rows (the smallest kept scale) and compares on one
+index: a build with five queries; a reuse with three (all the marker's); the
+marker's answers removed, as a marker from before this change has none, and
+three again (computed, the marker extended) — sections A, B, D and E equal the
+previous run's, timings aside, and the confound agrees; six (three from the
+marker, three computed, the marker extended to six); six again (all the
+marker's, the tables as the run that extended it); then the corpus marked
+`rewritten` as a refused reuse leaves it, and a run refused before the
+oracle is consulted. The suite drives `with-postgres.sh` itself, removes the
+volume it kept, and runs in about three minutes; it is not in CI (no container
+runtime there) nor in `ci-parity.sh` (it starts its own containers).
 
 ## Detached from the fork network
 

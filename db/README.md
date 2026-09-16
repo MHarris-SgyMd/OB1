@@ -21,7 +21,9 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
   17 compiled to WASM — no daemon, no container.
 - To run `test-live.ts`: podman or docker, for a throwaway container
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
-  for the benchmarks a few minutes — they build tables up to 100,000 rows.
+  for the benchmarks a few minutes — they build tables up to 100,000 rows;
+  `test-bench-reuse.ts` the same and about three minutes (six bench runs at
+  150,000 rows, in containers it starts itself).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
 
@@ -980,8 +982,10 @@ OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./wi
 OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
-# it, every later run under the same name finds it, checks it, applies any
-# migration the tree gained since, and skips to the oracle. One corpus per name.
+# it and records the exact oracle's answers beside it (SMD-1562); every later
+# run under the same name finds it, checks it, applies any migration the tree
+# gained since, and skips the load, the builds and the exact pass. One corpus
+# per name.
 OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 podman volume rm ob1-pg-keep-hnsw10m   # when done with it (the exit line prints this, with the runtime as found)
 ```
@@ -1055,9 +1059,22 @@ counters and file — refuses the corpus (its heap and graphs are no longer
 the bulk-built ones) and marks it so every later run refuses too;
 then both HNSW relations are read into the page cache, this run's queries'
 confound is taken from the exact pass, and the oracle's premise is re-checked
-whenever the ledger differs from the one it last passed under. Section L's
-`source` column says `loaded` or `reused (built …)` per
-scale, and the run prints what it counted and which files it applied. Under
+whenever the ledger differs from the one it last passed under. The exact pass
+itself is not paid again either (SMD-1562): it is most of a reuse's minutes at
+ten million rows — about 450 full scans — and its answers are a pure function
+of the rows, the queries and K, so the marker keeps them (per tier and for the
+whole table, each query's exact top-10 in distance order, and the nearest
+cosine the confound reads). A reuse takes the first Q of the queries the
+marker holds — the stream's first Q are the same whatever the count asked —
+computes only the ones it lacks (a run with a larger `OB1_BENCH_QUERIES`, or a
+marker from before the answers were kept), and extends the marker with them.
+The answers are trusted exactly as far as the rows are: they ride inside the
+marker the checks above protect, and a corpus that changed is refused before
+they are read. Section L's `source` column says `loaded` or `reused (built …)`
+per scale — and for a reused corpus whether the oracle was `reused`,
+`computed` or `extended (n of Q from the marker)` — and the run prints what it
+counted and which files it applied. `test-bench-reuse.ts` holds the reuse to
+the computation at 150,000 rows (see [Testing](#testing)). Under
 `OB1_PG_KEEP` a run is exactly one scale above 100,000 rows, refused otherwise
 before anything is connected to or dropped (an empty kept volume is the worst
 such a refusal leaves, and the exit line names it): a kept database holds one
@@ -1253,6 +1270,25 @@ off `PATH`):
 ```bash
 podman volume rm ob1-pg-keep-<name>
 ```
+
+The kept corpus and the exact answers its marker keeps (SMD-1562) have a
+suite of their own, which drives `with-postgres.sh` itself and so runs
+without it:
+
+```bash
+bun test-bench-reuse.ts   # six bench runs at 150,000 rows under one kept name, ~3 min; removes the volume it kept
+```
+
+It builds once with five queries, reuses with three (every answer the
+marker's), strips the marker's answers as a marker from before SMD-1562 has
+none and reuses again (computed, and the marker extended), then asks six
+(three from the marker, three computed) and six again (all from the marker) —
+and asserts sections A, B, D and E agree, timings aside, between each run
+that read the marker and the run on the same index that computed; then marks
+the corpus `rewritten` and asserts the next run is refused before the oracle
+is consulted. Two builds would give two HNSW graphs and two recall figures,
+which is why every comparison is on one kept index. Not in CI (no container
+runtime there) and not in `ci-parity.sh` (it starts its own containers).
 
 ### What only the live suite can catch
 

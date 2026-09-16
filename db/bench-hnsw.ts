@@ -142,8 +142,9 @@
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
  *   OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 036: the function before 037
  *
- *   # Keep the ten-million-row corpus between passes: the first run builds it,
- *   # every later run under the same name finds it and skips to the oracle.
+ *   # Keep the ten-million-row corpus between passes: the first run builds it
+ *   # and records the exact pass's answers in its marker; every later run under
+ *   # the same name finds it and skips the load, the builds and the exact pass.
  *   OB1_PG_KEEP=hnsw10m OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
  *
  * Vectors are 64-wide random unit vectors: wide enough that HNSW behaves like
@@ -520,6 +521,11 @@ type LoadStats = {
 //     here, since the runner would not notice it. A kept corpus is never
 //     measured under a schema older than the tree's.
 //
+// And once the rows are vouched for, the exact pass — most of a reuse's
+// minutes at ten million rows — is not paid again either: the marker keeps
+// the pass's answers (`OracleCache`), a reuse takes the first Q of them and
+// computes only what the marker lacks (SMD-1562).
+//
 // The published scales are not kept: the before arm needs 001–013 under the
 // rows, a build that size is seconds, and a kept database holds ONE corpus —
 // a run asking for another scale is refused rather than replacing thirty
@@ -540,14 +546,31 @@ const MARKER_FORMAT = 2;
 const LOAD_STATS_KEYS: Record<keyof LoadStats, true> = { scale: true, schema: true, confound: true, insertS: true, chunkRows: true, chunkS: true, buildS: true, otherIndexes: true, otherIndexesS: true, sizes: true, maintenanceMem: true, workers: true, builtAt: true, source: true };
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
 /**
+ * The exact pass's answers, kept in the marker (SMD-1562): for each tier key
+ * and for the whole table, the exact top-K ids of each query in distance
+ * order, and for each whole-table query the nearest row's cosine (the
+ * confound). At ten million rows the pass is most of a reuse's minutes —
+ * some 450 full scans — and its answers are a pure function of the rows, the
+ * queries (both from the seed and the scale) and K, the same on every reuse.
+ * The stream's first `q` queries are a prefix of any longer run's, so a run
+ * asking fewer takes the first Q of these and a run asking more computes the
+ * rest and extends. Valid exactly while the rows are: the cache rides inside
+ * the marker whose physical fingerprint a reuse judges first, and a corpus
+ * that changed is refused before this is read. A marker without one (written
+ * before this field, or under another K) is computed for and extended, not
+ * refused — the answers are derivable, the build is not.
+ */
+type OracleCache = { k: number; q: number; answers: Record<string, string[][]>; nearest: number[] };
+/**
  * The marker's payload. The scale and build time live in `stats` (the one
  * copy the report reads); `physical` is the four relations' state at the
  * build and `builtXid` the transaction id then, so a reuse can count rows
- * written since — exact at any share, blind to a statistics reset; `rewritten`
+ * written since — exact at any share, blind to a statistics reset; `oracle`
+ * is the exact pass's answers, so a reuse need not compute them; `rewritten`
  * holds the evidence of a change found on a reuse — a corpus so marked is
  * refused on every later run, not only the one that found it (review passes).
  */
-type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; physical: Physical; builtXid: number; rewritten?: string[] };
+type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; physical: Physical; builtXid: number; oracle?: OracleCache; rewritten?: string[] };
 
 /** A kept table that is not the corpus its marker describes — told apart from a dropped connection or a timeout, which are not the corpus's fault (review pass). */
 class NotTheCorpus extends Error {}
@@ -606,9 +629,24 @@ async function writeMarker(sql: SQL, marker: Marker): Promise<void> {
   });
 }
 
-/** Fields of the marker's payload updated in place (`rewritten`, on a refusal). */
+/** Fields of the marker's payload updated in place (`rewritten`, on a refusal; `oracle`, when a reuse computed queries the marker lacked). A top-level key is replaced whole. */
 async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
   await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
+}
+
+/**
+ * The marker's oracle cache where it can answer for THESE keys at this K:
+ * every key holds at least `q` answers and the confound has as many. Null
+ * where it is absent, at another K, or short — computed for, never refused
+ * (the answers are a function of the rows the fingerprint has just vouched
+ * for). Ids are not re-checked against the table: the same fingerprint says
+ * no row was written since they were read.
+ */
+function usableOracle(marker: Marker, keys: string[]): OracleCache | null {
+  const c = marker.oracle;
+  if (!c || c.k !== K || !Number.isInteger(c.q) || c.q < 1) return null;
+  const holds = (a: unknown) => Array.isArray(a) && a.length >= c.q;
+  return holds(c.nearest) && keys.every((key) => holds(c.answers?.[key])) ? c : null;
 }
 
 /** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
@@ -924,9 +962,11 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
  * filter at ten million rows should not cost a sequential scan per query.
  * A null filter is the whole table, with no predicate to evaluate on every
  * row. Correct by construction, slow on purpose where the filter is broad —
- * which is why it runs once per (tier, query) and not once per arm.
+ * which is why it runs once per (tier, query) and not once per arm, and on
+ * a kept corpus once per query ever (the marker keeps the answers). The ids
+ * come back in distance order, the marker's form.
  */
-async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ ids: Set<string>; top: number }> {
+async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ ids: string[]; top: number }> {
   // The distance is selected under an alias and the ORDER BY names the alias:
   // `1 - (embedding <=> q)` in the target list beside `embedding <=> q` in the
   // ORDER BY is two expressions to the planner, and it evaluated the distance
@@ -946,7 +986,7 @@ async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ i
   });
   // `top` is the nearest row's cosine — the confound, read off the same exact
   // scan rather than a second query or an index probe (review passes).
-  return { ids: new Set(rows.map((r: { id: string }) => r.id)), top: rows.length ? 1 - Number(rows[0].d) : -1 };
+  return { ids: rows.map((r: { id: string }) => r.id), top: rows.length ? 1 - Number(rows[0].d) : -1 };
 }
 
 async function chunksCarryParentVectors(sql: SQL): Promise<void> {
@@ -1120,8 +1160,10 @@ type Result = {
 };
 type WalkRow = FilteredResult & { scale: number; label: string; matches: number };
 type BoundsRow = { scale: number; label: string; matches: number; tuples: number; seeded: FilteredResult; defaults: FilteredResult; raised: FilteredResult; exact?: FilteredResult };
+/** Section L's row: the load's stats, and where this run's exact answers came from — `computed`, `reused` (the marker's), or `extended (n of Q from the marker)`. */
+type LoadRow = LoadStats & { oracle: string };
 const results: Result[] = [];
-const loads: LoadStats[] = [];
+const loads: LoadRow[] = [];
 const walk: WalkRow[] = [];
 const bounds: BoundsRow[] = [];
 
@@ -1328,55 +1370,69 @@ for (const n of SCALES) {
     console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, ${stats.otherIndexes.length} other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
     await chunksCarryParentVectors(sql);
   }
-  loads.push(stats);
-
-  // The exact answer for each (tier, query) once — shared by both arms.
+  // The exact answer for each (tier, query) once — shared by both arms — and
+  // over the whole table, for section A's recall control and for the
+  // confound, on both paths: the exact pass sees every row for every query
+  // this run will use (an index probe would see its first ef_search
+  // candidates), and one computation for both paths keeps a loaded and a
+  // reused row comparable. The load's own accumulator stays as the early
+  // abort before the index builds (review passes). On a kept corpus the
+  // answers come from the marker where it holds them: the first `have`
+  // queries of this run are the first `have` of the build's, by the stream's
+  // construction, and the rest — none, on a reuse at the build's Q — are
+  // computed here and the marker extended to hold them (SMD-1562).
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
-  process.stdout.write("  exact oracle      ");
+  const keys = [...withCounts.map((t) => t.key), WHOLE_TABLE];
+  const cache = kept ? usableOracle(kept, keys) : null;
+  const have = Math.min(cache?.q ?? 0, Q);
+  const oracleSource = have === Q ? "reused" : have > 0 ? `extended (${have} of ${Q} from the marker)` : "computed";
+  process.stdout.write(`  exact oracle      ${have === Q ? `reused from the marker (${cache!.q === Q ? `all ${Q} queries` : `the first ${Q} of the ${cache!.q} it keeps`})` : have > 0 ? `${have} of ${Q} queries from the marker, computing the rest ` : ""}`);
   const wants = new Map<string, Set<string>[]>();
-  for (const t of withCounts) {
-    const answers: Set<string>[] = [];
-    for (const q of queries) answers.push((await oracle(sql, q, tierFilter(t.key))).ids);
-    wants.set(t.key, answers);
-    process.stdout.write(".");
-  }
-  // And over the whole table, for section A's recall control — and for the
-  // confound, on both paths: this exact pass sees every row for every query
-  // this run will use (a reuse may have more than the build that checked
-  // them client-side; an index probe would see its first ef_search
-  // candidates), and reporting one computation for both paths keeps a
-  // loaded and a reused row comparable. The load's own accumulator stays as
-  // the early abort before the index builds (review passes).
-  {
-    const answers: Set<string>[] = [];
-    let nearest = -1;
-    for (const q of queries) {
-      const { ids, top } = await oracle(sql, q, null);
-      answers.push(ids);
-      nearest = Math.max(nearest, top);
+  const answers: Record<string, string[][]> = {};
+  const nearest: number[] = cache ? cache.nearest.slice(0, have) : [];
+  for (const key of keys) {
+    const rows: string[][] = cache ? cache.answers[key].slice(0, have) : [];
+    for (const q of queries.slice(have)) {
+      const { ids, top } = await oracle(sql, q, key === WHOLE_TABLE ? null : tierFilter(key));
+      rows.push(ids);
+      if (key === WHOLE_TABLE) nearest.push(top);
     }
+    answers[key] = rows;
+    wants.set(key, rows.map((ids) => new Set(ids)));
+    if (have < Q) process.stdout.write(".");
+  }
+  console.log(" done");
+  {
+    const max = Math.max(-1, ...nearest);
     try {
-      stats.confound = Confound.check(nearest);
+      stats.confound = Confound.check(max);
     } catch (err) {
       // The one gate a reuse with more queries than its build meets first;
       // a refusal with its reason, like every other kept-corpus path.
-      console.error(`\nbench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
+      console.error(`bench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
       process.exit(1);
     }
-    console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
-    process.stdout.write("                    ");
-    wants.set(WHOLE_TABLE, answers);
-    process.stdout.write(".");
+    console.log(`  nearest query-to-row cosine ${max.toFixed(3)} over this run's ${Q} queries, from the exact pass${have > 0 ? ` (${have === Q ? "all" : have} of them the marker's)` : ""} (a repeat would read 1.000)`);
   }
-  console.log(" done");
+  loads.push({ ...stats, oracle: oracleSource });
   // The marker last, once everything a reuse would skip — the load, the
-  // builds, the premise check, the exact pass's own confound gate — has
+  // builds, the premise check, the exact pass and its own confound gate — has
   // finished and passed: an interrupted or refused build leaves nothing that
   // reads as a corpus. Only where the database is kept (the one-scale rule
   // at parse makes this the scale above the before arm's): a throwaway
   // container's marker would serve nothing, and a persistent database reached
-  // some other way is not this bench's to mark.
-  if (!kept && KEPT) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql) });
+  // some other way is not this bench's to mark. A kept marker that answered
+  // for fewer queries than this run asked (or none: written before the cache
+  // existed, or under another K) is extended to what was computed; one that
+  // holds more keeps them.
+  const oracleRecord: OracleCache = { k: K, q: Q, answers, nearest };
+  if (!kept && KEPT) {
+    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: oracleRecord });
+    console.log(`  corpus kept: marker written, with the exact pass's answers for ${Q} queries`);
+  } else if (kept && have < Q) {
+    await amendMarker(sql, { oracle: oracleRecord });
+    console.log(`  marker extended: the exact pass's answers for ${Q} queries${cache ? ` (had ${cache.q})` : " (had none)"}`);
+  }
 
   // Both HNSW relations are read into the page cache here, on BOTH paths,
   // after the exact oracle and just before the first section that walks
@@ -1562,11 +1618,11 @@ await sql.close();
 // ── Report ──────────────────────────────────────────────────────────────────
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
-console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together, with how many there were (the set differs by schema: 023's and 025's three exist only under the whole one). Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MiB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated.\n");
+console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together, with how many there were (the set differs by schema: 023's and 025's three exist only under the whole one). Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MiB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated, and the row says where the exact oracle's answers came from — reused from the marker, computed, or extended (the marker held the first n of this run's queries; the rest were computed and kept).\n");
 console.log("| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |");
 console.log("| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
 for (const l of loads) {
-  const source = l.source === "loaded" ? "loaded" : `reused (built ${when(l.builtAt)})`;
+  const source = l.source === "loaded" ? "loaded" : `reused (built ${when(l.builtAt)}), oracle ${l.oracle}`;
   console.log(
     `| ${l.scale.toLocaleString()} | ${source} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} (${l.otherIndexes.length}) | ${l.maintenanceMem} | ${l.workers} |`
   );
