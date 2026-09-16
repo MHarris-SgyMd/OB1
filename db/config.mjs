@@ -683,7 +683,7 @@ export function migrationValues(overrides = {}) {
     HNSW_SEED_MAX_SCAN_TUPLES: String(HNSW_SEED_MAX_SCAN_TUPLES),
     HNSW_SEED_SCAN_MEM_MULTIPLIER: String(HNSW_SEED_SCAN_MEM_MULTIPLIER),
     MATCH_COUNT_CEILING: String(MATCH_COUNT_CEILING),
-    // 036's gate on the routing count: the pages it samples, and the heap size
+    // 037's gate on the routing count: the pages it samples, and the heap size
     // under which it does not sample at all. The floor is the one value a
     // suite overrides — to 0, so a table of a few thousand rows reaches the
     // gate (test-schema [8e], test-live [5d]); the shipped default otherwise.
@@ -1162,14 +1162,14 @@ export const BOUNDS_IN_FORCE_SQL =
 export const MATCH_COUNT_CEILING = 500;
 
 /**
- * The gate on match_thoughts' routing count (migration 036, SMD-1463). Every
+ * The gate on match_thoughts' routing count (migration 037, SMD-1463). Every
  * filtered call used to open with the capped GIN collection — `SELECT id …
  * WHERE metadata @> filter … LIMIT v_exact + 1` — and GIN builds its whole
  * bitmap before the LIMIT can stop anything, so that statement cost the
  * number of MATCHING rows (~50 ns each: 25–27 ms at 50% of a million rows, 240
- * at 50% of ten million) before the walk began. 036 samples the heap first —
+ * at 50% of ten million) before the walk began. 037 samples the heap first —
  * ROUTE_SAMPLE_PAGES pages through TABLESAMPLE SYSTEM, ~0.15 ms at the floor
- * and growing ~2 ns a heap page (a millisecond at ten million rows; 036's
+ * and growing ~2 ns a heap page (a millisecond at ten million rows; 037's
  * header, SMD-1526) — and skips the collection when the sample says the filter is
  * far too broad for the exact branch. The sample runs only on a heap of at
  * least ROUTE_ESTIMATE_MIN_PAGES pages (64 MB; some 160,000 rows at the

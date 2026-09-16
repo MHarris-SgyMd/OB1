@@ -368,9 +368,9 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
   assert(Number(mt) === 10 && Number(kw) === 25, `match_thoughts declares ROWS 10 and search_thoughts_keyword ROWS 25 on a real server (${mt}, ${kw})`);
 }
 
-console.log("\n[5d] The routing count is skipped when a sample of the heap says the filter is far too broad, and runs otherwise exactly as before (migration 036)");
+console.log("\n[5d] The routing count is skipped when a sample of the heap says the filter is far too broad, and runs otherwise exactly as before (migration 037)");
 {
-  // 036 gates 014's capped GIN collection — the statement every filtered call
+  // 037 gates 014's capped GIN collection — the statement every filtered call
   // opened with, whose cost is the number of matching rows — behind a sample
   // of ROUTE_SAMPLE_PAGES pages, skipping it when the sample puts the filter
   // at ten times the exact threshold on eight hits over three pages. The skip
@@ -386,7 +386,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
   // Read by the finally block below as well as the section.
-  const opts036 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("036") };
+  const opts037 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("037") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
   let failure: unknown;
   try {
@@ -403,14 +403,14 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
     assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
-    // The floor lowered to 0 for the section, so the gate runs on this heap: 036
+    // The floor lowered to 0 for the section, so the gate runs on this heap: 037
     // applied through test-support with the one override SchemaOptions carries.
-    await applyMigrations(URL_, { ...opts036, routeEstimateMinPages: 0 });
-    assert(/IF v_pages >= 0 THEN/.test(await body()) && /TABLESAMPLE SYSTEM \(v_pct\)/.test(await body()), "036 is installed with its floor at 0: the sample runs on every filtered call to this table");
+    await applyMigrations(URL_, { ...opts037, routeEstimateMinPages: 0 });
+    assert(/IF v_pages >= 0 THEN/.test(await body()) && /TABLESAMPLE SYSTEM \(v_pct\)/.test(await body()), "037 is installed with its floor at 0: the sample runs on every filtered call to this table");
 
     // The observable: 014's collection is one scan of the GIN index per call,
     // and nothing else in a call to this table scans it the same way twice — so
-    // the difference in GIN scans per call between 020's body and 036's, on the
+    // the difference in GIN scans per call between 020's body and 037's, on the
     // same table, is the collection skipped. pg_stat counts are flushed on
     // request (PG 15+), then read after one more statement.
     const ginScans = async () => {
@@ -445,12 +445,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const THIN = '{"thin": true}';
     const gatedBroad = await measure(BROAD);
     const gatedThin = await measure(THIN);
-    assert(gatedBroad.agree === QUERIES, `under 036, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedBroad.agree === QUERIES, `under 037, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
     assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
 
     // 020's body on the same table — the collection on every filtered call.
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-    assert(!/TABLESAMPLE/.test(await body()), "020 re-applied over 036: the body has no sample (the state a hand re-apply of 020 leaves; preflight's remedy names 036 for that reason)");
+    assert(!/TABLESAMPLE/.test(await body()), "020 re-applied over 037: the body has no sample (the state a hand re-apply of 020 leaves; preflight's remedy names 037 for that reason)");
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
@@ -458,7 +458,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // which a binomial draw of ~8 pages fails about one time in a hundred; the
     // rest of a call's GIN scans (the oracle's, the walk's bitmap) are the same
     // under both bodies and cancel.
-    assert(saved >= 0.8 && saved <= 1.0, `on the broad filter 036 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 036: ${gatedBroad.scansPerCall.toFixed(2)})`);
+    assert(saved >= 0.8 && saved <= 1.0, `on the broad filter 037 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 037: ${gatedBroad.scansPerCall.toFixed(2)})`);
     assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
@@ -480,7 +480,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
-    // leave 25,000 rows and no HNSW index to [6]..[16] (first review pass): 036
+    // leave 25,000 rows and no HNSW index to [6]..[16] (first review pass): 037
     // with its floor, and 027, because 020's file also redefines
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
@@ -493,8 +493,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     try {
       await sql`DELETE FROM thoughts`;
       await sql.unsafe(String(hnswDef));
-      await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
-      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      await applyMigrations(URL_, { ...opts037, only: (f) => f.startsWith("027") || f.startsWith("037") });
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `037 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
       assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
         "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
     } catch (cleanup) {

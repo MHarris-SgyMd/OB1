@@ -1,5 +1,5 @@
 -- ============================================================================
--- 036 — match_thoughts samples the heap before it counts the filter: the
+-- 037 — match_thoughts samples the heap before it counts the filter: the
 --        capped GIN collection every filtered call opened with is skipped
 --        when eight random pages already show the filter far too broad for
 --        the exact branch (SMD-1463)
@@ -95,9 +95,8 @@
 --   above — about 1e-5 or less for uniform or contiguous matches at any
 --   size the gate runs at, about 2e-3 for the thin-spread layout at the
 --   floor and falling as the cube of the heap — and the measurement below
---   found none
---   in a thousand draws at each of five such filters, and the thirteen above
---   in twenty thousand at the sixth.
+--   found none in a thousand draws at each of five such filters, and the
+--   thirteen above in twenty thousand at the sixth.
 --
 --   Under the floor nothing changes. The floor is the point where the bitmap
 --   can cost more than the sample: at 50 ns a matching row, a heap of
@@ -254,7 +253,7 @@
 --     three quarters of a 200,000-row table deleted and plain-VACUUMed, the
 --     50% filter was skipped in 309 of 1,000 draws and the 10% filter in
 --     154 (984 and 960 on the same 200,000-row table before the delete) —
---     the pre-036 cost returns, nothing worse. VACUUM FULL restores the
+--     the pre-037 cost returns, nothing worse. VACUUM FULL restores the
 --     density; SMD-1526's TID-range sample would count sampled pages exactly.
 --     A heap that is large in pages but few in rows (long content, TOASTed
 --     metadata) reaches the gate at fewer rows, where the collection
@@ -321,7 +320,7 @@
 --     the two locals at entry                     0.005 ms
 --
 --   Through the function, db/bench-hnsw.ts before and after this file on the
---   same machine (FORK.md change 68 has the tables; section C prints the
+--   same machine (FORK.md change 70 has the tables; section C prints the
 --   sample's own cost beside the collection's at every scale): the 50% tier
 --   241 ms → 13 at ten million rows and 36.5 → 10.4 at a million, the 10%
 --   tier 138 → 45 and 47 → 37, the thin tiers unchanged but for the sample
@@ -343,7 +342,7 @@
 --   extractBody read for test-schema [8e] and bench-hnsw.ts section C. A
 --   successor
 --   that removes the gate should say why in its header and expect FORK.md
---   change 68's tables to come back.
+--   change 70's tables to come back.
 --
 -- Prerequisites
 --   Migration 020 (the signature this file redefines). pgvector 0.8.0 or
@@ -469,7 +468,7 @@ DECLARE
   -- filter` to build the matched set, two GIN scans and two rounds of heap
   -- fetches per call, under two snapshots (eleventh review pass).
   v_ids        uuid[];
-  -- The gate on that collection (036). The heap's size in pages, exact and
+  -- The gate on that collection (037). The heap's size in pages, exact and
   -- cheap (pg_relation_size is a stat of the main fork; to_regclass resolves
   -- the name on every call, so a cached plan never holds a dropped table's
   -- OID — the header says what a temp table shadowing the name does), and
@@ -522,7 +521,7 @@ BEGIN
   -- its whole bitmap for the filter before the first row comes back, so what
   -- the LIMIT caps is the heap fetches (and the recheck each one carries), not
   -- the bitmap — db/bench-hnsw.ts section C explains this statement on the
-  -- broadest and the empty filter for that reason. Since 036 that collection
+  -- broadest and the empty filter for that reason. Since 037 that collection
   -- is gated: on a heap of {{ROUTE_ESTIMATE_MIN_PAGES}} pages or more, a
   -- sample of {{ROUTE_SAMPLE_PAGES}} pages is read first, and when it shows
   -- the filter matching far more than v_exact thoughts the collection is not
@@ -574,7 +573,7 @@ BEGIN
     ORDER BY 6 DESC, t.id
     LIMIT v_count;
   ELSE
-    -- The gate (036). On a heap large enough for the collection below to cost
+    -- The gate (037). On a heap large enough for the collection below to cost
     -- more than a sample of it, read {{ROUTE_SAMPLE_PAGES}} random pages —
     -- TABLESAMPLE SYSTEM picks whole pages, so the read is a handful of
     -- buffers whatever the table holds, plus ~2 ns a heap page for the
@@ -602,7 +601,7 @@ BEGIN
       -- the exact threshold or more; at least eight sampled rows passed, so
       -- one or two lucky rows on a huge table cannot decide; and they sit on
       -- at least three different pages, so one page of clustered matches
-      -- cannot either. Anything less runs the collection, as before 036: a
+      -- cannot either. Anything less runs the collection, as before 037: a
       -- filter the gate lets through costs what it always cost, a filter it
       -- wrongly skipped would go to the walk, which is correct but slower
       -- for a thin filter and, at a million rows, can return short — so the

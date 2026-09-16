@@ -690,10 +690,10 @@ console.log("\n[8d] rows without a vector or chunks do not count towards the wal
   assert(got.rows.every((r) => r.content.startsWith("scoreable")), "…and only those");
 }
 
-// ── 8e. Migration 036 — a sample of the heap before the routing count ────────
+// ── 8e. Migration 037 — a sample of the heap before the routing count ────────
 //
 // Every filtered call opened with the capped GIN collection, whose cost is the
-// number of matching rows — 240 ms at 50% of ten million (SMD-1018). 036 reads
+// number of matching rows — 240 ms at 50% of ten million (SMD-1018). 037 reads
 // eight random pages first, on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or
 // more, and skips the collection when the sample puts the filter at ten times
 // the exact threshold on at least eight hits over at least three pages. PGlite
@@ -703,11 +703,11 @@ console.log("\n[8d] rows without a vector or chunks do not count towards the wal
 // the threshold — and the answers are still exact. The skip itself is
 // db/test-live.ts [5d]'s, on a real server with rows enough to reach it.
 
-console.log("\n[8e] Migration 036: the routing count is gated by a sample of the heap — the shape, the floor, and exactness with the gate reached");
+console.log("\n[8e] Migration 037: the routing count is gated by a sample of the heap — the shape, the floor, and exactness with the gate reached");
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("036"), `036 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
+  assert(lastDefinerOf("match_thoughts").startsWith("037"), `037 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
   assert(/TABLESAMPLE SYSTEM \(v_pct\)/.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src),
     "the shipped body samples the heap with TABLESAMPLE SYSTEM into the three counts the gate reads");
   assert(new RegExp(`100\\.0 \\* ${ROUTE_SAMPLE_PAGES} / v_pages`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
@@ -759,9 +759,9 @@ console.log("\n[8e] Migration 036: the routing count is gated by a sample of the
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
   // rows are not — so the collection still runs and the answers hold.
-  const file036 = files.find((f) => f.startsWith("036"))!;
-  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file036), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
-  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "036 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
+  const file037 = files.find((f) => f.startsWith("037"))!;
+  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file037), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
+  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "037 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
   await agree("with the gate reached");
   // The gate's own input on this table, computed as the body computes it: the
   // sample scaled to the heap is under ten times the threshold, which is why
@@ -783,7 +783,7 @@ console.log("\n[8e] Migration 036: the routing count is gated by a sample of the
   assert(wouldSkip === 0,
     `five draws of the sample on 1,000 rows (hits/hit pages/pages seen: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here`);
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("036") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("037") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -1840,10 +1840,10 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const kwPlan = await plan(`SELECT * FROM search_thoughts_keyword('zylotrope', 25, 0, '{}'::jsonb)`);
   assert(/Function Scan on search_thoughts_keyword\s+\(cost=[^)]*rows=25\b/.test(kwPlan), `…and 25 from search_thoughts_keyword (${kwPlan.split("\n")[0]})`);
 
-  // The candidate scan is 014's, byte for byte, through 019, 020 and 036: the
+  // The candidate scan is 014's, byte for byte, through 019, 020 and 037: the
   // three RETURN QUERY blocks' CTEs (direct, chunked, best) and the routing
   // statement. 020 changed each branch's final SELECT and nothing above it;
-  // 036 wrapped the routing statement in the gate's IF (so it is indented two
+  // 037 wrapped the routing statement in the gate's IF (so it is indented two
   // more spaces — compared with whitespace collapsed) and changed nothing in
   // it; this holds "carried verbatim" for the part that decides the plan.
   // Re-applying 014 gives 014's text to compare against — as a SECOND
@@ -1878,11 +1878,11 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
   // Deliberately pinned, as [20] pinned 019 before 020 landed and 020 before
-  // 036: 019 last defines the keyword function, 036 match_thoughts. A
+  // 037: 019 last defines the keyword function, 037 match_thoughts. A
   // successor that redefines either fails here on purpose, and the
   // expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("036"),
-         `019 is the last definer of search_thoughts_keyword and 036 of match_thoughts (${restored.join(", ")})`);
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("037"),
+         `019 is the last definer of search_thoughts_keyword and 037 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.

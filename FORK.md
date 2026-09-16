@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-eight numbered changes on top of the pin. Seven fix defects found in an
+Seventy numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–68 are the numbered `###` sections** further down, which is
+sections. Changes **18–70 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -1890,7 +1890,7 @@ tier's whole latency. The mitigation the twelfth review pass declined for want
 of a number — estimate the match count from `pg_class.reltuples` and the
 planner's `@>` selectivity, or a `TABLESAMPLE`, and run the capped collection
 only when the estimate is plausibly under the threshold — now has its number
-and is SMD-1463 (done: migration 036, change 68). And the plan mode: plpgsql runs a statement's first five
+and is SMD-1463 (done: migration 037, change 70). And the plan mode: plpgsql runs a statement's first five
 executions on custom plans and may switch to a generic one after; for the walk
 branch the generic plan has the filter as a parameter and a flat estimate, and
 section C shows what that costs at a million rows — the 50% tier 292 ms
@@ -8878,7 +8878,7 @@ nothing.
 they now use is this fork's.
 
 
-### 68. The routing count is gated by a sample of the heap — migration 036 reads eight random pages before 014's capped GIN collection and skips it when the sample says the filter is far too broad for the exact branch (SMD-1463)
+### 70. The routing count is gated by a sample of the heap — migration 037 reads eight random pages before 014's capped GIN collection and skips it when the sample says the filter is far too broad for the exact branch (SMD-1463)
 
 Change 28's "At scale" section ended on two costs that grow with the table, and
 this is the first of them. Every filtered `match_thoughts` call since migration
@@ -8901,7 +8901,7 @@ keep the empty filter at one GIN probe, and hold `test-schema` [8b], [8c] and
 [8d]. The last held up to about a million rows; the third finding below says
 where and why not beyond.
 
-**Migration 036.** On a heap of at least 8,192 pages (64 MB), a filtered call
+**Migration 037.** On a heap of at least 8,192 pages (64 MB), a filtered call
 first reads eight random pages of `thoughts` through `TABLESAMPLE SYSTEM` and
 counts three things: the sampled rows that pass the filter and carry a vector
 (`hits`), the distinct pages those rows sit on (`hit_pages`), and the distinct
@@ -8952,7 +8952,7 @@ page count and the floor are `config.mjs` constants (`ROUTE_SAMPLE_PAGES`,
 and the tests read one value; they are not operator knobs, and a suite lowers
 the floor only to reach the gate on a small table (`SchemaOptions.routeEstimateMinPages`).
 The threshold, the three branches, the walk's bounds and the plan mode are
-untouched — SMD-1464's questions. 036 is now the last definer of
+untouched — SMD-1464's questions. 037 is now the last definer of
 `match_thoughts`, which is what preflight's remedy and the suites'
 `restoreShipped` apply *alone*, so it carries 020's `DROP` of the 4-argument
 form and 020's replay of that form's privileges onto the new one: a hand
@@ -8965,7 +8965,7 @@ database in order the `DROP` finds nothing, the capture reads an empty ACL, and
 image in preflight's signature remedy: "apply 020" re-installs 020's
 `search_thoughts_hybrid` too, without change 48's relative floor — test-live
 [5d]'s first run did exactly that and [15] failed behind it — so the remedy
-now names 020, then 027 and 036, the last definers of the two functions.
+now names 020, then 027 and 037, the last definers of the two functions.
 
 **Why a sample, and why this one — measured on a 500,000-row scratch corpus of
 the bench's shape before the file was written.**
@@ -9045,7 +9045,7 @@ times in ten or better.
 
 **Through the function, before and after, on the machine change 28 describes**
 (Apple M5 Pro, podman VM, 8 vCPUs, 14.8 GB, pgvector 0.8.6 at its image
-defaults; `db/bench-hnsw.ts`, the before pass from the tree without 036 and
+defaults; `db/bench-hnsw.ts`, the before pass from the tree without 037 and
 the after pass with it — reproducible from one tree as `OB1_BENCH_UPTO=035`
 against the default, which the bench gained for this). Section B, ten asked,
 median over 50 random queries:
@@ -9168,10 +9168,10 @@ concurrency run (218 differing answers across 800 calls, 0 under
 `plan_cache_mode = force_custom_plan`) and traced every difference to that
 flip; the sample statement stayed on custom plans throughout. It is
 SMD-1464's plan-mode question, with one more fact for it. Preflight has no
-recogniser for 036's body (a 020 paste
-under a 036 ledger passes; the operator's path above), as it has none for
-027's: a `TABLESAMPLE SYSTEM (v_pct)` regex or a sentinel of 036's own would
-give the `filtered search` check a "036's body" detail, the way `atomic
+recogniser for 037's body (a 020 paste
+under a 037 ledger passes; the operator's path above), as it has none for
+027's: a `TABLESAMPLE SYSTEM (v_pct)` regex or a sentinel of 037's own would
+give the `filtered search` check a "037's body" detail, the way `atomic
 capture` names 035's — a line for the next preflight change, not this one.
 The sample's per-page cost and its `pages_seen` denominator
 are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
@@ -9190,13 +9190,13 @@ reasons change 28 gives.
 
 **Verified:** `db/test-schema.ts` 855/855 under PGlite, [8e] new (the
 shape, the floor, exactness with the gate reached at floor 0) and [20]'s
-definer pin moved to 036; `db/test-live.ts` 492/492 on real Postgres, [5d]
+definer pin moved to 037; `db/test-live.ts` 492/492 on real Postgres, [5d]
 new (25,000 rows at the configured width, the gate reached, the broad filter
 makes one GIN scan fewer per call than under 020's body and the thin filter
-the same, both exact); `db/test-upgrade.ts` 173/173, [14] new (036 onto a
+the same, both exact); `db/test-upgrade.ts` 173/173, [14] new (037 onto a
 populated 035: no column, signature, row or privilege moves; 014 re-applied by
-hand, then 036 alone, leaves one form); `server-portable` `tsc --noEmit` clean;
-`bun scripts/check-fork-consistency.mjs` PASS (check 7 reads 036 as
+hand, then 037 alone, leaves one form); `server-portable` `tsc --noEmit` clean;
+`bun scripts/check-fork-consistency.mjs` PASS (check 7 reads 037 as
 `match_thoughts`' owner from the files); `bench-hnsw.ts` before and after at
 100,000, 1,000,000 and 10,000,000 rows, above. Three review passes, two
 reviewers each. Pass 1 (SQL and TypeScript): the sample's cost model (~2 ns a
@@ -9205,7 +9205,7 @@ and the bloat bullet's direction (an empty sampled page inflates the estimate
 rather than deflating it) — all stated above, SMD-1526 filed; on the
 TypeScript side nothing above LOW — an [8e] assertion that passed by the
 punctuation of a comment, a catch-all in the bench that would have read a
-rewrite failure as "before 036", cleanup-on-failure in [5d] and [8e], a stale
+rewrite failure as "before 037", cleanup-on-failure in [5d] and [8e], a stale
 change number on the README line this change extended (034 is change 65), the
 older missing-hybrid remedy still stopping at 020, `OB1_BENCH_UPTO` accepting
 a prefix before 014. Pass 2 (docs and run-it): pass 1's thin-spread figures
@@ -9234,19 +9234,19 @@ is sized while the cached plans read the real one, the safe side under the
 floor — and [5d]'s cleanup no longer masks the section's own error.
 
 **The operator's path, walked in pass 3.** A brain at 035 with rows, upgraded
-by `bun db/migrate.ts`: "036 applied, 1 applied, 35 skipped", one
+by `bun db/migrate.ts`: "037 applied, 1 applied, 35 skipped", one
 `match_thoughts` carrying the sample, the two SET clauses and `ROWS 10`;
 preflight run as the compose stack runs it reports `search signatures`,
 `filtered search`, `candidate scan`, `hybrid search`, `atomic capture` and
-`migration ledger` all ok, nothing attributable to 036. The same brain with
-020's file pasted over 036 by hand: preflight still reports ok — it has no
-recogniser for 036's body (nor for 027's), the ledger records both, and both
-020 bodies answer every call correctly, so what is lost is 036's cost bound
+`migration ledger` all ok, nothing attributable to 037. The same brain with
+020's file pasted over 037 by hand: preflight still reports ok — it has no
+recogniser for 037's body (nor for 027's), the ledger records both, and both
+020 bodies answer every call correctly, so what is lost is 037's cost bound
 and 027's ranking floor, a degradation preflight's stated scope does not
 cover; the ledgered remedy it prints for every stale-body state,
 `migrate.ts --reapply`, restores both. A brain built by hand from the guide
 and adopted with `--baseline`: preflight fails loudly on `filtered search`
-and `hybrid search`, and following the printed remedies ends at 036 and 027
+and `hybrid search`, and following the printed remedies ends at 037 and 027
 with every check ok. The PostgREST contract — six argument names, the
 `RETURNS TABLE` shape — is byte-identical to 020's. The README's two bench
 commands run and label their arms `after (014–035)` (no estimate row, the
