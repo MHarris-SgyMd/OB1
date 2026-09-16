@@ -1122,8 +1122,35 @@ function topLevel(block, depth = 1) {
   });
   return out;
 }
-/** SQL with its dash-dash line comments and slash-star block comments blanked: a column named in a comment is not a column, and one beside a comment is (the two review passes). */
-const uncommented = (sqlText) => sqlText.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ");
+/**
+ * SQL from a statement's head onward with its dash-dash line comments and
+ * slash-star block comments blanked (newlines kept), and a single-quoted
+ * string's text blanked between its quotes — a dash pair, a comma or a column
+ * name inside one is text: a column named in a comment or a string is not a
+ * column, one beside a comment is, and a comment's own `;`, `WHERE` or `(` no
+ * longer ends the list early — the three review passes.
+ * Started at the head, where the text is SQL, so a quote in the prose before
+ * it does not open a string.
+ */
+function sqlUncommented(sqlText) {
+  let out = "", i = 0, quote = false;
+  while (i < sqlText.length) {
+    const ch = sqlText[i];
+    if (quote) { out += ch === "'" || ch === "\n" ? ch : " "; if (ch === "'") quote = false; i++; continue; }
+    if (ch === "'") { quote = true; out += ch; i++; continue; }
+    if (ch === "-" && sqlText[i + 1] === "-") { while (i < sqlText.length && sqlText[i] !== "\n") { out += " "; i++; } continue; }
+    if (ch === "/" && sqlText[i + 1] === "*") {
+      const end = sqlText.indexOf("*/", i + 2);
+      const stop = end < 0 ? sqlText.length : end + 2;
+      for (; i < stop; i++) out += sqlText[i] === "\n" ? "\n" : " ";
+      continue;
+    }
+    out += ch; i++;
+  }
+  return out;
+}
+/** The text from `from` on, comments blanked, as far as a statement can reasonably run. */
+const sqlFrom = (text, from) => sqlUncommented(text.slice(from, from + 4000));
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
 const literalCarries = (text, open) => {
   const block = blockAt(text, open);
@@ -1182,16 +1209,19 @@ function thoughtWritesAroundIn(text) {
   }
   // SQL: `UPDATE [ONLY] [public.]thoughts [[AS] alias] SET <list>` up to WHERE/RETURNING/;, identifiers
   // quoted or not — the list naming either column as an assignment target, or the tuple form `SET (a, b) = …`.
-  for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/gi)) {
-    const list = uncommented(m[1]);
+  // The head is found in the text; the list is read from the text with its comments blanked, so a
+  // comment's `;` or `WHERE` does not end it (the third review pass).
+  for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b/gi)) {
+    const list = /^([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/.exec(sqlFrom(text, m.index + m[0].length))[1];
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
     // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
     if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
   }
   // SQL: `INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` — the column list naming either
   // column (SMD-1524). No list, no rule: `INSERT INTO thoughts VALUES …` and `… SELECT …` say nothing.
-  for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(([^()]*)\)/gi)) {
-    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(uncommented(m[1]))) lines.add(lineOf(m.index));
+  for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(/gi)) {
+    const list = /^([^()]*)\)/.exec(sqlFrom(text, m.index + m[0].length));
+    if (list && /(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(list[1])) lines.add(lineOf(m.index));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -1273,6 +1303,14 @@ const THOUGHT_WRITE_PROBES = [
   // The second review pass: a comment after the comma in a SET list, a block comment beside a column.
   'UPDATE thoughts SET metadata = $1, -- note\n  content = $3 WHERE id = $2;',
   'INSERT INTO thoughts (content /* the text */, metadata) VALUES ($1, $2);',
+  // The third review pass: a comment whose text would end the list — a `;`, a WHERE, a paren — and a
+  // dash pair inside a string beside a real target.
+  'UPDATE thoughts SET metadata = $1, -- v2; was v1\n  content = $2 WHERE id = $3;',
+  'UPDATE thoughts SET metadata = $1 -- where content lives\n, content = $2 WHERE id = $3;',
+  'INSERT INTO thoughts (content, -- (the text)\n  metadata) VALUES ($1, $2);',
+  "UPDATE thoughts SET summary = 'a -- b', content = $2 WHERE id = $1;",
+  'UPDATE thoughts SET metadata = $1 /* where */ , embedding = $2 WHERE id = $3;',
+  'INSERT INTO thoughts (metadata /* (note) */, content) VALUES ($1, $2);',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1323,6 +1361,9 @@ const THOUGHT_WRITE_NON_PROBES = [
   // The second review pass: the same in a block comment, and in a SET list.
   'INSERT INTO thoughts (metadata /* content */) VALUES ($1);',
   'UPDATE thoughts SET metadata = $1 /* content = $3, */ WHERE id = $2;',
+  // The third review pass: the column named inside a string is text, not a target.
+  "UPDATE thoughts SET summary = 'x -- content = 1' WHERE id = $1;",
+  "UPDATE thoughts SET summary = 'see, content = old' WHERE id = $1;",
 ];
 const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([

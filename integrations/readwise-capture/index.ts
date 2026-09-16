@@ -10,7 +10,8 @@
 // 016's trigger fills neither. No audit actor is named: the receiver holds a shared
 // secret, not a key, and 008 keeps a NULL actor for a write without one. The enhanced-thoughts
 // columns the function does not know follow by an update carrying neither content nor
-// vector, on a fresh row only. FORK.md change 70; extensions/test-writes.ts drives it
+// vector, where they are NULL — a fresh row's, or a half-shaped row's on re-capture. FORK.md
+// change 70; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
@@ -232,22 +233,26 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     const result = (data ?? {}) as { id?: string; existed?: boolean };
 
-    // The enhanced-thoughts columns the function does not know, by a raw update
-    // that carries neither content nor vector, so nothing it writes goes stale —
-    // WHERE source_type IS NULL: a fresh row takes them; a row whose first write
-    // was interrupted between the function and this update (a crash, a 500 and
-    // Readwise's retry) takes them on the re-capture, which the dedupe above
-    // cannot see (it filters on source_type) and the function answers `existed`;
-    // a complete row is left as it is, a hand-set type included.
+    // The enhanced-thoughts columns the function does not know, by raw updates
+    // that carry neither content nor vector, so nothing they write goes stale —
+    // each column WHERE it IS NULL: a fresh row takes both; a row whose first
+    // write was interrupted between the function and these updates (a crash, a
+    // 500 and Readwise's retry) takes them on the re-capture, which the dedupe
+    // above cannot see (it filters on source_type) and the function answers
+    // `existed`; a column already set is left as it is — a hand-set type on a
+    // row another path captured first keeps it while source_type is filled, so
+    // the dedupe sees the row from now on (the third review pass).
     if (result.id) {
-      const { error: sidecarError } = await supabase
-        .from("thoughts")
-        .update({ source_type: "readwise", type: "reference" })
-        .eq("id", result.id)
-        .is("source_type", null);
-      if (sidecarError) {
-        console.error("Supabase update error:", sidecarError);
-        return new Response("error", { status: 500 });
+      for (const [column, value] of [["source_type", "readwise"], ["type", "reference"]] as const) {
+        const { error: sidecarError } = await supabase
+          .from("thoughts")
+          .update({ [column]: value })
+          .eq("id", result.id)
+          .is(column, null);
+        if (sidecarError) {
+          console.error("Supabase update error:", sidecarError);
+          return new Response("error", { status: 500 });
+        }
       }
     }
 

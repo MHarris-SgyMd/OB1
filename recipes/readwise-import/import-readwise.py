@@ -193,18 +193,20 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
     function's `existed` — its metadata is merged, its vector replaced, and
     the highlight is counted as already present. The enhanced-thoughts
     columns the function does not know (source_type, type — the same for
-    every highlight) follow by ONE update per batch that carries neither
-    content nor vector, over every row of the batch WHERE source_type IS
-    NULL: the fresh rows take them, a row whose earlier run was interrupted
-    between the function and this update takes them now (already_imported()
+    every highlight) follow by one update per column per batch that carries
+    neither content nor vector, over every row of the batch WHERE that column
+    IS NULL: the fresh rows take both, a row whose earlier run was interrupted
+    between the function and these updates takes them now (already_imported()
     filters on source_type, so it re-sends such a row and the function answers
-    `existed`), and a complete row is left as it is.
+    `existed`), and a column already set — a hand-set type on a row another
+    path captured first — is left as it is.
 
     No actor is named in the payload: this is a script run by hand, and 008
     keeps a NULL actor for a write made without an access key.
     """
     ids: list[str] = []
     fresh = 0
+    loop_error: Optional[BaseException] = None
     try:
         for thought in thoughts:
             result = (
@@ -233,14 +235,30 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
             ids.append(str(data["id"]))
             if not data.get("existed"):
                 fresh += 1
+    except BaseException as e:
+        loop_error = e
+        raise
     finally:
         # The rows stored so far take their columns whether or not the batch
         # finished — a refused reply or an interrupt after the function's write
-        # must not leave them half-shaped (the second review pass).
+        # must not leave them half-shaped (the second review pass). If this
+        # update fails while the loop's own error is propagating, that error
+        # stays the one reported; the rows take their columns on the next run
+        # (the third review pass).
         if ids:
-            supabase.table("thoughts").update(
-                {"source_type": thoughts[0]["source_type"], "type": thoughts[0]["type"]}
-            ).in_("id", ids).is_("source_type", "null").execute()
+            try:
+                for column in ("source_type", "type"):
+                    supabase.table("thoughts").update(
+                        {column: thoughts[0][column]}
+                    ).in_("id", ids).is_(column, "null").execute()
+            except Exception as sidecar_error:
+                if loop_error is None:
+                    raise
+                print(
+                    f"warning: source_type/type not written for {len(ids)} row(s) "
+                    f"({sidecar_error}); the next run completes them",
+                    file=sys.stderr,
+                )
     return fresh
 
 

@@ -9319,9 +9319,10 @@ re-run backfill should do, and what a raw insert could not (the readwise
 backfill bisected its batches to find the row a unique violation aborted
 them on — gone with the batch). The enhanced-thoughts columns the function
 does not know (`source_type`, `type`, `importance`) follow by an update that
-carries neither content nor vector, on a fresh row only — `existed` skips it,
-so a re-capture leaves a hand-set tier alone, change 69's escalation-only
-stance. Where the writer makes no vector — the auditor's report, the
+carries neither content nor vector — for the bio worker on a fresh row only
+(`existed` skips it), for the receiver and the backfill wherever the columns
+are NULL (the second pass, below) — so a re-capture leaves a hand-set tier
+alone, change 69's escalation-only stance. Where the writer makes no vector — the auditor's report, the
 classification example — `{p_content, p_payload}` resolves to the 2-argument
 form and the row waits, labelled NULL as a vectorless row should be, for a
 re-embed pass; the files say so, and say that this form answers `{id,
@@ -9365,8 +9366,8 @@ outside the rule, said so). The one insert the non-probe list carried as
 shape and the forms a rebase could bring — and ten non-probes: another
 table's insert with a `content` column, the other columns, no column list,
 a metadata-only row, the remedy, prose naming the statement, the
-comprehension the rule cannot see. Fifty-two probes, thirty-nine non-probes
-(two of each from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
+comprehension the rule cannot see. Fifty-eight probes, forty-one non-probes
+(eight and four from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
 entries** — none a bypass a fix here could remove, each a file whose header
 or README says what its rows lack: three deployments whose database is their
 own, built from the guide's shape, where the fork's functions are not —
@@ -9487,7 +9488,49 @@ postgrest-py 2.31's rpc reply is the dict; the classification example's old
 insert fails `42703` on a plain fork brain and on one with the enhanced
 schema, so "failed on any brain" holds; two runs on one container green.
 
-**Not done here.** SMD-1541 (change 69's five servers hold a principal and
+**Review pass 3** (the same two lenses; eight findings, the top ones in the
+passes' own additions and one pre-existing — the stop signal). Check 10's
+comment handling, added in passes 1 and 2, blanked a comment AFTER the
+statement's boundary had been found, so a comment's own text still ended the
+list: `SET metadata = $1, -- v2; was v1` stopped the SET list at the
+comment's `;`, `-- where content lives` at its "where", and a paren inside a
+comment in an INSERT column list broke the list match — three false
+negatives from mundane comments (both reviewers; the running one ran them).
+The rules find the statement's head in the text and read the list from a
+copy blanked from the head onward — line and block comments, and the text of
+single-quoted strings, replaced by spaces with newlines kept, the string
+state starting at the head where the text is SQL, so a quote in the prose
+before it opens nothing; six probes and two non-probes (58/41), among them a
+dash pair and a `content =` inside a string beside a real target. The heal
+filter was one update WHERE `source_type IS NULL` writing both columns, so a
+row another path captured first, typed by hand and without a `source_type`,
+had its type overwritten to `reference` on the re-capture (the running
+reviewer made one); the heal is per column now — `source_type` where it is
+NULL, `type` where it is NULL — in the receiver and the backfill, and the
+test hand-sets a type on a row without `source_type` and re-captures. The
+backfill's `finally` let a failing sidecar update bury the loop's own error
+(the reading reviewer; the running one saw the chained traceback) — the
+loop's error is tracked and stays the one raised, the sidecar's a warning;
+the sidecar's own failure on a clean loop still raises (a fake client for
+all four cases). Prose: the receiver's header, README and this section still
+said "on a fresh row only" from before pass 2; said per writer now. Run for
+real: the actor plumbing end to end over the shim and PostgREST — a
+3-argument call with `actor` names it on 008's `capture` row with
+`actor.source` over `metadata.source`, `update_thought` with `p_actor` as a
+JS object binds as jsonb (005's guard silent) and names it on the `update`
+row, the 2-argument call names it too; `PATCH …&source_type=is.null` updates
+the NULL row once. **Pre-existing, found by driving the bio worker for
+real:** the SQL shim's `ident()` refuses a JSON-path filter column
+(`metadata->>generated_by`), so `consolidation-bio` as shipped on the fork
+answers 500 at its first query and never reaches `upsertProfile` — the
+reason it can only be read here, not driven; the shim fix and the drive are
+SMD-1544. A fresh worktree needs `bun install` in `extensions/` before
+`test-writes.ts` (eight MCP assertions fail without the packages); CI
+installs.
+
+**Not done here.** SMD-1544 (the shim refuses a JSON-path filter column, so
+`consolidation-bio` cannot run on the fork; with that fixed, bio joins the
+driven set). SMD-1541 (change 69's five servers hold a principal and
 pass no actor to `update_thought`/`upsert_thought`; their headers claim the
 actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
@@ -9499,9 +9542,9 @@ thoughts` statements are the fork's fixtures and benches, outside the scan
 as they were for the update rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
-eight hits in eight files before the conversions and PASS after (52 probes,
-39 non-probes, each probe caught on its verb's line; seven exceptions, each
-matching its one line); `../db/with-postgres.sh bun test-writes.ts` 156/156
+eight hits in eight files before the conversions and PASS after (58 probes,
+41 non-probes, each probe caught on its verb's line; seven exceptions, each
+matching its one line); `../db/with-postgres.sh bun test-writes.ts` 157/157
 under podman — the receiver's capture judged column by column, its retry
 answered `duplicate` before any write, the same passage highlighted again one
 row with the newer highlight id and a hand-set tier kept, the book cached and
