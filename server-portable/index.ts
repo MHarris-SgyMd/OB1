@@ -1257,10 +1257,15 @@ function buildServer(principal: Principal): McpServer {
 
 // --- Hono App with Auth + CORS ---
 
+// The methods the MCP endpoint serves. One definition: the CORS preflight
+// advertises it and the catch-all's 405 names it in `Allow`, so the two cannot
+// disagree. GET is absent on purpose — the method guard in the catch-all says why.
+const ALLOWED_METHODS = "POST, DELETE, OPTIONS";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+  "Access-Control-Allow-Methods": ALLOWED_METHODS,
 };
 
 // JSON-RPC error code for unauthorized requests.
@@ -1383,6 +1388,23 @@ app.options("*", (c) => {
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
 app.all("*", async (c) => {
+  // The endpoint speaks Streamable HTTP through a per-request, sessionless
+  // transport: it has no server-initiated stream to offer, so the spec's answer
+  // to a GET is 405 with `Allow`. Answered BEFORE authenticate(). An
+  // authenticated GET used to cost an agent-registry resolve and a server build,
+  // then reach the transport, which opened an SSE stream nothing wrote to or
+  // closed — a socket held until the runtime's idle timeout, once per probe, from
+  // a browser opening the connector URL or any client echoing `?key=` on GET
+  // (upstream #424: mcp-remote's handshake GET waited 60 s for it). Gating the
+  // Accept patch below on POST would not have been enough: the SDK client sets
+  // `Accept: text/event-stream` on its own GET, and it treats a 405 as "no
+  // stream here", which is the answer it wants. HEAD, PUT and PATCH take the
+  // same door. DELETE still reaches the transport, which closes its empty
+  // session and answers 200. FORK.md change 72 (SMD-1259).
+  if (c.req.method !== "POST" && c.req.method !== "DELETE") {
+    return c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS });
+  }
+
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
   // `?key=` does not shadow it. The query form stays because Claude Desktop
@@ -1424,6 +1446,8 @@ app.all("*", async (c) => {
   // Fix: Claude Desktop connectors don't send the Accept header that
   // StreamableHTTPTransport requires. Build a patched request if missing.
   // See: https://github.com/NateBJones-Projects/OB1/issues/33
+  // Only POST and DELETE get this far (the method guard above), so the patch
+  // never tells a GET to expect an event stream — that was SMD-1259's mechanism.
   if (!c.req.header("accept")?.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
     headers.set("Accept", "application/json, text/event-stream");

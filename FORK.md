@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-one numbered changes on top of the pin. Seven fix defects found in an
+Seventy-two numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–71 are the numbered `###` sections** further down, which is
+sections. Changes **18–72 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4842,7 +4842,9 @@ That is a design decision, and it sits with the **method** axis the review passe
 found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
-#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one.
+#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one;
+the method axis is closed by change 72, which answers GET with 405 before
+`authenticate()`. The path axis (a mount point) stays open there too.
 The concrete reason the path axis waits: a mount at `/` makes the connector URL
 the mount point, and a proxy that forwards under an unstripped prefix — the shape
 `deploy/README.md` already anticipates — would then 404 the MCP endpoint itself.
@@ -10341,6 +10343,98 @@ principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/iss
 reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 ---
+
+### 72. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
+
+`server-portable/index.ts`, `server-portable/test-server.ts` ([13]),
+`deploy/smoke.sh` (check 3), `deploy/README.md` (Linear SMD-1259, filed from
+change 42's first review pass; upstream
+[#424](https://github.com/NateBJones-Projects/OB1/issues/424)).
+
+**The defect.** `app.all("*")` handled every method. Beneath it the Accept patch
+— upstream's #33 fix, written for POSTs from Claude Desktop connectors that omit
+the header — set `Accept: application/json, text/event-stream` on GETs too, and
+`StreamableHTTPTransport.handleRequest` then took an authenticated GET as a
+request to open the standalone SSE stream. The transport here is built per
+request and is sessionless: nothing ever wrote to that stream or closed it. The
+response was `200 text/event-stream`, empty, held until the runtime's idle
+timeout — 10–12 s on Bun before the socket reset, longer on Node and Workers
+(SMD-1259's measurement) — and each such GET first cost an agent-registry
+resolve and a server build. Change 42's review reproduced it three ways:
+`GET /?key=…`; `GET //.well-known/…?key=…` (a trailing slash on the base URL
+doubles the slash, which Hono does not match to `/.well-known/*`); and
+`GET /.Well-Known/…` (Hono matches case-sensitively). Upstream #424 reports the
+same hang from mcp-remote, whose handshake GET waited 60 s for it. Any holder of
+a key — a browser opening the connector URL the docs hand out, an uptime checker
+configured with the key, a client echoing `?key=` on GET — could park
+connections at will, and nothing rate-limited it.
+
+**The change.** At the top of the catch-all, before `authenticate()`: a request
+whose method is neither POST nor DELETE gets `405 Method Not Allowed` with
+`Allow: POST, DELETE, OPTIONS` and the CORS headers. That is the Streamable HTTP
+transport's documented answer from a server that offers no server-initiated
+stream. Before auth, so no key shape reaches the agent registry or builds a
+server, and the answer is the same for no key, a wrong key and a revoked one — it
+is about the method, not the caller. HEAD, PUT and PATCH take the same door (the
+transport's own 405 for PUT and PATCH came after auth and named `GET` in its
+`Allow`). DELETE still reaches the transport, which closes its empty session and
+answers 200; the SDK client sends it from `terminateSession()` and accepts 200
+or 405. The method list is one constant: the OPTIONS preflight's
+`Access-Control-Allow-Methods` and the 405's `Allow` read the same string, so
+they cannot disagree. The CORS header thereby loses `GET`, which a browser never
+consults it for — GET is a CORS-safelisted method and is never preflighted.
+
+**What the ticket's smallest fix would have missed.** SMD-1259's second review
+pass offered a method condition on the Accept patch as the minimal fix. Read
+against the SDK client (`@modelcontextprotocol/sdk` 1.24.3,
+`_startOrAuthSse`): the client sets `Accept: text/event-stream` on its own GET,
+so the transport would have opened the stream for it whether or not the patch
+ran. The patch is left as it was, with a comment saying only POST and DELETE now
+reach it. The guard is the fix; gating the patch as well would have been a second
+mechanism with no observable behaviour left to test.
+
+**What the client does with a 405.** Read in the SDK source, not asserted:
+`_startOrAuthSse` cancels the body and returns on 405 — the comment there reads
+"indicates that the server does not offer an SSE stream at GET endpoint … an
+expected case that should not trigger an error" — and any other non-2xx is a
+`StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
+client. A live connector has not been seen to do it; see below.
+
+**Verified.** `test-server.ts` [13], 42 assertions against the real server: nine
+fetch rows — GET under no key, a wrong key, the right key in the header and in
+`?key=`, GET carrying the SDK client's own headers, HEAD, PUT, PATCH, and the
+case-variant discovery path — each asserted for 405, an `Allow` naming the
+served methods, CORS, and a body that is not a JSON-RPC envelope; the
+doubled-slash path written as a raw request line over a socket, because Bun's
+`fetch()` collapses `//` to `/` before sending and a fetch row probed the 404
+route instead (found when that row failed); the OPTIONS preflight's method list
+equal to the 405's; DELETE with a key → 200 and without one → the JSON-RPC
+refusal; POST still reaching the transport. Drilled by disabling the guard, 24
+assertions fail: the fetch rows holding a valid GET fail as `TimeoutError`; the
+raw-socket row as a `200 OK` status line (the stream's headers flush at once; it
+is the body that never ends); the rows without a key as 200 with an envelope;
+HEAD, PUT and PATCH by an `Allow` that names GET, from the transport's own 405
+after auth. The suite's 2 s abort on every routing probe stays: it
+is what turns the failure mode this change closes into a red assertion instead of
+a stuck CI job, so it is the test's teeth, not scaffolding to retire.
+`deploy/smoke.sh` check 3 GETs the endpoint with the key and expects 405 — a
+`000` is the hang meeting `--max-time`; the former checks 3–7 are now 4–8.
+`tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
+281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
+
+**Not verified: a live connector.** The same standing as change 42: a real
+Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
+build of this `main`, each completing `initialize` and listing tools. The SDK
+reading above says they will. It is not the same as seeing it.
+
+**Not done here.** The path axis — mounting the transport at a path and letting
+Hono's `notFound` answer `/favicon.ico`, `/robots.txt` and `/health` without a
+resolve — remains the deployment-contract decision change 42 describes.
+`server/index.ts`, the Deno Edge Function upstream deploys, carries the same
+Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
+their fix for it.
+
+Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
 ## Known issues we did NOT fix
 

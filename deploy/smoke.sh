@@ -88,12 +88,23 @@ done
 [ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
                || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
 
-# 3. Protocol handshake.
+# 3. GET at the endpoint is refused at once. The transport is per-request and
+#    sessionless, so it offers no server-initiated stream, and 405 is the answer
+#    the SDK client sends this GET to hear (it treats 405 as "no stream" and
+#    carries on). Before FORK.md change 72 an authenticated GET here was handed
+#    to the transport and held open until the runtime's idle timeout — the
+#    connector URL opened in a browser, or mcp-remote's handshake, hung. A 000
+#    from curl is that hang meeting --max-time.
+code=$(status -H "x-brain-key: $KEY" "$BASE/")
+[ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (no server stream to offer; the SDK client's expected answer)" \
+                    || bad "GET the endpoint → HTTP $code (expected 405; 000 is the SSE hang — FORK.md change 72)"
+
+# 4. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   | unwrap | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("protocolVersion",""))' 2>/dev/null)
 [ -n "$pv" ] && ok "initialize (protocol $pv)" || bad "initialize returned no protocolVersion"
 
-# 4. The full documented tool surface.
+# 5. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
 # Nine for a write key. update_thought and delete_thought are scope-gated, so a
@@ -101,7 +112,7 @@ tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 expected="capture_thought,delete_thought,fetch,list_supersession_proposals,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
 [ "$tools" = "$expected" ] && ok "all ten tools exposed" || bad "tool surface is '$tools'"
 
-# 5. A read that actually reaches the database. This is the check that catches a
+# 6. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
 stats=$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' \
   | unwrap | python3 -c 'import sys,json;d=json.load(sys.stdin);r=d.get("result",{});print(("ERROR: " if r.get("isError") else "")+r.get("content",[{}])[0].get("text",""))' 2>/dev/null | head -1)
@@ -111,12 +122,12 @@ case "$stats" in
   *)                   bad "thought_stats returned nothing usable" ;;
 esac
 
-# 6. A filtered read, which exercises a different query path.
+# 7. A filtered read, which exercises a different query path.
 listed=$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' \
   | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR" if r.get("isError") else "OK"))' 2>/dev/null)
 [ "$listed" = "OK" ] && ok "list_thoughts served" || bad "list_thoughts errored"
 
-# 7. Keyword search, which is the only read path that touches migration 012 and
+# 8. Keyword search, which is the only read path that touches migration 012 and
 #    the pg_trgm extension. It needs no embedding provider — the smoke stack has
 #    no real OPENROUTER_API_KEY — so unlike search_thoughts it can run here. A
 #    needle that cannot plausibly be in a fresh brain: zero hits is the pass, an

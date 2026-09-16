@@ -58,7 +58,7 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (it needs no `bun install` —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` prints `7 checks: 7 passed, 0 failed`.
+followed by `Started server`. `smoke.sh` prints `8 checks: 8 passed, 0 failed`.
 
 ## Why the server runs preflight before serving
 

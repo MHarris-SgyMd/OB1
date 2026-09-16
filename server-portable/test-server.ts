@@ -55,6 +55,29 @@ async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
   return line ? JSON.parse(line.slice(6)) : null;
 }
 
+/**
+ * A probe for the routing blocks ([11], [13]) that cannot hang or crash the
+ * suite: one 2 s abort that covers the body read too, a transport error reported
+ * by its own name, and the body parsed by the same mcpBody() as [4]–[10] then
+ * tested for the jsonrpc marker — a JSON body that is not an envelope must not
+ * count. The abort is what turns the failure mode both blocks guard against — a
+ * request handed to a stream the per-request transport never closes (SMD-1259)
+ * — into a red assertion named `TimeoutError` instead of a stuck CI job.
+ */
+const probe = async (path: string, init: RequestInit = {}) => {
+  try {
+    const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
+    return {
+      status: r.status as number | string,
+      cors: corsOk(r),
+      allow: r.headers.get("allow"),
+      envelope: (await mcpBody(r))?.jsonrpc === "2.0",
+    };
+  } catch (e) {
+    return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, envelope: false };
+  }
+};
+
 const INIT = JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
@@ -195,21 +218,9 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   // and proceeds on the key only on a 404. FORK.md change 42 has the rest.
   const discovery = "/.well-known/oauth-protected-resource";
 
-  // A probe that cannot hang or crash the suite: one 2 s abort that covers the
-  // body read too (a regressed route hands an authenticated GET to a stream that
-  // never closes — SMD-1259), a transport error reported by its own name, and
-  // the body parsed by the same mcpBody() as [4]–[10] then tested for the
-  // jsonrpc marker — a JSON body that is not an envelope must not count. Three
-  // asserts per row, always executed, so the count is stable green or red.
-  const probe = async (path: string, init: RequestInit = {}) => {
-    try {
-      const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
-      return { status: r.status as number | string, cors: corsOk(r), envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
-    } catch (e) {
-      return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
-    }
-  };
-
+  // Three asserts per row through the shared probe(), always executed, so the
+  // count is stable green or red. A deleted route now lands these GETs on the
+  // catch-all's 405 ([13]), not a hang — the status assertion still catches it.
   const rows: [string, string, RequestInit, number][] = [
     ["bare document, no key", discovery, {}, 404],
     ["path-suffixed form (the URL Supabase answered 401)", `${discovery}/functions/v1/open-brain-mcp`, {}, 404],
@@ -257,6 +268,91 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "0" }) === 0, "0 is honoured (prune everything older than now)");
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "-3" }) === QUERY_LOG.retentionDaysDefault, "a negative falls back to the default");
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "abc" }) === QUERY_LOG.retentionDaysDefault, "a non-number falls back to the default");
+}
+
+console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
+{
+  // Before the method guard, an authenticated GET here cost an agent-registry
+  // resolve and a server build, then reached the transport, which — because the
+  // Accept patch had stamped text/event-stream on it — opened the standalone SSE
+  // stream. Sessionless and per-request, nothing ever wrote to it or closed it:
+  // 200 text/event-stream, empty, held until the runtime's idle timeout. The SDK
+  // client (1.24.3, _startOrAuthSse) sends this GET on its own after initialize
+  // and treats a 405 as "no server stream", so 405 is the answer it wants, and
+  // any other 4xx would be an error it reports. Drilled by disabling the guard:
+  // every GET row holding a valid key fails as `TimeoutError`; the raw-socket
+  // row below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get
+  // the transport's own 405, after auth, with an `Allow` that names GET.
+  const ALLOW = "POST, DELETE, OPTIONS";
+  const rows: [string, string, RequestInit][] = [
+    // Every key shape, because the answer is about the method, not the caller:
+    // no key never reaches authenticate(), and a right key never reaches the
+    // agent registry or the transport.
+    ["GET, no key", "/", {}],
+    ["GET, wrong key", "/", { headers: { "x-brain-key": "wrong" } }],
+    ["GET, right key in header", "/", { headers: { "x-brain-key": KEY } }],
+    ["GET, right key in ?key= (the connector URL opened in a browser)", `/?key=${KEY}`, {}],
+    ["GET, the SDK client's own headers", "/", { headers: { "x-brain-key": KEY, Accept: "text/event-stream" } }],
+    ["HEAD, right key", `/?key=${KEY}`, { method: "HEAD" }],
+    ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
+    ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
+    // One of the two shapes SMD-1246's review found falling past the
+    // /.well-known/ route to the catch-all: Hono matches paths case-sensitively.
+    // It used to hang; it is a GET. The other shape is the raw-socket row below.
+    ["GET, differently-cased discovery path with the key", `/.Well-Known/oauth-protected-resource?key=${KEY}`, {}],
+  ];
+  for (const [label, path, init] of rows) {
+    const p = await probe(path, init);
+    assert(p.status === 405, `${label} → 405 (${p.status})`);
+    assert(p.allow === ALLOW, `${label}: Allow names what the endpoint serves (${p.allow})`);
+    assert(p.cors, `${label}: CORS present`);
+    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
+  }
+
+  // The other shape: a base URL with a trailing slash doubles the slash, and
+  // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
+  // catch-all and hung. Bun's fetch() collapses `//` to `/` before sending — the
+  // row above would have probed the 404 route — so this one writes the request
+  // line itself. The status line is enough: 405 means the guard answered, and a
+  // hang is reported as the timeout marker.
+  const rawStatusLine = (line: string) =>
+    new Promise<string>((resolve) => {
+      let buf = "";
+      const done = (s: string) => { clearTimeout(timer); resolve(s); };
+      const timer = setTimeout(() => done("<no status line within 2 s>"), 2000);
+      Bun.connect({
+        hostname: "127.0.0.1",
+        port: PORT,
+        socket: {
+          open(s) { s.write(`${line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`); },
+          data(_s, d) { buf += new TextDecoder().decode(d); if (buf.includes("\r\n")) done(buf.split("\r\n")[0]); },
+          close() { done(buf.split("\r\n")[0] || "<closed with no status line>"); },
+          error() { done("<socket error>"); },
+        },
+      });
+    });
+  const doubled = await rawStatusLine(`GET //.well-known/oauth-protected-resource?key=${KEY}`);
+  assert(doubled === "HTTP/1.1 405 Method Not Allowed", `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
+
+  // One definition of the method list: what the preflight advertises is what
+  // the refusal names. Drilled by editing either string.
+  const pre = await fetch(BASE, { method: "OPTIONS" });
+  assert(pre.headers.get("access-control-allow-methods") === ALLOW, "OPTIONS advertises the same list the 405 names");
+
+  // DELETE is the one non-POST method the transport still answers: it closes
+  // the (empty, per-request) session and returns 200 — and completes. The SDK
+  // client sends it from terminateSession() and accepts 200 or 405.
+  const del = await probe("/", { method: "DELETE", headers: AUTH });
+  assert(del.status === 200, `DELETE with the key → 200 (${del.status})`);
+  assert(del.cors, "DELETE: CORS present");
+  const delNoKey = await probe("/", { method: "DELETE", headers: H });
+  assert(delNoKey.status === 200 && delNoKey.envelope, `DELETE without a key → the JSON-RPC refusal, as POST gets (${delNoKey.status})`);
+
+  // The POST path is untouched — [4] through [10] above ran against the same
+  // server; a spot check here so this block fails on its own if the guard ever
+  // swallows POST.
+  const post = await probe("/", { method: "POST", headers: AUTH, body: INIT });
+  assert(post.status === 200 && post.envelope, `POST still reaches the transport (${post.status})`);
 }
 
 server.stop();
