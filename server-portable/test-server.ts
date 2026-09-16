@@ -115,7 +115,12 @@ console.log("\n[3] CORS preflight");
   const r = await fetch(BASE, { method: "OPTIONS" });
   assert(r.status === 200, "OPTIONS → 200");
   assert(corsOk(r), "allow-origin *");
-  assert(r.headers.has("access-control-allow-methods"), "allow-methods present");
+  // The exact list, because it is NOT the served list: the endpoint serves POST
+  // only ([13]), but this header says what a browser may send so it can hear
+  // our answer, and a browser-hosted SDK client holding a session id sends
+  // DELETE and accepts the 405. Hiding GET or DELETE here would turn that 405
+  // into a network error. FORK.md change 73.
+  assert(r.headers.get("access-control-allow-methods") === "GET, POST, OPTIONS, DELETE", "allow-methods advertises GET and DELETE, so a browser hears the 405");
 }
 
 console.log("\n[4] Auth failure — the real unauthorizedResponse(), not a copy of it");
@@ -316,9 +321,12 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
   // catch-all and hung. Bun's fetch() collapses `//` to `/` before sending — the
   // row above would have probed the 404 route — so this one writes the request
-  // line itself. The status code is enough: 405 means the guard answered, and a
-  // hang is reported as the timeout marker. The reason phrase is Bun's, not
-  // Hono's (Hono sets no statusText), so it is not asserted.
+  // line itself over a socket. A direct worker.fetch(new Request(…)) would keep
+  // the `//` too, but only the socket proves that Bun.serve's parser passes it
+  // through un-normalised to the router, which is the property the hang stood
+  // on. The status code is enough: 405 means the guard answered, and a hang is
+  // reported as the timeout marker. The reason phrase is Bun's, not Hono's
+  // (Hono sets no statusText), so it is not asserted.
   const rawStatusLine = (line: string) =>
     new Promise<string>((resolve) => {
       let buf = "";
@@ -329,7 +337,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
         port: PORT,
         socket: {
           open(s) { s.write(`${line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`); },
-          data(_s, d) { buf += new TextDecoder().decode(d); if (buf.includes("\r\n")) done(buf.split("\r\n")[0]); },
+          data(s, d) { buf += new TextDecoder().decode(d); if (buf.includes("\r\n")) { done(buf.split("\r\n")[0]); s.end(); } },
           close() { done(buf.split("\r\n")[0] || "<closed with no status line>"); },
           error() { done("<socket error>"); },
         },
@@ -338,34 +346,32 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   const doubled = await rawStatusLine(`GET //.well-known/oauth-protected-resource?key=${KEY}`);
   assert(doubled.startsWith("HTTP/1.1 405"), `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
 
-  // The CORS list is not the Allow list: it says what a browser may send so it
-  // can hear our answer, and a browser-hosted SDK client holding a session id
-  // sends DELETE and accepts the 405. Hiding GET or DELETE from the preflight
-  // would turn that 405 into a network error, so both stay advertised.
-  const pre = await probe("/", { method: "OPTIONS" });
-  assert(pre.status === 200 && pre.methods === "GET, POST, OPTIONS, DELETE", `OPTIONS still advertises GET and DELETE, so a browser hears the 405 (${pre.methods})`);
+  // The CORS preflight still advertises GET and DELETE — asserted in [3], where
+  // the preflight is probed. POST reaching the transport is [7].
 
   // /health is the probe target for platforms that can only GET and want 2xx
   // (Kubernetes httpGet, load-balancer target checks): its own route, before
   // authenticate(), so it needs no key and a key changes nothing. HEAD is routed
-  // as GET by Hono.
+  // as GET by Hono. Matched under any path prefix a proxy leaves on the request
+  // and with or without a trailing slash, because a probe is configured from
+  // the outside of the proxy; the name itself is exact.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
     ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
     ["HEAD /health", "/health", { method: "HEAD" }],
+    ["GET /health/ (trailing slash)", "/health/", {}],
+    ["GET /mcp/health (one-segment proxy prefix)", "/mcp/health", {}],
+    ["GET /functions/v1/open-brain-mcp/health (the Supabase-shaped prefix)", "/functions/v1/open-brain-mcp/health", {}],
   ] as [string, string, RequestInit][]) {
     const p = await probe(path, init);
     assert(p.status === 200, `${label} → 200 (${p.status})`);
     assert(p.cors && !p.envelope, `${label}: CORS present, body is not a JSON-RPC envelope`);
   }
-  const healthNear = await probe("/healthz", {});
-  assert(healthNear.status === 405, `GET /healthz is not /health → 405 (${healthNear.status})`);
-
-  // The POST path is untouched — [4] through [10] above ran against the same
-  // server; a spot check here so this block fails on its own if the guard ever
-  // swallows POST.
-  const post = await probe("/", { method: "POST", headers: AUTH, body: INIT });
-  assert(post.status === 200 && post.envelope, `POST still reaches the transport (${post.status})`);
+  // Route exactness, not a status contract: what a stray GET gets is the
+  // path-axis decision FORK.md change 42 defers (405 today, 404 under a mount).
+  for (const near of ["/healthz", "/Health", "/health/x", "/a/healthz"]) {
+    assert((await probe(near, {})).status !== 200, `GET ${near} is not /health`);
+  }
 }
 
 server.stop();

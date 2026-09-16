@@ -10377,12 +10377,18 @@ connections at will, and nothing rate-limited it.
 
 **The change.** The route table now says what the endpoint serves. The MCP
 handler is registered with `app.on(MCP_METHODS, "*", …)` for `["POST"]` alone,
-and a trailing `app.all("*")` answers every other method at every other path
-with `405 Method Not Allowed`, `Allow: POST, OPTIONS` and the CORS headers —
+and Hono's `notFound` answers whatever no route matched with
+`405 Method Not Allowed`, `Allow: POST, OPTIONS` and the CORS headers —
 before `authenticate()`, so no key shape reaches the agent registry or builds a
 server, and the answer is the same for no key, a wrong key and a revoked one; it
-is about the method, not the caller. That 405 is the Streamable HTTP transport's
-documented answer from a server that offers no server-initiated stream. HEAD,
+is about the method, not the caller. 405 and not 404 because the handler serves
+POST at every path: an unmatched request is always a method the endpoint does
+not serve, never an unknown path. `notFound` rather than a trailing
+`app.all("*")` (the second pass's shape) so that a route registered later is not
+silently shadowed by dispatch order — the third review pass verified the two
+byte-identical across every method and both odd paths. That 405 is the
+Streamable HTTP transport's documented answer from a server that offers no
+server-initiated stream. HEAD,
 PUT and PATCH land there (the transport's own 405 for PUT and PATCH came after
 auth and named `GET` in its `Allow`), and so does DELETE. The first draft kept
 DELETE on the premise that the SDK client sends it from `terminateSession()` and
@@ -10413,13 +10419,26 @@ registered between `/.well-known/*` and the MCP handler, before
 `authenticate()`: `ok`, 200, no key needed, a key ignored; Hono routes HEAD to
 it as GET, so a HEAD probe gets a bodiless 200. It says the process is serving
 and nothing else — readiness (is the database reachable) stays preflight's job
-at the entrypoint, as the Dockerfile comment records. The image's `HEALTHCHECK`
-keeps POSTing to the endpoint, which also proves the MCP path serves;
-`deploy/README.md` points platform probes at `/health` and says a browser
-opening the connector URL sees `Method Not Allowed`, which is expected. Nothing
-in the tree GETs the endpoint for liveness (checked: the Dockerfile,
-`compose.yaml`, `smoke.sh`, the workflows; the Kubernetes integration uses a
-`tcpSocket` probe).
+at the entrypoint, as the Dockerfile comment records. The third review pass
+found the second pass's route an exact root match: behind the unstripped proxy
+prefix `deploy/README.md` and change 42 already anticipate, `GET /mcp/health`
+got the 405 — the very outcome the route was added to prevent — and so did
+`/health/`. The route is now a GET handler on `*` that tests the path for
+`health` as its last segment, optional trailing slash, and calls `next()`
+otherwise (which lands on the 405). A route pattern was tried first —
+`/:prefix{.+}/health` — and matched every depth in a scratch app but only three
+segments in the real one: Hono's SmartRouter picks the RegExpRouter or the
+TrieRouter per app, and the two disagree on a parameter spanning segments, so
+`/functions/v1/open-brain-mcp/health` passed in isolation and failed in
+`test-server.ts`. Testing the path removes the dependency. The name stays exact:
+`/healthz`, `/Health` and `/health/x` are not it. `POST /health` is the MCP
+endpoint, as POST at every path is. The
+image's `HEALTHCHECK` keeps POSTing to the endpoint, which also proves the MCP
+path serves; `deploy/README.md` points platform probes at `<base>/health` and
+says a browser opening the connector URL sees `Method Not Allowed`, which is
+expected. Nothing in the tree GETs the endpoint for liveness (checked: the
+Dockerfile, `compose.yaml`, `smoke.sh`, the workflows; the Kubernetes
+integration uses a `tcpSocket` probe).
 
 **What the ticket's smallest fix would have missed.** SMD-1259's second review
 pass offered a method condition on the Accept patch as the minimal fix. Read
@@ -10437,30 +10456,37 @@ expected case that should not trigger an error" — and any other non-2xx is a
 `StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
 client. A live connector has not been seen to do it; see below.
 
-**Verified.** `test-server.ts` [13], 54 assertions against the real
+**Verified.** `test-server.ts` [13], 61 assertions against the real
 server: eleven fetch rows — GET under no key, a wrong key, the right key in the
 header and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT,
 PATCH, DELETE with and without a key, and the case-variant discovery path — each
 asserted for 405, an `Allow` naming the served methods, CORS, and a body that
 is not a JSON-RPC envelope; the doubled-slash path written as a raw request line
 over a socket, because Bun's `fetch()` collapses `//` to `/` before sending and
-a fetch row probed the 404 route instead (found when that row failed), asserted
-on the status code alone since the reason phrase is Bun's, not Hono's; the
-OPTIONS preflight still advertising GET and DELETE, through the same abortable
-probe as every other row; `GET /health`, with and without a key, and
-`HEAD /health` → 200 with CORS, and `/healthz` → 405 so the route is exact; POST
-still reaching the transport. Drilled by restoring the pre-change shape — the
-handler on `app.all` and no trailing route — 30 of 140 assertions fail: the fetch
-rows holding a valid GET fail as `TimeoutError`; the raw-socket row as a
+a fetch row probed the 404 route instead (found when that row failed) — and
+because only a socket shows that Bun.serve's parser passes `//` through to the
+router un-normalised, which is what the hang stood on — asserted on the status
+code alone since the reason phrase is Bun's, not Hono's; `/health` → 200 with
+CORS bare, with a key, as HEAD, with a trailing slash, under a one-segment and
+under the Supabase-shaped three-segment prefix; and `/healthz`, `/Health`,
+`/health/x`, `/a/healthz` not 200 — route exactness, not a status contract,
+since what a stray GET gets is the deferred path-axis decision. The exact CORS
+method list lives in [3], where the preflight is probed; POST reaching the
+transport is [7]. Drilled by restoring the pre-change shape — the handler on
+`app.all` and the `notFound` removed — 33 of 147 assertions fail: the
+fetch rows holding a valid GET fail as `TimeoutError`; the raw-socket row as a
 `200 OK` status line (the stream's headers flush at once; it is the body that
 never ends); the rows without a key as 200 with an envelope; HEAD, PUT and PATCH
 by an `Allow` that names GET, from the transport's own 405 after auth; the keyed
-DELETE by the transport's 200; `/healthz` by the 200 refusal; `/health` keeps
-passing, being its own route. The
+DELETE by the transport's 200; the four near-miss paths by the 200 refusal;
+`/health` keeps passing, being its own route. The
 suite's 2 s abort on every routing probe stays: it is what turns the failure
 mode this change closes into a red assertion instead of a stuck CI job, so it is
 the test's teeth, not scaffolding to retire. `deploy/smoke.sh` check 3 GETs the
-endpoint and expects 405, then GETs `/health` and expects 200, both **with no
+endpoint and expects 405, then GETs `<base>/health` and expects 200 — right
+whether or not the proxy strips its prefix, by the path test above — as one tally,
+so the summary still counts one per numbered check (the second pass's two
+tallies made a green run print nine of eight). Both **with no
 key**. No key, because both answers come before `authenticate()` so a key proves
 nothing, and because the script's status helper follows redirects with `-L`, on
 which curl forwards a custom header to whatever host comes next — the first

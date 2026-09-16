@@ -75,9 +75,10 @@ code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: ap
 
 # 2. OAuth discovery: claude.ai fetches this at the ORIGIN root (server path as a
 #    suffix) before opening a connector, and proceeds on the key only on a 404.
-#    Probed without the key: the SDK copies the connector URL's query onto the
-#    discovery GET, but the route answers 404 before authenticate() whether or
-#    not a key rides along, so a keyless probe asks the same question. FORK.md
+#    Probed without the key: the SDK copies the connector URL's query onto its
+#    first, path-aware discovery GET (the root fallback carries none), but the
+#    route answers 404 before authenticate() whether or not a key rides along,
+#    so a keyless probe asks the same question. FORK.md
 #    change 42 has the rest, including the two deployment shapes that answer
 #    this path before the server does.
 origin=$(printf '%s' "$BASE" | sed -E 's#^([A-Za-z]+://[^/]+).*#\1#')
@@ -98,15 +99,16 @@ done
 #    come before authenticate(), and status() follows redirects, on which curl
 #    forwards a custom header to whatever host comes next. A 200 from the
 #    endpoint is the method guard missing — or a front proxy answering GET /
-#    itself; a keyed hang would also read as 200 here, since the stream's headers
-#    flush before the body stalls. A Supabase Edge Function fails this check:
-#    upstream's server has no method guard (#424, their PR #425).
-code=$(status "$BASE/")
-[ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (POST only; the SDK client's expected answer to its stream probe)" \
-                    || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 73)"
-code=$(status "$BASE/health")
-[ "$code" = "200" ] && ok "GET /health → HTTP 200 (the liveness target for GET-only probes)" \
-                    || bad "GET /health → HTTP $code (expected 200; route /health to the server — FORK.md change 73)"
+#    itself. /health is matched under any path prefix the proxy leaves on, so
+#    "$BASE/health" is right whether or not the proxy strips. A Supabase Edge
+#    Function fails this check: upstream's server has no method guard (#424,
+#    their PR #425). One tally for the pair, so the count stays one per check.
+code=$(status "$BASE/"); hc=$(status "$BASE/health")
+if [ "$code" = "405" ] && [ "$hc" = "200" ]; then
+  ok "GET the endpoint → HTTP 405 (POST only), GET /health → HTTP 200 (the liveness target for GET-only probes)"
+else
+  bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server), GET /health → HTTP $hc (expected 200); FORK.md change 73"
+fi
 
 # 4. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

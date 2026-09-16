@@ -1398,8 +1398,18 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
 // process is serving and nothing else. Readiness — is the database reachable —
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
-// HEAD probe gets a bodiless 200. FORK.md change 73.
-app.get("/health", (c) => c.text("ok", 200, corsHeaders));
+// HEAD probe gets a bodiless 200. Matched as the last path segment, under any
+// prefix a proxy leaves on the request (`/mcp/health`,
+// `/functions/v1/open-brain-mcp/health`) and with or without a trailing slash —
+// deploy/README.md anticipates an unstripped prefix, and a probe aimed at
+// `<base>/health` must not 405 there. Tested against the path rather than
+// written as a route pattern because Hono's two routers disagree on a `{.+}`
+// parameter spanning segments: the RegExpRouter the app lands on matched three
+// segments and not four. The name is exact: /healthz and /Health are not it.
+// Anything else falls through to notFound's 405. POST /health is the MCP
+// endpoint, as POST at every path is. FORK.md change 73.
+const HEALTH_PATH = /(^|\/)health\/?$/;
+app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
 
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
@@ -1477,13 +1487,16 @@ app.on(MCP_METHODS, "*", async (c) => {
   return response;
 });
 
-// Every other method at every other path: 405 with `Allow`, before
-// authenticate(), so no key shape reaches the agent registry or builds a server
-// and the answer is the same for no key, a wrong key and a revoked one. This is
+// Whatever no route above matched: 405 with `Allow`, before authenticate(), so
+// no key shape reaches the agent registry or builds a server and the answer is
+// the same for no key, a wrong key and a revoked one. Since the MCP handler
+// serves POST at every path, an unmatched request is always a method the
+// endpoint does not serve, never an unknown path — hence 405, not 404. This is
 // where GET, HEAD, PUT, PATCH and DELETE land; a keyless GET or HEAD used to get
-// the 200 JSON-RPC refusal, so a platform probe must use /health above.
-// Registered last: Hono dispatches in registration order. FORK.md change 73.
-app.all("*", (c) => c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS }));
+// the 200 JSON-RPC refusal, so a platform probe uses /health above. Hono's
+// notFound rather than a trailing app.all("*"), so a route registered later is
+// not silently shadowed by dispatch order. FORK.md change 73.
+app.notFound((c) => c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS }));
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.

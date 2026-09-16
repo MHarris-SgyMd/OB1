@@ -60,10 +60,13 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
 followed by `Started server`. `smoke.sh` prints `8 checks: 8 passed, 0 failed`.
 
-Point an HTTP liveness probe at **`GET /health`** (200, no key). The MCP endpoint
-itself serves POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 73,
-so a platform-default probe aimed at `/` marks a healthy server down. The image's
-own `HEALTHCHECK` POSTs to the endpoint instead, which also proves the MCP path
+Point an HTTP liveness probe at **`GET <base>/health`** (200, no key). It is
+matched under whatever path prefix a proxy leaves on the request and with or
+without a trailing slash, so the URL you configure outside the proxy is the one
+to use; the name itself is exact (`/healthz` is not it). The MCP endpoint serves
+POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 73, so a
+platform-default probe aimed at `/` marks a healthy server down. The image's own
+`HEALTHCHECK` POSTs to the endpoint instead, which also proves the MCP path
 serves; either is fine. Opening the connector URL in a browser shows
 `Method Not Allowed`, which is expected.
 
