@@ -13,8 +13,8 @@
 #   ./db/ci-parity.sh
 #
 # Suites needing a model provider (evals/) are not included — CI does not run
-# those either; nor is db/test-bench-reuse.ts, which starts kept containers of
-# its own rather than using the shared Postgres.
+# those either; nor is db/test-bench-reuse.ts, three minutes of 150,000-row
+# builds and exact passes (it would run here — it drops its marker on exit).
 set -u
 cd "$(dirname "$0")/.."
 ROOT="$PWD"

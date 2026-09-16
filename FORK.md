@@ -10605,20 +10605,23 @@ field is nine keys × fifty × ten uuids, under 200 KB of jsonb.
 **Held to the computation (`db/test-bench-reuse.ts`, new).** The claim that
 matters is that what a reuse takes from the marker is what it would have
 computed, and two builds cannot test it — the parallel HNSW build gives two
-graphs, and two recall figures — so the suite runs the bench six times under
-one kept name at 150,000 rows (the smallest kept scale) and compares on one
-index: a build with five queries; a reuse with three (all the marker's); the
-marker's answers removed, as a marker from before this change has none, and
-three again (computed, the marker extended) — sections A, B, D and E equal the
-previous run's, timings aside, and the confound agrees; six (three from the
-marker, three computed, the marker extended to six); six again (all the
-marker's, the tables as the run that extended it); then the corpus marked
-`rewritten` as a refused reuse leaves it, and a run refused before the
-oracle is consulted. The suite drives `with-postgres.sh` itself, removes the
-volume it kept, and runs in about three minutes; it is not in CI (no container
-runtime there) nor in `ci-parity.sh` (it starts its own containers). A mutant
-that takes the *last* answers the marker holds instead of the first fails
-exactly the equality.
+graphs, and two recall figures — so the suite runs the bench six times
+against one database at 150,000 rows (the smallest kept scale) and compares
+on one index: a build with five queries; a reuse with three (all the
+marker's); the marker's answers removed, as a marker from before this change
+has none, and three again (computed, the marker extended) — sections A, B, D
+and E equal the previous run's, timings aside, and the confound agrees; six
+(three from the marker, three computed, the marker extended to six); six
+again (all the marker's, the tables as the run that extended it); then the
+corpus marked `rewritten` as a refused reuse leaves it, and a run refused
+before the oracle is consulted. It runs under `with-postgres.sh` like every
+suite and tells only the bench it spawns that the database is kept — to the
+bench, "kept" is the variable and the marker row, and the volume is the
+wrapper's concern, held by change 72 — so the throwaway container is the kept
+database for the six runs and nothing outlives the suite; it drops its
+marker table on the way out and takes about three minutes, which is why it
+is in neither CI nor `ci-parity.sh`. A mutant that takes the *last* answers
+the marker holds instead of the first fails exactly the equality.
 
 **First review pass.** The cache named the rows it was valid for (through the
 marker's fingerprint) but not the queries or the oracle's statement it was a
@@ -10635,15 +10638,13 @@ answer the marker's, some, none — is named once and rendered from there; the
 spread over Q arguments that would have died at a million queries is a
 reduce; and the marker line says what the marker had and how many of them
 were this run's, where it had said `had none` for a record it was replacing.
-`runScript` puts `--no-env-file` after the first `bun` token, not only a
-leading one: the new suite's spawns are fronted by `with-postgres.sh`, and
-the inner bun was loading `db/.env` for every `OB1_*` name the suite had
-just stripped (reproduced with a flag in the file). The suite removes what
-it kept on an interrupt too — a signal handler removes the container and the
-volume by the name both carry, and the wrapper's own cleanup is by then
-writing into a dead pipe — names the volume up front, turns a thrown stop
-into a failure with a tally rather than a stack trace, and compares the two
-scored tables through one helper that carries the rows guard to both sites.
+The suite, which then drove `with-postgres.sh` itself under a kept name,
+gained what that lifecycle needed: `--no-env-file` reaching a bun fronted by
+the wrapper (it was loading `db/.env` for every `OB1_*` name the suite had
+just stripped; reproduced with a flag in the file), removal of the container
+and volume on an interrupt, the volume named up front, a thrown stop turned
+into a failure with a tally rather than a stack trace, and one helper for
+the two scored-table comparisons that carries the rows guard to both sites.
 
 **Second pass.** The shape number was a hand-bumped integer standing in for
 the statement's identity, which an edit to the statement would not bump; the
@@ -10653,24 +10654,42 @@ another operator recomputes on its own. `markerAnswers` hands back the
 answers it validated rather than counts the caller re-derives through two
 non-null assertions; the three-way state is one value the four renderings
 index; the extension write is gated on `OB1_PG_KEEP` as the first write is
-(a persistent database reached some other way is marked by neither). The
-suite's interrupt handler had been fire-and-forget beside a main flow that
-did not know it had fired — a Ctrl-C in run 1 could reach `report()`'s exit
-while the removal was mid-retry, and in a later run could start the next
-container under the name being removed; the handler now only notes the
-signal, the run in flight finishes (a terminal's Ctrl-C reaches the wrapper
-too, which stops and removes its container), the next `run` throws instead
-of starting, and the removal happens once, in `finally`, before the exit the
-signal asked for (verified in run 1 and in a later run: exit 130, no
-container, no volume). The runtime is read from the wrapper's own output
-rather than a second copy of its pick (which would have chosen a docker whose
-daemon was down and then retried ten removals against it); the wrapper's
-image and shared-memory knobs and the build's workers and memory pass
-through the environment strip, which is now `shellWithoutOb1()` shared with
-`migratorEnv`; `runScript` matches the bun token by basename, so a binary
-spelled by path gets the flag; `scored()` gates on the section letter by
-regex (the empty section had matched `"ABDE".includes`); and the catch keeps
-the stack.
+(a persistent database reached some other way is marked by neither). And a
+second round on the suite's kept-volume lifecycle: the interrupt handler had
+been fire-and-forget beside a main flow that did not know it had fired, the
+runtime was a second copy of the wrapper's pick, the environment strip took
+the wrapper's own knobs with it, `runScript` matched only a leading `bun`;
+each was fixed (and the interrupt verified in run 1 and a later run: exit
+130, nothing left), the build's workers and memory pass through the strip,
+which is `shellWithoutOb1()` shared with `migratorEnv`, `scored()` gates on
+the section letter by regex (the empty section had matched
+`"ABDE".includes`), and the catch keeps the stack.
+
+**Third pass — the mechanism was the finding.** Three passes in a row had
+found seams in the suite's container-and-volume lifecycle (the runtime it
+parsed from the wrapper's banner was a basename the wrapper itself may not
+have on `PATH`, so the removal would have thrown inside `finally` on the very
+macOS layout the README names), and what the bench means by "kept" is a
+variable and a marker row: the suite now runs under one ordinary
+`with-postgres.sh` container and tells only the bench it spawns that the
+database is kept. Six kept volumes, the interrupt handler, the runtime pick
+and the argv heuristic in `runScript` (back to a command that *is* bun, by
+basename) went with it; the suite drops its marker table on the way out, so
+it could join `ci-parity.sh` and stays out only for its three minutes. In
+the bench: the marker's `oracle` is a map keyed by statement shape, each
+tree writing its own entry beside the others' (`jsonb_build_object` over the
+existing map) rather than over them — a kept volume outlives branches, and
+two trees that disagree on the statement would otherwise have recomputed the
+pass on every switch; the per-query digest covers the literal the server
+parsed, not the doubles it was rendered from; an answer is at most K
+distinct ids (a duplicated or overlong list had passed and skewed the
+denominator); `markerAnswers` returns how many the entry held, so the
+marker's line no longer reads a raw field the helper had rejected; the
+three-way state is one `note` the run line, the cell and the confound's
+parenthetical are read from, and the cell says `computed … not kept (no
+OB1_PG_KEEP)` where the answers went nowhere, instead of `extended`; and the
+arms take the answers themselves (`ids.includes` over lists of at most ten)
+where a second copy as sets had stood behind eight non-null assertions.
 
 ## Detached from the fork network
 

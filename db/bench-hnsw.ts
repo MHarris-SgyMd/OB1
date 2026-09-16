@@ -555,19 +555,21 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
  * confound). At ten million rows the pass is most of a reuse's minutes —
  * some 450 full scans — and its answers are a pure function of the rows, the
  * queries, K and the oracle's statement, the same on every reuse. What they
- * are a function of is named in the record by value: `k`; `shape`, a digest
- * of the oracle's statement and the filter's form (ORACLE_SHAPE, so an edit
- * to either recomputes rather than trusts); and `queries`, a digest of each
- * query vector in order.
- * The stream's first queries are a prefix of any longer run's, so a run
- * asking fewer takes the answers whose digests match its own queries — the
- * leading ones, all of them where the stream is unchanged — and a run asking
- * more computes the rest and extends. Valid exactly while the rows are: the
- * cache rides inside the marker whose physical fingerprint a reuse judges
- * first, and a corpus that changed is refused before this is read. A marker
- * without one, or with one under another K or shape, or whose digests stop
- * matching, is computed for and extended, not refused — the answers are
- * derivable, the build is not (review pass).
+ * are a function of is named by value: the marker's `oracle` is a map keyed
+ * by `shape` — a digest of the oracle's statement (K inside it) and the
+ * filter's form, ORACLE_SHAPE — so a tree whose statement differs writes an
+ * entry of its own beside this one rather than over it (a kept volume
+ * outlives branches; review pass); and each entry carries `queries`, a
+ * digest of each query's literal as the server parsed it, in order. The
+ * stream's first queries are a prefix of any longer run's, so a run asking
+ * fewer takes the answers whose digests match its own queries — the leading
+ * ones, all of them where the stream is unchanged — and a run asking more
+ * computes the rest and extends its entry. Valid exactly while the rows are:
+ * the cache rides inside the marker whose physical fingerprint a reuse
+ * judges first, and a corpus that changed is refused before this is read. A
+ * marker without an entry for this shape, or whose digests stop matching,
+ * is computed for and extended, not refused — the answers are derivable, the
+ * build is not (review passes).
  */
 type OracleAnswer = { ids: string[]; top: number };
 type OracleCache = { k: number; shape: string; queries: string[]; answers: Record<string, OracleAnswer[]> };
@@ -578,11 +580,12 @@ const digestOf = (value: unknown) => new Bun.CryptoHasher("sha256").update(JSON.
  * copy the report reads); `physical` is the four relations' state at the
  * build and `builtXid` the transaction id then, so a reuse can count rows
  * written since — exact at any share, blind to a statistics reset; `oracle`
- * is the exact pass's answers, so a reuse need not compute them; `rewritten`
- * holds the evidence of a change found on a reuse — a corpus so marked is
- * refused on every later run, not only the one that found it (review passes).
+ * is the exact pass's answers by statement shape, so a reuse need not compute
+ * them; `rewritten` holds the evidence of a change found on a reuse — a
+ * corpus so marked is refused on every later run, not only the one that
+ * found it (review passes).
  */
-type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; physical: Physical; builtXid: number; oracle?: OracleCache; rewritten?: string[] };
+type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; physical: Physical; builtXid: number; oracle?: Record<string, OracleCache>; rewritten?: string[] };
 
 /** A kept table that is not the corpus its marker describes — told apart from a dropped connection or a timeout, which are not the corpus's fault (review pass). */
 class NotTheCorpus extends Error {}
@@ -641,36 +644,45 @@ async function writeMarker(sql: SQL, marker: Marker): Promise<void> {
   });
 }
 
-/** Fields of the marker's payload updated in place (`rewritten`, on a refusal; `oracle`, when a reuse computed queries the marker lacked). A top-level key is replaced whole. */
+/** Fields of the marker's payload updated in place (`rewritten`, on a refusal). A top-level key is replaced whole. */
 async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
   await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
 }
 
+/** This tree's entry in the marker's oracle map, written or replaced; other shapes' entries stay. */
+async function amendOracle(sql: SQL, record: OracleCache): Promise<void> {
+  await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || jsonb_build_object('oracle', COALESCE(corpus->'oracle', '{}'::jsonb) || ${{ [record.shape]: record }}::jsonb)`;
+}
+
 /**
- * The answers the marker's oracle cache gives this run: for each of THESE
- * keys, the leading answers whose queries are this run's (`taken`, `have`
- * of them). The cache must be at this K and shape and whole — one
- * well-formed answer per query for every key — and its digests are matched
- * against this run's queries from the front, so a changed stream answers
- * for nothing past the change. Nothing where it is absent, at another K or
- * shape, or malformed — computed for, never refused (the answers are a
- * function of the rows the fingerprint has just vouched for; a malformed
- * field would otherwise be a TypeError after the checks were paid, or a
- * silent zero — review pass). Built here, where the shape was proven, so the
+ * The answers the marker's oracle entry for this shape gives this run: for
+ * each of THESE keys, the leading answers whose queries are this run's
+ * (`taken`, `have` of them), and how many the entry holds (`had`). The entry
+ * must be whole — one well-formed answer per query for every key: at most K
+ * distinct ids and a finite cosine — and its digests are matched against
+ * this run's queries from the front, so a changed stream answers for nothing
+ * past the change. Nothing, and `had` 0, where the entry is absent or
+ * malformed — computed for, never refused (the answers are a function of the
+ * rows the fingerprint has just vouched for; a malformed field would
+ * otherwise be a TypeError after the checks were paid, or a silently skewed
+ * recall — review passes). Built here, where the shape was proven, so the
  * caller asserts nothing. Ids are not re-checked against the table: the same
  * fingerprint says no row was written since they were read.
  */
-function markerAnswers(marker: Marker, keys: string[], digests: string[]): { have: number; taken: Record<string, OracleAnswer[]> } {
-  const c = marker.oracle;
-  const nothing = { have: 0, taken: Object.fromEntries(keys.map((key) => [key, []])) };
-  if (!c || c.k !== K || c.shape !== ORACLE_SHAPE || !Array.isArray(c.queries) || c.queries.length < 1) return nothing;
+function markerAnswers(marker: Marker, keys: string[], digests: string[]): { have: number; had: number; taken: Record<string, OracleAnswer[]> } {
+  const c = marker.oracle?.[ORACLE_SHAPE];
+  const nothing = { have: 0, had: 0, taken: Object.fromEntries(keys.map((key) => [key, []])) };
+  if (!c || typeof c !== "object" || c.k !== K || c.shape !== ORACLE_SHAPE || !Array.isArray(c.queries) || c.queries.length < 1) return nothing;
   const n = c.queries.length;
-  const answer = (a: unknown): a is OracleAnswer => typeof a === "object" && a !== null && Array.isArray((a as OracleAnswer).ids) && (a as OracleAnswer).ids.every((id) => typeof id === "string") && Number.isFinite((a as OracleAnswer).top);
+  const answer = (a: unknown): a is OracleAnswer => {
+    const { ids, top } = (a ?? {}) as OracleAnswer;
+    return Array.isArray(ids) && ids.length <= K && new Set(ids).size === ids.length && ids.every((id) => typeof id === "string") && Number.isFinite(top);
+  };
   const whole = c.queries.every((d) => typeof d === "string") && keys.every((key) => Array.isArray(c.answers?.[key]) && c.answers[key].length === n && c.answers[key].every(answer));
   if (!whole) return nothing;
   let have = 0;
   while (have < Math.min(n, digests.length) && c.queries[have] === digests[have]) have++;
-  return { have, taken: Object.fromEntries(keys.map((key) => [key, c.answers[key].slice(0, have)])) };
+  return { have, had: n, taken: Object.fromEntries(keys.map((key) => [key, c.answers[key].slice(0, have)])) };
 }
 
 /** The physical state of the four relations the measurements depend on: the marker records the build's, a reuse compares. */
@@ -922,7 +934,7 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
 
 // ── The measurements ────────────────────────────────────────────────────────
 
-/** The `wants` key for the exact answer over the whole table (section A's control); no tier is keyed so. */
+/** The answers' key for the exact answer over the whole table (section A's control); no tier is keyed so. */
 const WHOLE_TABLE = "whole table";
 
 /** A filter for a tier: `{"tiers": ["t1"]}` — array containment, one key. */
@@ -933,7 +945,7 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.len
 /** Row counts asked for in section A; the last is the function's own ceiling, timed too. */
 const ASKS = [10, 20, 50, 100, 200, 500];
 
-async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): Promise<{ counts: Record<number, string>; ms10: number; msMax: number; overlap: number; ms10Raised: number; overlapRaised: number }> {
+async function unfiltered(sql: SQL, queries: number[][], wants: OracleAnswer[]): Promise<{ counts: Record<number, string>; ms10: number; msMax: number; overlap: number; ms10Raised: number; overlapRaised: number }> {
   const counts: Record<number, string> = {};
   for (const count of ASKS) {
     let min = Infinity;
@@ -958,7 +970,7 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
       const t0 = performance.now();
       const got = (await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`)).map((r: { id: string }) => r.id);
       times.push(performance.now() - t0);
-      overlap += got.filter((id) => wants[i].has(id)).length;
+      overlap += got.filter((id) => wants[i].ids.includes(id)).length;
     }
     return { ms: median(times), overlap: overlap / queries.length };
   };
@@ -1039,7 +1051,7 @@ async function filtered(
   sql: SQL,
   queries: number[][],
   filter: string,
-  wants: Set<string>[],
+  wants: OracleAnswer[],
   statement: (q: number[], filter: string) => string = viaFunction
 ): Promise<FilteredResult> {
   let returned = 0;
@@ -1053,8 +1065,9 @@ async function filtered(
     const got = (await sql.unsafe(statement(q, filter))).map((r: { id: string }) => r.id);
     times.push(performance.now() - t0);
     returned += got.length;
-    overlap += got.filter((id) => want.has(id)).length;
-    exact += want.size;
+    // Both lists are at most K long; a scan beside an index probe is noise.
+    overlap += got.filter((id) => want.ids.includes(id)).length;
+    exact += want.ids.length;
     if (got.length === 0) empty++;
   }
   return {
@@ -1417,24 +1430,28 @@ for (const n of SCALES) {
   // computed here and the marker extended to hold them (SMD-1562).
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
   const keys = [...withCounts.map((t) => t.key), WHOLE_TABLE];
-  const digests = queries.map(digestOf);
-  // One three-way state — every answer the marker's, some, none — named
-  // once, and every rendering indexed by it: the run line, section L's cell,
-  // the confound's and the marker's lines (review passes). `had` is what the
-  // marker holds whether or not it could answer, for the marker's line.
-  const { have, taken } = kept ? markerAnswers(kept, keys, digests) : { have: 0, taken: {} as Record<string, OracleAnswer[]> };
-  const had = kept?.oracle?.queries?.length ?? 0;
-  const state: "all" | "some" | "none" = have === Q ? "all" : have > 0 ? "some" : "none";
-  const oracleSource = { all: "reused", some: `extended (${have} of ${Q} from the marker)`, none: "computed" }[state];
-  process.stdout.write(`  exact oracle      ${{ all: `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})`, some: `${have} of ${Q} queries from the marker, computing the rest `, none: "" }[state]}`);
-  const wants = new Map<string, Set<string>[]>();
+  // The digests cover the literal the server parses, not the doubles it was
+  // rendered from, so a change to the rendering is a change of query.
+  const digests = queries.map((q) => digestOf(lit(q)));
+  // One three-way state — every answer the marker's, some, none — decided
+  // once as the three lines it is rendered as: the run line, section L's
+  // cell and the confound's note (review passes). Answers are written back
+  // only under OB1_PG_KEEP, and the cell says so where they are not.
+  const { have, had, taken } = kept ? markerAnswers(kept, keys, digests) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
+  const notKept = kept && !KEPT ? ", not kept (no OB1_PG_KEEP)" : "";
+  const note =
+    have === Q
+      ? { source: "reused", run: `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})`, confound: " (all of them the marker's)" }
+      : have > 0
+        ? { source: `${KEPT ? "extended" : "computed"} (${have} of ${Q} from the marker)${notKept}`, run: `${have} of ${Q} queries from the marker, computing the rest `, confound: ` (${have} of them the marker's)` }
+        : { source: `computed${notKept}`, run: "", confound: "" };
+  process.stdout.write(`  exact oracle      ${note.run}`);
   const answers: Record<string, OracleAnswer[]> = {};
   for (const key of keys) {
     const rows: OracleAnswer[] = [...(taken[key] ?? [])];
     for (const q of queries.slice(have)) rows.push(await oracle(sql, q, key === WHOLE_TABLE ? null : tierFilter(key)));
     answers[key] = rows;
-    wants.set(key, rows.map((a) => new Set(a.ids)));
-    if (state !== "all") process.stdout.write(".");
+    if (have < Q) process.stdout.write(".");
   }
   console.log(" done");
   const max = answers[WHOLE_TABLE].reduce((m, a) => Math.max(m, a.top), -1);
@@ -1447,27 +1464,27 @@ for (const n of SCALES) {
     console.error(`bench-hnsw.ts: ${(err as Error).message}. Nothing was measured.`);
     process.exit(1);
   }
-  console.log(`  nearest query-to-row cosine ${max.toFixed(3)} over this run's ${Q} queries, from the exact pass${{ all: " (all of them the marker's)", some: ` (${have} of them the marker's)`, none: "" }[state]} (a repeat would read 1.000)`);
-  loads.push({ ...stats, oracle: oracleSource });
+  console.log(`  nearest query-to-row cosine ${max.toFixed(3)} over this run's ${Q} queries, from the exact pass${note.confound} (a repeat would read 1.000)`);
+  loads.push({ ...stats, oracle: note.source });
   // The marker last, once everything a reuse would skip — the load, the
   // builds, the premise check, the exact pass and its own confound gate — has
   // finished and passed: an interrupted or refused build leaves nothing that
   // reads as a corpus. Only where the database is kept (the one-scale rule
   // at parse makes this the scale above the before arm's): a throwaway
   // container's marker would serve nothing, and a persistent database reached
-  // some other way is not this bench's to mark, on either write. A kept
-  // marker that answered for fewer of this run's queries than it asked is
-  // replaced by what this run holds — the answers it took plus the ones it
-  // computed — which is a shorter record where the marker's were unusable
-  // (another K or shape, a changed stream) and this run asked fewer; a marker
-  // that answered for every query is left as it is, however many more it
-  // holds.
+  // some other way is not this bench's to mark, on either write. This
+  // tree's entry in the marker's oracle map, where it answered for fewer of
+  // this run's queries than it asked, is replaced by what this run holds —
+  // the answers it took plus the ones it computed — which is a shorter entry
+  // where the stream changed and this run asked fewer; an entry that
+  // answered for every query is left as it is, however many more it holds;
+  // other shapes' entries are never touched.
   const oracleRecord: OracleCache = { k: K, shape: ORACLE_SHAPE, queries: digests, answers };
   if (!kept && KEPT) {
-    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: oracleRecord });
+    await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [ORACLE_SHAPE]: oracleRecord } });
     console.log(`  corpus kept: marker written, with the exact pass's answers for ${Q} queries`);
-  } else if (kept && KEPT && state !== "all") {
-    await amendMarker(sql, { oracle: oracleRecord });
+  } else if (kept && KEPT && have < Q) {
+    await amendOracle(sql, oracleRecord);
     console.log(`  marker extended: the exact pass's answers for ${Q} queries (${had === 0 ? "had none" : `had ${had}, ${have} of them this run's`})`);
   }
 
@@ -1535,10 +1552,10 @@ for (const n of SCALES) {
       console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts; pgvector defaults ${HNSW_BOUNDS.map((b) => `${b}=${pgvectorDefaults[b]}`).join(", ")}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
-    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get(WHOLE_TABLE)!);
+    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, answers[WHOLE_TABLE]);
     const cells: Cell[] = [];
     for (const t of withCounts) {
-      const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+      const r = await filtered(sql, queries, tierFilter(t.key), answers[t.key]);
       cells.push({ ...r, label: t.label, matches: t.matches });
       process.stdout.write(".");
     }
@@ -1604,17 +1621,17 @@ for (const n of SCALES) {
   process.stdout.write("  bounds, via fn    ");
   const walkTiers = withCounts.filter((t) => t.matches > routing.vExact).sort((a, b) => a.matches - b.matches);
   for (const t of walkTiers) {
-    const seeded = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+    const seeded = await filtered(sql, queries, tierFilter(t.key), answers[t.key]);
     for (const name of HNSW_BOUNDS) await sql.unsafe(`SET ${name} = ${pgvectorDefaults[name]}`);
-    const defaults = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+    const defaults = await filtered(sql, queries, tierFilter(t.key), answers[t.key]);
     for (const name of HNSW_BOUNDS) await sql.unsafe(`RESET ${name}`);
     await sql.unsafe(`SET hnsw.ef_search = ${EF_SEARCH_RAISED}`);
-    const raised = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
+    const raised = await filtered(sql, queries, tierFilter(t.key), answers[t.key]);
     await sql.unsafe(`RESET hnsw.ef_search`);
     let exact: FilteredResult | undefined;
     if (t.matches <= EXACT_CEILING) {
       const body = await extractBody(sql, "exact", DIM, { overrides: { v_exact: String(t.matches + 1) } });
-      exact = await withPrepared("bench_exact", body, "force_custom_plan", (via) => filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via));
+      exact = await withPrepared("bench_exact", body, "force_custom_plan", (via) => filtered(sql, queries, tierFilter(t.key), answers[t.key], via));
     }
     bounds.push({ scale: n, label: t.label, matches: t.matches, tuples: Math.round((routing.vFetch * n) / t.matches), seeded, defaults, raised, exact });
     process.stdout.write(".");
@@ -1642,7 +1659,7 @@ for (const n of SCALES) {
   const thin = withCounts.filter((t) => t.matches <= routing.vExact);
   await withPrepared("bench_walk", walkBody, "force_generic_plan", async (via) => {
     for (const t of thin) {
-      const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via);
+      const r = await filtered(sql, queries, tierFilter(t.key), answers[t.key], via);
       walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
       process.stdout.write(".");
     }

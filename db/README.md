@@ -23,7 +23,7 @@ later — migration 014 declares HNSW settings that older pgvector rejects.
 - To run `test-upgrade.ts`, `bench-trgm.ts` or `bench-keyword.ts`: the same, and
   for the benchmarks a few minutes — they build tables up to 100,000 rows;
   `test-bench-reuse.ts` the same and about three minutes (six bench runs at
-  150,000 rows, in containers it starts itself).
+  150,000 rows).
   `bench-hnsw.ts` at a million rows and up wants most of an hour and a container with
   gigabytes of shared memory; its section below says how much
 
@@ -1261,9 +1261,8 @@ second invocation while one is running under it is refused rather than sharing
 the database, and for a kept volume that already exists the readiness wait is about thirty minutes (1,800 tries, a second or more apart) rather than one, since a
 kept data directory may start into crash recovery. `bench-hnsw.ts` uses it to
 reuse a loaded corpus across passes (SMD-1493). Only `bench-hnsw.ts` should
-run under a kept name (and `test-bench-reuse.ts`, which runs it there): any
-suite's schema reset refuses a database holding a kept corpus (set
-`OB1_DROP_KEPT_CORPUS=1` to drop it deliberately). What was
+run under a kept name: any suite's schema reset refuses a database holding a
+kept corpus (set `OB1_DROP_KEPT_CORPUS=1` to drop it deliberately). What was
 kept is yours to remove, and the exit line prints the command with the
 runtime as the script found it (`/opt/podman/bin/podman` where `podman` is
 off `PATH`):
@@ -1273,23 +1272,25 @@ podman volume rm ob1-pg-keep-<name>
 ```
 
 The kept corpus and the exact answers its marker keeps (SMD-1562) have a
-suite of their own, which drives `with-postgres.sh` itself and so runs
-without it:
+suite of their own:
 
 ```bash
-bun test-bench-reuse.ts   # six bench runs at 150,000 rows under one kept name, ~3 min; removes the volume it kept (on an interrupt too)
+./with-postgres.sh bun test-bench-reuse.ts   # six bench runs at 150,000 rows against one database, ~3 min
 ```
 
-It builds once with five queries, reuses with three (every answer the
-marker's), strips the marker's answers as a marker from before SMD-1562 has
-none and reuses again (computed, and the marker extended), then asks six
-(three from the marker, three computed) and six again (all from the marker) —
-and asserts sections A, B, D and E agree, timings aside, between each run
-that read the marker and the run on the same index that computed; then marks
-the corpus `rewritten` and asserts the next run is refused before the oracle
-is consulted. Two builds would give two HNSW graphs and two recall figures,
-which is why every comparison is on one kept index. Not in CI (no container
-runtime there) and not in `ci-parity.sh` (it starts its own containers).
+It runs the bench six times against the wrapper's one throwaway database,
+telling only the bench that the database is kept (to the bench, "kept" is
+the variable and the marker row; the volume is the wrapper's concern): a
+build with five queries, a reuse with three (every answer the marker's), the
+marker's answers stripped as a marker from before SMD-1562 has none and three
+again (computed, and the marker extended), then six (three from the marker,
+three computed) and six again (all from the marker) — asserting sections A,
+B, D and E agree, timings aside, between each run that read the marker and
+the run on the same index that computed; then the corpus marked `rewritten`
+and the next run refused before the oracle is consulted. Two builds would
+give two HNSW graphs and two recall figures, which is why every comparison
+is on one index. It drops its marker table on the way out. Not in CI or
+`ci-parity.sh`, for the three minutes of exact passes it costs.
 
 ### What only the live suite can catch
 
