@@ -10206,9 +10206,11 @@ alias of it stood; the marker constant says why its name is spelled out in the
 tagged templates; two comments that narrated which review run found what say
 the fact instead; change 28's section L table gained the `source` column the
 bench now prints, every row `loaded`; the README's thirty-minute wait is said
-to be a kept volume's that already exists. Left as they were, being either
-behaviour or beyond the touched files: caching the exact oracle's answers in
-the marker (the bulk of a reuse's remaining minutes at ten million rows), and
+to be a kept volume's that already exists; a second look folded the script's
+four removals into one `discard` and let the README count the thirty minutes
+as the 1,800 tries they are. Left as they were, being either behaviour or
+beyond the touched files: caching the exact oracle's answers in the marker
+(the bulk of a reuse's remaining minutes at ten million rows — SMD-1562), and
 test-live's own stripped-shell spawns for the re-embed worker and preflight,
 which predate this change.
 

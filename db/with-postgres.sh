@@ -87,6 +87,9 @@ fi
 STOP_TIMEOUT=120
 CID=""
 STARTED=0
+# Remove a container and its anonymous volumes, by ID or by name; a failure
+# (already gone) is not an error anywhere this is called.
+discard() { "$RUNTIME" rm -fv "$1" >/dev/null 2>&1 || true; }
 cleanup() {
   # A Ctrl-C during the stop below must not abort the removal and the hint:
   # ignored, not reset — the default disposition would let a second Ctrl-C
@@ -97,7 +100,7 @@ cleanup() {
     # invocation's and nothing is touched; otherwise the per-process name is
     # ours alone, and a `create` the runtime finished after an interrupt cut
     # the substitution short would leave a container and its anonymous volume.
-    [ -n "$KEEP" ] || "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true
+    [ -n "$KEEP" ] || discard "$NAME"
     return 0
   fi
   if [ -n "$KEEP" ]; then
@@ -112,10 +115,10 @@ cleanup() {
       echo -n "  stopping $NAME (a checkpoint; up to $STOP_TIMEOUT s) "
     fi
     "$RUNTIME" stop -t "$STOP_TIMEOUT" "$CID" >/dev/null 2>&1 || true
-    "$RUNTIME" rm -fv "$CID" >/dev/null 2>&1 || true
+    discard "$CID"
     [ "$STARTED" = 1 ] && echo "— done"
   else
-    "$RUNTIME" rm -fv "$CID" >/dev/null 2>&1 || true
+    discard "$CID"
   fi
 }
 trap cleanup EXIT
@@ -170,7 +173,7 @@ if [ -n "$KEEP" ]; then
       # invocation between its own two steps looks the same for about as
       # long; it loses its start with a clear error and nothing else, the
       # volume being shared and untouched. Removed by the inspected ID.
-      exited|stopped|dead|created) "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true ;;
+      exited|stopped|dead|created) discard "${STALE#* }" ;;
       *)
         echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -fv $NAME" >&2
         exit 2
