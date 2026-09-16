@@ -258,8 +258,10 @@ if (!Number.isInteger(BUILD_WORKERS) || BUILD_WORKERS < 0) {
  * the first). Unset, the whole set applies. The arm's label says which.
  */
 const UPTO = process.env.OB1_BENCH_UPTO;
-if (UPTO !== undefined && !/^\d{3}$/.test(UPTO)) {
-  console.error(`OB1_BENCH_UPTO must be a three-digit migration prefix such as 035 (got ${JSON.stringify(UPTO)})`);
+if (UPTO !== undefined && (!/^\d{3}$/.test(UPTO) || UPTO < "014")) {
+  // 014 or later: the after arm reads the function's locals from the
+  // catalog, and a body from before 014 has none to read (review pass 1).
+  console.error(`OB1_BENCH_UPTO must be a three-digit migration prefix of 014 or later, such as 035 (got ${JSON.stringify(UPTO)})`);
   process.exit(2);
 }
 /** Whether the after arm applies this migration file. */
@@ -986,13 +988,11 @@ for (const n of SCALES) {
       // pages it reads, so the three rows should agree, and the difference
       // between them and `route`'s is what the gate saves or costs a call. A
       // body from before 036 (OB1_BENCH_UPTO=035) has no such statement.
-      let gated = true;
-      try {
-        await extractBody(sql, "estimate", DIM);
-      } catch {
-        gated = false;
-        console.log("\n  (the deployed match_thoughts has no TABLESAMPLE estimate before its routing count — a body from before 036 — so none is explained)");
-      }
+      // Whether the body declares the sample share is routingAt's to say;
+      // a rewrite failure on a body that does must propagate, not read as
+      // "before 036" (review pass 1).
+      const gated = routing.vPct !== undefined;
+      if (!gated) console.log("\n  (the deployed match_thoughts declares no sample share — a body from before 036 — so no estimate is explained)");
       if (gated) {
         if (broadest) plan.estimateBroad = { branch: "estimate", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "estimate")) };
         if (thinnest && thinnest !== broadest) plan.estimateThin = { branch: "estimate", tier: thinnest.label, matches: thinnest.matches, ...(await plans(sql, queries[0], tierFilter(thinnest.key), "estimate")) };
@@ -1103,7 +1103,7 @@ for (const r of results) {
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
-console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 036's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes.\n");
+console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 036's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the sample share is substituted as the literal the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make is exactly what the substitution removes.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {

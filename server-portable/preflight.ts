@@ -1006,7 +1006,7 @@ if (configFailed) {
         if (Number(hybrid[0].c) >= 1) add("hybrid search", "ok", "search_thoughts_hybrid present");
         else add("hybrid search", "fail",
                  "search_thoughts_hybrid is missing, but search and search_thoughts call it — every semantic search would fail",
-                 "Apply the migrations through db/migrations/020_match_thoughts_recency.sql (017_search_thoughts_hybrid.sql defines it; 020 redefines it with the arguments the server sends).");
+                 "Apply the migrations through db/migrations/027_search_thoughts_relative_floor.sql (017_search_thoughts_hybrid.sql defines it; 020_match_thoughts_recency.sql redefines it with the arguments the server sends; 027 last defines it — stopping at 020 would leave 020's body over 027's).");
 
         /**
          * Migration 024's function. On the SQL path thought_stats calls

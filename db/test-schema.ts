@@ -716,7 +716,10 @@ console.log("\n[8e] Migration 036: the routing count is gated by a sample of the
     "…and the three conditions as the header states them: eight hits, on three pages, at ten times the threshold");
   assert(/IF NOT v_broad THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
     "…the collection runs only when the gate did not decide, and the exact branch only when the collection ran");
-  assert(/embedding IS NOT NULL\) AS hit/.test(src) && !/EXISTS[^;]*TABLESAMPLE/.test(src),
+  // The statement itself, not the source around it: the body's comments
+  // mention EXISTS and TABLESAMPLE in the same breath (review pass 1).
+  const sampleStmt = /INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?TABLESAMPLE SYSTEM[\s\S]*?\) s);/.exec(src)?.[1] ?? "";
+  assert(/embedding IS NOT NULL\) AS hit/.test(sampleStmt) && !/EXISTS/.test(sampleStmt) && !/thought_chunks/.test(sampleStmt),
     "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — the header says)");
 
   // 1,000 random rows, 990 of one kind and 10 of another: both filters are
@@ -730,10 +733,12 @@ console.log("\n[8e] Migration 036: the routing count is gated by a sample of the
   const exactTop = async (qv: string, filter: string) => {
     await db.exec(`SET enable_indexscan = off`);
     await db.exec(`SET enable_bitmapscan = off`);
-    const r = await db.query<{ id: string }>(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> $1::vector, id LIMIT 10`, [qv]);
-    await db.exec(`RESET enable_indexscan`);
-    await db.exec(`RESET enable_bitmapscan`);
-    return r.rows.map((x) => x.id);
+    try {
+      return (await db.query<{ id: string }>(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> $1::vector, id LIMIT 10`, [qv])).rows.map((x) => x.id);
+    } finally {
+      await db.exec(`RESET enable_indexscan`);
+      await db.exec(`RESET enable_bitmapscan`);
+    }
   };
   const agree = async (label: string) => {
     let ok = 0;

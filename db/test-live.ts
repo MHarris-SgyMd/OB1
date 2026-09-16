@@ -385,103 +385,110 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
-  const N = 25_000;
-  await sql.unsafe(`
-    INSERT INTO thoughts (content, metadata, embedding)
-    SELECT 'gate ' || r.i,
-           CASE WHEN r.i % 250 = 0 THEN '{"broad": true, "thin": true}' ELSE '{"broad": true}' END::jsonb,
-           -- correlated through r.i so the subquery runs per row: uncorrelated
-           -- it is an InitPlan evaluated once, and every row gets one vector
-           (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
-    FROM generate_series(1, ${N}) AS r(i)`);
-  await sql.unsafe(`VACUUM ANALYZE thoughts`);
-  const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
-  assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
-
-  // The floor lowered to 0 for the section, so the gate runs on this heap: 036
-  // applied through test-support with the one override SchemaOptions carries.
+  // Read by the finally block below as well as the section.
   const opts036 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("036") };
-  await applyMigrations(URL_, { ...opts036, routeEstimateMinPages: 0 });
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
-  assert(/IF v_pages >= 0 THEN/.test(await body()) && /TABLESAMPLE SYSTEM \(v_pct\)/.test(await body()), "036 is installed with its floor at 0: the sample runs on every filtered call to this table");
+  try {
+    const N = 25_000;
+    await sql.unsafe(`
+      INSERT INTO thoughts (content, metadata, embedding)
+      SELECT 'gate ' || r.i,
+             CASE WHEN r.i % 250 = 0 THEN '{"broad": true, "thin": true}' ELSE '{"broad": true}' END::jsonb,
+             -- correlated through r.i so the subquery runs per row: uncorrelated
+             -- it is an InitPlan evaluated once, and every row gets one vector
+             (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
+      FROM generate_series(1, ${N}) AS r(i)`);
+    await sql.unsafe(`VACUUM ANALYZE thoughts`);
+    const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
+    assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
 
-  // The observable: 014's collection is one scan of the GIN index per call,
-  // and nothing else in a call to this table scans it the same way twice — so
-  // the difference in GIN scans per call between 020's body and 036's, on the
-  // same table, is the collection skipped. pg_stat counts are flushed on
-  // request (PG 15+), then read after one more statement.
-  const ginScans = async () => {
-    await sql`SELECT pg_stat_force_next_flush()`;
-    await sql`SELECT 1`;
-    return Number((await sql`SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_metadata_idx'`)[0].idx_scan);
-  };
-  const { unitVector } = seededRandom(1463);
-  const QUERIES = 10;
-  const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
-  const exactTop = (qv: string, filter: string) =>
-    sql.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL enable_indexscan = off`);
-      await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
-      return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector, id LIMIT 10`);
-    });
-  /** GIN scans per call and exact-answer agreement, for one filter under the installed body. */
-  const measure = async (filter: string): Promise<{ scansPerCall: number; agree: number }> => {
-    let agree = 0;
-    const g0 = await ginScans();
-    for (const qv of queries) {
-      const want = new Set((await exactTop(qv, filter)).map((r: { id: string }) => r.id));
-      const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '${filter}'::jsonb)`);
-      if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
-    }
-    // The oracle's own bitmap scans are inside the bracket too, one per call
-    // under both bodies, so they cancel in the difference below.
-    return { scansPerCall: ((await ginScans()) - g0) / QUERIES, agree };
-  };
-  const BROAD = '{"broad": true}';
-  const THIN = '{"thin": true}';
-  const gatedBroad = await measure(BROAD);
-  const gatedThin = await measure(THIN);
-  assert(gatedBroad.agree === QUERIES, `under 036, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
-  assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
+    // The floor lowered to 0 for the section, so the gate runs on this heap: 036
+    // applied through test-support with the one override SchemaOptions carries.
+    await applyMigrations(URL_, { ...opts036, routeEstimateMinPages: 0 });
+    assert(/IF v_pages >= 0 THEN/.test(await body()) && /TABLESAMPLE SYSTEM \(v_pct\)/.test(await body()), "036 is installed with its floor at 0: the sample runs on every filtered call to this table");
 
-  // 020's body on the same table — the collection on every filtered call.
-  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
-  assert(!/TABLESAMPLE/.test(await body()), "020 re-applied over 036: the body has no sample (the state a hand re-apply of 020 leaves; preflight's remedy names 036 for that reason)");
-  const plainBroad = await measure(BROAD);
-  const plainThin = await measure(THIN);
-  const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
-  // The sample skips the collection whenever it lands on three or more pages,
-  // which a binomial draw of ~8 pages fails about one time in a hundred; the
-  // rest of a call's GIN scans (the oracle's, the walk's bitmap) are the same
-  // under both bodies and cancel.
-  assert(saved >= 0.8 && saved <= 1.0, `on the broad filter 036 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 036: ${gatedBroad.scansPerCall.toFixed(2)})`);
-  assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
-  assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
+    // The observable: 014's collection is one scan of the GIN index per call,
+    // and nothing else in a call to this table scans it the same way twice — so
+    // the difference in GIN scans per call between 020's body and 036's, on the
+    // same table, is the collection skipped. pg_stat counts are flushed on
+    // request (PG 15+), then read after one more statement.
+    const ginScans = async () => {
+      await sql`SELECT pg_stat_force_next_flush()`;
+      await sql`SELECT 1`;
+      return Number((await sql`SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_metadata_idx'`)[0].idx_scan);
+    };
+    const { unitVector } = seededRandom(1463);
+    const QUERIES = 10;
+    const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
+    const exactTop = (qv: string, filter: string) =>
+      sql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+        await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+        return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector, id LIMIT 10`);
+      });
+    /** GIN scans per call and exact-answer agreement, for one filter under the installed body. */
+    const measure = async (filter: string): Promise<{ scansPerCall: number; agree: number }> => {
+      let agree = 0;
+      const g0 = await ginScans();
+      for (const qv of queries) {
+        const want = new Set((await exactTop(qv, filter)).map((r: { id: string }) => r.id));
+        const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '${filter}'::jsonb)`);
+        if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
+      }
+      // The oracle runs inside the bracket too, but with index and bitmap scans
+      // off it seq-scans and touches no GIN index; what the bracket counts is
+      // the function's own scans.
+      return { scansPerCall: ((await ginScans()) - g0) / QUERIES, agree };
+    };
+    const BROAD = '{"broad": true}';
+    const THIN = '{"thin": true}';
+    const gatedBroad = await measure(BROAD);
+    const gatedThin = await measure(THIN);
+    assert(gatedBroad.agree === QUERIES, `under 036, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
 
-  // The sample's cost against the collection's on this table, printed for the
-  // record: the header's numbers are a bench's, this is one server on one day.
-  const timed = async (stmt: string, n = 20): Promise<number> => {
-    const ts: number[] = [];
-    for (let i = 0; i < n; i++) { const t0 = performance.now(); await sql.unsafe(stmt); ts.push(performance.now() - t0); }
-    return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
-  };
-  const sampleMs = await timed(`SELECT count(*) FILTER (WHERE s.hit), count(DISTINCT s.blk) FILTER (WHERE s.hit), count(DISTINCT s.blk)
-    FROM (SELECT (t.metadata @> '${BROAD}'::jsonb AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
-          FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`);
-  const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
-  console.log(`      (${ROUTE_SAMPLE_PAGES} pages sampled of ${pages}: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
+    // 020's body on the same table — the collection on every filtered call.
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
+    assert(!/TABLESAMPLE/.test(await body()), "020 re-applied over 036: the body has no sample (the state a hand re-apply of 020 leaves; preflight's remedy names 036 for that reason)");
+    const plainBroad = await measure(BROAD);
+    const plainThin = await measure(THIN);
+    const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
+    // The sample skips the collection whenever it lands on three or more pages,
+    // which a binomial draw of ~8 pages fails about one time in a hundred; the
+    // rest of a call's GIN scans (the oracle's, the walk's bitmap) are the same
+    // under both bodies and cancel.
+    assert(saved >= 0.8 && saved <= 1.0, `on the broad filter 036 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 036: ${gatedBroad.scansPerCall.toFixed(2)})`);
+    assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
+    assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
-  // The shipped state back: 036 with its floor — and 027, because 020's file
-  // also redefines search_thoughts_hybrid as 020 had it, without 027's
-  // relative floor, and [15] holds that floor (the first run of this section
-  // left 020's hybrid behind and [15] failed on it) — the table emptied, the
-  // index rebuilt (instant on no rows).
-  await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
-  assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
-  assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
-    "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
-  await sql`DELETE FROM thoughts`;
-  await sql.unsafe(String(hnswDef));
+    // The sample's cost against the collection's on this table, printed for the
+    // record: the header's numbers are a bench's, this is one server on one day.
+    const timed = async (stmt: string, n = 20): Promise<number> => {
+      const ts: number[] = [];
+      for (let i = 0; i < n; i++) { const t0 = performance.now(); await sql.unsafe(stmt); ts.push(performance.now() - t0); }
+      return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
+    };
+    const sampleMs = await timed(`SELECT count(*) FILTER (WHERE s.hit), count(DISTINCT s.blk) FILTER (WHERE s.hit), count(DISTINCT s.blk)
+      FROM (SELECT (t.metadata @> '${BROAD}'::jsonb AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
+            FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`);
+    const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
+    console.log(`      (${ROUTE_SAMPLE_PAGES} pages sampled of ${pages}: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
+
+  } finally {
+    // The shipped state back on every path — a throw above would otherwise
+    // leave 25,000 rows and no HNSW index to [6]..[16] (review pass 1): 036
+    // with its floor, and 027, because 020's file also redefines
+    // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
+    // [15] holds that floor (the first run of this section left 020's hybrid
+    // behind and [15] failed on it); the table emptied; the index rebuilt
+    // (instant on no rows).
+    await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
+    assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+    assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
+      "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
+    await sql`DELETE FROM thoughts`;
+    await sql.unsafe(String(hnswDef));
+  }
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");

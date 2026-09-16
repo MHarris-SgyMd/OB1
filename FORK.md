@@ -8922,11 +8922,20 @@ goes straight to the walk — only when all three hold:
    page passes the first two conditions by itself. Three different pages means
    three separate draws landed on the filter; for a contiguous run of
    `v_exact` rows that is C(8,3) × (run pages / heap pages)³ — about 1e-5 at
-   the floor, 6e-8 at a million rows, 6e-11 at ten million.
+   the floor, 6e-8 at a million rows, 6e-11 at ten million. The layout the
+   rule is weakest against sits between those two: a few matches a page over
+   hundreds of pages — a tag on four captures a day for most of a year —
+   where three sampled pages already hold eight hits. For `v_exact` rows four
+   to a page that is C(8,3) × (250 / heap pages)³: about 7e-4 at the floor,
+   2e-5 at a million rows, 3e-8 at ten million. The first review pass found
+   the layout; measured on a 6,826-page heap, 995 such rows were skipped 13
+   times in 20,000 draws (`hit_pages ≥ 4` would make it 4, at two to three
+   points of the broad filters' skip rate — the knob if that band matters;
+   the rule ships as measured).
 
-Anything less runs the collection exactly as before — the same statement, byte
-for byte, wrapped in an `IF` (test-schema [20] compares it with 014's, with
-whitespace collapsed) — and the same routing after it. Under the floor nothing
+Anything less runs the collection exactly as before — the same statement,
+token for token, indented two spaces further inside an `IF` (test-schema [20]
+compares it with 014's, whitespace collapsed) — and the same routing after it. Under the floor nothing
 runs but that collection: a brain of a few thousand thoughts never reads the
 sample, and its empty-filter probe stays the one GIN probe 014 made it. The
 page count and the floor are `config.mjs` constants (`ROUTE_SAMPLE_PAGES`,
@@ -9081,20 +9090,26 @@ Read down the tables and four things fall out.
   warmth; the same tier ran 5.7–9.3 across change 28's passes); every one
   returned 10 of 10 in the exact top-10 before and after, as [8b]–[8e] and
   [5d] hold them to.
-- **The empty filter pays the sample, and the sample's cost is eight random
-  page reads.** 0.21 → 0.43 ms at a million rows, where the 400 MB heap sits
-  in the VM's page cache; 0.27 → 1.31 at ten million, where it does not: a
-  4 GB heap against the image's 128 MB `shared_buffers`, eight pages a call
-  from the OS cache at ~0.1 ms each. The scratch corpus and the 100,000-row
-  bench (where the function does not run it) price the same statement at
-  0.10–0.17 ms with the pages in `shared_buffers`. So the ticket's "the
-  estimate must not cost more than the 0.01–0.2 ms the empty filter does
-  today" holds where the heap is buffered and not where it is not: on this
-  VM at ten million rows the shape enhanced-mcp sends on every call costs a
-  millisecond more, against 228 ms less on the 50% tier and 93 less on the
-  10%. A server sized for the table (SMD-1499 — `shared_buffers` a quarter
-  of RAM, not 128 MB) puts the pages back in the buffer pool; on a cold disk
-  the eight reads are eight seeks, and the header says so. The bench's own
+- **The empty filter pays the sample, and the sample's cost grows with the
+  heap — about 2 ns a page — not with what the buffer pool holds.** 0.21 →
+  0.43 ms at a million rows (50,000 pages), 0.27 → 1.31 at ten million
+  (526,000). This section's first draft blamed uncached page reads against
+  the image's 128 MB `shared_buffers`; the first review pass read the
+  bench's own section C the other way (0.11 / 0.21 / 0.99 ms at 5,000 /
+  50,000 / 500,000 heap pages is a line through the origin, not a cache
+  effect) and the measurement agreed: one row a page, every page warm in
+  `shared_buffers`, the statement costs 0.038 ms at 2,000 pages, 0.094 at
+  20,000, 0.459 at 200,000. `TABLESAMPLE SYSTEM` decides per page by hashing
+  every block number against its cutoff, so the eight page reads are the
+  small part. So the ticket's "the estimate must not cost more than the
+  0.01–0.2 ms the empty filter does today" holds up to about a million rows
+  and not beyond: on this VM at ten million the shape enhanced-mcp sends on
+  every call costs a millisecond more, against 228 ms less on the 50% tier
+  and 93 less on the 10%, and by the slope a hundred million rows would pay
+  10 ms on every filtered call. Sizing `shared_buffers` does not change it;
+  a different sampling statement does — eight TID range probes, eight page
+  reads whatever the heap, which also counts sampled pages exactly where
+  `pages_seen` today misses an empty one — and that is SMD-1526. The bench's own
   `estimate` row at ten million read 60 ms under both plan modes and 0.94
   with JIT off, which is why the table's last column is the JIT-off figure:
   the extraction had substituted the sample share as its declaring
@@ -9120,12 +9135,15 @@ Read down the tables and four things fall out.
 rows in the bench, every real brain today — the body computes two locals at
 entry (the heap's page count and the sample share, ~5 µs) and nothing else
 changes; the 100,000-row rows above differ by the pass-to-pass spread. Above
-it, every filtered call pays the sample: eight page reads, 0.2 ms when the
-heap is cached and about a millisecond when it is not (the third finding
-above), and the thin tiers move by less than the spread.
+it, every filtered call pays the sample: 0.2 ms at a million rows and about a
+millisecond at ten million, growing with the heap (the third finding above),
+and the thin tiers move by less than the spread.
 
-**Not done here.** The threshold, the plan mode and which of the two seeded
-bounds bites are SMD-1464; `ef_search` on real vectors is SMD-1465. One thing
+**Not done here.** The sample's per-page cost and its `pages_seen` denominator
+are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
+reads whatever the heap, sampled pages counted exactly). The threshold, the
+plan mode and which of the two seeded bounds bites are SMD-1464; `ef_search`
+on real vectors is SMD-1465. One thing
 the prototype saw in passing belongs with SMD-1464: with `enable_seqscan` on,
 the planner ran the 50% collection as a sequential scan with a `LIMIT` — 1.3 ms
 against 12.6 for the GIN bitmap it takes under 019's `enable_seqscan = off` —
@@ -9146,7 +9164,17 @@ populated 035: no column, signature, row or privilege moves; 014 re-applied by
 hand, then 036 alone, leaves one form); `server-portable` `tsc --noEmit` clean;
 `bun scripts/check-fork-consistency.mjs` PASS (check 7 reads 036 as
 `match_thoughts`' owner from the files); `bench-hnsw.ts` before and after at
-100,000, 1,000,000 and 10,000,000 rows, above.
+100,000, 1,000,000 and 10,000,000 rows, above. One review pass, two
+reviewers: the SQL side found the two measurement defects corrected above
+(the sample's cost model and the thin-spread layout's skip bound) plus the
+bloat bullet's direction (an empty sampled page inflates the estimate rather
+than deflating it — stated now; SMD-1526 fixes the denominator); the
+TypeScript side found no defect above LOW — an [8e] assertion that passed by
+the punctuation of a comment, a catch-all in the bench that would have read a
+rewrite failure as "before 036", cleanup-on-failure in [5d] and [8e], a stale
+change number on the README line this change extended (034 is change 65), the
+older missing-hybrid remedy still stopping at 020, and `OB1_BENCH_UPTO`
+accepting a prefix before 014 — all fixed.
 
 **Upstream status:** not applicable — 014's routing statement is this fork's.
 

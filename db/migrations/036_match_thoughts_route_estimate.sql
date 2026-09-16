@@ -67,18 +67,30 @@
 --        own. Three different pages means three separate draws landed on
 --        the filter; for a contiguous run of v_exact rows that is
 --        C(8,3) x (run pages / heap pages)^3: about 1e-5 at the floor,
---        6e-8 at a million rows, 6e-11 at ten million.
+--        6e-8 at a million rows, 6e-11 at ten million. The layout the three
+--        conditions are WEAKEST against sits between uniform and contiguous:
+--        a few matches a page over hundreds of pages (a tag on four captures
+--        a day for most of a year), where three sampled pages already hold
+--        eight hits. For v_exact rows four to a page that is C(8,3) x (250 /
+--        heap pages)^3 — about 7e-4 at the floor, 2e-5 at a million rows,
+--        3e-8 at ten million; measured on a 6,826-page heap, 995 such rows
+--        were skipped 13 times in 20,000 draws (first review pass, which
+--        found the layout). `hit_pages >= 4` would take the floor figure to
+--        2e-4 (4 of 20,000 measured) at the price of two to three points of
+--        the broad filters' skip rate; that is the knob if the band matters.
 --
 --   Anything less runs the collection exactly as before this file — the same
---   statement, byte for byte (db/test-schema.ts [20] compares it with 014's),
+--   statement token for token, indented two spaces further inside the IF
+--   (db/test-schema.ts [20] compares it with 014's, whitespace collapsed),
 --   and the same routing after it. So a filter the gate lets through costs
 --   what it always cost plus the sample; a filter the gate skips costs the
 --   sample and the walk, minus the bitmap. The exact branch remains the
---   answer for every filter at or under the threshold: the three conditions
---   are built so that a filter matching v_exact thoughts or fewer is skipped
---   with a probability the header's arithmetic puts under one in a hundred
---   thousand at the floor and far under it above, and the measurement below
---   found none in a thousand draws at each of five such filters.
+--   answer for every filter at or under the threshold up to the probabilities
+--   above — under 1e-6 for uniform or contiguous matches at any size the
+--   gate runs at, under 1e-3 for the thin-spread layout at the floor and
+--   falling as the cube of the heap — and the measurement below found none
+--   in a thousand draws at each of five such filters, and the thirteen above
+--   in twenty thousand at the sixth.
 --
 --   Under the floor nothing changes. The floor is the point where the bitmap
 --   can cost more than the sample: at 50 ns a matching row, a heap of
@@ -128,16 +140,26 @@
 --     every page; SYSTEM decides per page and reads {{ROUTE_SAMPLE_PAGES}} of
 --     them: 0.10 / 0.14 / 0.24 / 0.39 ms of execution for 4 / 8 / 16 / 32
 --     pages on the 500,000-row corpus, the same for the 50% filter and the
---     empty one (the cost is the rows read, not the rows that pass). Eight:
---     a 10% filter puts sixteen expected hits in 160 sampled rows and was
---     skipped in 908 of 1,000 draws, a 50% filter in 984 (the misses are
---     draws that landed on fewer than three pages — SYSTEM picks a binomial
---     number of them); sixteen pages bought 998 and 1,000 for 0.1 ms more on
---     every filtered call, and the empty filter's probe costs 0.012 ms, so
---     the sample is already the larger part of that call. No REPEATABLE
---     seed: a fixed seed reads the same pages every call, which is a warm
---     cache and a systematically wrong sample of a clustered filter; a fresh
---     draw is unbiased, and its cost is the page reads, cached or not.
+--     empty one (the cost is the rows read, not the rows that pass). SYSTEM
+--     is not free of the heap's size, though: it DECIDES per page by hashing
+--     every block number against its cutoff, so the statement carries about
+--     2 ns per heap page besides the eight pages' rows — measured with one
+--     row a page and every page in shared_buffers, 0.04 ms at 2,000 pages,
+--     0.09 at 20,000, 0.46 at 200,000 (first review pass, which caught the
+--     term); at ten million rows' 526,000 pages that is the millisecond the
+--     bench shows, whatever the buffer pool holds (the "large heap" failure
+--     mode below, and SMD-1526). Eight pages: a 10% filter puts sixteen
+--     expected hits in 160 sampled rows and was skipped in 908 of 1,000
+--     draws, a 50% filter in 984; sixteen pages bought 998 and 1,000 for
+--     0.1 ms more on every filtered call, and the empty filter's probe costs
+--     0.012 ms, so the sample is already the larger part of that call. The
+--     10% misses are mostly draws with fewer than eight hits — SYSTEM picks a
+--     binomial number of pages, and two hits a page compound that variance —
+--     then, at the floor, condition 1, and last fewer than three pages
+--     (1,109 / 345 / 45 of 1,499 misses in 20,000 draws on a 6,826-page
+--     heap). No REPEATABLE seed: a fixed seed reads the same pages every
+--     call, which is a warm cache and a systematically wrong sample of a
+--     clustered filter; a fresh draw is unbiased.
 --   * The hit is `metadata @> filter AND embedding IS NOT NULL`, not the
 --     collection's `OR EXISTS (chunk)`. Inside a SELECT-list expression the
 --     EXISTS became a hashed subplan — the planner built a hash of the whole
@@ -190,30 +212,44 @@
 --     function's own — the walk is what the collection would have chosen
 --     for a filter that broad — and the function was already STABLE only up
 --     to the index's approximation.
---   * A bloated heap. pg_relation_size counts dead and empty pages, so the
---     sample reads its eight pages and finds fewer live rows: less evidence,
---     more collections, never a skipped thin filter. VACUUM FULL restores
---     the density. A heap that is large in pages but few in rows (long
---     content, TOASTed metadata) is the same shape: the floor is a page
---     count, so such a brain reaches the gate at fewer rows, where the
---     collection was cheaper — and pays 0.15 ms to learn it. The other
---     direction — short content at the shipped width, 65–80 rows a page —
---     gives the sample four times the rows and the gate four times the
---     evidence, at about two and a half times the cost (~0.35 ms; Cost below).
+--   * A bloated heap. pg_relation_size counts dead and empty pages. Dead
+--     tuples on a sampled page mean fewer hits for the same page count: less
+--     evidence, more collections. EMPTY sampled pages are the other way:
+--     `pages_seen` counts the pages that returned a row, not the pages
+--     sampled, so an empty page drops out of the denominator and the scaled
+--     estimate is biased UP (first review pass; an earlier draft of this
+--     bullet had the direction wrong). A thin filter is still protected by
+--     conditions 2 and 3, which do not scale — but on a heap three quarters
+--     empty at the floor, v_exact rows are a larger share of what is live,
+--     and the uniform bound moves from ~1e-7 to ~3e-5. VACUUM FULL restores
+--     the density; SMD-1526's TID-range sample would count sampled pages
+--     exactly. A heap that is large in pages but few in rows (long content,
+--     TOASTed metadata) reaches the gate at fewer rows, where the collection
+--     was cheaper — and pays the sample to learn it. The other direction —
+--     short content at the shipped width, 65–80 rows a page — gives the
+--     sample four times the rows and the gate four times the evidence, at
+--     about two and a half times the per-row cost (~0.35 ms; Cost below).
 --   * Wide metadata. A metadata value past the TOAST threshold is detoasted
 --     for each sampled row; 160 detoasts. The collection's recheck pays the
 --     same per fetched row and always did.
---   * A heap larger than the buffer pool. The sample is eight RANDOM page
---     reads, and their cost is wherever the pages are: 0.10–0.17 ms from
---     shared_buffers (the scratch corpus, the bench at 100,000 rows), about
---     a millisecond from the OS page cache (the bench at ten million rows —
---     a 4 GB heap against the image's 128 MB shared_buffers: the empty
---     filter's call went from 0.27 ms to 1.31), and eight seeks from a cold
---     disk. The 50% tier went from 241 ms to 13 on the same table, so the
---     trade holds, but the ticket's "no more than the empty probe costs
---     today" holds only where the heap is buffered. A server sized for its
---     table (SMD-1499) keeps the pages in the pool; a brain on spinning
---     disk should size shared_buffers before it reaches the floor.
+--   * A large heap. The sample's cost grows with the heap — about 2 ns per
+--     page for SYSTEM's per-block decision (Design above) — not with what the
+--     buffer pool holds: 0.1 ms at 100,000 rows, 0.2 at a million, 1.0–1.1
+--     at ten million (the bench, every arm; the empty filter's call went from
+--     0.27 ms to 1.31 there), and by that slope some 10 ms at a hundred
+--     million, on every filtered call including the empty-filter shape one
+--     integration sends on every call. The 50% tier went from 241 ms to 13
+--     on the same table, so the trade holds at ten million, but the ticket's
+--     "no more than the empty probe costs today" holds only up to about a
+--     million rows, and sizing shared_buffers does not change it (an earlier
+--     draft of this bullet blamed uncached page reads; the first review pass
+--     measured the term with every page warm). The fix is a different
+--     sampling statement, not a setting: eight TID range probes — draw eight
+--     block numbers and read `ctid >= '(b,0)' AND ctid < '(b+1,0)'` for each,
+--     a TID Range Scan since PostgreSQL 14 — cost eight page reads whatever
+--     the heap, and count the pages sampled exactly (the bloat bullet). That
+--     is SMD-1526; a brain past a million rows that sends the empty filter
+--     on every call is the one that wants it.
 --   * The table is under the floor. Nothing here runs; the header's Why is
 --     the cost, at most a few milliseconds on the broadest filter.
 --   * Statistics have nothing to do with it: nothing here reads pg_statistic
@@ -230,10 +266,12 @@
 --   ANALYZE, median of 40, enable_seqscan off as the function has it):
 --
 --     the sample, 8 pages                        0.14 ms   any filter
---       (the rows on eight pages: 20 a page here, 160 rows; at the shipped
+--       (the rows on eight pages — 20 a page here, 160 rows; at the shipped
 --        width with short content the vectors are TOASTed and a page holds
---        ~65–80 rows, so the same eight pages are ~600 rows and ~0.35 ms —
---        db/test-live.ts [5d] prints it beside the collection on its table)
+--        ~65–80 rows, so the same eight pages are ~600 rows and ~0.35 ms,
+--        db/test-live.ts [5d] prints it beside the collection on its table —
+--        plus ~2 ns per heap page: 0.05 ms of the 0.14 here, a millisecond
+--        at ten million rows; Design and the "large heap" failure mode)
 --     the collection, 50% filter (249,623 rows)  12.6 ms
 --     the collection, 10% (49,994)                5.6 ms
 --     the collection, 1% (5,007)                  1.8 ms
@@ -248,8 +286,8 @@
 --   241 ms → 13 at ten million rows and 36.5 → 10.4 at a million, the 10%
 --   tier 138 → 45 and 47 → 37, the thin tiers within the pass-to-pass
 --   spread, the empty filter 0.21 → 0.43 ms at a million rows and 0.27 →
---   1.31 at ten million (the eight page reads, uncached — the last failure
---   mode above).
+--   1.31 at ten million (the per-page term — the "large heap" failure mode
+--   above).
 --
 -- What a successor must carry
 --   019's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
