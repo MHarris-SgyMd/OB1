@@ -10,7 +10,7 @@
   "requires": {
     "open_brain": true,
     "services": [],
-    "tools": ["Supabase CLI"]
+    "tools": ["Bun 1.4+"]
   },
   "requires_primitives": ["deploy-edge-function", "remote-mcp"],
   "learning_order": 1,

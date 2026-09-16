@@ -344,16 +344,20 @@ http://localhost:8000/?key=<your-raw-key>
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
 URL. For anything reachable from outside your machine, put it behind TLS first.
 
-A write key sees nine tools; a read key sees six. `update_thought` and
-`delete_thought` are never registered for a read key, so they do not appear in
-`tools/list` at all rather than failing when called. `capture_thought` returns the
+A write key sees ten tools; a read key sees seven. `capture_thought`,
+`update_thought` and `delete_thought` are never registered for a read key, so
+they do not appear in `tools/list` at all rather than failing when called.
+Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
+serves POST only, and that answer is expected. `capture_thought` returns the
 new thought's id, which is what the other two take.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied fourteen migrations. `server` logs `preflight OK` and
-`Started server`. `smoke.sh` prints `7 checks: 7 passed, 0 failed`. A client shows
-nine tools for a write key, six for a read key.
+`migrate` exits 0 having applied every migration under `db/migrations/`. `server`
+logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
+(`deploy/README.md` has the count, and the liveness-probe target for a platform
+that can only GET). A client shows ten tools for a write key, seven for a read
+key.
 
 ## Where to run it for real
 
@@ -363,7 +367,7 @@ no backups, no resource limits. For something durable:
 | | |
 | --- | --- |
 | **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `OB1_STORE=sql`, `DATABASE_URL`. The simplest data path. If the provider installs pgvector into a schema off the connection's `search_path` (Supabase uses `extensions`), the migrator heals its own session and preflight fails with the exact `ALTER ROLE … SET search_path` to run for the server — see `FORK.md` change 43. |
-| **Cloudflare Workers** | `server-portable` builds for Workers at ~272 KiB gzipped. Workers cannot pool Postgres connections, so pair it with PostgREST (`OB1_STORE=postgrest`) or add Hyperdrive. |
+| **Cloudflare Workers** | `server-portable` builds for Workers (`server-portable/README.md` has the bundle size). Workers cannot pool Postgres connections, so pair it with PostgREST (`OB1_STORE=postgrest`) or add Hyperdrive. |
 | **Self-hosted Supabase** | If you want the Supabase stack without supabase.com. Zero code change — see `recipes/local-brain-no-mcp`. |
 
 ## Two things this does not fix

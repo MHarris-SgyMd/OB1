@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-four numbered changes on top of the pin. Seven fix defects found in an
+Seventy-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–74 are the numbered `###` sections** further down, which is
+sections. Changes **18–76 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -179,11 +179,11 @@ evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
-scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
-<24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
+scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list)
+<23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
@@ -196,8 +196,10 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
-db/test-bench-reuse.ts           # change 74 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
-db/bench-oracle.ts               # change 74 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
+compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
+<16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
+db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
+db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -4794,12 +4796,14 @@ Cloudflare Worker in front that returns 404 for the prefix.
 `server-portable` had the same defect by a different door. `app.all("*")` caught
 every path, so the discovery GET went through `authenticate()`. With no key it
 got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an MCP
-request and wrong for this one. With a key — not the connector's shape, its
-discovery GET carries none, but any client that echoes the URL's `?key=` — it
+request and wrong for this one. With a key — which IS the URL-only connector's
+shape: the SDK copies the connector URL's query onto its path-aware discovery
+GET (`client/auth.js`, `url.search = issuer.search`), a fact this paragraph got
+wrong until change 75's review — it
 authenticated, cost an agent-registry resolve, and was handed to
-`StreamableHTTPTransport`, which opened an SSE stream nothing writes to or
-closes: the response never completes (SMD-1259, found by this change's review
-pass). Neither is 404. Nothing exercised the path: no test
+`StreamableHTTPTransport`, which opened an SSE stream nothing wrote to or
+closed: the response never completed (SMD-1259, found by this change's review
+pass; closed by change 75). Neither is 404. Nothing exercised the path: no test
 named `.well-known`, and `deploy/smoke.sh` only ever POSTed to the endpoint.
 Local Claude Code over `x-brain-key` never asks, which is why it stayed
 invisible in development.
@@ -4824,8 +4828,9 @@ check 2 probes the **origin root** — where RFC 9728 puts the document and wher
 claude.ai looks, with the server's path as a suffix when the URL carries one —
 with no key and following redirects, as the SDK client does, and naming the URL
 and code that missed; the base URL must carry a scheme and no query string, or
-the script refuses it rather than derive the wrong origin. It is the
-one check a Supabase deployment cannot pass, and that failure is real.
+the script refuses it rather than derive the wrong origin. It was the
+one check a Supabase deployment cannot pass, and that failure is real; change
+75's checks 3 and 4 are the others.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
 
@@ -4845,7 +4850,9 @@ That is a design decision, and it sits with the **method** axis the review passe
 found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
-#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one.
+#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one;
+the method axis is closed by change 75, which answers GET with 405 before
+`authenticate()`. The path axis (a mount point) stays open there too.
 The concrete reason the path axis waits: a mount at `/` makes the connector URL
 the mount point, and a proxy that forwards under an unstripped prefix — the shape
 `deploy/README.md` already anticipates — would then 404 the MCP endpoint itself.
@@ -8345,7 +8352,7 @@ checker's non-probe for the servers' own call spells the call they make today
 
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand
-neither deploy nor run — CI's `deno check` covers `server/index.ts` and the two
+neither deploy nor run (done in change 74) — CI's `deno check` covers `server/index.ts` and the two
 extensions on supabase-js, and the runtime test is what exercises all seven.
 The three vendored files that already compare timing-safe on their own
 (`integrations/rest-api` by a hand-rolled XOR loop, `enhanced-mcp` by
@@ -8932,7 +8939,8 @@ must keep ignoring (a property of a bound principal, a `typeof` beside a bound
 secret); the Next.js dashboard README told users to enter `MCP_ACCESS_KEY`
 against `open-brain-rest`, converted here. Noted, not changed:
 `consolidation-workers/deno.json`'s `check` task still names `bio/index.ts`,
-whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone);
+whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone — the
+task names `metadata-norm` alone since change 74);
 `readwise-capture` answers an empty body 200 before the secret check —
 upstream's accommodation of Readwise's Test Webhook button, unchanged.
 
@@ -9045,8 +9053,8 @@ servers' write tools beside the extensions' (six copies follow); the test's
 Deno stand-in and postgres stub lines are wrapped.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
-(integrations writing around `update_thought`) — done in change 69. SMD-1480 holds the
-deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
+(integrations writing around `update_thought`) — done in change 69. SMD-1480 held the
+deployability of everything that imports the shim — done in change 74. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
@@ -9412,9 +9420,10 @@ third Deno check.
 
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
 10's widening to them) — done in change 71. SMD-1525 (`enhanced-mcp`'s read tools cannot address
-a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
-`open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim;
-their behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun.
+a UUID row). SMD-1480 held the deployability of `update-thought-mcp`,
+`open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim —
+done in change 74; their behaviour is exercised by `test-auth.ts` and
+`test-writes.ts` under Bun.
 `server/index.ts`, upstream's Edge Function, is untouched. The `docs/` READMEs
 that show a SQL `UPDATE thoughts SET metadata …` are metadata-only and outside
 the rule.
@@ -10128,7 +10137,8 @@ pass no actor to `update_thought`/`upsert_thought`; their headers claim the
 actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
 `readwise-capture`, `consolidation-bio` and the auditor among them; their
-behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun). A
+behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun) —
+done in change 74. A
 fork-shaped brain for the Kubernetes and Neon deployments is theirs to take
 up; the READMEs name the path. `db/`'s and `evals/`' own `INSERT INTO
 thoughts` statements are the fork's fixtures and benches, outside the scan
@@ -10229,7 +10239,7 @@ run's queries' confound from the exact whole-table pass section A already runs
 would see only its first `ef_search` candidates) and re-checks the oracle's
 premise whenever the ledger differs from the one the marker says it last passed
 under; then goes on to the oracle. Section L
-gains a `source` column — `loaded`, or `reused (built <when>)` (change 74 adds where the exact oracle's answers came from) with the build's
+gains a `source` column — `loaded`, or `reused (built <when>)` (change 76 adds where the exact oracle's answers came from) with the build's
 own numbers — and the run says which it did, what it counted and which files it
 applied, so a report never silently mixes a fresh build's load line with a
 reused corpus. A kept database holds **one** corpus: a run asking for another
@@ -10768,7 +10778,7 @@ suite.
 
 **Not done here.** SMD-1480 (deployability: the worker still imports the
 Bun-only shim and reads `Deno.env`; it runs under `test-writes.ts`'s stand-in,
-not under `supabase functions deploy`). A path ending in `->`, an array
+not under `supabase functions deploy`) — done in change 74. A path ending in `->`, an array
 index, a key with a non-ASCII letter or a `$` (PostgREST takes both), a path
 in a select list, and `.contains()` with a path (containment under a key is
 `.contains("meta", { key })`) stay refused until a file needs one. The
@@ -10780,7 +10790,562 @@ nested `.or()` keeps it off the shim. SMD-1541 and SMD-1525 as before.
 **Upstream status:** not applicable — the shim is this fork's (fix 13); the
 worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**
 
-### 74. The kept bench corpus answers the exact oracle from its marker — `bench-hnsw.ts` records the exact pass's answers when it builds, and a reuse takes the first Q of them and computes only what the marker lacks (SMD-1562)
+### 74. The servers on the SQL shim run under Bun — `compat/deno-on-bun.ts` is the second one-line change, the codemod writes it, check 11 holds it, and `test-auth.ts` starts all sixteen (SMD-1480)
+
+`compat/deno-on-bun.ts` (new); `scripts/migrate-to-sql-shim.mjs`; one import
+line in sixteen vendored files — `extensions/home-maintenance`,
+`household-knowledge`, `meal-planning` (`index.ts` and `shared-server.ts`) and
+`professional-crm`; `integrations/consolidation-workers/bio`,
+`delete-thought-mcp`, `entity-extraction-worker`, `open-brain-rest`,
+`readwise-capture`, `rest-api`, `smart-ingest` and `update-thought-mcp`;
+`recipes/editorial-policy/auditor`, `work-operating-model-activation` and the
+cost recipe's "before" sample — and `recipes/local-brain-no-mcp/functions/
+_shared/db.ts` back on supabase-js; `scripts/check-fork-consistency.mjs`
+(check 11); `extensions/test-auth.ts`; `compat/supabase-sql/README.md` and
+`tsconfig.json`; the four extension READMEs and their `metadata.json`, the
+deploy primitive, ten recipe and integration READMEs (`rest-api`'s and
+`smart-ingest`'s gain the callout the other eight had),
+`integrations/consolidation-workers/deno.json`, two comments in
+`.github/workflows/fork-checks.yml`, `extensions/test-writes.ts`'s header
+(Linear SMD-1480, filed from change 64's third review pass and widened by
+comment from change 67).
+
+Fix 13's codemod moved a file off supabase-js by changing one import line, and
+the shim it moved it onto imports `bun`. The files it moved were written as
+Supabase Edge Functions: they read their environment through `Deno.env.get`
+and end in `Deno.serve`. So one line left them running nowhere — not under
+Deno, which cannot resolve `bun`; not under Bun, which has no `Deno` — and
+that state held for sixteen files: the five extension servers the ticket
+names, the nine recipes and integrations change 67's comment widened it to,
+and `rest-api` and `smart-ingest`, on the shim with a key compare of their
+own. Changes 64, 67, 69, 71 and 73 each exercised them under the tests' two-
+line stand-in for those globals, which is the only way they ran at all, and
+twelve READMEs and the deploy primitive sent a reader to `supabase functions
+deploy` above a callout saying it would fail. The ticket offered a revert; this fork's stated purpose
+is running Open Brain without Supabase, fix 13 put these files on the shim for
+exactly that, and change 73 had just made `consolidation-bio` run on it — so
+the migration is finished instead, for every file on the shim, by the
+mechanism fix 13 already owns.
+
+**The mechanism.** `compat/deno-on-bun.ts`, imported first, installs
+`globalThis.Deno` where none exists, with exactly the two members these files
+use: `env.get(name)` reads `process.env`, and `serve(handler)` /
+`serve({ port, hostname }, handler)` is `Bun.serve` on the option's port, else
+`PORT`, else 8000 (Deno's default), printing Deno's `Listening on http://…/`
+line and returning an object with Deno's `finished`, `shutdown()` and `addr`.
+Anything else on `Deno` stays undefined, so a file that starts using
+`readTextFile`, `args` or `exit` fails at the call under Bun with its name —
+not on a quiet emulation of another runtime's semantics. Where `Deno` already
+exists — on Deno itself, and under `test-auth.ts` and `test-writes.ts`, whose
+stand-in captures the handler instead of listening and is installed before
+any server is imported — the module does nothing. The codemod writes the line:
+`--apply` adds `import "…/compat/deno-on-bun.ts";` before a migrated file's
+first import statement when the file uses a `Deno.` member (ES modules
+evaluate imports in order, and a helper whose module body reads `Deno.env`
+before the polyfill has run is a `ReferenceError` at startup), and where the
+file's first import was Supabase's type-only `import
+"jsr:@supabase/functions-js/edge-runtime.d.ts";` — a specifier Bun does not
+resolve; four of the sixteen had it — that line becomes the polyfill import
+with the original recorded beside it (`// ob1-original-types:`), so the
+position is kept; `--revert` undoes both byte for byte, and `--apply --all`
+completes a file migrated before the line existed, so revert-then-apply is
+still the identity (23 reverted, 23 re-applied, the tree unchanged). A `KEEP`
+list beside the blockers names the one file the shim can resolve but must not
+take: the local-brain recipe's client runs inside that recipe's own
+self-hosted Supabase stack — `setup.sh` symlinks its `functions/` into the
+stack's edge runtime — where PostgREST is present and `bun` is not; it is back
+on `jsr:@supabase/supabase-js@2`, and the triage report says why. A recipe or
+integration has no `node_modules` on its path; `NODE_PATH=extensions/
+node_modules` (Bun honours it — probed) points the five that import `hono` or
+the MCP SDK at the install `extensions/package.json` already pins to their
+`deno.json` files, and the workers, the two APIs and the webhook receiver
+import nothing but the shim and their own files. Check 11 holds the state: a
+file under the seven category directories or `docs/` that imports the shim
+and — itself or through the relative imports it evaluates, transitively — uses
+a `Deno.` member has the polyfill as its first import statement; no member
+beyond `env.get` and `serve` appears in the file or its imports; no `jsr:`,
+`npm:` or URL specifier remains (`node:` is fine); comments and string
+contents blanked first, line numbers kept; twelve probes, three through a
+dependency, six non-probes, no exceptions. And `test-auth.ts` proves the run:
+every file in the tree that imports the shim and calls `Deno.serve` — a glob,
+so a newly migrated server joins or the guard fails — is started as a child
+process, `bun <file>` with the environment its README documents and
+`PORT=0`, the port read from the polyfill's `Listening on` line; then asked
+over HTTP for the one thing that proves it is that server authenticating —
+an MCP server's `tools/list` under a write key is its full tool list, an
+API's read probe passes under a read key, a worker dry-runs under one, the
+receiver admits its secret, the two APIs on their own key pass their gate —
+refused with a wrong key, still running afterwards, then stopped. Sixteen
+starts, four assertions each, in the required Portable-server job, no
+database; the child's exit is awaited beside the read, so a crash fails at
+once, and the child is stopped before its stderr is read, so a silent one
+fails at the deadline rather than hanging the job.
+
+**Decisions.** *Finish, not revert:* above. *A polyfill, not a per-file
+seam:* the ticket sketched `server-portable/index.ts`'s pattern — env through
+one accessor, `export default { fetch }` — which is right for a file the fork
+owns and wrong for sixteen it vendors: the sixteen entries hold 96
+`Deno.env.get` reads and 16 `Deno.serve` calls, and the four
+`_shared/helpers.ts` modules and `network.ts` behind them 65 more reads,
+every one a line the next rebase conflicts on, where the polyfill is one
+line the codemod owns and reverts, the same standard fix 13 set (a probe first: an unmodified
+`home-maintenance/index.ts` under `bun --preload` of the two globals
+answered `tools/list` with its four tools and 401 to a wrong key). *Two
+members, no more:* the polyfill is a statement of what these files use, and
+the loud failure at any other member is the point — an emulated
+`Deno.readTextFile` that differed from Deno's in one respect would be the
+fork's recurring defect, a value defined twice. *First import:* a second
+import ahead of it is a race the file's own order decides; check 11 names the
+line. *In the `jsr:` line's place:* a byte-exact round trip needs the
+position, and the swapped line is Bun's one unresolvable specifier in these
+files — a type-only import, so Deno lost nothing either. *`KEEP`, not a
+blocker regex:* nothing in the local-brain client's text says where it runs;
+its deployment does, so the codemod names the file and the reason. *`NODE_PATH`,
+not a `package.json` per category:* `extensions/package.json` already pins
+what the servers' `deno.json` files pin and `test-auth.ts` holds the two
+equal; a second install under `integrations/` and a third under `recipes/`
+would be two more copies of that pin to drift. *`SUPABASE_URL` still carries
+the Postgres URL:* fix 13's documented convention (the codemod's banner says
+it); renaming the variable is the per-file rewrite the one-line philosophy
+exists to avoid, and every README's run line says what the variable holds.
+*`rest-api` and `smart-ingest` in scope:* the ticket and its comment count
+fourteen; the tree has sixteen on the shim, and the drift guard is over the
+tree, not a list. *The tests keep their stand-in:* they need the handler, not
+a port, and the polyfill yielding to an existing `Deno` is what lets both be
+true; only the last section of `test-auth.ts` runs the polyfill, and it runs
+it as a user would. *`PORT=0`:* the OS picks a free port and the polyfill
+reports it, which is what Deno's `Listening on` line is for — no probe, no
+race. *`metadata.json`'s `tools`:* `Bun 1.4+` for the four, `Supabase CLI`
+for the two that deploy by the primitive.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with podman; twenty-nine items between them, three HIGH — two
+of them one defect seen by both — five MED, nineteen taken). The running reviewer broke the new test section both
+ways a child process can go wrong. A child that crashed at startup — the
+polyfill with `serve` removed — was reported only after the full thirty-second
+deadline, at 100% CPU, sixteen times over (eight minutes), with `exit null`
+and a code frame where the error text should be: `reader.read()` answers
+`{ done: true }` at once after the child's stdout hits EOF, so the loop spun
+eleven million times, and Bun sets `exitCode` only when `exited` settles,
+which the loop never awaited. And a healthy child whose `Listening on` line
+did not match the regex hung the suite past fifteen minutes and left an
+orphan: the failure message read the child's stderr to EOF while the child
+was alive (the reading reviewer saw the same line). Now the loop races the
+child's `exited` beside the read and a tick, drains once at EOF, kills the
+child before reading stderr, surfaces the line containing `error` rather than
+the frame above it, and names the deadline it waited — a crash fails in under
+a second with `TypeError: Deno.serve is not a function`, sixteen crashes in
+one, an unmatched port line at the deadline with no orphan, each re-run under
+the mutation. A polyfill made to install over the tests' stand-in killed the
+suite at the first import with a stack and no tally (port 8000 taken or not):
+the import loop is a counted failure now, and an assertion after it says the
+stand-in is still `Deno` — the identity the whole in-process section rests
+on (709 assertions). The documented port was wrong for the fork's own
+machine: podman's `gvproxy` holds `*:8000` on macOS, so `PORT` unset answered
+`Is port 8000 in use?` on the first try; the polyfill keeps Deno's default,
+the examples say `PORT=8787` (the shared meal-planning server 8788) and each
+callout says why to set one. The reading reviewer found the two README
+claims that would have failed a reader: every extension `schema.sql` creates
+RLS policies on Supabase's `auth.uid()` (meal-planning's on `auth.jwt()`
+too), which the fork's Postgres does not have, so the new `psql -f` step
+died at the first policy — Step 1 now creates the two stub functions first
+and says the table owner is not subject to the policies while the server
+scopes rows by `DEFAULT_USER_ID` itself; and `work-operating-model-activation`
+refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, which its callout said
+to leave unset — the callout says to set any value, and the test's spawns no
+longer inherit the variable from the process, so "may be left unset" is what
+the other fifteen starts prove. Check 11 widened at the running reviewer's
+probes: a bare `Deno` — aliased (`const D = Deno`), bracketed
+(`Deno["env"]`), destructured — is a use the rule cannot follow and is
+refused as one; a dynamic `import("jsr:…")` is a specifier too; four probes
+added and a non-probe widened (`globalThis.Deno.env.get`, a relative dynamic
+import). The codemod, given a `jsr:` types import that was not the first
+import, had swapped it in place — second — and left a second such line
+alone; it puts the polyfill first in every layout now and turns any other
+types import into the recorded comment, round trip identical on both
+constructed files. Smaller: `PORT=""` was port 0, a random port, silently —
+empty is unset now; `Deno.serve({ port, handler })`, Deno's options-only
+form, is accepted; the reader is cancelled rather than released around a
+pending read; the codemod's `Deno.` test reads comments (a harmless extra
+line, said so) and check 11's import statements end at `;` (a semicolon-less
+import would be a silent miss, said so). This section's counts were wrong
+and are fixed: 96 reads and 16 serves in the entries and 65 in the helper
+modules, not "64 and 64"; twelve READMEs and the primitive carried the
+callout, not fourteen; ten recipe and integration READMEs were edited, not
+nine; and the by-hand probe of an unmodified extension ran with the globals
+preloaded, so "fails at `Deno is not defined`" was not observed and is not
+claimed. The four extension credential trackers gain a Postgres URL line.
+Not taken: the migrated files' banner still says `node scripts/…` while the
+header says `bun` (rewriting 23 banners for a word; node runs it too); the
+bio worker's dry run under a write key answers 404 without a `?name=`, past
+the gate as the test counts it; `deno check` of the local-brain recipe's
+`capture/index.ts` fails in its `embed.ts` on a parameter property —
+pre-existing at the pin, not this change (its `db.ts`, back on supabase-js,
+checks clean).
+
+**Review pass 2** (the same two reviewers; twenty-one items between them,
+one HIGH, three MED; sixteen taken, one filed). **The stop signal, for this
+change's mechanism:** every finding in the polyfill, the codemod, check 11
+and the test was polish on pass 1's additions — the deadline constant printed
+as its own source text (a double-quoted string inside the template), the
+error-line picker preferring `throw new Error(` to the `error:` line below
+it, a child that printed its port and then exited crashing the suite with no
+tally where the probe's `fetch` threw (a counted failure now, re-run under the
+mutation), the postgres stub left in `/tmp` on the import-failure path,
+`--revert` turning a person's `// ob1-original-types: …` comment into an
+import (the record is a `jsr:` specifier and only that is restored, the
+constructed layout round-trips identical now), a backtick dynamic import
+unread (read now; one with `${…}` is not a literal), the blanker's template
+literals and the two runtime-detection idioms stated as limits, the ten
+callouts saying "set one" above command lines that set no port (they say
+`PORT=8787` now), the README's `CREATE OR REPLACE FUNCTION auth.uid()` — which
+on a real Supabase database would have replaced GoTrue's function with one
+returning NULL and broken row-level security across the project — a plain
+`CREATE` now, refused where the function exists, with the warning before the
+command, and pass 1's own tallies (twenty-nine items, not thirty-two). The
+running reviewer confirmed pass 1's two fixes load-bearing: with the `exited`
+race removed the busy-spin returns (sixteen crashes in 49 s at a 3 s
+deadline); with it, 1.1 s. And it re-ran the codemod's four odd layouts
+(identical) and the mutations (a)–(c) (as pass 1 left them).
+
+**The one HIGH is not this change's.** The running reviewer did what no pass
+before it had: it applied the five `schema.sql` files to a real Postgres
+(after the README's two stubs — they apply cleanly, RLS on, connected as the
+owner), started each server under `bun`, and called all twenty-five
+extension tools through `tools/call` with a real key. Seven fail, on three
+gaps in the shim that predate this ticket — fix 13 migrated these files and
+never drove them: the shim has no `.not()` (two tools: `get_upcoming_
+maintenance`, `crm_get_follow_ups` — the only two calls in the tree); four
+tools select a PostgREST embed the codemod's blocker regex let through, since
+it wants the table name flush against the parenthesis and `maintenance_tasks (`
+and `recipes:recipe_id (` are not (`search_maintenance_history`,
+`get_meal_plan`, `generate_shopping_list`, the shared `view_meal_plan`) — so
+fix 13's "four of the 54 files use embedding" undercounts; and a JavaScript
+array binds as its `String()`, so `crm_add_contact` with `tags: []` is `22P02
+malformed array literal: ""`. Two more tools' error paths render `[object
+Object]` because the shim's error is a plain object where supabase-js's
+extends `Error`. The write path works — `add_maintenance_task` stores the row
+under the configured `user_id` — so a fork user could add tasks and never
+list what is due. That is a second mechanism (three shim features and the
+codemod's blocker, with a tool-level drive to hold them), and it is filed as
+SMD-1588 with the evidence; here, the four extension READMEs name their
+failing tools above the Connect step (household-knowledge's all ran), the
+primitive and the shim README carry the count once, and this section's claim
+is the exact one: the servers start, authenticate and answer over the port —
+eighteen of twenty-five tools work end to end, seven wait on SMD-1588.
+
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the test's deadline is one constant for the
+section rather than one per child; the CI step that runs the checker names
+what it checks through check 11 (it stopped at check 8); this section's
+counts of check 11's probes read the arrays as pass 1 left them (twelve,
+three through a dependency, six non-probes; "eight" and "eleven" were the
+implementation's) and pass 1's paragraph says what it added (four probes and
+one widened non-probe, not "two non-probes"). Left as they are, with the
+reason: the migrated files' banner says `node scripts/…` while the codemod's
+header says `bun` — 23 upstream-owned files for a word, and node runs it; the
+extension credential trackers' Supabase lines beside the new Postgres URL
+line — upstream's teaching path.
+
+**Verified:** `bun test-auth.ts` 709/709 (643 before: sixteen starts × four
+assertions, the tree guard, and the stand-in's identity after every import); every one of the sixteen — the five
+extension servers, the sample, `work-operating-model-activation`, the two
+thought servers, `open-brain-rest`, the auditor, the two workers,
+`readwise-capture`, `rest-api`, `smart-ingest` — starts under `bun`, says its
+port, answers its probe and is still running (the auditor's dry run under a
+read key answers 500 against the refused stub database, past the gate as in
+the in-process section); before the change an unmodified integration under `bun` failed at its
+`jsr:` import and an unmodified extension served only under `bun --preload`
+of the two globals — the two starts probed by hand; `bun scripts/check-fork-consistency.mjs`
+PASS with check 11's fifteen probes, and six mutations of the tree each caught
+on the right file and line — the runtime line removed, the line moved after
+`hono`, `Deno.exit` in an entry, `Deno.args` in a `_shared/helpers.ts` reached
+through its entry, the `jsr:` line restored beside the polyfill, `npm:hono`
+as a specifier (a lesson from the mutant run: `git checkout --` restored the
+mutated files to HEAD and wiped the branch's own uncommitted lines with them
+— restore a mutation from the saved text, never from git, on a dirty tree);
+after pass 1, the test's own failure modes re-run under mutation — `serve`
+removed from the polyfill: sixteen named failures in 0.9 s with the
+`TypeError` text; the polyfill installing over the stand-in: one counted
+failure with a tally in 0.1 s; the port line unmatched under a two-second
+deadline: sixteen failures in 33 s, no orphan — and the codemod's two odd
+layouts (a `jsr:` types import second; two of them) each round-trip
+identical with the polyfill first; after pass 2, a child that exits after
+its port line is one counted failure, a human-written
+`// ob1-original-types:` line survives `--revert`, and the running
+reviewer's end-to-end run stands as the measure of what works: five schemas
+applied, sixteen servers started, eighteen of twenty-five extension tools
+answering, the seven that do not named in their READMEs and in SMD-1588;
+`../db/with-postgres.sh bun test-writes.ts` 186/186 (the bio worker and the
+other drivers unchanged under the stand-in); `bunx tsc --noEmit` in
+`compat/supabase-sql` clean with `../deno-on-bun.ts` in its include;
+`../../db/with-postgres.sh bun test-compat.ts` 84/84; the codemod round-trips
+(23 reverted, 23 re-applied, the tree byte-identical, the local-brain client
+kept) and its triage report marks a migrated file lacking the line with `!`
+and prints the `KEEP` reason under "Needs a human". The ticket's verify —
+each of the five starts under Bun and answers `tools/list` with a scoped key,
+in CI; `test-auth.ts` still passes, and its stand-in is now the test's
+convenience rather than the files' only runtime — is the suite.
+
+**Not done here.** SMD-1588: the shim's `.not()`, array binding and error
+class, the codemod's embed blocker (a space or an alias before the
+parenthesis), the one-hop embed or an honest refusal for the three servers
+already on the shim, and a drive of every extension tool against Postgres —
+seven of twenty-five fail today, named in the READMEs. Deno deployability of a shim-importing file: the shim is
+Bun's `SQL`, and a Deno-capable shim would be a second client to hold equal
+to the first — the files that must deploy to Supabase stay on supabase-js
+(`family-calendar`, `job-hunt`, `ob-graph`, `agent-memory-api`,
+`metadata-norm`, `kubernetes-deployment`, the local-brain client). A compose
+service per extension in `deploy/`: each server is one `bun` process on one
+port, and `SETUP.md`'s TLS proxy is where a hosted client reaches it; the
+READMEs say so. The extension READMEs' Supabase-shaped prose outside the run
+step — credential trackers naming a project ref, RLS steps that assume
+`auth.jwt()` — is upstream's teaching path and is left as it is beyond the
+prerequisites, the schema step and the user-id step. The `Deno.serve` return
+object carries `finished`, `shutdown()` and `addr` and nothing else of
+Deno's `HttpServer`; no file on the shim reads even those. `rest-api` and
+`smart-ingest` keep their own single-key compare (check 8 passes it; SMD-1455
+left them). SMD-1541 and SMD-1525 as before.
+
+**Upstream status:** not applicable — the shim, the codemod and the polyfill
+are this fork's (fix 13); upstream's copies of these files deploy to
+Supabase on supabase-js, which is what `--revert` restores. **Unfiled.**
+
+### 75. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
+
+`server-portable/index.ts`, `server-portable/test-server.ts` ([13]),
+`deploy/smoke.sh` (check 3), `deploy/README.md`, `SETUP.md` (Linear SMD-1259,
+filed from change 42's first review pass; upstream
+[#424](https://github.com/NateBJones-Projects/OB1/issues/424)).
+
+**The defect.** `app.all("*")` handled every method. Beneath it the Accept patch
+— upstream's #33 fix, written for POSTs from Claude Desktop connectors that omit
+the header — set `Accept: application/json, text/event-stream` on GETs too, and
+`StreamableHTTPTransport.handleRequest` then took an authenticated GET as a
+request to open the standalone SSE stream. The transport here is built per
+request and is sessionless: nothing ever wrote a message to that stream or
+closed it. The response was `200 text/event-stream`, its headers flushed at
+once, its body a `ping` event every 30 s from the transport's keep-alive and
+nothing else, until the client hung up — or, on Bun alone, until its 10 s
+per-connection idle reset beat the ping (SMD-1259 measured 10–12 s there). On
+Node and Workers nothing on the server side ended it: an uptime checker
+configured with the key parked one connection per probe, indefinitely. Each
+such GET first cost an agent-registry resolve and a server build. Change 42's review reproduced it three ways:
+`GET /?key=…`; `GET //.well-known/…?key=…` (a trailing slash on the base URL
+doubles the slash, which Hono does not match to `/.well-known/*`); and
+`GET /.Well-Known/…` (Hono matches case-sensitively). Upstream #424 reports the
+same hang from mcp-remote, whose handshake GET waited 60 s for it. Any holder of
+a key — a browser opening the connector URL the docs hand out, an uptime checker
+configured with the key, a client echoing `?key=` on GET — could park
+connections at will, and nothing rate-limited it.
+
+**The change.** The route table now says what the endpoint serves. The MCP
+handler is registered with `app.on(MCP_METHODS, "*", …)` for `["POST"]` alone,
+and Hono's `notFound` answers whatever no route matched with
+`405 Method Not Allowed`, `Allow: POST, OPTIONS` and the CORS headers —
+before `authenticate()`, so no key shape reaches the agent registry or builds a
+server, and the answer is the same for no key, a wrong key and a revoked one; it
+is about the method, not the caller. 405 and not 404 because the handler serves
+POST at every path: an unmatched request is always a method the endpoint does
+not serve, never an unknown path. `notFound` rather than a trailing
+`app.all("*")` (the second pass's shape) so that a route registered later is not
+silently shadowed by dispatch order — the third review pass verified the two
+byte-identical across every method and both odd paths. That 405 is the
+Streamable HTTP transport's documented answer from a server that offers no
+server-initiated stream. HEAD,
+PUT and PATCH land there (the transport's own 405 for PUT and PATCH came after
+auth and named `GET` in its `Allow`), and so does DELETE. The first draft kept
+DELETE on the premise that the SDK client sends it from `terminateSession()` and
+accepts 200 or 405; the first review pass read the client and found the premise
+true and irrelevant: `terminateSession()` returns before sending anything when
+it holds no session id, the id comes from an `mcp-session-id` response header —
+which this server strips from every response — or from a `sessionId` the
+application passes to the transport's constructor, so the only DELETE that can
+arrive is from a client an application seeded by hand, and it accepts the 405 by
+spec. A keyed DELETE bought a resolve and a server build for a transport with
+nothing to close. One list — `MCP_METHODS` — registers the handler and names the
+405's `Allow`, so the two cannot drift; the first draft had a string beside a
+hand-written boolean, which the review named as a value defined twice. The CORS
+`Access-Control-Allow-Methods` is left as it was on main, `GET, POST, OPTIONS,
+DELETE`, on purpose: it answers a different question — what a browser may send
+so that it can hear our answer — and the first review pass's version, which
+derived it from the served list, would have turned a browser-hosted client's
+DELETE (or a preflighted GET carrying `mcp-protocol-version`; GET itself is
+CORS-safelisted, but a preflight still happens for the header) into a network
+error where the server would have said 405. The second pass caught that.
+
+**A contract change for health checks, and its remedy.** A keyless `GET /` or
+`HEAD /` used to get the 200 JSON-RPC refusal; it now gets 405. A
+platform-default HTTP probe — Kubernetes `httpGet`, a load balancer's target
+check, an uptime monitor — can only GET and expects 2xx, so aimed at `/` it
+would mark a healthy server down. So `GET /health` is a route of its own,
+registered between `/.well-known/*` and the MCP handler, before
+`authenticate()`: `ok`, 200, no key needed, a key ignored; Hono routes HEAD to
+it as GET, so a HEAD probe gets a bodiless 200. It says the process is serving
+and nothing else — readiness (is the database reachable) stays preflight's job
+at the entrypoint, as the Dockerfile comment records. The third review pass
+found the second pass's route an exact root match: behind the unstripped proxy
+prefix `deploy/README.md` and change 42 already anticipate, `GET /mcp/health`
+got the 405 — the very outcome the route was added to prevent — and so did
+`/health/`. The route is now a GET handler on `*` that tests the path for
+`health` as its last segment, optional trailing slash, and calls `next()`
+otherwise (which lands on the 405). A route pattern was tried first —
+`/:prefix{.+}/health` — and in `test-server.ts` matched `/mcp/health` and
+`/a/b/health` but not `/functions/v1/open-brain-mcp/health`. Three passes
+stated three mechanisms for that, and the fifth is the one driven directly
+against the project's Hono 4.9.2 with each router named: the RegExpRouter
+accepts `/:prefix{.+}/health` on its own and matches four segments; what makes
+it throw `UnsupportedPathError` at registration is a `:param` route sharing the
+root node with a static route — `/.well-known/*` here, or a plain `/health` —
+regex or no regex; SmartRouter then falls back to the TrieRouter, and the
+TrieRouter miscounts a `{.+}` prefix of three or more segments (its segment
+counter matches one slash where it should match all). The scratch apps that
+"matched every depth" in passes 3 and 4 were loading Hono 4.13.8 from Bun's
+global cache, not the project's 4.9.2 — a scratch file outside the package
+resolves `hono` elsewhere. The lesson holds either way: the pattern's reach
+depends on router internals and on which Hono answers, and testing the path
+depends on neither. The name is exact after Hono's decodeURI: `/healthz`,
+`/Health` and `/health/x` are not it; `/he%61lth` is; an encoded slash `%2F`
+stays encoded and is not a slash, so `/health%2F` and `/health//` are refused
+while `/health/` and `//health` pass — one trailing slash, and an empty segment
+is tolerated. The breadth — `health` under any prefix — stands in for a
+base-path setting the server does not have; the mount change 42 defers would
+match `${base}/health` exactly and should narrow it. `POST /health` is the MCP
+endpoint, as POST at every path is, and a PUT or DELETE at a health path gets
+its 405 with `Allow: GET, HEAD, POST, OPTIONS` — the health resource's methods,
+which include the endpoint's, derived from the same list (the fourth pass wrote
+`GET, HEAD, OPTIONS` and contradicted its own sentence about POST). The
+image's `HEALTHCHECK` keeps POSTing to the endpoint, which also proves the MCP
+path serves; `deploy/README.md` points platform probes at `<base>/health` and
+says a browser opening the connector URL sees `Method Not Allowed`, which is
+expected. Nothing in the tree GETs the endpoint for liveness (checked: the
+Dockerfile, `compose.yaml`, `smoke.sh`, the workflows; the Kubernetes
+integration uses a `tcpSocket` probe).
+
+**What the ticket's smallest fix would have missed.** SMD-1259's second review
+pass offered a method condition on the Accept patch as the minimal fix. Read
+against the SDK client (`@modelcontextprotocol/sdk` 1.24.3,
+`_startOrAuthSse`): the client sets `Accept: text/event-stream` on its own GET,
+so the transport would have opened the stream for it whether or not the patch
+ran. The patch is left as it was, with a comment saying only POST now reaches
+it. The guard is the fix; gating the patch as well would have been a second
+mechanism with no observable behaviour left to test.
+
+**What the client does with a 405.** Read in the SDK source, not asserted:
+`_startOrAuthSse` cancels the body and returns on 405 — the comment there reads
+"indicates that the server does not offer an SSE stream at GET endpoint … an
+expected case that should not trigger an error" — and any other non-2xx is a
+`StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
+client. A live connector has not been seen to do it; see below.
+
+**Verified.** `test-server.ts` [13], 64 assertions against the real
+server: eleven fetch rows — GET under no key, a wrong key, the right key in the
+header and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT,
+PATCH, DELETE with and without a key, and the case-variant discovery path — each
+asserted for 405, an `Allow` naming the served methods, CORS, and a body that
+is not a JSON-RPC envelope; the doubled-slash path handed to `worker.fetch` as
+a `Request` object, because Bun's `fetch()` collapses `//` to `/` on the wire
+and a fetch row probed the 404 route instead (found when that row failed) — an
+earlier draft wrote the request line over a raw socket to prove Bun.serve's
+parser passes `//` through, which the sixth pass called a harness property and
+not a repo contract, production being Deno and Workers; `/health` → 200 with
+CORS bare, with a key, as HEAD, with a trailing slash, under a one-segment and
+under the Supabase-shaped three-segment prefix; `/healthz`, `/Health`,
+`/health/x`, `/a/healthz` → 405 or 404 — route exactness, not a status
+contract, since what a stray GET gets is the deferred path-axis decision, but
+one of the two refusals and nothing else, because the third pass's `!== 200`
+would have passed the abort marker, which is a hang, the one outcome the block
+exists to refuse (the fourth pass reproduced it with a wrapped `fetch`);
+`PUT /health` → 405 with `Allow: GET, HEAD, POST, OPTIONS`, and `POST /health`
+with the key → the transport's `initialize` result (a keyless row would have
+been satisfied by the JSON-RPC refusal, which the sixth pass caught). The sixth
+pass also asked whether that health-path `Allow` — a second evaluation of
+`HEALTH_PATH`, for a request nothing sends — is worth its seam; it is kept,
+because an `Allow` that omits GET at a path that serves GET is a false
+statement, and the cost is one regex test on a refusal path. A base-path
+setting would make both the route and this branch exact; that is the mount
+change 42 defers. The exact CORS method list lives in [3], where the preflight is
+now probed through the same abortable helper, whose body parse sits outside the
+transport try so a non-JSON body reports the status the server sent rather than
+`SyntaxError`; POST reaching the transport is [7], which also sends
+`Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
+whichever of the two tokens the transport requires is missing, where it used to
+test only the SSE token and let that POST through to a 406 after paying the
+resolve and the build. Drilled by restoring the pre-change shape — the handler on
+`app.all` and the `notFound` removed — 34 of 151 assertions fail: the
+fetch rows holding a valid GET fail as `TimeoutError`; the doubled-slash row as
+a 200 (the stream's headers flush at once; it is the body that never ends, and
+that row reads only the status); the rows without a key as 200 with an envelope; HEAD, PUT and PATCH
+by an `Allow` that names GET, from the transport's own 405 after auth; the keyed
+DELETE by the transport's 200; the four near-miss paths and `PUT /health` by
+the 200 refusal; `/health` keeps passing, being its own route. The
+suite's 2 s abort on every routing probe stays: it is what turns the failure
+mode this change closes into a red assertion instead of a stuck CI job, so it is
+the test's teeth, not scaffolding to retire. `deploy/smoke.sh` check 3 GETs the
+endpoint and expects 405; check 4 GETs `<base>/health` and expects the body
+`ok` — right whether or not the proxy strips its prefix, by the path test
+above. The body and not the status, because a 200 there proves nothing: a
+server with no health route (upstream's, say) answers a keyless GET with a 200
+JSON-RPC refusal, and a proxy that redirects unknown paths to a landing page
+answers 200 too — the fifth pass's status-only check passed on both, while
+three documents claimed a Supabase deployment fails it. Two checks, because
+they are two contracts with two remedies (the fourth pass bundled them into one
+tally to keep the count at eight, a constraint it had itself dissolved by moving
+the count literal into one file). Both **with no key**. No key, because both answers come before `authenticate()` so a key proves
+nothing, and because the script's status helper follows redirects with `-L`, on
+which curl forwards a custom header to whatever host comes next — the first
+draft sent the key, and behind a redirecting front proxy it would have landed in
+a third party's access log. A 200 from the endpoint is the guard missing or a
+front proxy answering `GET /` itself, and the message says both; a hang would
+also read as 200 under `--max-time`, since the stream's headers flush before the
+body stalls (the first draft said `000`, which curl prints only when no status
+line arrives at all). Check 2's comment now says why a keyless discovery probe
+suffices — the route answers before auth whether or not the key rides along —
+rather than the false claim that the connector sends none. The former checks
+3–7 are now 5–9. No document carries the count any more: `deploy/README.md`
+says the summary ends with `0 failed` and exits 0, and `SETUP.md` points there.
+This change bumped seven to eight by hand in two files before the fourth pass
+noticed, then eight to nine in one, before the sixth pass asked why a number
+the script computes is copied anywhere. `SETUP.md`'s tool counts (ten for a
+write key, seven for a read key; three tools gated, not two) are corrected
+where they contradicted each other eight lines apart, and
+`server-portable/README.md`'s suite count and bundle size, stale since [11]
+landed, now match the run, and are the only current copies of either number
+(the dated run records in changes 42 and 43 keep theirs) — `SETUP.md` and the
+known-issues entry below point there.
+`tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
+281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
+
+**Tidied while the files were open** (boyscout, after the sixth pass; no
+behaviour change, the suite count unchanged): the two 405 header sets are built
+once instead of spread per refusal; the test's probe deadline is one constant
+where it was the literal `2000` twice; and the per-row refusal triple that [11]
+and [13] each spelled out is one `expectRefusal()` helper beside `probe()`. Two
+cut-for-space items were left alone because they change behaviour: an `Allow`
+on the OPTIONS answer, and Hono's `cors()` middleware in place of the
+hand-spread header (its preflight answers 204 where [3] asserts 200) — the
+latter is a ticket if anyone wants it.
+
+**Not verified: a live connector.** The same standing as change 42: a real
+Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
+build of this `main`, each completing `initialize` and listing tools. The SDK
+reading above says they will. It is not the same as seeing it.
+
+**Not done here.** The path axis — mounting the transport at a path and letting
+Hono's `notFound` answer `/favicon.ico` and `/robots.txt` — remains the
+deployment-contract decision change 42 describes; `/health` no longer waits on
+it. Today those stray paths get the 405 like any other GET, which is a complete
+answer if not the most descriptive one.
+`server/index.ts`, the Deno Edge Function upstream deploys, carries the same
+Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
+their fix for it. A Supabase deployment therefore fails smoke checks 3 and 4 as
+it fails check 2, and for as real a reason: with a key, its GET hangs, and it
+has no `/health` — its keyless GET there gets the 200 JSON-RPC refusal, which
+is why check 4 reads the body.
+
+Upstream status: #424 open, PR #425 open. **Unfiled** by us.
+
+### 76. The kept bench corpus answers the exact oracle from its marker — `bench-hnsw.ts` records the exact pass's answers when it builds, and a reuse takes the first Q of them and computes only what the marker lacks (SMD-1562)
 
 Change 72 made a `bench-hnsw.ts` pass at ten million rows reusable: 37 min 9 s
 for the run that built the corpus, 7 min 24 s for the one that reused it. Most
@@ -10965,7 +11530,7 @@ section's lead now describes the shipped mechanism rather than the first
 draft with the passes as errata.
 
 **Fifth pass, on the tree merged with main** (SMD-1544 took change 73; this
-section became 74). The exact statement orders by distance *and id*: the
+section became 74 — and 76 once SMD-1480 and SMD-1259 took 74 and 75). The exact statement orders by distance *and id*: the
 column is `vector(64)` and the cosine accumulates in float4, so distinct
 rows can tie at rank K, and without the tie-break the id kept was whichever
 worker's stream it landed in — an answer the marker keeps must not depend
@@ -11059,6 +11624,7 @@ touched files: test-live's own by-hand `OB1_*` strips, which
 `shellWithoutOb1` could replace; a `--json` report the suite could compare
 as data rather than scraped markdown; and prewarming the metadata GIN on
 both paths so a reused row's first tier queries find it warm.
+
 
 ## Detached from the fork network
 
@@ -11278,7 +11844,8 @@ Deliberate. Recorded so nobody assumes they were missed.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
-  target is verified with the real bundler (272 KiB gzipped) and CI rebuilds it on
+  target is verified with the real bundler (`server-portable/README.md` has the
+  size) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
 - **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and

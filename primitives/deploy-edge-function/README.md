@@ -67,7 +67,7 @@ mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
-> **Two extensions deploy this way today: Family Calendar and Job Hunt.** The other four import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so as they stand they neither bundle as an Edge Function nor run under Bun — SMD-1480 holds the fix; `extensions/test-auth.ts` exercises their access-key behaviour under a stand-in for Deno. Their READMEs say the same above their deployment tables.
+> **Two extensions deploy this way: Family Calendar and Job Hunt.** The other four run under Bun against your Postgres instead — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts` for the two Deno globals they use (FORK.md change 74) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the four under `bun` in CI. Seven of their twenty-five tools fail on the shim today (`.not()`, array binding, embedded selects — SMD-1588); each README's Run step names its own.
 
 🟦 **Windows (PowerShell):**
 
@@ -200,9 +200,9 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 
 ## Extensions That Use This
 
-- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1) — not deployable as it stands (SMD-1480)
-- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2) — not deployable as it stands (SMD-1480)
+- [Household Knowledge Base](../../extensions/household-knowledge/) (Extension 1) — runs under Bun instead; see its README's Step 3 (FORK.md change 74)
+- [Home Maintenance Tracker](../../extensions/home-maintenance/) (Extension 2) — runs under Bun instead; see its README's Step 3 (FORK.md change 74)
 - [Family Calendar](../../extensions/family-calendar/) (Extension 3)
-- [Meal Planning](../../extensions/meal-planning/) (Extension 4) — not deployable as it stands (SMD-1480)
-- [Professional CRM](../../extensions/professional-crm/) (Extension 5) — not deployable as it stands (SMD-1480)
+- [Meal Planning](../../extensions/meal-planning/) (Extension 4) — both servers run under Bun instead; see its README (FORK.md change 74)
+- [Professional CRM](../../extensions/professional-crm/) (Extension 5) — runs under Bun instead; see its README's Step 3 (FORK.md change 74)
 - [Job Hunt Pipeline](../../extensions/job-hunt/) (Extension 6)

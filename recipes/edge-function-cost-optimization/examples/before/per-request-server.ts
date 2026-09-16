@@ -16,6 +16,7 @@
 // handshake fan-out, this drives invocation counts (and per-request CPU)
 // orders of magnitude higher than necessary.
 
+import "../../../../compat/deno-on-bun.ts";
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";

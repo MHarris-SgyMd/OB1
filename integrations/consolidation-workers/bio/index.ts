@@ -48,6 +48,7 @@
  * See docs/05-tool-audit.md for the full tool and worker inventory.
  */
 
+import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
