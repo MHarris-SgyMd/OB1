@@ -36,6 +36,7 @@
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 67; extensions/test-auth.ts exercises it.
+import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
