@@ -7100,6 +7100,13 @@ SMD-1043 owns (change 63 does); whichever of the two lands second carries the fi
 `derived_from` input on the MCP tool (above). The three audit reads in the test
 suites that ordered by the audit table's uuid key now order by `created_at` —
 one of them, [28]'s, was a latent flake this section's twin assertion exposed.
+[32]'s reads later left `created_at` too (SMD-1514): separate transactions do
+not promise distinct values of it — PGlite's clock has millisecond grain
+(change 65, SMD-1498) — so each read is now the set difference of the thought's
+audit ids across the one write, and the `updated_at` compare sleeps 2 ms first,
+since 001's trigger re-stamps the column on any UPDATE and the row cannot be
+aged by construction. [28]'s read stands: its thought has one update row when
+it is read.
 
 Upstream status: **not applicable** — upstream's `update_thought` (the
 `integrations/*-thought-mcp` recipe 009 ported) has neither the provenance
