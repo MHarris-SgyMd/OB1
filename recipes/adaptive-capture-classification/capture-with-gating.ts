@@ -4,6 +4,12 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1524): the example capture goes through the database's upsert_thought,
+// which writes the content fingerprint (003) with the text; a raw insert left the
+// fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
+// one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
+// here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
+// change 71; scripts/check-fork-consistency.mjs check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *
@@ -205,16 +211,32 @@ async function resolveOutcome(
 // ---------------------------------------------------------------------------
 
 async function writeToOB1(classified: Classified): Promise<void> {
-  // Example: direct Supabase insert into the thoughts table.
-  // If you use the OB1 MCP tool, call it here instead.
-  await db.from("thoughts").insert({
-    content: classified.title,
-    type: classified.type,
-    tags: classified.tags,
-    project: classified.project,
-    due_date: classified.due_date,
-    created_at: new Date().toISOString(),
+  // Example: the capture through the database's upsert_thought (FORK.md change
+  // 70), so the row carries its content fingerprint — the raw insert this
+  // replaced left the fingerprint NULL, and 016's trigger does not fill it. A
+  // server that authenticates a key passes `actor: { name }` in p_payload so
+  // 008's audit row names it; this example has no key and names none. No vector is made here: the 2-argument form is resolved and
+  // the row waits for a re-embed pass (db/reembed.ts). The OB1 capture MCP tool
+  // embeds as it captures — if you use it, call it here instead. The
+  // classifier's fields ride in metadata: `thoughts` has no tags/project/
+  // due_date columns, and `type` as a column is the enhanced-thoughts
+  // schema's — a brain that has it can write the column beside the call, as
+  // integrations/readwise-capture does. Note the 2-argument form answers
+  // `{id, fingerprint}` only, no `existed`: to write a column on a fresh row
+  // only, pass the 3-argument form (p_embedding: null) and read `existed`.
+  const { error } = await db.rpc("upsert_thought", {
+    p_content: classified.title,
+    p_payload: {
+      metadata: {
+        type: classified.type,
+        tags: classified.tags,
+        project: classified.project,
+        due_date: classified.due_date,
+        source: "adaptive-capture",
+      },
+    },
   });
+  if (error) throw new Error(`upsert_thought failed: ${error.message}`);
 }
 
 // ---------------------------------------------------------------------------

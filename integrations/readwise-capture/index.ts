@@ -4,6 +4,15 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: https://esm.sh/@supabase/supabase-js@2
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1524): a captured thought — content and vector — is written through
+// the 3-argument upsert_thought, which writes the content fingerprint (003), the
+// vector's model label (021) in the same statement; a raw insert left both NULL, and
+// 016's trigger fills neither. No audit actor is named: the receiver holds a shared
+// secret, not a key, and 008 keeps a NULL actor for a write without one. The enhanced-thoughts
+// columns the function does not know follow by an update carrying neither content nor
+// vector, where they are NULL — a fresh row's, or a half-shaped row's on re-capture. FORK.md
+// change 71; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function.
@@ -26,6 +35,8 @@ const READWISE_ACCESS_TOKEN = Deno.env.get("READWISE_ACCESS_TOKEN")!;
 const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const READWISE_BASE = "https://readwise.io/api/v2";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -65,7 +76,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model: "openai/text-embedding-3-small", input: text }),
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
   });
   const d = await r.json();
   return d.data[0].embedding;
@@ -185,33 +196,67 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const content = `${event.text}${noteSuffix}`;
     const embedding = await getEmbedding(content);
 
-    const { error } = await supabase.from("thoughts").insert({
-      content,
-      embedding,
-      source_type: "readwise",
-      type: "reference",
-      metadata: {
-        source: "readwise",
-        readwise_highlight_id: event.id,
-        readwise_book_id: event.book_id,
-        book_title: book?.title ?? null,
-        book_author: book?.author ?? null,
-        book_category: book?.category ?? null,
-        highlighted_at: event.highlighted_at,
-        note: event.note,
-        location: event.location,
-        location_type: event.location_type,
-        color: event.color,
-        url: event.url,
-        tags: event.tags?.map((t) => t.name) ?? [],
+    // The row through the 3-argument upsert_thought (db/migrations/033): the
+    // text, its fingerprint, the vector and the vector's label in one statement.
+    // The raw insert this replaced left the fingerprint and the label NULL — the
+    // row invisible to dedup until 023's backfill, its vector of unknown model to
+    // the re-embed pass. A text the brain already holds comes back `existed`:
+    // metadata merged (this highlight's id over the earlier one's), vector
+    // replaced. No actor is named: this receiver holds a shared secret, not a
+    // key, and 008 keeps a NULL actor for a write without one.
+    const { data, error } = await supabase.rpc("upsert_thought", {
+      p_content: content,
+      p_payload: {
+        metadata: {
+          source: "readwise",
+          readwise_highlight_id: event.id,
+          readwise_book_id: event.book_id,
+          book_title: book?.title ?? null,
+          book_author: book?.author ?? null,
+          book_category: book?.category ?? null,
+          highlighted_at: event.highlighted_at,
+          note: event.note,
+          location: event.location,
+          location_type: event.location_type,
+          color: event.color,
+          url: event.url,
+          tags: event.tags?.map((t) => t.name) ?? [],
+        },
+        embedding_model: EMBEDDING_MODEL,
       },
+      p_embedding: embedding,
     });
 
     if (error) {
-      console.error("Supabase insert error:", error);
+      console.error("upsert_thought error:", error);
       return new Response("error", { status: 500 });
     }
+    const result = (data ?? {}) as { id?: string; existed?: boolean };
 
+    // The enhanced-thoughts columns the function does not know, by raw updates
+    // that carry neither content nor vector, so nothing they write goes stale —
+    // each column WHERE it IS NULL: a fresh row takes both; a row whose first
+    // write was interrupted between the function and these updates (a crash, a
+    // 500 and Readwise's retry) takes them on the re-capture, which the dedupe
+    // above cannot see (it filters on source_type) and the function answers
+    // `existed`; a column already set is left as it is — a hand-set type on a
+    // row another path captured first keeps it while source_type is filled, so
+    // the dedupe sees the row from now on (the third review pass).
+    if (result.id) {
+      for (const [column, value] of [["source_type", "readwise"], ["type", "reference"]] as const) {
+        const { error: sidecarError } = await supabase
+          .from("thoughts")
+          .update({ [column]: value })
+          .eq("id", result.id)
+          .is(column, null);
+        if (sidecarError) {
+          console.error("Supabase update error:", sidecarError);
+          return new Response("error", { status: 500 });
+        }
+      }
+    }
+
+    // The book's counter counts highlights, as Readwise does — an `existed` row is still one.
     if (book) {
       await supabase.rpc("increment_book_highlight_count", {
         p_book_id: event.book_id,

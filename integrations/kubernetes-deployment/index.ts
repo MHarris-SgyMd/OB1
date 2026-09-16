@@ -31,6 +31,12 @@ import { z } from "zod";
 import { Pool } from "postgres";
 import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 
+// ob1-fork (SMD-1524): capture_thought writes `thoughts` with a raw INSERT, by design —
+// this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
+// and this fork's upsert_thought is not in it. The row carries no content fingerprint,
+// no model label and no audit actor; the README says so. Listed in
+// scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 71).
+
 // --- Configuration ---
 
 const DB_HOST = Deno.env.get("DB_HOST") || "127.0.0.1";

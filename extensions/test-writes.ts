@@ -15,6 +15,21 @@
  * Postgres carrying the fork's schema, and the row it leaves is compared with
  * the row update_thought leaves for the same edit — the ticket's own verify.
  *
+ * SMD-1524 (FORK.md change 71) added the other door: eight vendored files
+ * INSERTED a fresh row with content, or content and a vector, around the
+ * 3-argument upsert_thought — a webhook receiver, a worker's first run, an
+ * auditor's report, a recipe's example capture, two Python recipes and two
+ * README samples — and so left 003's fingerprint NULL (016's trigger does not
+ * fill it; the row invisible to dedup, a later capture of the text a twin) and
+ * 021's label NULL (a vector of unknown model). The receiver and the auditor
+ * are driven here; the rest are read. Three more deployments write a raw row
+ * into a database of their own, where the functions are not, and say so in
+ * their headers and READMEs — they are check 10's counted exceptions, read here.
+ * The text guards below are spelling-sensitive by design: a rewrite of a
+ * read-only file that keeps the mechanism but respells the call fails one
+ * assertion whose message names the mechanism, and the guard is updated with
+ * the file — the cost of holding behaviour this suite cannot drive.
+ *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
  * rewrite: `@supabase/supabase-js` resolves to compat/supabase-sql, so the two
@@ -23,10 +38,11 @@
  * stubbed — a unit vector keyed off the text, so the vector a writer stored is
  * recognisable — and everything below the tool or route boundary is real.
  *
- * The database is the fork's migrations plus two vendored sidecars the
+ * The database is the fork's migrations plus three vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
- * beside the function — type, importance, sensitivity_tier …) and
- * schemas/agent-memory (the write-back's own tables). Their tables and
+ * beside the function — type, importance, sensitivity_tier …),
+ * schemas/agent-memory (the write-back's own tables) and schemas/readwise-books
+ * (the receiver's book cache and its counter). Their tables and
  * functions are dropped before they are applied and again at the end, whether
  * or not the run finished (an aborted run's orphaned agent_memories row made
  * the next run's write-back short-circuit on its idempotency key), because CI
@@ -69,8 +85,8 @@ const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
-const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql"];
-// Both GRANT to Supabase's roles, which plain Postgres lacks; the sidecar's own header says to create them.
+const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql"];
+// All three GRANT to Supabase's roles, which plain Postgres lacks; the sidecars' own headers say to create them.
 for (const role of ["authenticated", "service_role", "anon"]) {
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
 }
@@ -97,9 +113,12 @@ const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
 /** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
 let embeddingsDown = false;
+/** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
+const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
-  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider is stubbed`);
+  if (/readwise\.io\/api\/v2\/books\//.test(url)) return Response.json(BOOK);
+  if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider and Readwise's book lookup are stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
@@ -152,6 +171,14 @@ process.env.MCP_ACCESS_KEY = KEY;
 delete process.env.MCP_ACCESS_KEYS;
 process.env.OPENROUTER_API_KEY = "stub-openrouter-key"; // the writers' first-choice provider; its model name is the label
 for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"]) delete process.env[name];
+// The receiver's secret and token, and the auditor's key and Slack settings (read at import; Slack is never reached).
+const READWISE_SECRET = "a-secret-readwise-minted";
+process.env.READWISE_WEBHOOK_SECRET = READWISE_SECRET;
+process.env.READWISE_ACCESS_TOKEN = "stub-readwise-token";
+process.env.AUDITOR_ACCESS_KEY = KEY;
+delete process.env.AUDITOR_ACCESS_KEYS;
+process.env.SLACK_BOT_TOKEN = "stub";
+process.env.SLACK_CAPTURE_CHANNEL = "C0STUB";
 
 async function load(rel: string): Promise<Handler> {
   const before = served.length;
@@ -449,6 +476,83 @@ try {
   judgeCapture("repo-learning-coach capture", await row(result.thoughtId, content), content);
 }
 
+// ── integrations/readwise-capture (SMD-1524) ─────────────────────────────────
+
+{
+  const F = "integrations/readwise-capture/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  const text = "The happiness of your life depends upon the quality of your thoughts.";
+  const note = "Book II, on attention";
+  const content = `${text}\n\n— ${note}`;
+  const event = (id: number) => ({ secret: READWISE_SECRET, event_type: "readwise.highlight.created", id, text, note, location: 12, location_type: "page",
+    highlighted_at: "2026-09-01T00:00:00Z", url: null, color: "yellow", updated: "2026-09-01T00:00:00Z", book_id: BOOK.id, tags: [{ id: 1, name: "stoicism" }] });
+  const r = await send(h, "POST", "/", event(9001));
+  assert(r.status === 200 && r.text === "ok", `a highlight webhook answers ok (${r.status} ${r.text.slice(0, 60)})`);
+  const id = await idOf(content);
+  assert(id !== null, "…and the highlight, with its note, is a thought");
+  if (id) {
+    judgeCapture("readwise-capture", await row(id, content), content);
+    const [side] = await sql`SELECT type, source_type, metadata FROM thoughts WHERE id = ${id}`;
+    assert(side.type === "reference" && side.source_type === "readwise", "the enhanced-thoughts columns follow the capture, by the raw update that carries neither content nor vector");
+    assert(side.metadata.readwise_highlight_id === 9001 && side.metadata.book_title === BOOK.title && side.metadata.tags?.[0] === "stoicism", "the highlight's metadata carries the book the receiver resolved");
+    const [book] = await sql`SELECT title, num_highlights FROM readwise_books WHERE book_id = ${BOOK.id}`;
+    assert(book?.title === BOOK.title && Number(book?.num_highlights) === BOOK.num_highlights + 1, `the book is cached and its count incremented (${book?.num_highlights})`);
+    // Readwise retries the same event: the receiver's own dedupe answers before any write.
+    const again = await send(h, "POST", "/", event(9001));
+    assert(again.status === 200 && again.text === "duplicate", `a retried event is answered duplicate (${again.text})`);
+    // A second highlight of the same passage: the function's dedup — one row, metadata merged, the hand-set columns kept.
+    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${id}`;
+    const twin = await send(h, "POST", "/", event(9002));
+    const rows = await sql`SELECT id, sensitivity_tier, metadata FROM thoughts WHERE content = ${content}`;
+    assert(twin.status === 200 && twin.text === "ok" && rows.length === 1 && rows[0].id === id && rows[0].metadata.readwise_highlight_id === 9002 && rows[0].sensitivity_tier === "personal",
+      `the same passage highlighted again is one row, its metadata merged, its hand-set tier kept (${rows.length} row(s), ${rows[0]?.sensitivity_tier})`);
+    assert((await row(id, content)).at_axis === true && (await row(id, content)).embedding_model === MODEL, "…its vector and label as the function leaves them");
+    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'capture' ORDER BY created_at LIMIT 1`;
+    assert(audit?.actor_name === null && audit?.source === "readwise", `008's audit row names no actor for a receiver without a key, and the source from metadata (${audit?.actor_name} ${audit?.source})`);
+    // A first write interrupted between the function and the sidecar: the row lacks source_type, the
+    // receiver's dedupe cannot see it, the function answers existed — and the sidecar heals it now.
+    await sql`UPDATE thoughts SET source_type = NULL, type = NULL WHERE id = ${id}`;
+    const healed = await send(h, "POST", "/", event(9004));
+    const [shape] = await sql`SELECT source_type, type FROM thoughts WHERE id = ${id}`;
+    assert(healed.status === 200 && healed.text === "ok" && shape.source_type === "readwise" && shape.type === "reference",
+      `a re-capture of a row whose first write was interrupted completes its columns (${shape.source_type} ${shape.type})`);
+    // A row another path captured first, typed by hand, with no source_type: the heal is per column.
+    await sql`UPDATE thoughts SET source_type = NULL, type = 'idea' WHERE id = ${id}`;
+    await send(h, "POST", "/", event(9005));
+    const [kept] = await sql`SELECT source_type, type FROM thoughts WHERE id = ${id}`;
+    assert(kept.source_type === "readwise" && kept.type === "idea", `…filling source_type while a hand-set type stays (${kept.source_type} ${kept.type})`);
+  }
+  // An event whose secret is wrong writes nothing: test-auth.ts holds the refusals; here, the row count.
+  const [{ n: before }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
+  await send(h, "POST", "/", { ...event(9003), secret: "not-the-secret" });
+  const [{ n: after }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
+  assert(before === after, "a request with the wrong secret writes no row");
+}
+
+// ── recipes/editorial-policy/auditor (SMD-1524) ──────────────────────────────
+
+{
+  const F = "recipes/editorial-policy/auditor/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  // The stubbed model answers metadata, not findings: the auditor reads no findings and stores an empty report — no Slack.
+  const r = await send(h, "POST", "/", { days: 30, post_to_slack: false });
+  assert(r.status === 200 && r.json?.ok === true && UUID.test(String(r.json?.stored_id)) && r.json?.finding_count === 0,
+    `an audit stores its report and answers its id (${r.status} ${JSON.stringify(r.json).slice(0, 100)})`);
+  const sid = String(r.json?.stored_id);
+  if (UUID.test(sid)) {
+    const [{ content }] = await sql`SELECT content FROM thoughts WHERE id = ${sid}`;
+    const report = await row(sid, content);
+    assert(report.fp_set && report.fp_ok, "the report's content_fingerprint is its text's (003) — the raw insert left NULL");
+    assert(!report.has_vec && report.embedding_model === null, "the report carries no vector and so no label — the 2-argument form, said in the file");
+    assert(report.metadata.type === "audit_report" && report.metadata.finding_count === 0 && Array.isArray(report.metadata.findings), "the structured findings ride in metadata");
+    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${sid} AND action = 'capture'`;
+    assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.source === "auditor-function", `008's audit row names the key that ran the audit (${audit?.actor_name} ${audit?.source})`);
+    assert(/Audit/i.test(content) && report.chunks === 0, "the text is the rendered report; no chunk rows");
+  }
+}
+
 // ── The files that cannot run here say what this test assumes ────────────────
 
 console.log("\n[the files say what this test assumes]");
@@ -463,14 +567,41 @@ spells("integrations/consolidation-workers/bio/index.ts", /if \(!OPENROUTER_API_
 spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p_id: existing\[0\]\.id,\s*p_content: messageText,/s, "'s sample edits through update_thought");
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
 spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought", \{\s*p_id: existingId,\s*p_content: profileContent,/s, " rewrites the profile through update_thought");
-// Every runnable file this change touched is driven above: the header names them.
+// SMD-1524: the first run, the example capture, the two Python recipes and the two README samples capture through the function.
+spells("integrations/consolidation-workers/bio/index.ts", /rpc\("upsert_thought", \{(?=[^;]*p_content: profileContent)(?=[^;]*embedding_model: embeddingModelUsed\(\))(?=[^;]*p_embedding: embedding)/s, " captures the first profile through the 3-argument upsert_thought, embedded, with its label (the three arguments in any order)");
+spells("integrations/consolidation-workers/bio/index.ts", /if \(result\.existed === true\) \{\s*return \{ id: thoughtId, created: false \};/s, "…and leaves a concurrent run's row its columns");
+spells("integrations/consolidation-workers/bio/index.ts", /embedding_model: embeddingModelUsed\(\), actor \},/, "…naming the key as 008's actor on the first run");
+spells("integrations/consolidation-workers/bio/index.ts", /p_embedding_model: embeddingModelUsed\(\),\s*p_actor: actor,/s, "…and on the rewrite");
+spells("integrations/consolidation-workers/bio/index.ts", /\{ name: principal\.name, source: "consolidation-bio" \}/, "…the actor being the authenticated key's name");
+spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
+spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
+spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
+spells("recipes/local-ollama-embeddings/embed-local.py", /\/rest\/v1\/rpc\/upsert_thought/, " posts to the function, not the table");
+spells("recipes/local-ollama-embeddings/embed-local.py", /"p_payload": \{"metadata": metadata_dict, "embedding_model": model\},\s*"p_embedding": embedding,/s, "…with the vector and the Ollama model's name as its label");
+spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
+spells("recipes/readwise-import/import-readwise.py", /ids\.append\(str\(data\["id"\]\)\)\s*if not data\.get\("existed"\):\s*fresh \+= 1\s*except BaseException as e:\s*loop_error = e\s*raise\s*finally:[\s\S]{0,1200}?if ids:\s*try:\s*for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(/s, "…and writes the enhanced columns once per column per batch, in a finally, so a refused reply leaves no half-shaped row behind it — the loop's own error staying the one raised");
+spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");
+for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
+  spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");
+}
+// The three that own their database say they bypass the functions, in the file and in the README.
+for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "integrations/kubernetes-deployment/README.md"], ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
+  spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
+  spells(readme, /no content fingerprint/, " says what its rows lack");
+}
+// Every runnable file the two changes touched is driven above, or read: the headers name them.
 const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
   "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts"];
 const TEXT_ONLY = ["integrations/consolidation-workers/bio/index.ts", "recipes/provenance-chains/mcp-tools.ts"];
-{
+const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts"];
+const TEXT_ONLY_1524 = ["integrations/consolidation-workers/bio/index.ts", "recipes/adaptive-capture-classification/capture-with-gating.ts"];
+const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
+for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]]] as const) {
   const headed = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
-    .filter((f) => !f.includes("node_modules") && /SMD-1228/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
-  assert(headed.join() === [...DRIVEN, ...TEXT_ONLY].sort().join(), `every .ts file that names SMD-1228 is driven here or read here, and vice versa (${headed.join(", ")})`);
+    .filter((f) => !f.includes("node_modules") && new RegExp(ticket).test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
+}
+{
   assert(existsSync(join(ROOT, "scripts/check-fork-consistency.mjs")) && /function thoughtWritesAroundIn\(/.test(readFileSync(join(ROOT, "scripts/check-fork-consistency.mjs"), "utf8")),
     "scripts/check-fork-consistency.mjs check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
