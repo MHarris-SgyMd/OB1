@@ -385,6 +385,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   await sql`DELETE FROM thoughts`;
   const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
   await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  // User triggers off for the load, as the bench does: 008's audit trigger
+  // would write a row per row (25,000 here, then 25,000 more for the DELETE)
+  // into a table later sections read differentially — nothing this section
+  // measures — and the heap they leave behind moves a timing-sensitive race
+  // that follows ([6g]). Re-enabled in the finally block.
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
   // Read by the finally block below as well as the section.
   const opts037 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("037") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
@@ -419,7 +425,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       return Number((await sql`SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_metadata_idx'`)[0].idx_scan);
     };
     const { unitVector } = seededRandom(1463);
-    const QUERIES = 10;
+    // Twenty, not ten: the gate misses a broad filter when its eight-page draw
+    // reaches fewer than three pages — measured 17 in 1,000 draws of the
+    // statement and 2 in 300 calls through the function on this fixture — so
+    // ten calls failed the 0.8 band once in about two thousand runs (a merge
+    // re-run met it); twenty calls at 0.75 fail once in about a million.
+    const QUERIES = 20;
     const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
     const exactTop = (qv: string, filter: string) =>
       sql.begin(async (tx: SQL) => {
@@ -454,11 +465,12 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const plainBroad = await measure(BROAD);
     const plainThin = await measure(THIN);
     const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
-    // The sample skips the collection whenever it lands on three or more pages,
-    // which a binomial draw of ~8 pages fails about one time in a hundred; the
-    // rest of a call's GIN scans (the oracle's, the walk's bitmap) are the same
-    // under both bodies and cancel.
-    assert(saved >= 0.8 && saved <= 1.0, `on the broad filter 037 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 037: ${gatedBroad.scansPerCall.toFixed(2)})`);
+    // The sample skips the collection whenever its draw lands on three or more
+    // pages, which a binomial draw of ~8 pages fails about twice in a hundred
+    // (the QUERIES note above); the rest of a call's GIN scans (the walk's
+    // bitmap) are the same under both bodies and cancel. At most five misses
+    // in twenty is the band.
+    assert(saved >= 0.75 && saved <= 1.0, `on the broad filter 037 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 037: ${gatedBroad.scansPerCall.toFixed(2)})`);
     assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
     assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
 
@@ -492,6 +504,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // run shows (fourth review pass).
     try {
       await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
+      // The 25,000 dead tuples and their pages go too, so the sections after
+      // start from the heap they would have had without this one.
+      await sql.unsafe(`VACUUM thoughts`);
       await sql.unsafe(String(hnswDef));
       await applyMigrations(URL_, { ...opts037, only: (f) => f.startsWith("027") || f.startsWith("037") });
       assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `037 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);

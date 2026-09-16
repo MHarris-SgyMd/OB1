@@ -9742,9 +9742,9 @@ its estimate would rest on the same `@>` selectivity this change found
 uninformative on real metadata. A hundred million rows was not run, for the
 reasons change 28 gives.
 
-**Verified:** `db/test-schema.ts` 855/855 under PGlite, [8e] new (the
+**Verified:** `db/test-schema.ts` 868/868 under PGlite on the merged tree, [8e] new (the
 shape, the floor, exactness with the gate reached at floor 0) and [20]'s
-definer pin moved to 037; `db/test-live.ts` 492/492 on real Postgres, [5d]
+definer pin moved to 037; `db/test-live.ts` 500/500 on real Postgres, [5d]
 new (25,000 rows at the configured width, the gate reached, the broad filter
 makes one GIN scan fewer per call than under 020's body and the thin filter
 the same, both exact); `db/test-upgrade.ts` 173/173, [14] new (037 onto a
