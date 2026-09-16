@@ -138,7 +138,7 @@ The app listens on port 3000 by default; use `PORT=4000 npm start` to override.
 
 1. **"SESSION_SECRET env var is required and must be at least 32 characters"** — generate one with `openssl rand -hex 32` and set it. This is intentional; the app refuses to start without it.
 2. **Login says "Could not reach API"** — verify `NEXT_PUBLIC_API_URL` is correct and the REST gateway is live. Test with `curl -H "x-brain-key: YOUR_KEY" $NEXT_PUBLIC_API_URL/health`.
-3. **Login says "Invalid API key or service unavailable"** — the REST gateway reached but rejected the key. Check `MCP_ACCESS_KEY` (or whatever secret backs `x-brain-key`) in your Edge Function secrets.
+3. **Login says "Invalid API key or service unavailable"** — the REST gateway reached but rejected the key. Check that the key's SHA-256 hash is an entry in the `MCP_ACCESS_KEYS` secret on your `open-brain-rest` function (the request carries the key, the secret its hash; the older single `MCP_ACCESS_KEY` still works), and that the entry is `write`-scoped — the dashboard edits and deletes.
 4. **Search returns nothing** — semantic search needs embeddings. Verify `OPENROUTER_API_KEY` (or your embedding provider) is set in Supabase secrets and that the `embedding` column is populated.
 5. **Ingest page never finishes extracting** — confirm the `smart-ingest` Edge Function is deployed alongside the REST gateway.
 6. **Connections panel empty on Detail page** — the panel requires `topics` or `people` in `metadata`. Thoughts enriched through classification have these; raw captures do not.

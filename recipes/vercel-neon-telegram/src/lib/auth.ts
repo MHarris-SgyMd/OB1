@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 
 export function validateAccessKey(key: string): boolean {
   const expected = process.env.BRAIN_ACCESS_KEY;
@@ -10,6 +10,18 @@ export function validateAccessKey(key: string): boolean {
     Buffer.from(key),
     Buffer.from(expected),
   );
+}
+
+/**
+ * Whether a secret the caller echoes — Telegram's `secret_token` header — is the
+ * one configured. Both sides are hashed first, so the digests are one length and
+ * `timingSafeEqual` leaks neither the secret's length nor its prefix; empty on
+ * either side is a refusal (ob1-fork, SMD-1455).
+ */
+export function secretMatches(presented: string | null | undefined, expected: string | null | undefined): boolean {
+  if (!presented || !expected) return false;
+  const digest = (s: string) => createHash("sha256").update(s, "utf8").digest();
+  return timingSafeEqual(digest(presented), digest(expected));
 }
 
 export function extractKey(req: Request): string | null {

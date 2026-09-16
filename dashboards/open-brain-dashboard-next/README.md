@@ -92,7 +92,7 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). You should see the login page.
 
-Enter your Open Brain API key (the `MCP_ACCESS_KEY` from your Supabase Edge Function secrets). After login, the dashboard loads with your stats and recent thoughts.
+Enter your Open Brain API key — a key whose hash is an entry in the `MCP_ACCESS_KEYS` secret on your `open-brain-rest` function, `write`-scoped since the dashboard edits and deletes (the older single `MCP_ACCESS_KEY` still works). After login, the dashboard loads with your stats and recent thoughts.
 
 ### Step 5: Deploy to Vercel (optional)
 

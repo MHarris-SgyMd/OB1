@@ -9,8 +9,9 @@
  * What changes, and why each matters here:
  *
  *   Scopes. The tools that write — `capture_thought`, and since changes 22 and 60
- *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five
- *   — are registered only for a write-scoped key. A read-only key means a leaked
+ *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five,
+ *   and the vendored recipes' and integrations' likewise since change 67 — are
+ *   registered only for a write-scoped key. A read-only key means a leaked
  *   ChatGPT connector URL cannot add or alter anything: read-only keys do not
  *   merely fail to write, the write tools are never registered for them, so they
  *   do not appear in tools/list at all.
@@ -31,15 +32,24 @@
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
  *
- * Consumers: server-portable/index.ts, and the six vendored extensions under
+ * Consumers: server-portable/index.ts; the six vendored extensions under
  * extensions/ (seven servers), which authenticated with `key !== expected` on a
  * URL query key and ran as the service role until they were made consumers of
- * this module (SMD-1252, FORK.md change 64). They import extensions/_shared/
- * auth.ts — a byte-for-byte copy of this file, because a Supabase Edge Function
- * is bundled from supabase/functions/ and `_shared/` is the one place beside it
- * a shared module can live; extensions/test-auth.ts fails if the two differ.
+ * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
+ * integrations that compared the same way — nine MCP and HTTP servers, four
+ * workers and one webhook receiver (SMD-1455, change 67). Each imports
+ * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
+ * supabase/functions/, one level under which every function sits, and
+ * `_shared/` beside it is the one place a shared module can live — so a
+ * byte-for-byte copy of this file sits in every directory that holds a
+ * function directory: extensions/_shared/, recipes/_shared/,
+ * recipes/editorial-policy/_shared/,
+ * recipes/edge-function-cost-optimization/examples/_shared/,
+ * integrations/_shared/ and integrations/consolidation-workers/_shared/.
+ * `bun run sync-auth` in extensions/ rewrites them all from this file;
+ * extensions/test-auth.ts fails if any copy differs or is missing from either list.
  * Everything here is runtime-neutral — node:crypto and node:buffer resolve on
- * Bun, Node, Workers (nodejs_compat) and Deno — so the copy runs as it is.
+ * Bun, Node, Workers (nodejs_compat) and Deno — so the copies run as they are.
  */
 
 import { Buffer } from "node:buffer";
@@ -142,6 +152,21 @@ function digestsMatch(a: string, b: string): boolean {
   const bufB = Buffer.from(b, "hex");
   if (bufA.length !== bufB.length || bufA.length === 0) return false;
   return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Whether a shared secret the caller echoes — a webhook's `secret_token`, the
+ * value Readwise puts in its payload — is the one configured. Both sides are
+ * hashed first and the digests compared timing-safe, so neither the secret's
+ * length nor its prefix reaches the response time; empty on either side is a
+ * refusal, never a match, and so is anything that is not a string — a payload
+ * field is the caller's to shape, and a number or an object is refused here
+ * rather than hashed or thrown on. No scope and no name: a webhook secret
+ * identifies the caller's platform, not a client, so there is no principal to give.
+ */
+export function secretMatches(presented: unknown, expected: string | null | undefined): boolean {
+  if (typeof presented !== "string" || typeof expected !== "string" || !presented || !expected) return false;
+  return digestsMatch(hashKey(presented), hashKey(expected));
 }
 
 export type AuthConfig = {

@@ -353,7 +353,10 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
       const on = onIndex(plan);
       assert(on.thoughts && on.chunks && seqOn(plan).length === 0,
         `count ${count}, ${mode.replace("force_", "").replace("_plan", "")} plan, recency_weight 0.3: both candidate CTEs are Index Scans on their HNSW indexes and nothing seq-scans (${buffers} buffers)`);
-      const limits = [...plan.matchAll(/Limit \(actual time=[^)]*rows=(\d+)/g)].map((m) => Number(m[1]));
+      // `Limit  (cost=…) (actual time=… rows=N …)` since explainPrepared prints
+      // costs; the estimate's own `rows=` sits inside the cost parens, so the
+      // match reaches past them to the actual clause (SMD-1018 review pass).
+      const limits = [...plan.matchAll(/Limit(?:\s+\(cost=[^)]*\))?\s+\(actual time=[^)]*rows=(\d+)/g)].map((m) => Number(m[1]));
       assert(limits.includes(count * 16), `…and the window is ${count * 16} candidates, four times the unweighted one (Limit rows: ${limits.join(", ")})`);
     }
   }

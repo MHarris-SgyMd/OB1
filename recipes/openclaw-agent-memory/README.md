@@ -40,7 +40,7 @@ Local development path: use [the plugin README](../../integrations/openclaw-agen
 | Contract | Purpose |
 | -------- | ------- |
 | [recall.schema.json](contracts/recall.schema.json) | Pre-task recall request |
-| [recall-response.schema.json](contracts/recall-response.schema.json) | Policy-labeled recall response |
+| [recall-response.schema.json](contracts/recall-response.schema.json) | Policy-labeled recall response; `request_id` is `null` when the key was read-scoped and no trace was stored (this fork, SMD-1455) |
 | [writeback.schema.json](contracts/writeback.schema.json) | Post-task memory write-back |
 
 ## Example Payloads

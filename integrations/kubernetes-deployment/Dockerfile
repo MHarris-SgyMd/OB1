@@ -1,13 +1,18 @@
 FROM denoland/deno:2.3.3
 
-WORKDIR /app
+# Built with integrations/ as the context — `docker build -f Dockerfile ..` from
+# this directory — because index.ts imports the shared auth module from
+# ../_shared/auth.ts (ob1-fork, SMD-1455) and Docker cannot COPY from outside
+# the context. The image mirrors the repository layout so the import resolves.
+WORKDIR /app/kubernetes-deployment
 
 # Copy dependency manifest and cache dependencies
-COPY deno.json ./
+COPY kubernetes-deployment/deno.json ./
 RUN deno install
 
-# Copy server source
-COPY index.ts ./
+# Copy the shared auth module and the server source
+COPY _shared/auth.ts /app/_shared/auth.ts
+COPY kubernetes-deployment/index.ts ./
 
 # Run as non-root
 USER deno

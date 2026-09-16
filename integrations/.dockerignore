@@ -1,0 +1,6 @@
+# integrations/kubernetes-deployment builds with this directory as its context
+# (its index.ts imports ../_shared/auth.ts); only these three files reach the daemon.
+*
+!kubernetes-deployment/deno.json
+!kubernetes-deployment/index.ts
+!_shared/auth.ts

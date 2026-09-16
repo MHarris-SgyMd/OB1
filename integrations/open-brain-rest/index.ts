@@ -4,23 +4,28 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key is refused by the routes
+// that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
 import { createClient } from "../../compat/supabase-sql/index.ts";
+import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.ts";
 import { z } from "zod";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
 };
 
@@ -97,11 +102,6 @@ const reflectionSchema = z.object({
   reflection_type: z.string().optional().default("reflection"),
   metadata: z.record(z.string(), z.unknown()).optional().default({}),
 });
-
-function auth(c: { req: { header: (name: string) => string | undefined; url: string } }) {
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  return Boolean(provided && provided === MCP_ACCESS_KEY);
-}
 
 function intParam(value: string | null, fallback: number, min = 0, max = 1000) {
   const parsed = Number.parseInt(value || "", 10);
@@ -455,14 +455,29 @@ async function createThought(body: z.infer<typeof captureSchema>) {
   };
 }
 
-const app = new Hono();
+const app = new Hono<{ Variables: { principal: Principal } }>();
 
 app.options("*", (c) => c.text("ok", 200, corsHeaders));
 
+// Named, scoped, hashed keys through the shared module (MCP_ACCESS_KEYS; the
+// older single MCP_ACCESS_KEY still works, compared by digest); every presented
+// form — x-brain-key, x-access-key, ?key=, a bearer token — is tried.
 app.use("*", async (c, next) => {
-  if (!auth(c)) return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  c.set("principal", principal);
   await next();
 });
+
+// Routes that change what is stored take a write-scoped key; a read-scoped key
+// is told so, not merely refused.
+const requireWrite: MiddlewareHandler<{ Variables: { principal: Principal } }> = async (c, next) => {
+  if (!canWrite(c.get("principal"))) return c.json({ error: "Forbidden: this key is read-scoped and this route writes" }, 403, corsHeaders);
+  await next();
+};
 
 app.get("/health", (c) => c.json({ ok: true, status: "ok", service: "open-brain-rest", version: "0.1.0" }, 200, corsHeaders));
 
@@ -490,7 +505,7 @@ app.get("/thought/:id", async (c) => {
   return c.json(normalizeThought(data as DbThought), 200, corsHeaders);
 });
 
-app.put("/thought/:id", async (c) => {
+app.put("/thought/:id", requireWrite, async (c) => {
   try {
     const parsed = updateSchema.safeParse(await c.req.json());
     if (!parsed.success) return c.json({ error: "Invalid update payload", details: parsed.error.flatten() }, 400, corsHeaders);
@@ -527,14 +542,14 @@ app.put("/thought/:id", async (c) => {
   }
 });
 
-app.delete("/thought/:id", async (c) => {
+app.delete("/thought/:id", requireWrite, async (c) => {
   const id = c.req.param("id");
   const { error } = await supabase.from("thoughts").delete().eq("id", id);
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
   return c.json({ id, action: "deleted", message: "Thought deleted" }, 200, corsHeaders);
 });
 
-app.post("/capture", async (c) => {
+app.post("/capture", requireWrite, async (c) => {
   try {
     const parsed = captureSchema.safeParse(await c.req.json());
     if (!parsed.success) return c.json({ error: "Invalid capture payload", details: parsed.error.flatten() }, 400, corsHeaders);
@@ -623,7 +638,7 @@ app.get("/thought/:id/reflection", async (c) => {
   return c.json({ reflections: data || [] }, 200, corsHeaders);
 });
 
-app.post("/thought/:id/reflection", async (c) => {
+app.post("/thought/:id/reflection", requireWrite, async (c) => {
   const parsed = reflectionSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid reflection payload", details: parsed.error.flatten() }, 400, corsHeaders);
   const payload = { ...parsed.data, thought_id: c.req.param("id") };
@@ -635,7 +650,7 @@ app.post("/thought/:id/reflection", async (c) => {
 app.get("/ingestion-jobs", (c) => c.json({ jobs: [], count: 0 }, 200, corsHeaders));
 app.get("/ingestion-jobs/:id", (c) => c.json({ job: null, items: [] }, 200, corsHeaders));
 app.post("/ingestion-jobs/:id/execute", (c) => c.json({ job_id: c.req.param("id"), status: "not_configured" }, 200, corsHeaders));
-app.post("/ingest", async (c) => {
+app.post("/ingest", requireWrite, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const text = String(body.text || "").trim();
   if (!text) return c.json({ error: "text is required" }, 400, corsHeaders);

@@ -131,11 +131,11 @@ spec:
                 secretKeyRef:
                   name: openbrain-secret
                   key: postgres-password
-            - name: MCP_ACCESS_KEY
+            - name: MCP_ACCESS_KEYS
               valueFrom:
                 secretKeyRef:
                   name: openbrain-secret
-                  key: mcp-access-key
+                  key: mcp-access-keys
             # Configure your embedding/chat API provider:
             # For OpenRouter (default):
             - name: EMBEDDING_API_BASE
