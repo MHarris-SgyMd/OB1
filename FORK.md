@@ -8920,9 +8920,11 @@ and every build have finished the bench writes one marker row
 tiers and their shares, the chunked share — the tier match counts it counted as
 it generated, and section L's numbers). An interrupted load leaves no marker and
 nothing reads as a corpus (the oracle's premise — every chunk carries its
-parent's vector — is checked on the build, before the marker, and not on a
-reuse, where that join over every chunk row would cost a minute at ten million
-rows to guard against nothing the tree can do to a kept table). The next run at
+parent's vector — is checked on the build, before the marker, and on a reuse
+only when the ledger differs from the one the marker says it last passed under,
+since that join over every chunk row costs a minute at ten million rows and a
+migration applied onto the table is the one way a kept chunk vector can
+change). The next run at
 that scale finds the marker and, in this order, (1) counts both tables against
 the marker and regenerates the corpus's first and last rows from the seed,
 comparing the tiers exactly and the vectors to float32 — a generator change or
@@ -8936,11 +8938,17 @@ corpus would land a migration and then say "nothing was measured" — then
 `migrate.ts` itself, so a migration added since the build is **applied onto
 the corpus** (as onto a real brain that size, which is the measurement wanted),
 the files it recorded read back from the ledger rather than scraped from its
-output, and both tables `VACUUM ANALYZE`d when anything was; (4) checks this
-run's queries against the rows through the index (the build's confound covered
-the build's queries) and re-checks the oracle's premise whenever the ledger
-differs from the one the marker says it last passed under; then skips to the
-oracle. Section L
+output — and refuses the corpus if those files *rewrote rows* (the update and
+delete counters moved), since a heap at twice its pages and HNSW graphs of
+repaired twins are not the bulk-built state the marker's sizes describe, and
+the `VACUUM FULL` that would restore it is the rebuild the reuse exists to
+avoid; (4) reads both HNSW relations into the page cache (`pg_prewarm`, best
+effort), so the walks time the same cache a fresh build leaves; (5) takes this
+run's queries' confound from the exact whole-table pass section A already runs
+(the build's client-side check covered the build's queries; an index probe
+would see only its first `ef_search` candidates) and re-checks the oracle's
+premise whenever the ledger differs from the one the marker says it last passed
+under; then goes on to the oracle. Section L
 gains a `source` column — `loaded`, or `reused (built <when>)` with the build's
 own numbers — and the run says which it did, what it counted and which files it
 applied, so a report never silently mixes a fresh build's load line with a
@@ -9094,6 +9102,27 @@ named-remedy form rather than throwing; the fresh path skips the dry run and
 words its refusal for an empty database; and "before a container is asked for"
 became "before anything is connected to or dropped", which is what is true
 under `with-postgres.sh`.
+
+**Fifth pass, on the tree merged with main** (PR #47's fourth and fifth
+passes, changes 66 and 67). The stale namesake's status and ID now come from
+one inspect and the removal goes by that ID (two reads by name were a second
+snapshot, and a name gone between them aborted under `set -e`); the data path
+is pinned with `-e PGDATA` rather than discovered from the image, which
+retires the pre-pull, the environment parse and the silent default the
+discovery needed; `--stop-timeout 120` rides only on a kept container, since
+podman's `rm -f` honours it and a throwaway container should go at once; the
+readiness wait ends only on an explicit `Running=false`, not on a failed
+inspect, so one transient runtime error cannot stop a thirty-minute recovery.
+In the bench the marker format is 2 (main's `otherIndexes` in section L) and a
+format mismatch is documented as the refusal it is; a reuse whose migrations
+rewrote rows is refused rather than plain-vacuumed and measured — main's
+fourth pass found plain `VACUUM` leaves the heap doubled and the graphs as
+repaired twins, and its `VACUUM FULL` at ten million rows is the rebuild the
+reuse exists to avoid; both HNSW relations are prewarmed on a reuse, since the
+untimed pass over the default call had warmed only the query vectors'
+neighbourhoods; the confound comes from one exact pass on both paths through
+one `oracle()` (the duplicate whole-table scan went); and the two paragraphs
+above say the ledger-keyed re-check and the exact-pass confound the code does.
 
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh

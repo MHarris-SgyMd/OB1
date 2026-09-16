@@ -496,12 +496,12 @@ type LoadStats = {
 const MARKER = "bench_hnsw_corpus";
 /**
  * Bumped when the marker's shape changes — a LoadStats field the report reads,
- * a new key in `matches` — so a marker an earlier bench wrote rebuilds (said
- * aloud, as a parameter change does) rather than passing every check and
- * failing in the report after the run. The seed lives in `seedFor`; a change
- * there is caught by the regenerated rows.
+ * a new key in `matches` — so a marker an earlier bench wrote is refused up
+ * front with the remedies (as a parameter change is) rather than passing every
+ * check and failing in the report after the run. The seed lives in `seedFor`;
+ * a change there is caught by the regenerated rows.
  */
-const MARKER_FORMAT = 1;
+const MARKER_FORMAT = 2; // 2: LoadStats gained `otherIndexes` (SMD-1018 pass 4)
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
 /** `verifiedLedger` is the ledger as it stood when the oracle's premise (every chunk carries its parent's vector) last passed; a reuse whose ledger differs re-checks. */
 type Marker = { scale: number; builtAt: string; params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[] };
@@ -535,6 +535,28 @@ async function writeMarker(sql: SQL, n: number, params: CorpusParams, matches: M
 
 /** The ledger's names, sorted, as the marker records them. */
 const ledgerList = async (sql: SQL): Promise<string[]> => [...((await ledgerNames(sql)) ?? [])].sort();
+
+/**
+ * Rows rewritten so far in the two tables — the cumulative update and delete
+ * counters, which autovacuum does not reset (n_dead_tup would) — read before
+ * and after the migrator on a reuse; the migrator's backends flush their
+ * statistics when they exit, so the second read sees what the files did.
+ */
+async function rowRewrites(sql: SQL): Promise<Record<string, number>> {
+  const rows = await sql`SELECT relname, (n_tup_upd + n_tup_del)::bigint AS n FROM pg_stat_user_tables WHERE relname IN ('thoughts', 'thought_chunks')`;
+  return Object.fromEntries(rows.map((r: { relname: string; n: string | number }) => [r.relname, Number(r.n)]));
+}
+
+/** Both HNSW relations into the page cache, on a reuse. False where pg_prewarm cannot be had. */
+async function prewarm(sql: SQL): Promise<boolean> {
+  try {
+    await sql.unsafe(`CREATE EXTENSION IF NOT EXISTS pg_prewarm`);
+    for (const rel of ["thoughts_embedding_idx", "thought_chunks_embedding_idx"]) await sql.unsafe(`SELECT pg_prewarm($1::regclass, 'read')`, [rel]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Row i of the n-row corpus, regenerated from the seed without the rows before it. */
 function rowAt(n: number, tiers: Tier[], i: number): Row {
@@ -724,10 +746,10 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.len
 const ASKS = [10, 20, 50, 100, 200, 500];
 
 async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): Promise<{ counts: Record<number, string>; ms10: number; msMax: number; overlap: number; ms10Raised: number; overlapRaised: number }> {
-  // One untimed pass over the queries first: a freshly built index is warm in
-  // the page cache, a kept one in a new container is cold, and the oracle
-  // before this section runs with the index scan off — without this the two
-  // paths would time different caches (review pass).
+  // One untimed pass over the default call first — the query vectors' own
+  // neighbourhoods, which the oracle before this section (index scan off)
+  // never touched; the wider walks are served by the pg_prewarm a reuse runs
+  // on both HNSW relations, so the two paths time the same cache.
   for (const q of queries) await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '{}'::jsonb)`);
   const counts: Record<number, string> = {};
   for (const count of ASKS) {
@@ -783,26 +805,16 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
  * row. Correct by construction, slow on purpose where the filter is broad —
  * which is why it runs once per (tier, query) and not once per arm.
  */
-async function oracle(sql: SQL, q: number[], filter: string | null): Promise<Set<string>> {
-  const rows = await sql.begin(async (tx: SQL) => {
-    await tx.unsafe(`SET LOCAL enable_indexscan = off`);
-    return tx.unsafe(`
-      SELECT t.id FROM thoughts t
-      WHERE t.embedding IS NOT NULL${filter === null ? "" : ` AND t.metadata @> '${filter}'::jsonb`}
-      ORDER BY t.embedding <=> '${lit(q)}'::vector LIMIT ${K}`);
-  });
-  return new Set(rows.map((r: { id: string }) => r.id));
-}
-
-/** The whole-table oracle, with the nearest row's cosine beside the ids: the same exact scan, read once more. */
-async function oracleWithTop(sql: SQL, q: number[]): Promise<{ ids: Set<string>; top: number }> {
+async function oracle(sql: SQL, q: number[], filter: string | null): Promise<{ ids: Set<string>; top: number }> {
   const rows = await sql.begin(async (tx: SQL) => {
     await tx.unsafe(`SET LOCAL enable_indexscan = off`);
     return tx.unsafe(`
       SELECT t.id, 1 - (t.embedding <=> '${lit(q)}'::vector) AS cos FROM thoughts t
-      WHERE t.embedding IS NOT NULL
+      WHERE t.embedding IS NOT NULL${filter === null ? "" : ` AND t.metadata @> '${filter}'::jsonb`}
       ORDER BY t.embedding <=> '${lit(q)}'::vector LIMIT ${K}`);
   });
+  // `top` is the nearest row's cosine — the confound, read off the same exact
+  // scan rather than a second query or an index probe (review passes).
   return { ids: new Set(rows.map((r: { id: string }) => r.id)), top: rows.length ? Number(rows[0].cos) : -1 };
 }
 
@@ -1061,8 +1073,9 @@ for (const n of SCALES) {
   // What the database holds: a corpus of this scale built from the same
   // parameters is reused (above the before arm's scales — see the section
   // above); one built from other parameters, or under an older marker
-  // format, is this scale's to rebuild, said aloud; one of another scale is
-  // this run's own earlier scale (the block above refused any other).
+  // format, is refused with the remedies — a kept build is never dropped
+  // without being asked; one of another scale is this run's own earlier
+  // scale (the block above refused any other).
   const kept = await readMarker(sql);
   const reuse = kept !== null && !beforeArm && kept.scale === n && canonical(kept.params) === canonical(params);
   if (kept && kept.scale === n && !reuse) {
@@ -1101,8 +1114,30 @@ for (const n of SCALES) {
       process.exit(1);
     }
     // migrate.ts onto the corpus: pending files applied, a drifted file refused first.
+    const rewritesBefore = await rowRewrites(sql);
     appliedFiles = await migrateWhole(sql, "kept");
     await reconnect();
+    // A migration of 023's kind — an apply-time UPDATE or DELETE over the
+    // rows — leaves the heap at twice its pages and the HNSW graphs as
+    // incrementally inserted twins, repaired: not the bulk-built state the
+    // marker's sizes describe and the published tables measure (SMD-1018's
+    // fourth pass judged a plain VACUUM insufficient for exactly this, and a
+    // VACUUM FULL at ten million rows is the rebuild the reuse exists to
+    // avoid). Such a corpus is refused, not measured as-is (review pass).
+    const rewrites = await rowRewrites(sql);
+    const rewritten = Object.entries(rewrites).filter(([rel, n]) => n > (rewritesBefore[rel] ?? 0));
+    if (rewritten.length > 0) {
+      console.error(
+        `bench-hnsw.ts: the migrations applied onto the kept corpus rewrote rows (${rewritten.map(([rel, n]) => `${rel}: ${(n - (rewritesBefore[rel] ?? 0)).toLocaleString()}`).join(", ")}); its heap and HNSW graphs are no longer the bulk-built ones the marker describes, so measuring it would not be measuring the build. Remove the kept volume and build again under the new schema (db/README.md names the command).`
+      );
+      process.exit(1);
+    }
+    // A reused index is cold in a fresh container where a freshly built one is
+    // warm; both HNSW relations are read into the page cache first, so the
+    // walks in sections A–E time the same cache on both paths (review pass).
+    // Best effort: pg_prewarm ships with the image, and its absence is said.
+    const warmed = await prewarm(sql);
+    console.log(warmed ? `  HNSW indexes read into the page cache (pg_prewarm)` : `  (pg_prewarm unavailable; the first walks may read a cold index)`);
     stats = { ...kept!.stats, source: "reused" };
     matches = new Map(Object.entries(kept!.matches));
     console.log(`  ${n.toLocaleString()} thoughts and ${stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched`);
@@ -1148,13 +1183,9 @@ for (const n of SCALES) {
     // nothing it should not (review pass).
     const ledger = await ledgerList(sql);
     if (canonical(ledger) !== canonical(kept!.verifiedLedger)) {
-      // A migration that rewrote rows (023's kind: an apply-time UPDATE of an
-      // indexed column, non-HOT) leaves dead index entries and the build's
-      // statistics; the sections below must not time those.
-      for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`VACUUM ANALYZE ${rel}`);
       await chunksCarryParentVectors(sql);
       await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${{ verifiedLedger: ledger }}::jsonb`;
-      console.log(`  ledger differs from the one the corpus was last verified under: VACUUM ANALYZE run, oracle premise re-checked`);
+      console.log(`  ledger differs from the one the corpus was last verified under: oracle premise re-checked`);
     }
   } else {
     await chunksCarryParentVectors(sql);
@@ -1170,28 +1201,28 @@ for (const n of SCALES) {
   const wants = new Map<string, Set<string>[]>();
   for (const t of withCounts) {
     const answers: Set<string>[] = [];
-    for (const q of queries) answers.push(await oracle(sql, q, tierFilter(t.key)));
+    for (const q of queries) answers.push((await oracle(sql, q, tierFilter(t.key))).ids);
     wants.set(t.key, answers);
     process.stdout.write(".");
   }
-  // And over the whole table, for section A's recall control — and, on a
-  // reuse, for the confound: the build's check covered the build's queries,
-  // this run's may be more (a larger OB1_BENCH_QUERIES than the smoke run
-  // that built it), and this exact pass sees every row for every query, where
-  // an index probe would see its first ef_search candidates (review pass).
+  // And over the whole table, for section A's recall control — and for the
+  // confound, on both paths: this exact pass sees every row for every query
+  // this run will use (a reuse may have more than the build that checked
+  // them client-side; an index probe would see its first ef_search
+  // candidates), and reporting one computation for both paths keeps a
+  // loaded and a reused row comparable. The load's own accumulator stays as
+  // the early abort before the index builds (review passes).
   {
     const answers: Set<string>[] = [];
     let nearest = -1;
     for (const q of queries) {
-      const { ids, top } = await oracleWithTop(sql, q);
+      const { ids, top } = await oracle(sql, q, null);
       answers.push(ids);
       nearest = Math.max(nearest, top);
     }
-    if (reuse) {
-      stats.confound = Confound.check(nearest);
-      console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
-      process.stdout.write("                    ");
-    }
+    stats.confound = Confound.check(nearest);
+    console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
+    process.stdout.write("                    ");
     wants.set(WHOLE_TABLE, answers);
     process.stdout.write(".");
   }

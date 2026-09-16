@@ -1043,9 +1043,12 @@ then the migrator's ledger against the tree (the whole-schema arm is applied
 through `migrate.ts` for this) — a recorded name the tree has no file for is
 refused; then `migrate.ts --dry-run` and `migrate.ts` — a file edited since
 the build is refused on the dry run's `DRIFTED` before anything runs, a
-migration added since is applied onto the corpus and both tables are `VACUUM
-ANALYZE`d; then this run's queries are checked against the rows through the
-index. Section L's `source` column says `loaded` or `reused (built …)` per
+migration added since is applied onto the corpus, and one that rewrote rows
+refuses the corpus (its heap and graphs are no longer the bulk-built ones);
+then both HNSW relations are read into the page cache, this run's queries'
+confound is taken from the exact pass, and the oracle's premise is re-checked
+whenever the ledger differs from the one it last passed under. Section L's
+`source` column says `loaded` or `reused (built …)` per
 scale, and the run prints what it counted and which files it applied. Under
 `OB1_PG_KEEP` a run is exactly one scale above 100,000 rows, refused otherwise
 before anything is connected to or dropped (an empty kept volume is the worst

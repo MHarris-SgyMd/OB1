@@ -141,38 +141,37 @@ if [ -n "$KEEP" ]; then
   # ran) — refused, since sharing a database would let whichever exits first
   # stop it under the other, and the created case cannot be told from the
   # race, so the refusal names the removal for the operator to judge.
-  if "$RUNTIME" container inspect "$NAME" >/dev/null 2>&1; then
-    STATUS="$("$RUNTIME" container inspect -f '{{.State.Status}}' "$NAME")"
+  # One inspect, one snapshot: the status and the ID come from the same read,
+  # and the removal goes by that ID — a forced removal by name would take
+  # whatever holds the name at that instant, another invocation's freshly
+  # created container included. A name that vanished between the two reads
+  # (another invocation's removal) is no container at all, and `create`
+  # decides who has the name.
+  STALE="$("$RUNTIME" container inspect -f '{{.State.Status}} {{.Id}}' "$NAME" 2>/dev/null || true)"
+  if [ -n "$STALE" ]; then
+    STATUS="${STALE%% *}"
     case "$STATUS" in
-      exited|stopped|dead)
-        # By the ID the status was read from, not the name: a forced removal
-        # by name would take whatever holds the name at that instant, another
-        # invocation's freshly created container included. If another
-        # invocation removed it first, ours fails and the `create` below
-        # decides who has the name.
-        STALE="$("$RUNTIME" container inspect -f '{{.Id}}' "$NAME")"
-        "$RUNTIME" rm -fv "$STALE" >/dev/null 2>&1 || true
-        ;;
+      exited|stopped|dead) "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true ;;
       *)
         echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database, or a run left it without starting it. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -f $NAME" >&2
         exit 2
         ;;
     esac
   fi
-  # The data directory is the image's PGDATA: /var/lib/postgresql/data through
-  # pg17, /var/lib/postgresql/<major>/docker from the pg18 images — a mount at
-  # the wrong path would keep an empty volume while the corpus went into the
-  # anonymous one that is removed on exit. Read from the image (pulled first
-  # if absent, as `run` would).
-  "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 || "$RUNTIME" pull -q "$IMAGE" >/dev/null
-  # Not `|| true`: a silent default on an image whose PGDATA is elsewhere
-  # would mount the kept volume at the wrong path and lose the corpus into the
-  # anonymous one — the hazard this block exists to prevent.
-  IMAGE_ENV="$("$RUNTIME" image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE")" || { echo "could not read $IMAGE's environment to find its PGDATA; nothing was started" >&2; exit 1; }
-  PGDATA_PATH="$(printf '%s\n' "$IMAGE_ENV" | sed -n 's/^PGDATA=//p' | head -n 1)"
-  PGDATA_PATH="${PGDATA_PATH:-/var/lib/postgresql/data}"
-  MOUNT_ARGS=(-v "$NAME:$PGDATA_PATH")
-  if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME at $PGDATA_PATH"; else VOLUME_NOTE=", new volume $NAME kept at $PGDATA_PATH"; fi
+  # The data directory is PINNED, not discovered: PGDATA is set on the
+  # container to the path the volume is mounted at, which the official
+  # entrypoint honours on every major (the pg18 images moved their default to
+  # /var/lib/postgresql/<major>/docker under a VOLUME at /var/lib/postgresql;
+  # that one becomes an anonymous volume the removal takes). A discovered path
+  # needs a default when the image names none, and a wrong default would keep
+  # an empty volume while the corpus went into the anonymous one.
+  PGDATA_PATH=/var/lib/postgresql/data
+  MOUNT_ARGS=(-e "PGDATA=$PGDATA_PATH" -v "$NAME:$PGDATA_PATH")
+  # The stop timeout the exit uses, on the container too, so an operator's own
+  # `stop` checkpoints as cleanly. Only here: podman's `rm -f` honours it, and
+  # a throwaway container should go at once, as before.
+  MOUNT_ARGS+=(--stop-timeout 120)
+  if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; else VOLUME_NOTE=", new volume $NAME kept"; fi
 fi
 
 echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
@@ -181,7 +180,6 @@ CID="$("$RUNTIME" create --name "$NAME" \
   -e POSTGRES_DB="$DB" \
   -p "$PORT:5432" \
   --shm-size "$SHM_SIZE" \
-  --stop-timeout 120 \
   ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
   "$IMAGE")"
 "$RUNTIME" start "$CID" >/dev/null
@@ -195,11 +193,19 @@ CID="$("$RUNTIME" create --name "$NAME" \
 if [ -n "$KEEP" ]; then READY_TRIES=1800; else READY_TRIES=60; fi
 echo -n "▸ waiting for readiness "
 for _ in $(seq 1 "$READY_TRIES"); do
-  if "$RUNTIME" exec "$CID" pg_isready -U postgres -d "$DB" >/dev/null 2>&1; then
+  # pg_isready exits 0 ready, 1 starting (recovery included), 2 unreachable,
+  # 3 bad arguments; the runtime's own failure to exec (no such running
+  # container) is 125/126. Only that last case asks the runtime whether the
+  # container is still running, and only an explicit "false" ends the wait —
+  # a failed inspect (a transient runtime error) prints nothing and must not
+  # read as an exit, or one bad call would stop a thirty-minute recovery.
+  RC=0
+  "$RUNTIME" exec "$CID" pg_isready -U postgres -d "$DB" >/dev/null 2>&1 || RC=$?
+  if [ "$RC" = 0 ]; then
     echo "— ready"
     break
   fi
-  if [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null)" != "true" ]; then
+  if [ "$RC" -gt 3 ] && [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null || true)" = "false" ]; then
     echo " — the container exited"
     break
   fi
