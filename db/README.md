@@ -1051,9 +1051,10 @@ and a build that size is seconds — so run the small scales, or several
 scales, without it. A kept database holding another scale than the one asked
 for, or the same scale built from other parameters, is refused up front,
 before anything is dropped: a kept build is never replaced without being
-asked. Measured at a million
-rows: 6 min 49 s for the run that built the corpus, 3 min 45 s for the one
-that reused it.
+asked. Measured at ten million
+rows: 37 min 9 s for the run that built the corpus, 7 min 24 s for the one
+that reused it, with identical recall columns; at a million rows, 6 min 49 s
+and 3 min 45 s.
 
 ### bench-plan.ts
 

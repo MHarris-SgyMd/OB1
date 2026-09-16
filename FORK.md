@@ -8277,10 +8277,24 @@ looks for a recorded name it has no file for — so `--reapply`'s "every recorde
 migration" is silently short on such a brain — is SMD-1504's, not this
 change's: a bench ticket does not change what the migrator refuses.
 
-**Measured.** At a million rows (the README's command, 50 queries): the fresh
-kept run 6 min 49 s end to end, the reuse 3 min 45 s — the load, the two HNSW
-builds and the other indexes gone from the second, section L reading `reused
-(built 2026-09-15 22:55)` with the first run's numbers. At 150,000 rows (the
+**Measured.** At ten million rows (the README's command: `OB1_PG_SHM_SIZE=11g
+OB1_BENCH_MAINTENANCE_MEM=9GB`, 50 queries, the same VM as change 28's
+"At scale"): the run that built the corpus took **37 min 9 s** end to end —
+206 s of inserts, 1,059 s and 267 s for the two HNSW indexes, 60 s for the
+rest, the numbers change 28's third pass records — and the run that reused it
+**7 min 24 s**, against the ticket's fifteen: `10,000,000 thoughts and
+4,000,000 chunk rows counted, rows 0 and 9,999,999 regenerated from the seed
+and matched`, `schema already at the tree's; nothing applied`, the confound
+0.656 from the exact pass, section L reading `reused (built …)` with the
+first run's numbers. The two runs' recall columns are identical (0.6 / 3.4 of
+ten unfiltered at `ef_search` 40 / 400; 0.7 at 50%, 5.1 at 1%) and their
+latencies sit inside the ~30% pass-to-pass spread change 28 reports (the
+default path 7.8 against 10.1 ms), so the fresh container's cold index, once
+warmed by the untimed pass, does not show in the tables. Of the seven
+minutes, the exact oracle — 500 exact scans of ten million rows — is most,
+which is why caching its answers in the marker is the first cut-for-space
+item below. At a million rows: the fresh kept run 6 min 49 s, the reuse 3 min
+45 s. At 150,000 rows (the
 smallest kept scale; 3 queries): a fresh kept run 27 s, the reuse 5 s, with
 `150,000 thoughts and 60,000 chunk rows counted, rows 0 and 149,999 regenerated
 from the seed and matched` and `schema already at the tree's; nothing applied`.
@@ -8299,11 +8313,7 @@ two reuse runs each failed on a driver fact: a JSON **string** bound to a
 jsonb string, which `@>` never matches — the double-encoding the README's
 live-suite section already names, met from the other side (bind objects); and
 jsonb hands an object back with its keys in its own order, so a round trip's
-text is not the text that went in (compare a key-sorted serialisation). The
-ten-million-row figure the ticket names — a second pass under fifteen minutes —
-is the same mechanism at the scale it was built for and was not re-run here; the
-reuse skips exactly the load and the builds, whose cost at that scale change 28
-records.
+text is not the text that went in (compare a key-sorted serialisation).
 
 **Second review pass, on the seams the first pass's fixes made.** The
 container is now stopped and removed by the ID `run` returned, not by name —
