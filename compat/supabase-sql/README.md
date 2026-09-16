@@ -60,7 +60,8 @@ therefore gives such a file a second line, first among its imports:
 
 That module installs exactly the two Deno members these files use — `Deno.env.get`
 reading the process environment, `Deno.serve` as `Bun.serve` on `PORT` (8000 unset,
-Deno's default), printing Deno's `Listening on` line — and nothing else, so a file
+Deno's default — a port podman's `gvproxy` also holds on macOS, so the examples
+say `PORT=8787`), printing Deno's `Listening on` line — and nothing else, so a file
 that starts using another `Deno.*` fails at the call rather than running on a
 guess at another runtime's semantics. Where the file's first import was Supabase's
 type-only `import "jsr:@supabase/functions-js/edge-runtime.d.ts"`, which Bun cannot
@@ -72,7 +73,7 @@ Then, from a checkout:
 
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
-PORT=8000 bun extensions/home-maintenance/index.ts                      # an extension
+PORT=8787 bun extensions/home-maintenance/index.ts                      # an extension
 
 NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
 bun integrations/delete-thought-mcp/index.ts                             # a recipe or integration
@@ -84,7 +85,11 @@ pinned install (only the servers that import `hono` or the MCP SDK need it — t
 workers, the APIs on their own key and the webhook receiver import nothing but the
 shim and their own files). The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
-callout gives its own line. Check 11 of `scripts/check-fork-consistency.mjs` holds
+callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
+every server but `work-operating-model-activation`, which refuses to start
+without it — set it to any value there. An extension's `schema.sql` carries
+Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
+functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.mjs` holds
 every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
 `jsr:`/`npm:`/URL specifier, through the files it imports — and
 `extensions/test-auth.ts` starts each one under `bun` and answers it over its port

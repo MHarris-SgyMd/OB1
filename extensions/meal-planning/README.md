@@ -65,7 +65,7 @@ MEAL PLANNING -- CREDENTIAL TRACKER
 --------------------------------------
 
 SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   Secret key:            ____________
   Project ref:           ____________
 
@@ -94,7 +94,7 @@ NOTE: This extension uses TWO Edge Functions:
 
 ### 1. Create the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database (`psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql`, or the Supabase SQL Editor if that is where it lives). This creates three RLS-enabled tables:
+Run the SQL in `schema.sql` against your Open Brain database. Its row-level-security policies call Supabase's `auth.uid()` and `auth.jwt()`, which a plain Postgres does not have, so give it both first (the servers connect as one role and scope rows by `DEFAULT_USER_ID` themselves; the table owner is not subject to the policies): `psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth; CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'; CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"` and then `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql` — or paste `schema.sql` into the Supabase SQL Editor, if that is where it lives. This creates three RLS-enabled tables:
 
 ```bash
 # Using Supabase SQL Editor (recommended)
@@ -129,10 +129,10 @@ This server runs under [Bun](https://bun.sh) against your Postgres: it imports t
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
 DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8000 bun extensions/meal-planning/index.ts
+PORT=8787 bun extensions/meal-planning/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8000/`; your **MCP Server URL** is `http://your-host:8000/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8000/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
 
 ### 4. Connect to Your AI
 
@@ -192,10 +192,10 @@ The shared server runs under Bun exactly as the primary one does (Step 3 above),
 ```bash
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_HOUSEHOLD_ACCESS_KEYS='spouse:write:paste-the-hash-here' \
-PORT=8001 bun extensions/meal-planning/shared-server.ts
+PORT=8788 bun extensions/meal-planning/shared-server.ts
 ```
 
-`SUPABASE_HOUSEHOLD_KEY`, the restricted Supabase key the Edge Function version read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8001/mcp?key=the-household-key`.
+`SUPABASE_HOUSEHOLD_KEY`, the restricted Supabase key the Edge Function version read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
 
 Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
 

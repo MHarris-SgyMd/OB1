@@ -1449,8 +1449,12 @@ function checkThoughtWritesAround() {
 //     emulation of `readTextFile`, `exit` or `args` would be a guess at another
 //     runtime's semantics; a new use fails at the call under Bun, and here;
 //   - no import specifier Bun cannot resolve remains — `jsr:`, `npm:`, a URL —
-//     in the file or the files it imports (`node:` is fine; the codemod swaps
-//     the one such line these files had and records it).
+//     in the file or the files it imports, a dynamic `import("…")` included
+//     (`node:` is fine; the codemod swaps the one such line these files had
+//     and records it);
+//   - `Deno` is reached only as `Deno.env.get` or `Deno.serve`: an alias, a
+//     bracket or a destructure is a use the rule cannot follow, so it is
+//     refused as one.
 // Comments and string contents are not code: members and specifiers are read
 // with both blanked (line numbers kept). Scanned: every .ts/.js/.mjs under the
 // seven category directories and docs/ that imports the shim. No exceptions —
@@ -1458,7 +1462,10 @@ function checkThoughtWritesAround() {
 // codemod's KEEP list (the local-brain recipe's client), not excepted here.
 /** Members of `Deno` compat/deno-on-bun.ts provides. */
 const DENO_PROVIDED = new Set(["env.get", "serve"]);
-const DENO_MEMBER = /\bDeno\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?/g;
+/** `Deno` wherever it appears in code: a member chain of up to two names, or bare — an alias (`const D = Deno`), a bracket (`Deno["env"]`), a destructure. */
+const DENO_MEMBER = /\bDeno\b(?:\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)?/g;
+/** A dynamic import's literal specifier. */
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'])([^"'\n]+)\1/g;
 const SHIM_SPECIFIER = /compat\/supabase-sql\/index\.ts$/;
 const RUNTIME_SPECIFIER = /compat\/deno-on-bun\.ts$/;
 /** A specifier Bun does not resolve: Deno's registries and a URL. */
@@ -1495,7 +1502,12 @@ function blanked(text, stringsToo) {
   return out;
 }
 
-/** Every import (and export-from) statement's specifier, with the line it starts on, in order. */
+/**
+ * Every import (and export-from) statement's specifier, with the line it starts
+ * on, in order. A statement ends at its `;` — the tree's imports all carry one;
+ * a semicolon-less import would run on to the next `;` and its specifier be
+ * missed (a silent miss, never a false catch), so the rule says so here.
+ */
 function importSpecifiers(text) {
   const code = blanked(text, false);
   const out = [];
@@ -1523,13 +1535,20 @@ function shimRuntimeGapsIn(entry, deps = []) {
   let usesDeno = false;
   [entry, ...deps].forEach((text, i) => {
     const at = i === 0 ? "" : `dep${i - 1}:`;
-    for (const m of blanked(text, true).matchAll(DENO_MEMBER)) {
+    const code = blanked(text, true);
+    for (const m of code.matchAll(DENO_MEMBER)) {
       usesDeno = true;
-      const member = m[2] ? `${m[1]}.${m[2]}` : m[1];
+      // `globalThis.Deno.x` reads as `Deno.x`; a bare `Deno` (aliased, bracketed, destructured) is a use the rule cannot follow, so it is refused as one.
+      const member = m[1] === undefined ? "<bare>" : m[2] ? `${m[1]}.${m[2]}` : m[1];
       const line = text.slice(0, m.index).split("\n").length;
       if (!DENO_PROVIDED.has(member)) gaps.push(`${at}deno-member:${member}@${line}`);
     }
     for (const s of importSpecifiers(text)) if (NOT_ON_BUN.test(s.spec)) gaps.push(`${at}specifier:${s.spec}@${s.line}`);
+    for (const m of code.matchAll(DYNAMIC_IMPORT)) {
+      // The specifier's text is blanked in `code`; read it from the original at the same offset.
+      const spec = text.slice(m.index + m[0].length - m[2].length - 1, m.index + m[0].length - 1);
+      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${text.slice(0, m.index).split("\n").length}`);
+    }
   });
   if (usesDeno) {
     const specs = importSpecifiers(entry);
@@ -1549,6 +1568,12 @@ const SHIM_RUNTIME_PROBES = [
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst t = await Deno.readTextFile("x");\n', "deno-member:readTextFile@3"],
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nif (!ok) Deno.exit(1);\n', "deno-member:exit@3"],
   ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst all = Deno.env.toObject();\n', "deno-member:env.toObject@3"],
+  // `Deno` reached around the member syntax: an alias, a bracket, a destructure — each a use the rule cannot follow.
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst D = Deno;\nD.exit(1);\n', "deno-member:<bare>@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst k = Deno["env"].get("X");\n', "deno-member:<bare>@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst { readTextFile } = Deno;\n', "deno-member:<bare>@3"],
+  // A dynamic import of a specifier Bun does not resolve.
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst p = await import("jsr:@std/path");\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@std/path@3"],
   // Specifiers Bun does not resolve: Deno's registries and a URL, in an import and an export-from.
   ['import "../../compat/deno-on-bun.ts";\nimport "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@supabase/functions-js/edge-runtime.d.ts@2"],
   ['import "../../compat/deno-on-bun.ts";\nimport { Hono } from "npm:hono@4.9.2";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:npm:hono@4.9.2@2"],
@@ -1569,8 +1594,8 @@ const SHIM_RUNTIME_NON_PROBES = [
   '#!/usr/bin/env node\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst url = process.env.SUPABASE_URL;\n',
   // Members and specifiers in comments and strings are prose.
   'import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\n// All env reads use Deno.env.get(); never Deno.readTextFile — see "jsr:@supabase/functions-js".\nconst note = "Deno.exit is not provided; import \\"npm:x\\" fails";\n/* Deno.args too */\nDeno.serve(app.fetch);\n',
-  // A multi-line import after the runtime line; `Deno.serve({ port }, handler)`.
-  'import "../../compat/deno-on-bun.ts";\nimport {\n  createClient,\n  type SupabaseClient,\n} from "../../compat/supabase-sql/index.ts";\nDeno.serve({ port: 8000 }, (req) => new Response("ok"));\n',
+  // A multi-line import after the runtime line; `Deno.serve({ port }, handler)`; `globalThis.Deno.env.get`; a dynamic import Bun resolves.
+  'import "../../compat/deno-on-bun.ts";\nimport {\n  createClient,\n  type SupabaseClient,\n} from "../../compat/supabase-sql/index.ts";\nconst u = globalThis.Deno.env.get("X");\nconst m = await import("./tools.ts");\nDeno.serve({ port: 8000 }, (req) => new Response("ok"));\n',
   // Not on the shim at all: whatever it does with Deno is a Deno deployment's business.
   'import "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "@supabase/supabase-js";\nconst t = await Deno.readTextFile("x");\nDeno.serve(app.fetch);\n',
 ];
@@ -1611,6 +1636,7 @@ function checkShimRuntime() {
       }
     }
     for (const gap of shimRuntimeGapsIn(text, deps.map((d) => readFileSync(d, "utf8")))) {
+      // The gap strings, above; a bare `Deno` reports as `<bare>`.
       const dep = /^dep(\d+):/.exec(gap);
       const where = dep ? relOf(deps[Number(dep[1])]) : rel;
       const g = dep ? gap.slice(dep[0].length) : gap;
@@ -1618,7 +1644,10 @@ function checkShimRuntime() {
       const at = line ? `${where}:${line}` : where;
       if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.mjs --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
       else if (g.startsWith("runtime-not-first")) fail(at, `imports compat/deno-on-bun.ts after another import — a module evaluated before it may read \`Deno.env\` in its body and throw at startup; make it the first import statement (SMD-1480, FORK.md change 74)`);
-      else if (g.startsWith("deno-member:")) fail(at, `uses \`Deno.${g.slice("deno-member:".length).replace(/@\d+$/, "")}\` in a file that runs under Bun through compat/deno-on-bun.ts, which provides only \`Deno.env.get\` and \`Deno.serve\` — the call fails under Bun; use the Node API Bun and Deno both have (node:fs, process.argv, process.exit), or extend the polyfill deliberately and say so (SMD-1480, FORK.md change 74)`);
+      else if (g.startsWith("deno-member:")) {
+        const member = g.slice("deno-member:".length).replace(/@\d+$/, "");
+        fail(at, `uses ${member === "<bare>" ? "\`Deno\` other than as \`Deno.env.get\` or \`Deno.serve\` (aliased, bracketed or destructured — a use this rule cannot follow)" : `\`Deno.${member}\``} in a file that runs under Bun through compat/deno-on-bun.ts, which provides only \`Deno.env.get\` and \`Deno.serve\` — the call fails under Bun; use the Node API Bun and Deno both have (node:fs, process.argv, process.exit), or extend the polyfill deliberately and say so (SMD-1480, FORK.md change 74)`);
+      }
       else if (g.startsWith("specifier:")) fail(at, `imports \`${g.slice("specifier:".length).replace(/@\d+$/, "")}\` in a file that runs under Bun, which does not resolve jsr:, npm: or URL specifiers — a bare package name resolves from extensions/node_modules (NODE_PATH, as the README says); a type-only jsr: import is what the codemod swaps for the polyfill line (SMD-1480, FORK.md change 74)`);
       else fail(at, `shim-runtime gap ${g}`);
     }

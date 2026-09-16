@@ -32,24 +32,27 @@
  *   Deno.env.get(name)            → process.env[name]
  *   Deno.serve(handler)           → Bun.serve({ fetch: handler, port: PORT ?? 8000 })
  *   Deno.serve({ port, hostname }, handler)
+ *   Deno.serve({ port, hostname, handler })
  *                                 → the same, the options winning over PORT
  *
  * `Deno.serve` returns what Deno's does in the two respects a file could
  * read: `finished`, a promise that resolves when the server stops, and
  * `shutdown()`, which stops it. It prints Deno's `Listening on http://…/`
- * line. Anything else on Deno's `HttpServer` is absent.
+ * line. Anything else on Deno's `HttpServer` is absent, as are the options
+ * no shim file uses: `onListen` and `signal` are ignored.
  */
 
 type Handler = (req: Request) => Response | Promise<Response>;
-type ServeOptions = { port?: number; hostname?: string };
+type ServeOptions = { port?: number; hostname?: string; handler?: Handler };
 
 if (!("Deno" in globalThis)) {
   const serve = (a: Handler | ServeOptions, b?: Handler) => {
     const opts: ServeOptions = typeof a === "function" ? {} : a;
-    const handler = typeof a === "function" ? a : b;
+    const handler = typeof a === "function" ? a : (b ?? a.handler);
     if (typeof handler !== "function") throw new TypeError("compat/deno-on-bun: Deno.serve needs a handler");
     if (typeof Bun === "undefined") throw new Error("compat/deno-on-bun: Deno.serve runs under Bun (the SQL shim is Bun's client) — `bun <file>`");
-    const port = opts.port ?? Number(process.env.PORT ?? 8000);
+    // An empty PORT is unset, not port 0 (which would be a random port, silently).
+    const port = opts.port ?? (process.env.PORT ? Number(process.env.PORT) : 8000);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError(`compat/deno-on-bun: PORT must be a port number, not ${JSON.stringify(process.env.PORT)}`);
     const server = Bun.serve({ fetch: handler, port, hostname: opts.hostname });
     let stopped: () => void = () => {};

@@ -67,7 +67,7 @@ const ROOT = resolve(HERE, "..");
 
 type Handler = (req: Request) => Response | Promise<Response>;
 const served: Handler[] = [];
-(globalThis as unknown as { Deno: unknown }).Deno = {
+const STAND_IN = {
   env: { get: (name: string) => process.env[name] },
   // `Deno.serve(handler)` and `Deno.serve({ port }, handler)` both capture the handler.
   serve: (a: Handler | object, b?: Handler) => {
@@ -75,6 +75,7 @@ const served: Handler[] = [];
     return { finished: Promise.resolve() };
   },
 };
+(globalThis as unknown as { Deno: unknown }).Deno = STAND_IN;
 
 // ── Deno's specifiers, on Bun ────────────────────────────────────────────────
 
@@ -229,14 +230,23 @@ process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
 process.env.DB_PASSWORD = "stub";
 process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
-for (const s of SERVERS) {
-  process.env.SUPABASE_URL = s.url;
-  await import(join(ROOT, s.file));
-  assert(served.length === SERVERS.indexOf(s) + 1, `${s.file} imports as deployed and hands Deno.serve one handler`);
+try {
+  for (const s of SERVERS) {
+    process.env.SUPABASE_URL = s.url;
+    await import(join(ROOT, s.file));
+    assert(served.length === SERVERS.indexOf(s) + 1, `${s.file} imports as deployed and hands Deno.serve one handler`);
+  }
+  process.env.SUPABASE_URL = PG;
+  await import(join(ROOT, WEBHOOK.file));
+  assert(served.length === SERVERS.length + 1, `${WEBHOOK.file} imports as deployed and hands Deno.serve one handler`);
+} catch (e) {
+  // A server that listens for real at import (the polyfill installed over the stand-in, say) is a
+  // counted failure with a tally, not a stack trace in place of one; nothing below could run.
+  assert(false, `a server threw at import — under the stand-in nothing should listen or connect: ${e instanceof Error ? e.message : String(e)}`);
+  report();
 }
-process.env.SUPABASE_URL = PG;
-await import(join(ROOT, WEBHOOK.file));
-assert(served.length === SERVERS.length + 1, `${WEBHOOK.file} imports as deployed and hands Deno.serve one handler`);
+assert((globalThis as unknown as { Deno: unknown }).Deno === STAND_IN,
+  "the stand-in is still `Deno` after every import — compat/deno-on-bun.ts, which each shim-migrated file imports first, installed nothing over it");
 unlinkSync(PG_STUB); // every import that wanted it has it
 
 // ── One request ──────────────────────────────────────────────────────────────
@@ -461,7 +471,8 @@ const fill = (path: string) => path.replace(/:[a-z_]+/g, "test-id");
 const LIVE: Live[] = [
   ...SERVERS.filter((s) => onShim(s.file)).map((s): Live => ({
     file: s.file,
-    env: { [s.keys]: KEYS, SUPABASE_URL: s.url },
+    // work-operating-model-activation refuses to start without SUPABASE_SERVICE_ROLE_KEY (its README says to set any value); the rest read it and ignore it.
+    env: { [s.keys]: KEYS, SUPABASE_URL: s.url, ...(s.file === "recipes/work-operating-model-activation/index.ts" ? { SUPABASE_SERVICE_ROLE_KEY: "unused-by-the-shim" } : {}) },
     probe: async (base) => {
       if (s.kind === "mcp") {
         const all = [...s.reads, ...s.writes].sort();
@@ -505,27 +516,50 @@ const LIVE: Live[] = [
 }
 for (const live of LIVE) {
   const env: Record<string, string | undefined> = { ...process.env, PORT: "0", NODE_PATH: join(HERE, "node_modules"), ...live.env };
-  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY"]) delete env[name];
+  // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
+  // URL); the process above set them, so they are removed here and the claim is what the start proves.
+  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY"]) delete env[name];
+  Object.assign(env, live.env);
   const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe" });
-  // The port, from the polyfill's `Listening on http://host:port/` line — or nothing within the deadline.
+  // The port, from the polyfill's `Listening on http://host:port/` line — or nothing: the child
+  // exited (its stdout drained once at EOF, its exit awaited — `exitCode` is set only when
+  // `exited` settles, and a loop that polled it spun for the whole deadline; pass 1), or the
+  // deadline passed with the child alive and silent.
   const reader = proc.stdout.getReader();
-  const deadline = Date.now() + 30_000;
-  let out = "", port: number | null = null;
-  while (port === null && Date.now() < deadline && proc.exitCode === null) {
-    const chunk = await Promise.race([reader.read(), new Promise<{ done: true; value?: undefined }>((res) => setTimeout(() => res({ done: true }), 500))]);
-    if (chunk.value) out += new TextDecoder().decode(chunk.value);
-    port = Number(/Listening on http:\/\/[^/:]+:(\d+)\//.exec(out)?.[1] ?? NaN) || null;
-    if (chunk.done && !chunk.value && proc.exitCode !== null) break;
+  const exited = proc.exited.then(() => "exited" as const);
+  const DEADLINE_MS = 30_000;
+  const deadline = Date.now() + DEADLINE_MS;
+  let out = "", port: number | null = null, pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null, eof = false;
+  const parsePort = () => Number(/Listening on http:\/\/[^/:]+:(\d+)\//.exec(out)?.[1] ?? NaN) || null;
+  while (port === null && Date.now() < deadline) {
+    if (!eof) pending ??= reader.read();
+    const tick = new Promise<"tick">((res) => setTimeout(() => res("tick"), 500));
+    const r = await Promise.race([...(pending ? [pending] : []), exited, tick]);
+    if (r === "exited") { if (pending) { const last = await Promise.race([pending, tick]); if (last !== "tick" && last.value) out += new TextDecoder().decode(last.value); } port = parsePort(); break; }
+    if (r === "tick") continue;
+    pending = null;
+    if (r.value) out += new TextDecoder().decode(r.value);
+    if (r.done) eof = true;
+    port = parsePort();
   }
-  const stderr = async () => (await new Response(proc.stderr).text()).trim().split("\n").slice(0, 3).join(" | ");
-  assert(port !== null, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on${port === null ? ` (exit ${proc.exitCode}: ${await stderr()})` : ""}`);
   if (port !== null) {
     await live.probe(`http://127.0.0.1:${port}`);
     assert(proc.exitCode === null, "…and is still running after the probes");
   }
-  reader.releaseLock();
+  // Stop the child BEFORE reading its stderr: a server alive without a port would
+  // otherwise hold stderr open and the read below would hang the test (pass 1).
+  const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;
+  await reader.cancel().catch(() => {});
+  if (port === null) {
+    // The error line, not the code frame Bun prints above it.
+    const lines = (await new Response(proc.stderr).text()).trim().split("\n");
+    const stderr = (lines.filter((l) => /error/i.test(l)).slice(0, 2).concat(lines.slice(0, 2))).slice(0, 3).join(" | ");
+    assert(false, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on (${alive ? "alive after ${DEADLINE_MS / 1000} s without a Listening line" : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
+  } else {
+    assert(true, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on`);
+  }
 }
 
 // ── Where the key may travel ─────────────────────────────────────────────────

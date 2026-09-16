@@ -10796,7 +10796,8 @@ cost recipe's "before" sample — and `recipes/local-brain-no-mcp/functions/
 _shared/db.ts` back on supabase-js; `scripts/check-fork-consistency.mjs`
 (check 11); `extensions/test-auth.ts`; `compat/supabase-sql/README.md` and
 `tsconfig.json`; the four extension READMEs and their `metadata.json`, the
-deploy primitive, nine recipe and integration READMEs,
+deploy primitive, ten recipe and integration READMEs (`rest-api`'s and
+`smart-ingest`'s gain the callout the other eight had),
 `integrations/consolidation-workers/deno.json`, two comments in
 `.github/workflows/fork-checks.yml`, `extensions/test-writes.ts`'s header
 (Linear SMD-1480, filed from change 64's third review pass and widened by
@@ -10812,8 +10813,8 @@ names, the nine recipes and integrations change 67's comment widened it to,
 and `rest-api` and `smart-ingest`, on the shim with a key compare of their
 own. Changes 64, 67, 69, 71 and 73 each exercised them under the tests' two-
 line stand-in for those globals, which is the only way they ran at all, and
-fourteen READMEs sent a reader to `supabase functions deploy` above a callout
-saying it would fail. The ticket offered a revert; this fork's stated purpose
+twelve READMEs and the deploy primitive sent a reader to `supabase functions
+deploy` above a callout saying it would fail. The ticket offered a revert; this fork's stated purpose
 is running Open Brain without Supabase, fix 13 put these files on the shim for
 exactly that, and change 73 had just made `consolidation-bio` run on it — so
 the migration is finished instead, for every file on the shim, by the
@@ -10869,15 +10870,18 @@ API's read probe passes under a read key, a worker dry-runs under one, the
 receiver admits its secret, the two APIs on their own key pass their gate —
 refused with a wrong key, still running afterwards, then stopped. Sixteen
 starts, four assertions each, in the required Portable-server job, no
-database.
+database; the child's exit is awaited beside the read, so a crash fails at
+once, and the child is stopped before its stderr is read, so a silent one
+fails at the deadline rather than hanging the job.
 
 **Decisions.** *Finish, not revert:* above. *A polyfill, not a per-file
 seam:* the ticket sketched `server-portable/index.ts`'s pattern — env through
 one accessor, `export default { fetch }` — which is right for a file the fork
-owns and wrong for sixteen it vendors: the reads are 64 lines across the
-entry files and 64 more in four `_shared/helpers.ts` modules, every one a
-line the next rebase conflicts on, where the polyfill is one line the codemod
-owns and reverts, the same standard fix 13 set (a probe first: an unmodified
+owns and wrong for sixteen it vendors: the sixteen entries hold 96
+`Deno.env.get` reads and 16 `Deno.serve` calls, and the four
+`_shared/helpers.ts` modules and `network.ts` behind them 65 more reads,
+every one a line the next rebase conflicts on, where the polyfill is one
+line the codemod owns and reverts, the same standard fix 13 set (a probe first: an unmodified
 `home-maintenance/index.ts` under `bun --preload` of the two globals
 answered `tools/list` with its four tools and 401 to a wrong key). *Two
 members, no more:* the polyfill is a statement of what these files use, and
@@ -10907,16 +10911,81 @@ reports it, which is what Deno's `Listening on` line is for — no probe, no
 race. *`metadata.json`'s `tools`:* `Bun 1.4+` for the four, `Supabase CLI`
 for the two that deploy by the primitive.
 
-**Verified:** `bun test-auth.ts` 708/708 (643 before: sixteen starts × four
-assertions and the tree guard); every one of the sixteen — the five
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with podman; thirty-two findings between them, two HIGH, five
+MED, twenty-one taken). The running reviewer broke the new test section both
+ways a child process can go wrong. A child that crashed at startup — the
+polyfill with `serve` removed — was reported only after the full thirty-second
+deadline, at 100% CPU, sixteen times over (eight minutes), with `exit null`
+and a code frame where the error text should be: `reader.read()` answers
+`{ done: true }` at once after the child's stdout hits EOF, so the loop spun
+eleven million times, and Bun sets `exitCode` only when `exited` settles,
+which the loop never awaited. And a healthy child whose `Listening on` line
+did not match the regex hung the suite past fifteen minutes and left an
+orphan: the failure message read the child's stderr to EOF while the child
+was alive (the reading reviewer saw the same line). Now the loop races the
+child's `exited` beside the read and a tick, drains once at EOF, kills the
+child before reading stderr, surfaces the line containing `error` rather than
+the frame above it, and names the deadline it waited — a crash fails in under
+a second with `TypeError: Deno.serve is not a function`, sixteen crashes in
+one, an unmatched port line at the deadline with no orphan, each re-run under
+the mutation. A polyfill made to install over the tests' stand-in killed the
+suite at the first import with a stack and no tally (port 8000 taken or not):
+the import loop is a counted failure now, and an assertion after it says the
+stand-in is still `Deno` — the identity the whole in-process section rests
+on (709 assertions). The documented port was wrong for the fork's own
+machine: podman's `gvproxy` holds `*:8000` on macOS, so `PORT` unset answered
+`Is port 8000 in use?` on the first try; the polyfill keeps Deno's default,
+the examples say `PORT=8787` (the shared meal-planning server 8788) and each
+callout says why to set one. The reading reviewer found the two README
+claims that would have failed a reader: every extension `schema.sql` creates
+RLS policies on Supabase's `auth.uid()` (meal-planning's on `auth.jwt()`
+too), which the fork's Postgres does not have, so the new `psql -f` step
+died at the first policy — Step 1 now creates the two stub functions first
+and says the table owner is not subject to the policies while the server
+scopes rows by `DEFAULT_USER_ID` itself; and `work-operating-model-activation`
+refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, which its callout said
+to leave unset — the callout says to set any value, and the test's spawns no
+longer inherit the variable from the process, so "may be left unset" is what
+the other fifteen starts prove. Check 11 widened at the running reviewer's
+probes: a bare `Deno` — aliased (`const D = Deno`), bracketed
+(`Deno["env"]`), destructured — is a use the rule cannot follow and is
+refused as one; a dynamic `import("jsr:…")` is a specifier too; four probes
+and two non-probes added (`globalThis.Deno.env.get`, a relative dynamic
+import). The codemod, given a `jsr:` types import that was not the first
+import, had swapped it in place — second — and left a second such line
+alone; it puts the polyfill first in every layout now and turns any other
+types import into the recorded comment, round trip identical on both
+constructed files. Smaller: `PORT=""` was port 0, a random port, silently —
+empty is unset now; `Deno.serve({ port, handler })`, Deno's options-only
+form, is accepted; the reader is cancelled rather than released around a
+pending read; the codemod's `Deno.` test reads comments (a harmless extra
+line, said so) and check 11's import statements end at `;` (a semicolon-less
+import would be a silent miss, said so). This section's counts were wrong
+and are fixed: 96 reads and 16 serves in the entries and 65 in the helper
+modules, not "64 and 64"; twelve READMEs and the primitive carried the
+callout, not fourteen; ten recipe and integration READMEs were edited, not
+nine; and the by-hand probe of an unmodified extension ran with the globals
+preloaded, so "fails at `Deno is not defined`" was not observed and is not
+claimed. The four extension credential trackers gain a Postgres URL line.
+Not taken: the migrated files' banner still says `node scripts/…` while the
+header says `bun` (rewriting 23 banners for a word; node runs it too); the
+bio worker's dry run under a write key answers 404 without a `?name=`, past
+the gate as the test counts it; `deno check` of the local-brain recipe's
+`capture/index.ts` fails in its `embed.ts` on a parameter property —
+pre-existing at the pin, not this change (its `db.ts`, back on supabase-js,
+checks clean).
+
+**Verified:** `bun test-auth.ts` 709/709 (643 before: sixteen starts × four
+assertions, the tree guard, and the stand-in's identity after every import); every one of the sixteen — the five
 extension servers, the sample, `work-operating-model-activation`, the two
 thought servers, `open-brain-rest`, the auditor, the two workers,
 `readwise-capture`, `rest-api`, `smart-ingest` — starts under `bun`, says its
 port, answers its probe and is still running (the auditor's dry run under a
 read key answers 500 against the refused stub database, past the gate as in
-the in-process section); with the polyfill absent an unmodified integration
-fails at `jsr:` and an extension at `Deno is not defined` — the two starts
-probed by hand before the change; `bun scripts/check-fork-consistency.mjs`
+the in-process section); before the change an unmodified integration under `bun` failed at its
+`jsr:` import and an unmodified extension served only under `bun --preload`
+of the two globals — the two starts probed by hand; `bun scripts/check-fork-consistency.mjs`
 PASS with check 11's eleven probes, and six mutations of the tree each caught
 on the right file and line — the runtime line removed, the line moved after
 `hono`, `Deno.exit` in an entry, `Deno.args` in a `_shared/helpers.ts` reached
@@ -10924,6 +10993,13 @@ through its entry, the `jsr:` line restored beside the polyfill, `npm:hono`
 as a specifier (a lesson from the mutant run: `git checkout --` restored the
 mutated files to HEAD and wiped the branch's own uncommitted lines with them
 — restore a mutation from the saved text, never from git, on a dirty tree);
+after pass 1, the test's own failure modes re-run under mutation — `serve`
+removed from the polyfill: sixteen named failures in 0.9 s with the
+`TypeError` text; the polyfill installing over the stand-in: one counted
+failure with a tally in 0.1 s; the port line unmatched under a two-second
+deadline: sixteen failures in 33 s, no orphan — and the codemod's two odd
+layouts (a `jsr:` types import second; two of them) each round-trip
+identical with the polyfill first;
 `../db/with-postgres.sh bun test-writes.ts` 186/186 (the bio worker and the
 other drivers unchanged under the stand-in); `bunx tsc --noEmit` in
 `compat/supabase-sql` clean with `../deno-on-bun.ts` in its include;

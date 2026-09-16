@@ -27,9 +27,10 @@
  * Bun the two members those files use and nothing else. Where the file's first
  * import is Supabase's type-only `import "jsr:@supabase/functions-js/
  * edge-runtime.d.ts";` — a specifier Bun cannot resolve — that line becomes the
- * polyfill import, the original recorded on the same line for --revert. Both
- * are undone by --revert, byte for byte; --apply --all also completes a file
- * migrated before this line existed. `bun <file>` then serves it.
+ * polyfill import, the original recorded on the same line for --revert (a
+ * types import anywhere else becomes that comment alone). Both are undone by
+ * --revert, byte for byte; --apply --all also completes a file migrated
+ * before this line existed. `bun <file>` then serves it.
  *
  * A file is INELIGIBLE when it uses something the shim deliberately does not
  * implement, or when it deploys somewhere the shim cannot follow (KEEP below).
@@ -77,6 +78,7 @@ const KEEP = new Map([
 const TYPES_IMPORT_RE = /^import "(jsr:@supabase\/functions-js\/edge-runtime\.d\.ts)";$/m;
 /** The polyfill's import as this script writes it — alone on a line, or in the types import's place with the original recorded. */
 const RUNTIME_IMPORT_RE = /^import "([^"]*compat\/deno-on-bun\.ts)";(?: \/\/ ob1-original-types: (.+))?\n/m;
+/** Read over the whole text, comments included: a Node-shaped file that mentions `Deno.env` in a comment gets a harmless extra line. */
 const USES_DENO_RE = /\bDeno\./;
 
 function walk(dir, out = []) {
@@ -142,11 +144,15 @@ function relativeTo(file, target) {
 function withRuntime(text, file) {
   if (!USES_DENO_RE.test(text) || RUNTIME_IMPORT_RE.test(text)) return text;
   const line = `import "${runtimePath(file)}";`;
-  const types = text.match(TYPES_IMPORT_RE);
-  if (types) return text.replace(TYPES_IMPORT_RE, `${line} // ob1-original-types: ${types[1]}`);
   const first = text.search(/^import[\s{"']/m);
   if (first < 0) throw new Error(`${relative(ROOT, file)} uses a Deno global but has no import statement to put compat/deno-on-bun.ts before`);
-  return text.slice(0, first) + line + "\n" + text.slice(first);
+  const types = TYPES_IMPORT_RE.exec(text);
+  // In the types import's place when that IS the first import (the tree's four); otherwise first,
+  // and any types import elsewhere becomes the comment alone — first is what the file needs.
+  text = types && types.index === first
+    ? text.replace(TYPES_IMPORT_RE, `${line} // ob1-original-types: ${types[1]}`)
+    : text.slice(0, first) + line + "\n" + text.slice(first);
+  return text.replace(new RegExp(TYPES_IMPORT_RE.source, "gm"), (_m, spec) => `// ob1-original-types: ${spec}`);
 }
 
 function rewrite(file) {
@@ -198,8 +204,9 @@ function revert(file) {
   // than at the start of the file.
   let text = original.replace(/^\/\/ MIGRATED OFF SUPABASE:[\s\S]*?--revert <file>\n/m, "");
   text = text.replace(/(['"])[^'"]*compat\/supabase-sql\/index\.ts\1/g, (_m, q) => `${q}${spec}${q}`);
-  // The runtime line: back to the jsr: types import it replaced, or gone.
+  // The runtime line: back to the jsr: types import it replaced, or gone; a types import left as a comment, back.
   text = text.replace(RUNTIME_IMPORT_RE, (_m, _p, types) => (types ? `import "${types}";\n` : ""));
+  text = text.replace(/^\/\/ ob1-original-types: (.+)$/gm, (_m, spec) => `import "${spec}";`);
   if (text === original) return { changed: false };
   writeFileSync(file, text);
   return { changed: true };

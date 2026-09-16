@@ -47,7 +47,7 @@ PROFESSIONAL CRM -- CREDENTIAL TRACKER
 
 SUPABASE (from your Open Brain setup)
   Project ref:           ____________
-  Project URL:           ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   Secret key:            ____________
 
 MCP SERVER (you'll create these)
@@ -63,13 +63,16 @@ MCP SERVER (you'll create these)
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` against your Open Brain database:
+Run the SQL in `schema.sql` against your Open Brain database. Its row-level-security policies call Supabase's `auth.uid()`, which a plain Postgres does not have, so give it that function first — the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and the table owner is not subject to the policies:
 
 ```bash
+psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth;
+  CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
+  CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
 psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql
 ```
 
-(Or paste its contents into the Supabase SQL Editor, if that is where your database lives.) This creates three RLS-enabled tables with proper foreign key relationships.
+(Or paste `schema.sql` into the Supabase SQL Editor, if that is where your database lives — Supabase has both functions.) This creates three RLS-enabled tables with proper foreign key relationships.
 
 ### 2. Generate Your User ID
 
@@ -95,10 +98,10 @@ This server runs under [Bun](https://bun.sh) against your Postgres: it imports t
 SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
 MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
 DEFAULT_USER_ID='your-generated-uuid-here' \
-PORT=8000 bun extensions/professional-crm/index.ts
+PORT=8787 bun extensions/professional-crm/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8000/`; your **MCP Server URL** is `http://your-host:8000/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8000/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
 
 ### 4. Connect to Your AI
 
