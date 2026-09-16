@@ -7102,11 +7102,13 @@ suites that ordered by the audit table's uuid key now order by `created_at` —
 one of them, [28]'s, was a latent flake this section's twin assertion exposed.
 [32]'s reads later left `created_at` too (SMD-1514): separate transactions do
 not promise distinct values of it — PGlite's clock has millisecond grain
-(change 65, SMD-1498) — so each read is now the set difference of the thought's
-audit ids across the one write, and the `updated_at` compare sleeps 2 ms first,
-since 001's trigger re-stamps the column on any UPDATE and the row cannot be
-aged by construction. [28]'s read stands: its thought has one update row when
-it is read.
+(change 65's [34] note, SMD-1498) — so each read is now the set difference of
+the thought's audit ids across the one write, and the `updated_at` compare
+sleeps 2 ms first, since 001's trigger re-stamps the column on any UPDATE and
+disabling it would disarm what [9] tests; [9]'s own compare, `>=` across two
+adjacent statements, passed with the trigger dropped and now sleeps the same
+2 ms and asserts `>`. [28]'s read is unordered and asserts what makes it safe:
+its thought has one update row when it is read.
 
 Upstream status: **not applicable** — upstream's `update_thought` (the
 `integrations/*-thought-mcp` recipe 009 ported) has neither the provenance
