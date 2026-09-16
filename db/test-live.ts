@@ -841,6 +841,127 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   await sql`DELETE FROM thoughts`;
 }
 
+console.log("\n[6g] delete_thought joins the lock order: an accept racing a delete of the superseded thought deadlocks without the advisory lock and does not with it, forty tries each (migration 036, SMD-1462)");
+{
+  await sql`DELETE FROM thoughts`;
+  // Z is the older, superseded thought — the delete's target, and the row the
+  // accept's FK check takes KEY SHARE on; S the newer that supersedes it; P a
+  // pending directed proposal. review(P,'accept') writes S.supersedes = Z
+  // through update_thought. A small 0–3 ms stagger on each side, as 033's pass
+  // ran it. Every arm builds a fresh pair, so a deadlock's rollback leaves
+  // nothing behind, and DELETE FROM thoughts between tries clears the rest.
+  let n = 0;
+  const mkCase = async () => {
+    n += 1;
+    const z = ((await sql`SELECT upsert_thought(${"older, superseded — case " + n}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+    const s = ((await sql`SELECT upsert_thought(${"newer, supersedes it — case " + n}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+    const p = (await sql`SELECT record_supersession_proposal(${z}::uuid, ${s}::uuid, 'newer_supersedes_older', 0.9, 'raced by test [6g]', 0.9, 'test:1462') AS id`)[0].id as string;
+    return { z, s, p };
+  };
+  const jitter = () => Bun.sleep(Math.random() * 3);
+  type R = { ok: boolean; error?: string };
+
+  // Arm 1 — the pre-036 delete, by hand: a single DELETE FROM thoughts holding
+  // no advisory lock, racing the shipped review. This is 009's body minus the
+  // one line 036 adds, so the cycle it reproduces is exactly the one the fix
+  // closes. (033's pass measured 23 of 40 against the 032 review; this arm
+  // races the shipped 036 review, but the cycle is on the rows Z and P and does
+  // not depend on where the review takes the advisory lock — so the count
+  // varies run to run and the arm only asserts it happens at all.) This is the
+  // one deliberately stochastic assertion in the suite: with the delete fully
+  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
+  // on the order of 1e-15 — a spurious pass is not a practical risk.
+  {
+    const connR = new SQL({ url: URL_, max: 1 });
+    const connD = new SQL({ url: URL_, max: 1 });
+    let deadlocks = 0;
+    for (let i = 0; i < 40; i++) {
+      const { z, p } = await mkCase();
+      const review = (async () => { await jitter(); try { await connR`SELECT review_supersession_proposal(${p}::uuid, 'accept') AS r`; return ""; } catch (e) { return (e as Error).message; } })();
+      const del = (async () => { await jitter(); try { await connD.begin(async (tx: SQL) => { await tx`SET LOCAL statement_timeout = '8s'`; await tx`DELETE FROM thoughts WHERE id = ${z}::uuid`; }); return ""; } catch (e) { return (e as Error).message; } })();
+      const [er, ed] = await Promise.all([review, del]);
+      if (/deadlock detected/.test(er) || /deadlock detected/.test(ed)) deadlocks += 1;
+      await sql`DELETE FROM thoughts`;
+    }
+    await connR.close(); await connD.close();
+    assert(deadlocks > 0, `the lockless delete (009's body, pre-036) racing an accept closes the cycle the ticket measured — ${deadlocks} of 40 deadlocked`);
+  }
+
+  // Arm 2 — the shipped delete_thought (036), which takes the supersession lock
+  // before the DELETE: forty tries, no 40P01. The delete is never the victim
+  // now; whichever writer runs first, its cascade still takes the proposal.
+  {
+    const connR = new SQL({ url: URL_, max: 1 });
+    const connD = new SQL({ url: URL_, max: 1 });
+    let deadlocks = 0, deleteVictim = 0, proposalLeft = 0;
+    for (let i = 0; i < 40; i++) {
+      const { z, p } = await mkCase();
+      const review = (async () => { await jitter(); try { return ((await connR`SELECT review_supersession_proposal(${p}::uuid, 'accept') AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+      const del = (async () => { await jitter(); try { return ((await connD`SELECT delete_thought(${z}::uuid, NULL::jsonb) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+      const [rr, rd] = await Promise.all([review, del]);
+      if (/deadlock detected/.test(rr.error ?? "") || /deadlock detected/.test(rd.error ?? "")) deadlocks += 1;
+      if (rd.ok !== true) deleteVictim += 1;
+      if (Number((await sql`SELECT count(*)::int AS c FROM supersession_proposals WHERE id = ${p}::uuid`)[0].c) !== 0) proposalLeft += 1;
+      await sql`DELETE FROM thoughts`;
+    }
+    await connR.close(); await connD.close();
+    assert(deadlocks === 0, `forty accepts raced forty shipped deletes, no 40P01 (${deadlocks})`);
+    assert(deleteVictim === 0, `the shipped delete was never the deadlock victim — it completed every try (${deleteVictim})`);
+    assert(proposalLeft === 0, `the delete's cascade still removed the proposal every try (${proposalLeft})`);
+  }
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[6h] update_thought naming supersedes races a delete of that target: never a raw 23503, always SUPERSEDES_NOT_FOUND or a clean write — the same lock closes it (migration 036, SMD-1462)");
+{
+  await sql`DELETE FROM thoughts`;
+  // No proposal row here (a plain edit naming supersedes deadlocked 0 of 40
+  // pre-fix, the ticket says — nothing for the cascade to fight over). What
+  // the delete-side lock closes is the OTHER thing the same probe found: a
+  // target deleted between update_thought's existence walk and its UPDATE
+  // surfaced as a raw 23503 rather than the SUPERSEDES_NOT_FOUND 032's COMMENT
+  // promises. update_thought holds the supersession lock across both its walk
+  // and its UPDATE whenever supersedes is named (033); with delete_thought now
+  // contending on it, a delete can no longer slip between the two.
+  let n = 0;
+  const mkPair = async () => {
+    n += 1;
+    const z = ((await sql`SELECT upsert_thought(${"supersedes target — pair " + n}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+    const s = ((await sql`SELECT upsert_thought(${"the newer note — pair " + n}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+    return { z, s };
+  };
+  const jitter = () => Bun.sleep(Math.random() * 3);
+  type R = { ok: boolean; error?: string };
+  const connU = new SQL({ url: URL_, max: 1 });
+  const connD = new SQL({ url: URL_, max: 1 });
+  let fkViolations = 0, unexpected = 0, pointerLeft = 0, notFound = 0, wrote = 0, deleteFailed = 0;
+  for (let i = 0; i < 40; i++) {
+    const { z, s } = await mkPair();
+    // Build the provenance jsonb server-side: binding a JS string and casting
+    // ::jsonb double-encodes it (jsonb_typeof 'string'), which update_thought's
+    // 032 guard refuses — the Bun binding trap 005 rejects.
+    const upd = (async () => { await jitter(); try { return ((await connU`SELECT update_thought(${s}::uuid, p_provenance => jsonb_build_object('supersedes', ${z}::uuid)) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+    const del = (async () => { await jitter(); try { return ((await connD`SELECT delete_thought(${z}::uuid, NULL::jsonb) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+    const [ru, rd] = await Promise.all([upd, del]);
+    if (/\b23503\b|thoughts_supersedes_fkey/.test(ru.error ?? "")) fkViolations += 1;
+    else if (ru.ok === true) wrote += 1;
+    else if (ru.error === "SUPERSEDES_NOT_FOUND") notFound += 1;
+    else unexpected += 1;
+    if (rd.ok !== true) deleteFailed += 1;
+    // Whichever way it fell, Z is gone and S points at nothing: never set (the
+    // walk found Z already deleted), or set then cleared by 025's SET NULL.
+    const after = (await sql`SELECT supersedes FROM thoughts WHERE id = ${s}::uuid`)[0] as { supersedes: string | null } | undefined;
+    if (!after || after.supersedes !== null) pointerLeft += 1;
+    await sql`DELETE FROM thoughts`;
+  }
+  await connU.close(); await connD.close();
+  assert(fkViolations === 0, `no raw 23503 in forty tries — 032's COMMENT is honoured, not tightened (${fkViolations})`);
+  assert(unexpected === 0, `every update_thought answered SUPERSEDES_NOT_FOUND or wrote cleanly — ${notFound} not-found, ${wrote} wrote, ${unexpected} other`);
+  assert(deleteFailed === 0, `the delete completed every try (${deleteFailed})`);
+  assert(pointerLeft === 0, `S.supersedes is NULL after every race — never set, or set then cleared by the delete's SET NULL (${pointerLeft})`);
+  await sql`DELETE FROM thoughts`;
+}
+
 console.log("\n[7] Chunk context survives capture, edit and a payload without it");
 {
   await sql`DELETE FROM thoughts`;
