@@ -29,8 +29,8 @@
 --     10,000,000      240 ms            268 ms
 --
 --   At ten million rows it is nine tenths of the broadest tier's latency,
---   and at 10% (~50 ms of ~150) a third. The walk that follows needs a few
---   hundred tuples. The twelfth review pass of 014 named the mitigation —
+--   and at 10% (~50 ms of ~150) a third. The walk that follows needs some
+--   eighty tuples at 50%. 014's header named the mitigation —
 --   estimate the match count first, run the collection only when the
 --   estimate is plausibly under the threshold — and declined it for want of
 --   a number; SMD-1018's tables are the number, and this file is the
@@ -53,18 +53,20 @@
 --        given up.
 --     2. hits >= 8
 --        A floor on the evidence. At ten million rows condition 1 is met by
---        one sampled row (8 pages of 500,000 are one 60,000th of the table;
---        one hit scales to 60,000, sixty times the threshold), and one row
---        is luck. Eight rows from a filter matching exactly v_exact thoughts
---        has probability ~1e-19 there; from one matching 1% of the table,
---        two in ten thousand.
+--        one sampled row (8 pages of some 526,000 are one 65,000th of the
+--        table; one hit scales to 65,000, sixty-five times the threshold),
+--        and one row is luck. Eight rows from a filter matching exactly
+--        v_exact thoughts has probability ~1e-19 there; from one matching 1%
+--        of the table, about two in a thousand measured (Cost below: 2 of
+--        1,000 draws) — the Poisson figure is two in ten thousand, and
+--        SYSTEM's page-level variance is the difference (Design).
 --     3. hit_pages >= 3
 --        SYSTEM sampling is by page. A filter whose matches sit together on
 --        disk — one import, one day's captures, everything with one tag
 --        written in one session — shows the sample either a page full of hits
---        or nothing, and a full page (20 rows at the bench's width, 80 at the
---        shipped width with short content) passes conditions 1 and 2 on its
---        own. Three different pages means three separate draws landed on
+--        or nothing, and a full page (20 rows at the bench's width, 65–80 at
+--        the shipped width with short content) passes conditions 1 and 2 on
+--        its own. Three different pages means three separate draws landed on
 --        the filter; for a contiguous run of v_exact rows that is
 --        C(8,3) x (run pages / heap pages)^3: about 1e-5 at the floor,
 --        6e-8 at a million rows, 6e-11 at ten million. The layout the three
@@ -77,13 +79,11 @@
 --        says 2.8e-3 there), 995 such rows were skipped 13 times in 20,000
 --        draws, 6.5e-4: condition 1 is marginal with exactly three hit pages
 --        — twelve hits scale to just over ten times the threshold and fail
---        it whenever the draw reached nine pages or more (first review pass
---        found the layout; the second corrected these figures, which had
---        quoted the measurement as the formula's). `hit_pages >= 4` would
---        take the bound to C(8,4) x f^4, about 2e-4 at the floor (4 of
---        20,000 measured on that heap), at the price of two to three points
---        of the broad filters' skip rate; that is the knob if the band
---        matters.
+--        it whenever the draw reached nine pages or more. `hit_pages >= 4`
+--        would take the bound to C(8,4) x f^4, about 6e-5 at the floor
+--        (1.3e-4 on the 6,826-page heap, where 4 of 20,000 draws — 2e-4 —
+--        were measured), at the price of two to three points of the broad
+--        filters' skip rate; that is the knob if the band matters.
 --
 --   Anything less runs the collection exactly as before this file — the same
 --   statement token for token, indented two spaces further inside the IF
@@ -92,9 +92,10 @@
 --   what it always cost plus the sample; a filter the gate skips costs the
 --   sample and the walk, minus the bitmap. The exact branch remains the
 --   answer for every filter at or under the threshold up to the probabilities
---   above — under 1e-5 for uniform or contiguous matches at any size the
---   gate runs at, about 2e-3 for the thin-spread layout at the floor and
---   falling as the cube of the heap — and the measurement below found none
+--   above — about 1e-5 or less for uniform or contiguous matches at any
+--   size the gate runs at, about 2e-3 for the thin-spread layout at the
+--   floor and falling as the cube of the heap — and the measurement below
+--   found none
 --   in a thousand draws at each of five such filters, and the thirteen above
 --   in twenty thousand at the sixth.
 --
@@ -103,7 +104,7 @@
 --   {{ROUTE_ESTIMATE_MIN_PAGES}} pages — some 160,000 rows at the bench's
 --   width, fewer with long content, more at the shipped width with short
 --   content — puts the collection at 4 ms for a 50% filter and 8 for one
---   matching everything, against a sample that costs 0.15 ms on every
+--   matching everything, against a sample that costs about 0.15 ms on every
 --   filtered call. A brain of a few thousand thoughts, which is every real
 --   brain today, never reads the sample; its empty-filter probe stays the
 --   one GIN probe 014 made it. The floor and the page count are config.mjs
@@ -151,8 +152,8 @@
 --     every block number against its cutoff, so the statement carries about
 --     2 ns per heap page besides the eight pages' rows — measured with one
 --     row a page and every page in shared_buffers, 0.04 ms at 2,000 pages,
---     0.09 at 20,000, 0.46 at 200,000 (first review pass, which caught the
---     term); at ten million rows' 526,000 pages that is the millisecond the
+--     0.09 at 20,000, 0.46 at 200,000; at ten million rows' 526,000 pages
+--     that is the millisecond the
 --     bench shows, whatever the buffer pool holds (the "large heap" failure
 --     mode below, and SMD-1526). Eight pages: a 10% filter puts sixteen
 --     expected hits in 160 sampled rows and was skipped in 908 of 1,000
@@ -161,8 +162,8 @@
 --     0.012 ms, so the sample is already the larger part of that call. The
 --     10% misses are mostly draws with fewer than eight hits — SYSTEM picks a
 --     binomial number of pages, and two hits a page compound that variance —
---     then, at the floor, condition 1, and last fewer than three pages
---     (1,109 / 345 / 45 of 1,499 misses in 20,000 draws on a 6,826-page
+--     then, on a heap near the floor, condition 1, and last fewer than three
+--     pages (1,109 / 345 / 45 of 1,499 misses in 20,000 draws on a 6,826-page
 --     heap). No REPEATABLE seed: a fixed seed reads the same pages every
 --     call, which is a warm cache and a systematically wrong sample of a
 --     clustered filter; a fresh draw is unbiased.
@@ -188,7 +189,7 @@
 --     would size a table that no longer exists (NULL, one page, 100%).
 --   * The gate is three conditions in plpgsql over three counts from one
 --     statement, not a CASE inside the collection: the collection is 014's
---     text and [20] holds it byte for byte; and a reader of this body should
+--     text and [20] holds it token for token; and a reader of this body should
 --     be able to see the rule without reading a query plan.
 --
 -- Failure modes, each with its cost
@@ -207,7 +208,7 @@
 --     contiguous one, 479 rows, 52, and none, on 500,000 rows.
 --   * The sample runs the collection on a filter that is broad. That is the
 --     cost before this file — 5.6 ms for the 10% filter, 12.6 for 50% at
---     500,000 rows — plus 0.15 ms. It happens by design for a clustered
+--     500,000 rows — plus about 0.15 ms. It happens by design for a clustered
 --     broad filter (a 10,000-row contiguous run was skipped once in 1,000
 --     draws: eight pages rarely land on three of the run's 500) and for a
 --     moderately broad uniform one (a 5,007-row filter, five times the
@@ -223,19 +224,19 @@
 --     evidence, more collections. EMPTY sampled pages are the other way:
 --     `pages_seen` counts the pages that returned a row, not the pages
 --     sampled, so an empty page drops out of the denominator and the scaled
---     estimate is biased UP (first review pass; an earlier draft of this
---     bullet had the direction wrong). A thin filter is still protected by
+--     estimate is biased UP. A thin filter is still protected by
 --     conditions 2 and 3, which do not scale — but on a heap three quarters
 --     empty at the floor, v_exact rows are a larger share of what is live,
 --     and the uniform bound moves from ~1e-7 to ~3e-5. Empty pages also drop
 --     out of hit_pages, so on such a heap condition 3 fails most draws and
 --     the BROAD filters get their collection back: measured with the middle
 --     three quarters of a 200,000-row table deleted and plain-VACUUMed, the
---     50% filter was skipped in 309 of 1,000 draws (984 on the dense heap),
---     the 10% filter in 154 (960) — the pre-036 cost returns, nothing worse
---     (second review pass, run). VACUUM FULL restores the density;
---     SMD-1526's TID-range sample would count sampled pages exactly. A heap that is large in pages but few in rows (long content,
---     TOASTed metadata) reaches the gate at fewer rows, where the collection
+--     50% filter was skipped in 309 of 1,000 draws and the 10% filter in
+--     154 (984 and 960 on the same 200,000-row table before the delete) —
+--     the pre-036 cost returns, nothing worse. VACUUM FULL restores the
+--     density; SMD-1526's TID-range sample would count sampled pages exactly.
+--     A heap that is large in pages but few in rows (long content, TOASTed
+--     metadata) reaches the gate at fewer rows, where the collection
 --     was cheaper — and pays the sample to learn it. The other direction —
 --     short content at the shipped width, 65–80 rows a page — gives the
 --     sample four times the rows and the gate four times the evidence, at
@@ -252,9 +253,9 @@
 --     integration sends on every call. The 50% tier went from 241 ms to 13
 --     on the same table, so the trade holds at ten million, but the ticket's
 --     "no more than the empty probe costs today" holds only up to about a
---     million rows, and sizing shared_buffers does not change it (an earlier
---     draft of this bullet blamed uncached page reads; the first review pass
---     measured the term with every page warm). The fix is a different
+--     million rows, and sizing shared_buffers does not change it (the term
+--     was measured with every page warm in shared_buffers). The fix is a
+--     different
 --     sampling statement, not a setting: eight TID range probes — draw eight
 --     block numbers and read `ctid >= '(b,0)' AND ctid < '(b+1,0)'` for each,
 --     a TID Range Scan since PostgreSQL 14 — cost eight page reads whatever
@@ -274,9 +275,9 @@
 --     against the custom plan's rows=160, cost 45), and plpgsql keeps custom
 --     plans when the generic one costs more than their average — measured
 --     through auto_explain on eight consecutive calls, every one custom, no
---     JIT, and no step in latency after the fifth call (second review pass,
---     run). bench-hnsw.ts section C explains the statement with the share as
---     a literal, which is the plan the function gets.
+--     JIT, and no step in latency after the fifth call. bench-hnsw.ts
+--     section C explains the statement with the share as a literal, which is
+--     the plan the function gets.
 --
 -- Cost, measured
 --   500,000 rows of the bench's shape on this file's development machine
@@ -302,10 +303,11 @@
 --   same machine (FORK.md change 68 has the tables; section C prints the
 --   sample's own cost beside the collection's at every scale): the 50% tier
 --   241 ms → 13 at ten million rows and 36.5 → 10.4 at a million, the 10%
---   tier 138 → 45 and 47 → 37, the thin tiers within the pass-to-pass
---   spread, the empty filter 0.21 → 0.43 ms at a million rows and 0.27 →
---   1.31 at ten million (the per-page term — the "large heap" failure mode
---   above).
+--   tier 138 → 45 and 47 → 37, the thin tiers unchanged but for the sample
+--   (within the pass-to-pass spread at a million rows, about a millisecond
+--   more at ten million), the empty filter 0.21 → 0.43 ms at a million rows
+--   and 0.27 → 1.31 at ten million (the per-page term — the "large heap"
+--   failure mode above).
 --
 -- What a successor must carry
 --   019's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET
@@ -313,8 +315,12 @@
 --   in the body, the pgvector floor line; 020's DROP of the 4-argument form
 --   with the ACL capture before it and the replay after (above: the last
 --   definer is applied alone); and, if it keeps the gate, the two template
---   constants: a redefinition that pastes this body with the literals baked
---   in still works, and then drifts the day config.mjs moves. A successor
+--   constants — a redefinition that pastes this body with the literals baked
+--   in still works, and then drifts the day config.mjs moves — and the
+--   estimate as ONE statement over locals declared at entry (v_pages, v_pct
+--   with the constants inline), which test-support's routingAt and
+--   extractBody read for test-schema [8e] and bench-hnsw.ts section C. A
+--   successor
 --   that removes the gate should say why in its header and expect FORK.md
 --   change 68's tables to come back.
 --
@@ -323,7 +329,9 @@
 --   later, as 014. Applied by `bun db/migrate.ts`.
 --
 -- Expected outcome
---   `match_thoughts` returns what 020's returned for every call; on a heap of
+--   `match_thoughts` returns what 020's returned for every call, up to the
+--   skip probabilities under Failure modes (a wrongly skipped thin filter
+--   gets the walk's answer, correct where the walk completes); on a heap of
 --   {{ROUTE_ESTIMATE_MIN_PAGES}} pages or more, a filter matching a large
 --   share of the table no longer pays for a bitmap over every matching row
 --   before the walk begins, and the call's latency drops by that share
@@ -551,8 +559,8 @@ BEGIN
     -- per-block decision (the header's Design and "large heap" bullets) —
     -- and count the rows that pass the filter and carry a vector, the pages
     -- those rows sit on, and the pages the sample reached. A row with a
-    -- vector, not the collection's "vector
-    -- or chunks": the EXISTS probe inside an expression became a hashed
+    -- vector, not the collection's "vector or chunks": the EXISTS probe
+    -- inside an expression became a hashed
     -- subplan over the whole chunk table (18 ms measured, against 0.15 for
     -- the sample), and counting fewer scoreable rows than there are only
     -- biases the gate towards running the collection, which is the safe

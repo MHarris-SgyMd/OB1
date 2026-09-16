@@ -8898,7 +8898,8 @@ brief: bias the guess towards running the collection (a wrong estimate that
 runs it costs what today costs; one that skips it sends a thin filter to the
 walk, which is correct but slower and, at a million rows, can return short),
 keep the empty filter at one GIN probe, and hold `test-schema` [8b], [8c] and
-[8d].
+[8d]. The last held up to about a million rows; the third finding below says
+where and why not beyond.
 
 **Migration 036.** On a heap of at least 8,192 pages (64 MB), a filtered call
 first reads eight random pages of `thoughts` through `TABLESAMPLE SYSTEM` and
@@ -8911,11 +8912,13 @@ goes straight to the walk — only when all three hold:
    table, puts the filter at ten times the exact threshold or more. Ten is the
    bias.
 2. `hits ≥ 8` — a floor on the evidence. At ten million rows the first
-   condition is met by a single sampled row (eight pages of 500,000 are one
-   sixty-thousandth of the table; one hit scales to 60,000), and one row is
-   luck. Eight from a filter matching exactly `v_exact` thoughts there has
-   probability about 1e-19; from one matching 1% of the table, two in ten
-   thousand.
+   condition is met by a single sampled row (eight pages of some 526,000 are
+   one sixty-five-thousandth of the table; one hit scales to 65,000), and one
+   row is luck. Eight from a filter matching exactly `v_exact` thoughts there
+   has probability about 1e-19; from one matching 1% of the table, about two
+   in a thousand measured (the table below: 2 of 1,000 draws) — the Poisson
+   figure is two in ten thousand, and `SYSTEM`'s page-level variance is the
+   difference.
 3. `hit_pages ≥ 3` — `SYSTEM` sampling is by page, so a filter whose matches
    sit together on disk (one import, one day's captures, one tag written in
    one session) shows the sample a page full of hits or nothing, and one full
@@ -8934,9 +8937,10 @@ goes straight to the walk — only when all three hold:
    (twelve hits scale to barely ten times the threshold and fail it whenever
    the draw reached nine pages). The second pass corrected the figures here,
    which had quoted that measurement as the formula's output. `hit_pages ≥ 4`
-   would make the bound C(8,4) × f⁴, about 2e-4 at the floor (4 of 20,000
-   measured), at two to three points of the broad filters' skip rate — the
-   knob if that band matters; the rule ships as measured.
+   would make the bound C(8,4) × f⁴, about 6e-5 at the floor (1.3e-4 on the
+   6,826-page heap, where 4 of 20,000 draws — 2e-4 — were measured), at two to
+   three points of the broad filters' skip rate — the knob if that band
+   matters; the rule ships as measured.
 
 Anything less runs the collection exactly as before — the same statement,
 token for token, indented two spaces further inside an `IF` (test-schema [20]
@@ -9009,7 +9013,7 @@ the bench's shape before the file was written.**
 - *The floor* is where the bitmap can cost more than the sample: at 50 ns a
   matching row, 8,192 pages — some 160,000 rows at the bench's width, fewer
   with long content, more at the shipped width with short content (the
-  vectors are TOASTed, so the heap holds ~80 rows a page there) — puts the
+  vectors are TOASTed, so the heap holds ~65–80 rows a page there) — puts the
   collection at 4 ms for a 50% filter against a sample of 0.15 ms on every
   filtered call.
 
@@ -9030,7 +9034,9 @@ the bench's shape before the file was written.**
 | nothing | 0 | — | 0 | 0 |
 
 Every filter at or under the threshold — the five bottom rows, the contiguous
-1,000 among them — ran the collection every time. The two filters between one
+1,000 among them — ran the collection every time on that corpus; the
+thin-spread layout, measured separately on a 6,826-page heap, is the exception
+condition 3 describes above. The two filters between one
 and ten times the threshold (5,007 and the contiguous 10,000) were skipped
 once or twice in a thousand, and a skip there is not a wrong answer: both are
 above the threshold, so the collection would have routed them to the walk
@@ -9069,11 +9075,13 @@ median over 50 random queries:
 | 10,000,000 | nothing | 0 | 0.0 | 0.27 | 0.0 | 1.31 |
 
 Section C, the two statements themselves, extracted from the deployed body and
-explained (execution time): the collection under a forced custom plan, the
-sample from the arm with JIT off — the third finding below says why that arm
-is the one that prices it as the function pays it:
+explained (execution time): the collection under a forced custom plan; the
+sample from the first after pass's JIT-off arm, because its other two arms
+were mispriced by the extraction the third finding describes — the corrected
+bench prices all three within 0.05 ms of each other (1.11 / 1.09 / 1.07 at
+ten million), so the column is the sample's cost, not a plan mode's:
 
-| rows | filter | matching rows | route (the collection): before ms | after ms | estimate (the sample): after ms, JIT off |
+| rows | filter | matching rows | route (the collection): before ms | after ms | estimate (the sample): after ms |
 | ---: | --- | ---: | ---: | ---: | ---: |
 | 100,000 | 50% | 49,991 | 2.70 | 2.54 | 0.11 |
 | 100,000 | 0.01% | 6 | 0.04 | 0.04 | 0.09 |
@@ -9150,7 +9158,12 @@ it, every filtered call pays the sample: 0.2 ms at a million rows and about a
 millisecond at ten million, growing with the heap (the third finding above),
 and the thin tiers move by less than the spread.
 
-**Not done here.** The sample's per-page cost and its `pages_seen` denominator
+**Not done here.** Preflight has no recogniser for 036's body (a 020 paste
+under a 036 ledger passes; the operator's path above), as it has none for
+027's: a `TABLESAMPLE SYSTEM (v_pct)` regex or a sentinel of 036's own would
+give the `filtered search` check a "036's body" detail, the way `atomic
+capture` names 035's — a line for the next preflight change, not this one.
+The sample's per-page cost and its `pages_seen` denominator
 are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
 reads whatever the heap, sampled pages counted exactly). The threshold, the
 plan mode and which of the two seeded bounds bites are SMD-1464; `ef_search`
@@ -9175,17 +9188,49 @@ populated 035: no column, signature, row or privilege moves; 014 re-applied by
 hand, then 036 alone, leaves one form); `server-portable` `tsc --noEmit` clean;
 `bun scripts/check-fork-consistency.mjs` PASS (check 7 reads 036 as
 `match_thoughts`' owner from the files); `bench-hnsw.ts` before and after at
-100,000, 1,000,000 and 10,000,000 rows, above. One review pass, two
-reviewers: the SQL side found the two measurement defects corrected above
-(the sample's cost model and the thin-spread layout's skip bound) plus the
-bloat bullet's direction (an empty sampled page inflates the estimate rather
-than deflating it — stated now; SMD-1526 fixes the denominator); the
-TypeScript side found no defect above LOW — an [8e] assertion that passed by
-the punctuation of a comment, a catch-all in the bench that would have read a
+100,000, 1,000,000 and 10,000,000 rows, above. Three review passes, two
+reviewers each. Pass 1 (SQL and TypeScript): the sample's cost model (~2 ns a
+heap page, not eight uncached reads), the thin-spread layout's skip bound,
+and the bloat bullet's direction (an empty sampled page inflates the estimate
+rather than deflating it) — all stated above, SMD-1526 filed; on the
+TypeScript side nothing above LOW — an [8e] assertion that passed by the
+punctuation of a comment, a catch-all in the bench that would have read a
 rewrite failure as "before 036", cleanup-on-failure in [5d] and [8e], a stale
 change number on the README line this change extended (034 is change 65), the
-older missing-hybrid remedy still stopping at 020, and `OB1_BENCH_UPTO`
-accepting a prefix before 014 — all fixed.
+older missing-hybrid remedy still stopping at 020, `OB1_BENCH_UPTO` accepting
+a prefix before 014. Pass 2 (docs and run-it): pass 1's thin-spread figures
+had quoted the measurement as the formula's output (corrected above), the 10%
+misses' cause named, `config.mjs` and the body comment repriced; every claim
+tried on a real Postgres — custom plans on every call (the generic plan is
+priced 200× the custom one and never adopted), NULL and array metadata, empty
+and floor-sized tables, a SELECT-only role in a READ ONLY transaction, the
+hybrid, `migrate.ts` apply / re-run / `--reapply` — no defect; the
+bloated-heap measurement and the generic-plan sentence added; [8e] judges
+five draws by the rule. Pass 3 (operator walkthrough and a coherence read of
+the documents): the `hit_pages ≥ 4` bound had repeated pass 1's error
+(6e-5 at the floor, not the measured 2e-4), the 1% filter's "two in ten
+thousand" was the Poisson figure where the table shows two in a thousand,
+this paragraph described one pass, the header narrated its own review
+history — all rewritten; the operator's path is the next paragraph.
+
+**The operator's path, walked in pass 3.** A brain at 035 with rows, upgraded
+by `bun db/migrate.ts`: "036 applied, 1 applied, 35 skipped", one
+`match_thoughts` carrying the sample, the two SET clauses and `ROWS 10`;
+preflight run as the compose stack runs it reports `search signatures`,
+`filtered search`, `candidate scan`, `hybrid search`, `atomic capture` and
+`migration ledger` all ok, nothing attributable to 036. The same brain with
+020's file pasted over 036 by hand: preflight still reports ok — it has no
+recogniser for 036's body (nor for 027's), the ledger records both, and both
+020 bodies answer every call correctly, so what is lost is 036's cost bound
+and 027's ranking floor, a degradation preflight's stated scope does not
+cover; the ledgered remedy it prints for every stale-body state,
+`migrate.ts --reapply`, restores both. A brain built by hand from the guide
+and adopted with `--baseline`: preflight fails loudly on `filtered search`
+and `hybrid search`, and following the printed remedies ends at 036 and 027
+with every check ok. The PostgREST contract — six argument names, the
+`RETURNS TABLE` shape — is byte-identical to 020's. The README's two bench
+commands run and label their arms `after (014–035)` (no estimate row, the
+"declares no sample share" note) and `after (014 on)` (three estimate rows).
 
 **Upstream status:** not applicable — 014's routing statement is this fork's.
 

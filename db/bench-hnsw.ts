@@ -96,7 +96,8 @@
  *      broadest, where it walks HNSW; the exact branch on the broadest filter
  *      under the threshold (the exact branch takes any
  *      filter matching at most 1,000 thoughts); the routing statement itself —
- *      the capped id collection every filtered call ran first until 036 — on
+ *      the capped id collection every filtered call ran first until 036, and
+ *      every call the gate lets through still does — on
  *      the 50% filter, where GIN builds its largest bitmap before the LIMIT
  *      can stop anything, on the thinnest filter with rows, and on the empty
  *      one; and 036's estimate — the TABLESAMPLE count that runs before it on

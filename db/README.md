@@ -1257,6 +1257,16 @@ container.
   populated 033 whose re-capture had just filled a pointer: the pointer stays
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
+- **The routing count is gated by a sample of the heap** (migration 036).
+  [5d] loads 25,000 rows at the configured width, applies 036 with its floor
+  lowered to zero, and counts GIN index scans per call: the broad filter makes
+  one fewer under 036 than under 020's body (the collection skipped), the thin
+  filter the same number (the collection ran), and both answer exactly.
+  `test-schema.ts` [8e] holds the body's shape and the three conditions, and
+  judges five sample draws by the rule on a table too small to skip;
+  `test-upgrade.ts` [14] applies 036 onto a populated 035 — no column,
+  signature, row or privilege moves — and, after a hand re-apply of 014 puts
+  the 4-argument form back, applies 036 alone and finds one form again.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the
