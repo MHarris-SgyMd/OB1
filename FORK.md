@@ -449,7 +449,7 @@ one write lands first.
   cost this fork migration 014. Any second store that filters after the fact
   reintroduces the bug migration 014 fixed; only a store that filters *inside* its
   scan, with the payload kept in sync on every write, is admissible.
-- *Cloudflare Workers.* Workers reach Postgres through PostgREST today
+- *Cloudflare Workers.* They reach Postgres through PostgREST today
   (`store-postgrest.ts`). A second store means a second client and a second set
   of credentials in the Worker, and the atomicity story above has to hold across
   a network the Worker does not control. Accepted cost: the Worker path carries
