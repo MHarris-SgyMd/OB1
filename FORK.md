@@ -7887,12 +7887,11 @@ prune's own transaction shares its `now()` and stays, and `test-schema` [34]
 asserts that with insert and prune in one transaction (SMD-1498 — the section
 had assumed each statement's `now()` is later than the last's, which PGlite's
 millisecond clock does not promise, and its wipe assertion flaked once).
-`db/config.mjs`'s `QUERY_LOG` is the one
-spelling of the flag, names, tool sets and retention, read by the server,
-preflight and the tests; a `querylog` grant group (query_log `INSERT`, since 034)
-means a self-hosted role that runs `--grant` can turn the flag on and have it
-work — documented, but not enforced, since preflight cannot read a server env
-flag and the log is off by default.
+`db/config.mjs`'s `QUERY_LOG` is the one spelling of the flag, names, tool sets
+and retention, read by the server, preflight and the tests; a `querylog` grant
+group (query_log `INSERT`, since 034) means a self-hosted role that runs
+`--grant` can turn the flag on and have it work — documented, but not enforced,
+since preflight cannot read a server env flag and the log is off by default.
 
 **Export → replay → gate (`evals/`).** `export-queries.ts` reads the log and
 writes a fixture of query text and ids (`query`, `relevant` = the touched ids,
