@@ -10988,6 +10988,16 @@ known-issues entry below point there.
 `tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
 281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
 
+**Tidied while the files were open** (boyscout, after the sixth pass; no
+behaviour change, the suite count unchanged): the two 405 header sets are built
+once instead of spread per refusal; the test's probe deadline is one constant
+where it was the literal `2000` twice; and the per-row refusal triple that [11]
+and [13] each spelled out is one `expectRefusal()` helper beside `probe()`. Two
+cut-for-space items were left alone because they change behaviour: an `Allow`
+on the OPTIONS answer, and Hono's `cors()` middleware in place of the
+hand-spread header (its preflight answers 204 where [3] asserts 200) — the
+latter is a ticket if anyone wants it.
+
 **Not verified: a live connector.** The same standing as change 42: a real
 Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
 build of this `main`, each completing `initialize` and listing tools. The SDK

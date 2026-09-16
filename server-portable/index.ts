@@ -1278,6 +1278,10 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
+// The two 405 header sets, built once; the refusal path spreads nothing per request.
+const METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: ALLOWED_METHODS };
+const HEALTH_METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: HEALTH_ALLOWED_METHODS };
+
 // JSON-RPC error code for unauthorized requests.
 // Per the JSON-RPC 2.0 spec, the range -32099 to -32000 is reserved for
 // implementation-defined server errors. -32001 is the conventional
@@ -1516,10 +1520,7 @@ app.on(MCP_METHODS, "*", async (c) => {
 // methods (RFC 9110 §10.2.1): at a health path, GET and HEAD beside the MCP
 // methods. FORK.md change 74.
 app.notFound((c) =>
-  c.text("Method Not Allowed", 405, {
-    ...corsHeaders,
-    Allow: HEALTH_PATH.test(c.req.path) ? HEALTH_ALLOWED_METHODS : ALLOWED_METHODS,
-  }),
+  c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
 );
 
 export default {

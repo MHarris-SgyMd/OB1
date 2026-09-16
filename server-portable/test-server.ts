@@ -64,11 +64,12 @@ async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
  * request handed to a stream the per-request transport never closes (SMD-1259)
  * — into a red assertion named `TimeoutError` instead of a stuck CI job.
  */
+const PROBE_TIMEOUT_MS = 2000;
 type Probe = { status: number | string; cors: boolean; allow: string | null; methods: string | null; envelope: boolean };
 const probe = async (path: string, init: RequestInit = {}): Promise<Probe> => {
   let r: Response;
   try {
-    r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
+    r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   } catch (e) {
     return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, methods: null, envelope: false };
   }
@@ -82,6 +83,14 @@ const probe = async (path: string, init: RequestInit = {}): Promise<Probe> => {
     /* not JSON → not an envelope */
   }
   return { status: r.status, cors: corsOk(r), allow: r.headers.get("allow"), methods: r.headers.get("access-control-allow-methods"), envelope };
+};
+
+/** The per-row refusal triple [11] and [13] share: status, CORS, not an envelope — plus Allow where a 405 must name it. */
+const expectRefusal = (label: string, p: Probe, status: number, allow?: string) => {
+  assert(p.status === status, `${label} → ${status} (${p.status})`);
+  if (allow !== undefined) assert(p.allow === allow, `${label}: Allow names what the endpoint serves (${p.allow})`);
+  assert(p.cors, `${label}: CORS present`);
+  assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
 };
 
 const INIT = JSON.stringify({
@@ -255,12 +264,7 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
     ["POST", discovery, { method: "POST", headers: AUTH, body: INIT }, 404],
     ["OPTIONS preflight", discovery, { method: "OPTIONS" }, 200],
   ];
-  for (const [label, path, init, expect] of rows) {
-    const p = await probe(path, init);
-    assert(p.status === expect, `${label} → ${expect} (${p.status})`);
-    assert(p.cors, `${label}: CORS present`);
-    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
-  }
+  for (const [label, path, init, expect] of rows) expectRefusal(label, await probe(path, init), expect);
   // The MCP endpoint at / is untouched — [4] through [10] above.
 }
 
@@ -320,13 +324,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     // It used to hang; it is a GET. The other shape is the raw-socket row below.
     ["GET, differently-cased discovery path with the key", `/.Well-Known/oauth-protected-resource?key=${KEY}`, {}],
   ];
-  for (const [label, path, init] of rows) {
-    const p = await probe(path, init);
-    assert(p.status === 405, `${label} → 405 (${p.status})`);
-    assert(p.allow === ALLOW, `${label}: Allow names what the endpoint serves (${p.allow})`);
-    assert(p.cors, `${label}: CORS present`);
-    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
-  }
+  for (const [label, path, init] of rows) expectRefusal(label, await probe(path, init), 405, ALLOW);
 
   // The other shape: a base URL with a trailing slash doubles the slash, and
   // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
@@ -374,7 +372,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, POST, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, POST, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
   // With the key, so the 200 is the transport's initialize result and not the
   // JSON-RPC refusal a keyless POST gets anywhere.
-  const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(2000) });
+  const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
