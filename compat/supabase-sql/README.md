@@ -180,7 +180,10 @@ development — the test caught it.
   parse, and `extensions/test-writes.ts` drives the writers among them against a
   real Postgres (the bio worker, the one that filters on a JSON path, found the
   two gaps change 73 closed). Exercise the ones you actually run before trusting
-  them.
+  them: change 74's review drove every extension tool and found seven of
+  twenty-five failing — no `.not()`, a JavaScript array bound as its `String()`,
+  and four embedded selects the codemod's blocker regex let through (a space or
+  an alias before the parenthesis) — SMD-1588 holds them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.

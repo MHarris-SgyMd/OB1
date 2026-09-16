@@ -77,7 +77,7 @@ const KEEP = new Map([
 /** Supabase's type-only import of the Edge Functions runtime's types; Bun cannot resolve a jsr: specifier. */
 const TYPES_IMPORT_RE = /^import "(jsr:@supabase\/functions-js\/edge-runtime\.d\.ts)";$/m;
 /** The polyfill's import as this script writes it — alone on a line, or in the types import's place with the original recorded. */
-const RUNTIME_IMPORT_RE = /^import "([^"]*compat\/deno-on-bun\.ts)";(?: \/\/ ob1-original-types: (.+))?\n/m;
+const RUNTIME_IMPORT_RE = /^import "([^"]*compat\/deno-on-bun\.ts)";(?: \/\/ ob1-original-types: (jsr:\S+))?\n/m;
 /** Read over the whole text, comments included: a Node-shaped file that mentions `Deno.env` in a comment gets a harmless extra line. */
 const USES_DENO_RE = /\bDeno\./;
 
@@ -206,7 +206,8 @@ function revert(file) {
   text = text.replace(/(['"])[^'"]*compat\/supabase-sql\/index\.ts\1/g, (_m, q) => `${q}${spec}${q}`);
   // The runtime line: back to the jsr: types import it replaced, or gone; a types import left as a comment, back.
   text = text.replace(RUNTIME_IMPORT_RE, (_m, _p, types) => (types ? `import "${types}";\n` : ""));
-  text = text.replace(/^\/\/ ob1-original-types: (.+)$/gm, (_m, spec) => `import "${spec}";`);
+  // Only the codemod's own record — a jsr: specifier — not a comment a person wrote in that shape.
+  text = text.replace(/^\/\/ ob1-original-types: (jsr:\S+)$/gm, (_m, spec) => `import "${spec}";`);
   if (text === original) return { changed: false };
   writeFileSync(file, text);
   return { changed: true };

@@ -1454,7 +1454,8 @@ function checkThoughtWritesAround() {
 //     and records it);
 //   - `Deno` is reached only as `Deno.env.get` or `Deno.serve`: an alias, a
 //     bracket or a destructure is a use the rule cannot follow, so it is
-//     refused as one.
+//     refused as one — and so are `typeof Deno` and `"Deno" in globalThis`:
+//     a migrated file does not detect its runtime, the polyfill is that.
 // Comments and string contents are not code: members and specifiers are read
 // with both blanked (line numbers kept). Scanned: every .ts/.js/.mjs under the
 // seven category directories and docs/ that imports the shim. No exceptions —
@@ -1464,8 +1465,8 @@ function checkThoughtWritesAround() {
 const DENO_PROVIDED = new Set(["env.get", "serve"]);
 /** `Deno` wherever it appears in code: a member chain of up to two names, or bare — an alias (`const D = Deno`), a bracket (`Deno["env"]`), a destructure. */
 const DENO_MEMBER = /\bDeno\b(?:\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)?/g;
-/** A dynamic import's literal specifier. */
-const DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'])([^"'\n]+)\1/g;
+/** A dynamic import's literal specifier — quoted or in a plain backtick literal; one with `${…}` is not a literal and is not read. */
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'\x60])([^"'\x60\n$]+)\1/g;
 const SHIM_SPECIFIER = /compat\/supabase-sql\/index\.ts$/;
 const RUNTIME_SPECIFIER = /compat\/deno-on-bun\.ts$/;
 /** A specifier Bun does not resolve: Deno's registries and a URL. */
@@ -1476,7 +1477,9 @@ const NOT_ON_BUN = /^(?:jsr:|npm:|https?:\/\/)/;
  * blanked as well; every blanked character becomes a space, newlines stay, so
  * offsets and line numbers hold. A regex literal is not tracked: a quote or
  * `//` inside one may blank to the next quote or line end, which only ever
- * hides text from this check, never invents a member or a specifier.
+ * hides text from this check, never invents a member or a specifier. A
+ * template literal is blanked whole, `${…}` included, so a `Deno` member
+ * inside one is not seen either way (no file on the shim has one).
  */
 function blanked(text, stringsToo) {
   let out = "";

@@ -67,7 +67,7 @@ mkdir -p supabase/functions/_shared
 curl -o supabase/functions/_shared/auth.ts https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/extensions/_shared/auth.ts
 ```
 
-> **Two extensions deploy this way: Family Calendar and Job Hunt.** The other four run under Bun against your Postgres instead — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts` for the two Deno globals they use (FORK.md change 74) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the four under `bun` in CI.
+> **Two extensions deploy this way: Family Calendar and Job Hunt.** The other four run under Bun against your Postgres instead — they import this repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts` for the two Deno globals they use (FORK.md change 74) — so their READMEs' Step 3 is a `bun extensions/<name>/index.ts` command, not this guide. Step 3 below, the access key, is the same for all six; `extensions/test-auth.ts` starts the four under `bun` in CI. Seven of their twenty-five tools fail on the shim today (`.not()`, array binding, embedded selects — SMD-1588); each README's Run step names its own.
 
 🟦 **Windows (PowerShell):**
 

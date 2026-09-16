@@ -10912,8 +10912,8 @@ race. *`metadata.json`'s `tools`:* `Bun 1.4+` for the four, `Supabase CLI`
 for the two that deploy by the primitive.
 
 **Review pass 1** (a reading reviewer and a running one, the latter in its
-own worktree with podman; thirty-two findings between them, two HIGH, five
-MED, twenty-one taken). The running reviewer broke the new test section both
+own worktree with podman; twenty-nine items between them, three HIGH — two
+of them one defect seen by both — five MED, nineteen taken). The running reviewer broke the new test section both
 ways a child process can go wrong. A child that crashed at startup — the
 polyfill with `serve` removed — was reported only after the full thirty-second
 deadline, at 100% CPU, sixteen times over (eight minutes), with `exit null`
@@ -10976,6 +10976,57 @@ the gate as the test counts it; `deno check` of the local-brain recipe's
 pre-existing at the pin, not this change (its `db.ts`, back on supabase-js,
 checks clean).
 
+**Review pass 2** (the same two reviewers; twenty-one items between them,
+one HIGH, three MED; sixteen taken, one filed). **The stop signal, for this
+change's mechanism:** every finding in the polyfill, the codemod, check 11
+and the test was polish on pass 1's additions — the deadline constant printed
+as its own source text (a double-quoted string inside the template), the
+error-line picker preferring `throw new Error(` to the `error:` line below
+it, a child that printed its port and then exited crashing the suite with no
+tally where the probe's `fetch` threw (a counted failure now, re-run under the
+mutation), the postgres stub left in `/tmp` on the import-failure path,
+`--revert` turning a person's `// ob1-original-types: …` comment into an
+import (the record is a `jsr:` specifier and only that is restored, the
+constructed layout round-trips identical now), a backtick dynamic import
+unread (read now; one with `${…}` is not a literal), the blanker's template
+literals and the two runtime-detection idioms stated as limits, the ten
+callouts saying "set one" above command lines that set no port (they say
+`PORT=8787` now), the README's `CREATE OR REPLACE FUNCTION auth.uid()` — which
+on a real Supabase database would have replaced GoTrue's function with one
+returning NULL and broken row-level security across the project — a plain
+`CREATE` now, refused where the function exists, with the warning before the
+command, and pass 1's own tallies (twenty-nine items, not thirty-two). The
+running reviewer confirmed pass 1's two fixes load-bearing: with the `exited`
+race removed the busy-spin returns (sixteen crashes in 49 s at a 3 s
+deadline); with it, 1.1 s. And it re-ran the codemod's four odd layouts
+(identical) and the mutations (a)–(c) (as pass 1 left them).
+
+**The one HIGH is not this change's.** The running reviewer did what no pass
+before it had: it applied the five `schema.sql` files to a real Postgres
+(after the README's two stubs — they apply cleanly, RLS on, connected as the
+owner), started each server under `bun`, and called all twenty-five
+extension tools through `tools/call` with a real key. Seven fail, on three
+gaps in the shim that predate this ticket — fix 13 migrated these files and
+never drove them: the shim has no `.not()` (two tools: `get_upcoming_
+maintenance`, `crm_get_follow_ups` — the only two calls in the tree); four
+tools select a PostgREST embed the codemod's blocker regex let through, since
+it wants the table name flush against the parenthesis and `maintenance_tasks (`
+and `recipes:recipe_id (` are not (`search_maintenance_history`,
+`get_meal_plan`, `generate_shopping_list`, the shared `view_meal_plan`) — so
+fix 13's "four of the 54 files use embedding" undercounts; and a JavaScript
+array binds as its `String()`, so `crm_add_contact` with `tags: []` is `22P02
+malformed array literal: ""`. Two more tools' error paths render `[object
+Object]` because the shim's error is a plain object where supabase-js's
+extends `Error`. The write path works — `add_maintenance_task` stores the row
+under the configured `user_id` — so a fork user could add tasks and never
+list what is due. That is a second mechanism (three shim features and the
+codemod's blocker, with a tool-level drive to hold them), and it is filed as
+SMD-1588 with the evidence; here, the four extension READMEs name their
+failing tools above the Connect step (household-knowledge's all ran), the
+primitive and the shim README carry the count once, and this section's claim
+is the exact one: the servers start, authenticate and answer over the port —
+eighteen of twenty-five tools work end to end, seven wait on SMD-1588.
+
 **Verified:** `bun test-auth.ts` 709/709 (643 before: sixteen starts × four
 assertions, the tree guard, and the stand-in's identity after every import); every one of the sixteen — the five
 extension servers, the sample, `work-operating-model-activation`, the two
@@ -10999,7 +11050,12 @@ removed from the polyfill: sixteen named failures in 0.9 s with the
 failure with a tally in 0.1 s; the port line unmatched under a two-second
 deadline: sixteen failures in 33 s, no orphan — and the codemod's two odd
 layouts (a `jsr:` types import second; two of them) each round-trip
-identical with the polyfill first;
+identical with the polyfill first; after pass 2, a child that exits after
+its port line is one counted failure, a human-written
+`// ob1-original-types:` line survives `--revert`, and the running
+reviewer's end-to-end run stands as the measure of what works: five schemas
+applied, sixteen servers started, eighteen of twenty-five extension tools
+answering, the seven that do not named in their READMEs and in SMD-1588;
 `../db/with-postgres.sh bun test-writes.ts` 186/186 (the bio worker and the
 other drivers unchanged under the stand-in); `bunx tsc --noEmit` in
 `compat/supabase-sql` clean with `../deno-on-bun.ts` in its include;
@@ -11011,7 +11067,11 @@ each of the five starts under Bun and answers `tools/list` with a scoped key,
 in CI; `test-auth.ts` still passes, and its stand-in is now the test's
 convenience rather than the files' only runtime — is the suite.
 
-**Not done here.** Deno deployability of a shim-importing file: the shim is
+**Not done here.** SMD-1588: the shim's `.not()`, array binding and error
+class, the codemod's embed blocker (a space or an alias before the
+parenthesis), the one-hop embed or an honest refusal for the three servers
+already on the shim, and a drive of every extension tool against Postgres —
+seven of twenty-five fail today, named in the READMEs. Deno deployability of a shim-importing file: the shim is
 Bun's `SQL`, and a Deno-capable shim would be a second client to hold equal
 to the first — the files that must deploy to Supabase stay on supabase-js
 (`family-calendar`, `job-hunt`, `ob-graph`, `agent-memory-api`,

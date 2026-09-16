@@ -243,6 +243,7 @@ try {
   // A server that listens for real at import (the polyfill installed over the stand-in, say) is a
   // counted failure with a tally, not a stack trace in place of one; nothing below could run.
   assert(false, `a server threw at import — under the stand-in nothing should listen or connect: ${e instanceof Error ? e.message : String(e)}`);
+  unlinkSync(PG_STUB);
   report();
 }
 assert((globalThis as unknown as { Deno: unknown }).Deno === STAND_IN,
@@ -543,7 +544,9 @@ for (const live of LIVE) {
     port = parsePort();
   }
   if (port !== null) {
-    await live.probe(`http://127.0.0.1:${port}`);
+    // A child that printed its port and then died fails the probe's fetch: a counted failure, not a crash of the suite.
+    try { await live.probe(`http://127.0.0.1:${port}`); }
+    catch (e) { assert(false, `${live.file}: answers over the port it announced (${e instanceof Error ? e.message : String(e)})`); }
     assert(proc.exitCode === null, "…and is still running after the probes");
   }
   // Stop the child BEFORE reading its stderr: a server alive without a port would
@@ -553,10 +556,10 @@ for (const live of LIVE) {
   await proc.exited;
   await reader.cancel().catch(() => {});
   if (port === null) {
-    // The error line, not the code frame Bun prints above it.
+    // The error line — `error: …`, `TypeError: …` — not the code frame Bun prints above it (`throw new Error(` is a frame line).
     const lines = (await new Response(proc.stderr).text()).trim().split("\n");
-    const stderr = (lines.filter((l) => /error/i.test(l)).slice(0, 2).concat(lines.slice(0, 2))).slice(0, 3).join(" | ");
-    assert(false, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on (${alive ? "alive after ${DEADLINE_MS / 1000} s without a Listening line" : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
+    const stderr = (lines.filter((l) => /^\s*(?:\w*Error|error)\b\s*:/.test(l)).slice(0, 2).concat(lines.slice(0, 2))).slice(0, 3).join(" | ");
+    assert(false, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on (${alive ? `alive after ${DEADLINE_MS / 1000} s without a Listening line` : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
   } else {
     assert(true, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on`);
   }
