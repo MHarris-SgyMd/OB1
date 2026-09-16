@@ -3591,7 +3591,8 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   // The same now(), on purpose: a row logged in the prune's own transaction is
   // kept — the strict bound the COMMENT states ("older than now()"). now() is
   // the transaction's start on Postgres proper too; only the clock's grain
-  // differs, and strictness decides only this equality.
+  // differs, and strictness decides only this equality: a `<=` bound, or one
+  // read from clock_timestamp(), fails this assertion and no other here.
   await db.transaction(async (tx) => {
     await tx.exec(`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'logged in the prune''s own transaction')`);
     const sameTick = Number((await tx.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n);
