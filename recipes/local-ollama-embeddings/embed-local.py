@@ -2,8 +2,15 @@
 """
 Open Brain — Local Ollama Embeddings
 
-Generates embeddings locally via Ollama and inserts thoughts into Supabase.
+Generates embeddings locally via Ollama and stores thoughts in Supabase.
 No OpenRouter or cloud API key required for the embedding step.
+
+ob1-fork (SMD-1524): each thought is stored through the database's
+upsert_thought — POST /rest/v1/rpc/upsert_thought, the 3-argument form — which
+writes the text, its content fingerprint (003), the vector and the vector's
+model label (021) in one statement; a POST to the table left the fingerprint
+and the label NULL. FORK.md change 70; scripts/check-fork-consistency.mjs
+check 10 holds it.
 
 Usage:
     echo "My thought" | python embed-local.py
@@ -117,34 +124,47 @@ def generate_embedding(text, model, ollama_url):
 # ─── Supabase Ingestion ──────────────────────────────────────────────────────
 
 
-def ingest_thought(content, embedding, metadata_dict):
-    """Insert a thought into Supabase with the provided embedding."""
+def ingest_thought(content, embedding, metadata_dict, model):
+    """Store a thought through the database's upsert_thought (FORK.md change 70).
+
+    The 3-argument form writes the text, its content fingerprint, the vector
+    and the vector's model label in one statement. The label is the Ollama
+    model's name as OB1_EMBEDDING_MODEL spells it, so a re-embed pass
+    (db/reembed.ts) knows which rows are at its target and which are not. A
+    text the brain already holds comes back `existed`: its metadata is merged
+    and its vector replaced, not a second row.
+    """
     resp = http_post(
-        f"{SUPABASE_URL}/rest/v1/thoughts",
+        f"{SUPABASE_URL}/rest/v1/rpc/upsert_thought",
         headers={
             "Content-Type": "application/json",
             "apikey": SUPABASE_SERVICE_ROLE_KEY,
             "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            "Prefer": "return=minimal",
         },
         body={
-            "content": content,
-            "embedding": embedding,
-            "metadata": metadata_dict,
+            "p_content": content,
+            "p_payload": {"metadata": metadata_dict, "embedding_model": model},
+            "p_embedding": embedding,
         },
     )
 
     if not resp:
         return {"ok": False, "error": "No response from Supabase"}
 
-    if resp.status_code not in (200, 201):
+    if resp.status_code != 200:
         try:
             error_detail = resp.json()
         except ValueError:
             error_detail = resp.text
         return {"ok": False, "error": f"HTTP {resp.status_code}: {error_detail}"}
 
-    return {"ok": True}
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {"ok": True, "existed": bool(data.get("existed")), "id": data.get("id")}
 
 
 # ─── Input Parsing ────────────────────────────────────────────────────────────
@@ -282,7 +302,7 @@ def main():
     if args.model in KNOWN_DIMENSIONS and KNOWN_DIMENSIONS[args.model] != 1536:
         print(f"\n  NOTE: {args.model} produces {KNOWN_DIMENSIONS[args.model]}-dim embeddings.")
         print(f"  The default Open Brain schema uses vector(1536).")
-        print(f"  Adjust your schema to match: ALTER TABLE thoughts ALTER COLUMN embedding TYPE vector({KNOWN_DIMENSIONS[args.model]});")
+        print(f"  On this fork the width is db/config.mjs's: build the brain with OB1_EMBEDDING_MODEL={args.model} (see the README).")
     print()
 
     # Process
@@ -320,10 +340,13 @@ def main():
             metadata.update(thought["metadata"])
 
         # Ingest
-        result = ingest_thought(content, embedding, metadata)
+        result = ingest_thought(content, embedding, metadata, args.model)
         if result.get("ok"):
             ingested += 1
-            print(f"   -> Ingested")
+            if result.get("existed"):
+                print(f"   -> Already present (metadata merged, vector replaced)")
+            else:
+                print(f"   -> Ingested")
         else:
             errors += 1
             print(f"   -> ERROR: {result.get('error', 'unknown')}")

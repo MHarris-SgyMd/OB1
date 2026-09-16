@@ -32,11 +32,13 @@
  *   9. a committed eval fixture carries no thought content — ids, vectors and
  *      the searcher's own queries only (SMD-1295)
  *  10. a vendored file never writes a thought's content or vector around the
- *      functions that own them — no PostgREST `.update(`/`.upsert(` on
- *      `thoughts` whose payload carries `content` or `embedding`, inline or
- *      through an object the file fills, and no SQL `UPDATE thoughts … SET`
- *      of either column — in the same files as 7, with counted per-file
- *      exceptions for a file whose README says it bypasses them (none today)
+ *      functions that own them — no PostgREST `.update(`/`.upsert(`/`.insert(`
+ *      on `thoughts` whose payload carries `content` or `embedding`, inline or
+ *      through an object the file fills, and no SQL `UPDATE thoughts … SET` of
+ *      either column or `INSERT INTO thoughts (…)` naming one — in the same
+ *      files as 7, with counted per-file exceptions for a file whose README
+ *      says it bypasses them (seven: three deployments with a database of
+ *      their own, three function bodies shown, one test fixture)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -1025,9 +1027,17 @@ function checkCredentialCompares() {
 // backfill and the fingerprint recipe's are theirs to write). In every
 // non-binary, non-ignored file under the seven category directories and
 // docs/, prose included — a README's code block is what the next integration
-// is copied from. Not in the rule, and said so: `.insert(` (a fresh row around
-// the functions is a different defect — no fingerprint, no label, and 016's
-// trigger does not fill them — held separately), a metadata-only update
+// is copied from. SMD-1524 (change 70) added the fresh row: `.insert(` with
+// either key (a literal, an array of literals, a bound name — one filled by
+// `x.push({ … })` or Python's `x.append({ … })` too), and the SQL
+// `INSERT INTO [public.]thoughts [AS alias] (<columns>)` naming either column
+// — a row written around the 3-argument upsert_thought has no fingerprint
+// (003: 016's trigger does not fill it; the row is invisible to dedup until
+// 023's backfill and a later capture of the text makes a twin), no model
+// label (021: a vector of unknown model, which the re-embed pool treats as
+// not at the target), and no actor for 008. Not in the rule, and said so: an
+// INSERT with no column list (`INSERT INTO thoughts VALUES …`, `INSERT INTO
+// thoughts SELECT …`, a client's `${sql(rows)}` helper), a metadata-only update
 // (nothing it leaves stale), a REST `PATCH …/rest/v1/thoughts` built by hand
 // (none in the tree), a payload spread from another object (`{ ...updates }`),
 // a payload that arrives as a function's return value or parameter, a builder
@@ -1035,14 +1045,20 @@ function checkCredentialCompares() {
 // a table name held in a variable, a payload behind a type assertion or a
 // conditional (`.update(<any>p)`, `.update(cond ? { content } : {})`), a
 // two-hop `Object.assign({}, a, b)` of bound names, Python's
-// `dict(content=…)`, and an `.rpc("update_thought", …)`, which is the remedy
-// — the dataflow cases need what this rule does not have, and a miss there
-// is what the second half of the audit, extensions/test-writes.ts, is for.
-// Exceptions are per
-// file and COUNTED, as checks 6–8's are: a file that deliberately writes
-// around the functions is listed with the reason and the line count, and its
-// README must say what it leaves stale; one fixed drops out as stale, one
-// added fails. The list is empty.
+// `dict(content=…)`, a list built by comprehension from a function's return
+// (`[build_row(h) for h in batch]` — readwise-import's, converted by hand and
+// held by test-writes.ts's text guard), and an `.rpc("update_thought", …)` or
+// `.rpc("upsert_thought", …)`, which is the remedy — the dataflow cases need
+// what this rule does not have, and a miss there is what the second half of
+// the audit, extensions/test-writes.ts, is for. Exceptions are per file and
+// COUNTED, as checks 6–8's are: a file that deliberately writes around the
+// functions is listed with the reason and the line count, and its README must
+// say what its rows lack; one fixed drops out as stale, one added fails. Seven
+// today, none a bypass a fix could remove: three deployments whose database is
+// their own (the fork's functions are not in it — two of them the files check 7
+// excepts for creating a brain), the two guides and the one container init that
+// show an upsert_thought body (the INSERT is the function's own), and the test
+// that plants a row as an older write left it, to be moved by the writer under test.
 /** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
 const THOUGHTS_TABLE = String.raw`\.(?:from|from_|table)(?:<[^>\n]*>)?\s*\(\s*["'\x60]thoughts["'\x60]\s*\)`;
 /** What may sit between the table and its verb: whitespace, line and block comments. */
@@ -1124,8 +1140,8 @@ function thoughtWritesAroundIn(text) {
   const lineOf = (i) => text.slice(0, i).split("\n").length;
   const lines = new Set();
   // Identifiers bound to a payload with either key: `x = { … content … }` or
-  // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.content = …`,
-  // `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
+  // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.push({ … })`,
+  // `x.content = …`, `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
   const payloads = new Set();
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*([{[])`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
@@ -1133,13 +1149,17 @@ function thoughtWritesAroundIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`Object\.assign\(\s*(${IDENT})\s*,\s*\{`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
   }
+  // A list filled one literal at a time — `rows.push({ … })`, Python's `rows.append({ … })` — is an array of them (SMD-1524).
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\.(?:push|append)\(\s*\{`, "g"))) {
+    if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
+  }
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})!?(?:\.(?:content|embedding)|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?:\?\?|\|\||\+)?=(?![=>])`, "g"))) {
     payloads.add(m[1]);
   }
-  // The verb (a type argument allowed): its first argument a literal, a bound
-  // name, or an `Object.assign(…)` whose own literals — not the ones nested in
-  // them — are read.
-  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
+  // The verb — `.update(`, `.upsert(`, or, since SMD-1524, `.insert(` (a type
+  // argument allowed): its first argument a literal, a bound name, or an
+  // `Object.assign(…)` whose own literals — not the ones nested in them — are read.
+  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert|insert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
     const verbAt = m.index + m[0].lastIndexOf("." + m[1]);
     let hit = false;
     if (m[2]) hit = literalCarries(text, m.index + m[0].length - 1);
@@ -1165,6 +1185,11 @@ function thoughtWritesAroundIn(text) {
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
     // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
     if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
+  }
+  // SQL: `INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` — the column list naming either
+  // column (SMD-1524). No list, no rule: `INSERT INTO thoughts VALUES …` and `… SELECT …` say nothing.
+  for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(([^()]*)\)/gi)) {
+    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(m[1])) lines.add(lineOf(m.index));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -1221,6 +1246,26 @@ const THOUGHT_WRITE_PROBES = [
   'await supabase.from("thoughts").update({ note: "}", content }).eq("id", id);',
   'await supabase.from("thoughts").update({ [`embedding`]: vec }).eq("id", id);',
   'const p: Record<string, unknown> = {};\np[`content`] = text;\nawait supabase.from("thoughts").update(p).eq("id", id);',
+  // SMD-1524: the fresh row. The Slack/Telegram samples' literal (the non-probe change 69 carried,
+  // moved here); readwise-capture's, with the enhanced columns beside the vector; consolidation-bio's,
+  // with the file's own fingerprint and no vector; the classification recipe's, content alone; the
+  // Python client's dict; a list filled by append, sent by name; a list pushed, sent by name; an
+  // array literal; a bound array; the Kubernetes server's SQL with casts; the Neon recipe's template
+  // over lines; quoted identifiers with a schema; an alias; INSERT … SELECT with a column list.
+  'await supabase.from("thoughts").insert({ content, embedding, metadata });',
+  'const { error } = await supabase.from("thoughts").insert({\n  content,\n  embedding,\n  source_type: "readwise",\n  type: "reference",\n  metadata: {\n    source: "readwise",\n    readwise_highlight_id: event.id,\n  },\n});',
+  'const { data, error: insertError } = await supabase\n  .from("thoughts")\n  .insert({\n    content: profileContent,\n    type: "person_note",\n    importance: 5,\n    metadata: profileMetadata,\n    content_fingerprint: contentFingerprint,\n  })\n  .select("id")\n  .single();',
+  'await db.from("thoughts").insert({\n  content: classified.title,\n  type: classified.type,\n  created_at: new Date().toISOString(),\n});',
+  'supabase.table("thoughts").insert({"content": content, "embedding": embedding, "metadata": meta}).execute()',
+  'rows = []\nfor h in highlights:\n    rows.append({"content": h["text"], "embedding": h["vec"]})\nsupabase.table("thoughts").insert(rows).execute()',
+  'const rows: Record<string, unknown>[] = [];\nrows.push({ content, embedding });\nawait supabase.from("thoughts").insert(rows);',
+  'await supabase.from("thoughts").insert([{ content: a, embedding: va }, { content: b, embedding: vb }]);',
+  'const batch = [{ content, embedding, metadata }];\nconst { error } = await supabase.from("thoughts").insert(batch);',
+  'await client.queryObject(\n  `INSERT INTO thoughts (content, embedding, metadata)\n   VALUES ($1, $2::vector, $3::jsonb)`,\n  [content, embStr, JSON.stringify(meta)]\n);',
+  'const rows = await sql`\n  INSERT INTO thoughts (content, embedding, metadata, source)\n  VALUES (${content}, ${embeddingStr}::vector, ${metadataStr}::jsonb, ${source})\n  RETURNING id\n`;',
+  'INSERT INTO "public"."thoughts" ("content", "metadata") VALUES ($1, $2);',
+  'INSERT INTO thoughts AS t (content, embedding) VALUES ($1, $2::vector) ON CONFLICT DO NOTHING;',
+  'INSERT INTO thoughts (content, metadata) SELECT body, \'{}\'::jsonb FROM staging;',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1230,7 +1275,6 @@ const THOUGHT_WRITE_NON_PROBES = [
   'await supabase.from("thoughts").update({ status: "new", status_updated_at: new Date().toISOString() }).eq("id", id);',
   'const sidecar = { type: extracted.type, sensitivity_tier: resolvedTier, importance: 3 };\nawait supabase.from("thoughts").update(sidecar).eq("id", id);',
   'const { data } = await supabase.from("thoughts").select("id, content, embedding, metadata").eq("id", id).single();',
-  'await supabase.from("thoughts").insert({ content, embedding, metadata });',
   'await supabase.from("thought_chunks").update({ content: window }).eq("id", chunkId);',
   'await supabase.from("agent_memories").update({ content: row.content, summary }).eq("id", id);',
   'const updates: Record<string, unknown> = {};\nupdates.type = sanitizeType(String(body.type));\nawait supabase.from("thoughts").update(updates).eq("id", id);',
@@ -1255,8 +1299,33 @@ const THOUGHT_WRITE_NON_PROBES = [
   // nested object inside an inline Object.assign.
   "UPDATE thoughts SET summary = CASE WHEN content = 'x' THEN 'y' ELSE summary END WHERE id = $1;",
   'await supabase.from("thoughts").update(Object.assign({}, base, { metadata: { content: "x" } })).eq("id", id);',
+  // SMD-1524: inserts that are not the rule's — another table, the other columns, no column list,
+  // a metadata-only row, the function's own remedy, prose naming the statement, a chunk row.
+  'INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, $2, $3::vector);',
+  'INSERT INTO thoughts (id, content_fingerprint, embedding_model, created_at) VALUES ($1, $2, $3, now());',
+  'INSERT INTO thoughts VALUES ($1, $2, $3);',
+  "INSERT INTO thoughts SELECT * FROM thoughts_staging;",
+  'await supabase.from("thoughts").insert({ metadata: { source: "import" } });',
+  'await supabase.from("readwise_books").insert({ content: note, title });',
+  'await supabase.from("consolidation_log").insert({ operation: "profile", details: { content: "x" } });',
+  'Any code path that writes a raw `INSERT INTO thoughts` — a webhook handler — will insert a row with a NULL fingerprint.',
+  'await supabase.rpc("upsert_thought", { p_content: content, p_payload: { metadata: meta, embedding_model: EMBEDDING_MODEL }, p_embedding: embedding });',
+  'thoughts = [build_thought(h, book) for h in batch]\nsupabase.table("thoughts").insert(thoughts).execute()',
 ];
-const THOUGHT_WRITE_EXCEPTIONS = new Map([]);
+const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
+const THOUGHT_WRITE_EXCEPTIONS = new Map([
+  // The guides that show upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
+  ["docs/01-getting-started.md", { why: "the INSERT inside upstream's upsert_thought definition, the function itself, shown as the guide's; SETUP.md sends this fork's readers past it", lines: 1 }],
+  ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
+  // Two deployments whose database is their own, built from the guide's shape.
+  ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
+  ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
+  ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
+  // The recipe's own container: its upsert_thought body, the guide's shape — the INSERT is the function's own.
+  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", { why: "the INSERT inside the recipe's own upsert_thought, in its own container's init (check 7 excepts the same definition); the README says what its rows lack", lines: 1 }],
+  // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole", lines: 1 }],
+]);
 
 function checkThoughtWritesAround() {
   const SELF = "scripts/check-fork-consistency.mjs";
@@ -1264,13 +1333,13 @@ function checkThoughtWritesAround() {
     // Caught on exactly one line, and that line is the verb's (or the UPDATE's): the second review
     // pass found an upsert chain reported on the line before its verb, which a count alone passed.
     const got = thoughtWritesAroundIn(probe);
-    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert)\b/.test(l) || /\bUPDATE\s+(?:ONLY\s+)?"?(?:public|thoughts)\b/i.test(l)) + 1;
+    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert|insert)\b/.test(l) || /\b(?:UPDATE\s+(?:ONLY\s+)?|INSERT\s+INTO\s+)"?(?:public|thoughts)\b/i.test(l)) + 1;
     if (got.length !== 1 || got[0] !== verbLine) fail(SELF, `thought-write rule no longer catches its probe on its verb's line ${verbLine} (caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
   }
   for (const text of THOUGHT_WRITE_NON_PROBES) {
     if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture through the 3-argument upsert_thought with embedding_model in the payload (FORK.md change 69, SMD-1228) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what it leaves stale";
+  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture — an insert too — through the 3-argument upsert_thought with embedding_model in the payload, the columns it does not know by an update carrying neither content nor vector (FORK.md changes 69 and 70, SMD-1228 and SMD-1524) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what its rows lack";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);

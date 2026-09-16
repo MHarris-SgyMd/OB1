@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-nine numbered changes on top of the pin. Seven fix defects found in an
+Seventy numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–69 are the numbered `###` sections** further down, which is
+sections. Changes **18–70 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -194,6 +194,7 @@ integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
+<8 vendored files>               # change 70 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -9086,8 +9087,8 @@ quoted identifiers and an alias allowed. Word-bounded: `content_fingerprint
 =` and `embedding_model =` are other columns. In every non-binary,
 non-ignored file under the seven category directories and `docs/`, prose
 included. Outside the rule, and said so: an `.insert(` (a fresh row around
-the functions — no fingerprint, no label — is a different defect, SMD-1524),
-a metadata-only update, a payload spread from another object, one that
+the functions — no fingerprint, no label — is a different defect, SMD-1524 —
+in the rule since change 70), a metadata-only update, a payload spread from another object, one that
 arrives as a function's return value or parameter, a builder split across
 statements, a table name held in a variable, Python's `dict(content=…)`, a
 hand-built REST `PATCH` (none in the tree), and the remedy itself — the
@@ -9161,7 +9162,8 @@ sentence names the spelling.
 **Decisions.** Updates, not inserts: the ticket's rule and the carry-forward
 comment named the update, and an insert leaves nothing *stale* — it leaves
 the pre-003 shape the backfills repair; six sites are filed as SMD-1524 with
-the widening of check 10 they need. The enhanced columns stay a raw update
+the widening of check 10 they need — done in change 70, which found eight.
+The enhanced columns stay a raw update
 beside the function rather than a payload key: the function never read them,
 and adding them would put a vendored schema's columns into a core function.
 `rest-api`'s failed-embedding edit blanks the vector rather than keeping the
@@ -9191,7 +9193,8 @@ idempotency key; `db/ci-parity.sh` did not run the suite; the probe list
 lacked the worker's statement and miscounted the files. Not fixed, and said
 where: the shim's table verbs bind a `number[]` as an array literal
 (pre-existing; every vendored `.insert({ embedding })` through the shim has
-it — carried to SMD-1524); a name bound to a payload is one for the whole
+it — carried to SMD-1524, where the inserts left the table verbs and the
+binding stayed); a name bound to a payload is one for the whole
 file (check 8's stance); the embed-before-`NOT_FOUND` cost. Run for real:
 PostgREST resolves `{p_content, p_payload, p_embedding}` to the 3-argument
 form, a JSON `null` vector included, and 013's 4-argument form is never a
@@ -9229,7 +9232,7 @@ timestamp); this section's Verified paragraph is rewrapped and names the
 third Deno check.
 
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
-10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
+10's widening to them) — done in change 70. SMD-1525 (`enhanced-mcp`'s read tools cannot address
 a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
 `open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim;
 their behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun.
@@ -9261,6 +9264,177 @@ return-shape half against its own tree; the two files that misread the
 return here read both shapes now.
 
 
+
+### 70. The vendored captures that inserted a thought go through the 3-argument `upsert_thought` — eight files off a raw `INSERT` into `thoughts`, three deployments with a database of their own say they bypass it, and check 10 holds the insert (SMD-1524)
+
+`integrations/readwise-capture/index.ts`,
+`integrations/consolidation-workers/bio/index.ts` (its first run),
+`recipes/editorial-policy/auditor/index.ts`,
+`recipes/adaptive-capture-classification/capture-with-gating.ts`,
+`recipes/local-ollama-embeddings/embed-local.py`,
+`recipes/readwise-import/import-readwise.py`, the samples in
+`integrations/telegram-capture/README.md` and
+`integrations/slack-capture/README.md`; headers on
+`integrations/kubernetes-deployment/index.ts`,
+`recipes/vercel-neon-telegram/src/lib/db.ts` and
+`recipes/schema-aware-routing/index.ts`; `scripts/check-fork-consistency.mjs`
+(check 10); `extensions/test-writes.ts`; their READMEs and
+`recipes/local-brain-no-mcp/README.md` (Linear SMD-1524, filed from change
+69's audit). Change 69 moved every vendored *update* of a thought's `content`
+or `embedding` onto the functions and drew its rule at the update, because an
+update leaves something *stale*; it named the other door and left it: a raw
+`INSERT` of a fresh row with content, or content and a vector, around the
+3-argument `upsert_thought`. The ticket named six sites. Check 10's first run
+with the insert in its rule found eight hits in eight files — the two the
+ticket's grep had not reached being `editorial-policy`'s auditor, which
+stored every weekly report as a raw row, and `schema-aware-routing`, which
+turned out to write a database of its own — and a hand search found two
+more the rule cannot see: the readwise backfill's batch insert of a list
+built by comprehension, and the Ollama recipe's `POST /rest/v1/thoughts`.
+What a raw insert leaves is not stale but *missing*: `content_fingerprint`
+NULL — 003's rule is in the functions, 016's trigger does not fill it, so the
+row is invisible to dedup until 023's backfill runs, and a later capture of
+the same text through `upsert_thought` makes a twin, which is the duplicate
+the fork's whole fingerprint machinery exists to refuse; `embedding_model`
+NULL — 021's vector of unknown model, which the re-embed pool treats as not at
+the target and re-embeds; and no actor for 008's audit row. Two of the eight
+were worse than the shape: the bio worker's first run computed its own
+fingerprint and stored **no vector at all** (the comment said `upsert_thought`
+would drop the enhanced columns, which is true, and is what the sidecar
+update change 69 gave the rewrite path is for), so the first profile was
+unsearchable until a re-embed pass reached it; and the classification
+recipe's example inserted `tags`, `project` and `due_date` as columns
+`thoughts` has never had, so it failed on any brain.
+
+**The mechanism** is change 69's, on the capture side. A capture is one call
+to the 3-argument `upsert_thought(p_content, p_payload, p_embedding)` with
+`embedding_model` in the payload — the function writes the text, its
+fingerprint, the vector and the vector's label in one statement under 033's
+lock order, sets 008's actor, and answers `{id, fingerprint, existed,
+supersedes}`; a text the brain already holds comes back `existed` with its
+metadata merged and its vector replaced, which is what a re-sent webhook or a
+re-run backfill should do, and what a raw insert could not (the readwise
+backfill bisected its batches to find the row a unique violation aborted
+them on — gone with the batch). The enhanced-thoughts columns the function
+does not know (`source_type`, `type`, `importance`) follow by an update that
+carries neither content nor vector, on a fresh row only — `existed` skips it,
+so a re-capture leaves a hand-set tier alone, change 69's escalation-only
+stance. Where the writer makes no vector — the auditor's report, the
+classification example — `{p_content, p_payload}` resolves to the 2-argument
+form and the row waits, labelled NULL as a vectorless row should be, for a
+re-embed pass; the files say so. The readwise receiver and the auditor are
+driven in `test-writes.ts` (the receiver behind a stubbed Readwise book
+lookup and the `readwise-books` sidecar, now the third the suite applies and
+drops); the bio worker's first run, the classification example, the two
+Python recipes and the two README samples are read by regex there. Per
+file: `readwise-capture` — one call with the label constant the file now
+names, the sidecar on a fresh row, `existed` answered `ok` and the book
+counter still incremented; `consolidation-bio` — the first run embeds the
+profile as the rewrite path does and captures it whole, a concurrent run's
+`existed` row reported as not created and left its columns,
+`computeContentFingerprint` no longer imported; `editorial-policy` — the
+report through the 2-argument form, its window timestamps keeping two reports
+two rows; `adaptive-capture-classification` — the 2-argument form with the
+classifier's fields in metadata, and the note that the capture MCP tool is
+the better call there; `embed-local.py` — `POST /rest/v1/rpc/upsert_thought`
+with the Ollama model's bare name as the label (the spelling
+`OB1_EMBEDDING_MODEL` uses for an Ollama model, so `db/reembed.ts` sees these
+rows as at its target or not), `existed` reported per thought, and the
+"ALTER the column" advice answered by a fork note (the width is
+`db/config.mjs`'s); `import-readwise.py` — one call per row, the bisection
+and its `APIError` gone, `existed` counted as already present, the sidecar
+per fresh row, a slower backfill said in the README; the two samples — the
+3-argument call with the label constant, Slack's sample gaining the constant
+Telegram's already had.
+
+**Check 10** widens to the insert: a PostgREST `.insert(` on `thoughts` whose
+payload carries either key — a literal, an array of literals, a bound name,
+and a name filled one literal at a time by `x.push({ … })` or Python's
+`x.append({ … })`, a binding form the update rule did not need — and the SQL
+`INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` whose column list
+names `content` or `embedding` (quoted or not; word-bounded, so
+`content_fingerprint` and `embedding_model` are the other columns they are;
+`INSERT … SELECT` with a list caught, `VALUES` or `SELECT` without one
+outside the rule, said so). The one insert the non-probe list carried as
+"outside" moved to the probes, joined by thirteen more — each site's own
+shape and the forms a rebase could bring — and ten non-probes: another
+table's insert with a `content` column, the other columns, no column list,
+a metadata-only row, the remedy, prose naming the statement, the
+comprehension the rule cannot see. Forty-nine probes, thirty-six non-probes, each
+probe held to its verb's line. **Exceptions, seven, the list's first
+entries** — none a bypass a fix here could remove, each a file whose header
+or README says what its rows lack: three deployments whose database is their
+own, built from the guide's shape, where the fork's functions are not —
+`kubernetes-deployment` (its own Postgres in the cluster, `k8s/init.sql`),
+`vercel-neon-telegram` (Neon, `sql/001-create-thoughts.sql`) and
+`schema-aware-routing` (a five-table project from its README's SQL, a
+`thoughts` with `domain`/`status`/`source` columns) — the first two the same
+files check 7 excepts for creating a brain rather than adding to one; the two
+guides that show upstream's `upsert_thought` body and the `local-brain-no-mcp`
+container init that shows its own, where the `INSERT` is the function's; and
+`test-writes.ts` itself, which plants a row as an older write left it,
+fingerprint and label by hand, for the writer under test to move whole. The
+Kubernetes and Neon READMEs say how to get a fork-shaped brain there instead
+(apply `db/migrations/` in place of the init script; backfill and re-embed
+data moved across); the routing README says to capture through the function
+and keep its three columns in metadata.
+
+**Decisions.** The three own-database deployments are excepted, not
+converted: routing their captures through a function their database does not
+have would break them, and replacing their init scripts with the fork's
+migrations is a deployment change beyond a write audit — each README says
+the path. The shim's table verbs still bind a `number[]` as a Postgres array
+literal (change 69's carried finding): after this change no vendored table
+verb carries a vector, so the dependence is gone rather than the binding
+fixed, and the binding stays because the shim cannot tell a vector from an
+`int[]` column by the array's shape — `rpc()` can, because a function
+parameter is typed. The readwise backfill stores one row per call rather
+than a batch: PostgREST has no batch RPC, a duplicate is now the function's
+answer rather than a violation to bisect for, and the cost — a few minutes
+per ten thousand highlights against a batch of twenty-five — is the
+backfill's to bear, said in its README. The Ollama label is the model's bare
+name, not `ollama/<name>`: the fork spells `OB1_EMBEDDING_MODEL` that way
+(`qwen3-embedding:4b`), and a label the re-embed pool does not recognise as
+its target is a row it re-embeds. The bio worker's first run pays for an
+embedding it did not before — the rewrite path already did, and an
+unembedded profile is one nobody finds. The two vectorless captures use the
+2-argument form by omission rather than passing a JSON `null` vector: the
+form is the function's own, and the label rule (NULL with no vector) holds
+either way. `INSERT INTO thoughts VALUES (…)` without a column list stays
+outside the rule: the statement does not say which columns it writes, and
+none is in the tree.
+
+**Not done here.** SMD-1525 (`enhanced-mcp`'s read tools address rows by
+integer id). SMD-1480 (deployability of the shim-importing writers —
+`readwise-capture`, `consolidation-bio` and the auditor among them; their
+behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun). A
+fork-shaped brain for the Kubernetes and Neon deployments is theirs to take
+up; the READMEs name the path. `db/`'s and `evals/`' own `INSERT INTO
+thoughts` statements are the fork's fixtures and benches, outside the scan
+as they were for the update rule.
+
+**Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
+eight hits in eight files before the conversions and PASS after (49 probes,
+36 non-probes, each probe caught on its verb's line; seven exceptions, each
+matching its one line); `../db/with-postgres.sh bun test-writes.ts` 147/147
+under podman — the receiver's capture judged column by column, its retry
+answered `duplicate` before any write, the same passage highlighted again one
+row with the newer highlight id and a hand-set tier kept, the book cached and
+counted, a wrong secret writing nothing, the auditor's report fingerprinted,
+vectorless and unlabelled with its findings in metadata; `bun test-auth.ts`
+643/643 on the converted receiver and auditor; the two Python recipes compile
+(`py_compile`); the four converted `.ts` files parse under Bun (all four
+import the SQL shim, so `deno check` does not reach them, as change 69
+found); the codemod round-trips. The ticket's verify — check 10 fails on the
+six today and passes after; a capture through `readwise-capture` leaves
+`content_fingerprint`, `embedding_model` and no chunk rows as the 3-argument
+`upsert_thought` leaves them, one round trip — is the check's before/after
+and the test.
+
+**Upstream status:** not applicable — the raw inserts are upstream's, the
+function they now call is this fork's. The classification example's
+nonexistent columns and the bio worker's vectorless first row are upstream
+defects on their own terms; **unfiled** upstream.
 
 ## Detached from the fork network
 
@@ -9339,14 +9513,18 @@ best, under this repository's name, in a repo whose stated differentiator is
 that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
 carries the audit so a rebase cannot quietly undo it. Four rules are audited
-today. Writes around the functions (SMD-1228, change 69): check 10 fails the
-build on a PostgREST `.update(`/`.upsert(` on `thoughts` whose payload carries
-`content` or `embedding` — inline or through an object the file fills — and on
-a SQL `UPDATE thoughts … SET` of either column: the raw write nine vendored
-files made around `update_thought` and the 3-argument `upsert_thought`, leaving
-a stale fingerprint, a stale model label and the previous vector's windows,
-with counted per-file exceptions for a file whose README says it bypasses the
-functions (none today). Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
+today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
+70): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
+on `thoughts` whose payload carries `content` or `embedding` — inline or
+through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
+either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
+vendored files made around `update_thought` and the 3-argument
+`upsert_thought`, leaving a stale fingerprint, a stale model label and the
+previous vector's windows, and the raw insert eight more made around the
+capture, leaving no fingerprint and no label at all; with counted per-file
+exceptions for a file whose README says it bypasses the functions — seven,
+each a database of its own, a function body shown, or the test's fixture.
+Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
 the build on a value read from the environment under a credential's name
 compared with an equality operator — the one shared plaintext key seven
 extension servers, and then seventeen more vendored files, compared with `!==`
@@ -9368,10 +9546,10 @@ check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64, SMD-1455 as change 67 and SMD-1228 as change 69 — the four rules
-named when the standard was decided are all audited and held; the next
-finding (SMD-1524, the raw inserts change 69 left outside its rule) lands the
-same way.
+change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
+raw inserts change 69 left outside its rule — as change 70: the four rules
+named when the standard was decided are all audited and held, the last on
+both of its doors.
 
 ### Landing a rebase on `main`, which is protected
 

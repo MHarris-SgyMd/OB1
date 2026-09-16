@@ -26,6 +26,11 @@
 //
 // Schedule: see schedule.sql in this recipe folder.
 
+// ob1-fork (SMD-1524): the audit report is stored through the database's upsert_thought,
+// which writes the content fingerprint (003) and the audit actor (008) with the text; a
+// raw insert left the fingerprint NULL and the row invisible to dedup. The report carries
+// no vector, so the 2-argument form is resolved. FORK.md change 70; extensions/test-writes.ts
+// drives it against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
@@ -457,10 +462,16 @@ function buildAuditContent(result: AuditResult): string {
 
 async function storeAuditReport(result: AuditResult): Promise<string> {
   const content = buildAuditContent(result);
-  const { data, error } = await supabase
-    .from("thoughts")
-    .insert({
-      content,
+  // Through the database's upsert_thought (FORK.md change 70): the content
+  // fingerprint and the audit actor are written with the text — the raw insert
+  // this replaced left the fingerprint NULL, and 016's trigger does not fill it.
+  // No vector: the report is a record, not a search target, so the 2-argument
+  // form is resolved and the row carries no label (a re-embed pass may give it
+  // one). The window's timestamps are in the text, so two reports are two rows;
+  // an identical text would come back `existed`, its metadata merged.
+  const { data, error } = await supabase.rpc("upsert_thought", {
+    p_content: content,
+    p_payload: {
       metadata: {
         type: "audit_report",
         source: "auditor-function",
@@ -477,13 +488,13 @@ async function storeAuditReport(result: AuditResult): Promise<string> {
         minor_count: result.findings.filter((f) => f.severity === "minor").length,
         findings: result.findings, // structured, queryable
       },
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`audit_report insert failed: ${error?.message ?? "unknown"}`);
+    },
+  });
+  const id = (data as { id?: unknown } | null)?.id;
+  if (error || typeof id !== "string") {
+    throw new Error(`audit_report capture failed: ${error?.message ?? "upsert_thought returned no id"}`);
   }
-  return data.id as string;
+  return id;
 }
 
 // ── Slack ────────────────────────────────────────────────────────────────

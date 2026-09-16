@@ -216,6 +216,8 @@ Each captured thought is automatically:
 
 The `thoughts` table schema and `match_thoughts()` function are identical to OB1's — data is portable between stacks.
 
+> **On this fork (FORK.md change 70, SMD-1524):** "identical to OB1's" means upstream's guide, not this fork's migrations — the Neon database `sql/` builds has no `upsert_thought`, so `insertThought()` writes `thoughts` with a raw INSERT, and its rows have no content fingerprint (no dedup by text), no model label and no audit actor. Data moved into a fork brain gets its fingerprints from `db/migrations/023`'s backfill and its labels from a re-embed pass. The file is a counted exception in `scripts/check-fork-consistency.mjs` check 10.
+
 ## File Structure
 
 ```

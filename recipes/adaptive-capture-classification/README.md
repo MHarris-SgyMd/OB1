@@ -93,6 +93,14 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > TypeScript reference implementation (`capture-with-gating.ts`). You will need to adapt
 > the implementation to your own capture interface — the logic is intentionally kept
 > separate from any specific bot, CLI, or workflow framework.
+>
+> **On this fork (FORK.md change 70, SMD-1524):** the example `writeToOB1()` captures
+> through the database's `upsert_thought`, so the row carries its content fingerprint and
+> the audit actor — the raw insert it replaced left the fingerprint NULL and the row
+> invisible to dedup. It makes no vector, so the 2-argument form is resolved and the row
+> waits for a re-embed pass (`db/reembed.ts`); the OB1 capture MCP tool embeds as it
+> captures, and is the better call there. The classifier's `type`, `tags`, `project` and
+> `due_date` ride in `metadata` — `thoughts` has no such columns.
 
 Replace your current direct call to the OB1 `capture` MCP tool with the following pattern.
 

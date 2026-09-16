@@ -6,6 +6,8 @@
 
 Replaces the OpenRouter embedding step with a local Ollama model. You feed it text (stdin, file, or argument), it generates embeddings on your machine, and inserts the thoughts into your Supabase `thoughts` table. Zero API cost, full privacy, works offline.
 
+> **On this fork (FORK.md change 70, SMD-1524):** each thought is stored through the database's 3-argument `upsert_thought` (`POST /rest/v1/rpc/upsert_thought`), which writes the text, its content fingerprint, the vector and the vector's model label in one statement; the POST to the table it replaced left the fingerprint and the label NULL. The label is the Ollama model's name as `OB1_EMBEDDING_MODEL` spells it — `nomic-embed-text`, `mxbai-embed-large` — so `db/reembed.ts` knows which rows are at its target and which are not. A thought whose text the brain already holds comes back `existed`: metadata merged, vector replaced.
+
 ## Prerequisites
 
 - Working Open Brain setup ([guide](../../docs/01-getting-started.md))
@@ -83,6 +85,8 @@ ALTER TABLE thoughts ALTER COLUMN embedding TYPE vector(1024);
 ```
 
 You will also need to recreate the `match_thoughts` function with the matching dimension. See the [getting started guide](../../docs/01-getting-started.md) for the function definition and replace `vector(1536)` with your model's dimension.
+
+> **On this fork** the width is not altered by hand: the migrations and every function are built at `db/config.mjs`'s width, so build the brain with `OB1_EMBEDDING_MODEL` set to the Ollama model you will embed with (`mxbai-embed-large` is 1024, the fork's default width; `nomic-embed-text` needs a 768-wide build) — see [`db/README.md`](../../db/README.md). `upsert_thought` refuses a vector of another width, and the script reports the refusal per thought.
 
 > **Note:** `rjmalagon/gte-qwen2-1.5b-instruct-embed-f16` is a community-published model (a quantized version of Alibaba's GTE-Qwen2-1.5B-instruct). It is not published by an official organization on Ollama. If you prefer an officially published model, use nomic-embed-text or mxbai-embed-large and adjust your schema accordingly.
 >

@@ -4,6 +4,11 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1524): the example capture goes through the database's upsert_thought,
+// which writes the content fingerprint (003) and the audit actor (008) with the text; a
+// raw insert left the fingerprint NULL and the row invisible to dedup. No vector is made
+// here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
+// change 70; scripts/check-fork-consistency.mjs check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *
@@ -205,16 +210,27 @@ async function resolveOutcome(
 // ---------------------------------------------------------------------------
 
 async function writeToOB1(classified: Classified): Promise<void> {
-  // Example: direct Supabase insert into the thoughts table.
-  // If you use the OB1 MCP tool, call it here instead.
-  await db.from("thoughts").insert({
-    content: classified.title,
-    type: classified.type,
-    tags: classified.tags,
-    project: classified.project,
-    due_date: classified.due_date,
-    created_at: new Date().toISOString(),
+  // Example: the capture through the database's upsert_thought (FORK.md change
+  // 70), so the row carries its content fingerprint and the audit actor — the
+  // raw insert this replaced left the fingerprint NULL, and 016's trigger does
+  // not fill it. No vector is made here: the 2-argument form is resolved and
+  // the row waits for a re-embed pass (db/reembed.ts). The OB1 capture MCP tool
+  // embeds as it captures — if you use it, call it here instead. The
+  // classifier's fields ride in metadata: `thoughts` has no tags/project/
+  // due_date columns, and `type` is the enhanced-thoughts sidecar's.
+  const { error } = await db.rpc("upsert_thought", {
+    p_content: classified.title,
+    p_payload: {
+      metadata: {
+        type: classified.type,
+        tags: classified.tags,
+        project: classified.project,
+        due_date: classified.due_date,
+        source: "adaptive-capture",
+      },
+    },
   });
+  if (error) throw new Error(`upsert_thought failed: ${error.message}`);
 }
 
 // ---------------------------------------------------------------------------

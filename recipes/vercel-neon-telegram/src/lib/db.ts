@@ -1,6 +1,12 @@
 import { neon } from "@neondatabase/serverless";
 import type { Thought, ThoughtMetadata } from "./types";
 
+// ob1-fork (SMD-1524): insertThought writes `thoughts` with a raw INSERT, by design — the
+// recipe's Neon database is its own, built by sql/001-create-thoughts.sql from the guide's
+// shape, and this fork's upsert_thought is not in it. The row carries no content
+// fingerprint, no model label and no audit actor; the README says so. Listed in
+// scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 70).
+
 function getSQL() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is required");

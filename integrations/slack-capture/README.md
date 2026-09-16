@@ -4,6 +4,8 @@
 
 Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
 
+> **On this fork (FORK.md change 70, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint, its vector's model label and the audit actor; the raw insert it replaced left the first two NULL. WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
+
 ## Prerequisites
 
 - A working Open Brain setup (follow the [Getting Started guide](../../docs/01-getting-started.md) through Step 4 — you need the Supabase database, OpenRouter API key, and Supabase CLI installed)
@@ -120,13 +122,15 @@ const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
     headers: { "Authorization": `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai/text-embedding-3-small", input: text }),
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
   });
   const d = await r.json();
   return d.data[0].embedding;
@@ -195,14 +199,21 @@ Deno.serve(async (req: Request): Promise<Response> => {
       extractMetadata(messageText),
     ]);
 
-    const { error } = await supabase.from("thoughts").insert({
-      content: messageText,
-      embedding,
-      metadata: { ...metadata, source: "slack", slack_ts: messageTs },
+    // The capture through the database's upsert_thought — the 3-argument form
+    // — so the row carries its content fingerprint, the vector's model label and
+    // the audit actor; a raw insert left the first two NULL. A message whose
+    // text is already held comes back `existed`: metadata merged, vector replaced.
+    const { error } = await supabase.rpc("upsert_thought", {
+      p_content: messageText,
+      p_payload: {
+        metadata: { ...metadata, source: "slack", slack_ts: messageTs },
+        embedding_model: EMBEDDING_MODEL,
+      },
+      p_embedding: embedding,
     });
 
     if (error) {
-      console.error("Supabase insert error:", error);
+      console.error("upsert_thought error:", error);
       await replyInSlack(channel, messageTs, `Failed to capture: ${error.message}`);
       return new Response("error", { status: 500 });
     }

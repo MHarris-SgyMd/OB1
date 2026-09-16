@@ -12,6 +12,8 @@
 
 A pattern for using LLM-extracted metadata to route unstructured text into the correct database tables automatically. One input message becomes writes to four different tables — `thoughts`, `people`, `interactions`, and `action_items` — based entirely on what the LLM finds in the text.
 
+> **On this fork (FORK.md change 70, SMD-1524):** the SQL below creates the pattern's own five tables — a `thoughts` with `domain`/`status`/`source` columns — in a project of its own, where this fork's `upsert_thought` is not; `processThought()` therefore writes `thoughts` with a raw insert, and its rows have no content fingerprint (no dedup by text), no model label and no audit actor. The file is a counted exception in `scripts/check-fork-consistency.mjs` check 10. To run the pattern against a fork brain, capture through `upsert_thought` and keep `domain`/`status`/`source` in `metadata`.
+
 > [!NOTE]
 > I'm an elementary school teacher, not a developer. I built this entire system with Claude Code. If I can get it running, you can too. The instructions below are written for people like me.
 
