@@ -12,7 +12,7 @@
 //    server's server-portable/auth.ts): named, scoped, hashed entries in
 //    MCP_ACCESS_KEYS, and a read-scoped key is handed a server on which the
 //    tools that write were never registered (ob1-fork, SMD-1455, FORK.md
-//    change 65)
+//    change 67)
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";

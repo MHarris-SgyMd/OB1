@@ -86,6 +86,11 @@ process.env.OB1_STORE = "sql";
 process.env.DATABASE_URL = URL_;
 process.env.OPENROUTER_API_KEY = "stub";
 process.env.MCP_ACCESS_KEY = "e2e-key";
+// The query log (034, SMD-1295) is read once at first request and frozen, as in
+// production (set at boot, not toggled per request). On for the whole suite so
+// [N] can exercise the real write+join path; the OFF guarantee — that the guard
+// writes nothing when unset — is a pure unit test in test-server.ts.
+process.env.OB1_QUERY_LOG = "on";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -343,6 +348,52 @@ console.log("\n[7] Dedup through the tool surface");
   const after = await call("thought_stats");
   assert(/Total thoughts: 3/.test(after), "a normalised duplicate did not add a row");
   assert(before.split("\n")[0] === after.split("\n")[0], "the total is unchanged");
+
+  // 035: a re-capture writes no provenance, and the reply says what stands —
+  // read from the row's pointer the store returns beside `existed`, not from
+  // the caller's inputs (the second review pass drove the four `supersedes` shapes and
+  // found the input-only reply advising a redundant or a refused edit).
+  const idOf = (out: string) => out.match(/— id ([0-9a-f-]{36})/)?.[1] ?? "";
+  const alpha = idOf(await call("capture_thought", { content: "alpha thought about migrations" }));
+  const beta = idOf(await call("capture_thought", { content: "beta thought about databases" }));
+  const gamma = idOf(await call("capture_thought", { content: "gamma thought about runtimes" }));
+  assert(alpha && beta && gamma && alpha !== beta, "the three ids read back from the replies");
+  const none = await call("capture_thought", { content: "  ALPHA THOUGHT ABOUT MIGRATIONS  ", supersedes: beta });
+  assert(new RegExp(`Note: this text was already captured as ${alpha}, so the \`supersedes\` given here was not written — a re-capture leaves an existing thought's provenance as it is\\. To record that it supersedes ${beta}, call update_thought with id ${alpha} and \`supersedes\` ${beta}; it records the pointer if that thought exists and closes no loop\\.`).test(none),
+         `a re-capture naming supersedes over a thought with no pointer: not written, and the reply names the edit that records it (${none.split("Note:")[1]?.slice(0, 80)})`);
+  assert(/now supersedes/.test(await call("update_thought", { id: alpha, supersedes: beta })), "…which, followed, works");
+  const same = await call("capture_thought", { content: "alpha thought about migrations", supersedes: beta });
+  assert(new RegExp(`It already supersedes ${beta}; there is nothing to record\\.`).test(same) && !/call update_thought/.test(same), "…re-captured naming the pointer it holds: the reply says so and advises no edit");
+  const upper = await call("capture_thought", { content: "alpha thought about migrations", supersedes: beta.toUpperCase() });
+  assert(new RegExp(`It already supersedes ${beta}; there is nothing to record\\.`).test(upper) && !/call update_thought/.test(upper), "…the same pointer in upper case is the same pointer (compared and printed lower-case)");
+  const other = await call("capture_thought", { content: "alpha thought about migrations", supersedes: gamma });
+  assert(new RegExp(`It currently supersedes ${beta}; to replace that pointer with ${gamma}, call update_thought with id ${alpha} and \`supersedes\` ${gamma}; it records the pointer if that thought exists and closes no loop\\.`).test(other), "…naming another: the reply says what it holds and that the edit would replace it");
+  // The advice's two conditions, driven: a pointer that would close a loop
+  // (gamma supersedes alpha; alpha re-captured naming gamma) is advised with
+  // the condition and refused by the edit; a first capture naming no thought
+  // is 025's FK, said in the tool's words.
+  await call("update_thought", { id: gamma, supersedes: alpha });
+  const loopy = await call("capture_thought", { content: "alpha thought about migrations", supersedes: gamma });
+  assert(/closes no loop\./.test(loopy), "…a pointer that would close a loop is advised with the condition spelled out");
+  let refused = "";
+  try { await call("update_thought", { id: alpha, supersedes: gamma }); } catch (e) { refused = (e as Error).message; }
+  assert(/would close a loop/.test(refused), `…and the edit refuses it by name (${refused.slice(0, 60)})`);
+  await call("update_thought", { id: gamma, supersedes: null });
+  try { await call("capture_thought", { content: "iota thought naming a ghost", supersedes: "00000000-0000-0000-0000-000000000000" }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: no thought with the id given as supersedes/.test(refused), `a first capture naming no thought is refused in the tool's words, not Postgres's (${refused.slice(0, 60)})`);
+  try { await call("capture_thought", { content: "iota thought naming a bad source", derived_from: ["abc"] }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: every `derived_from` entry must be a thought id/.test(refused), `a derived_from element that is no id is refused before the model calls (${refused.slice(0, 60)})`);
+  try { await call("capture_thought", { content: "iota thought naming a ghost source", derived_from: ["00000000-0000-0000-0000-000000000000"] }); } catch (e) { refused = (e as Error).message; }
+  assert(/Refused: a `derived_from` id names no thought — \(in \["00000000-0000-0000-0000-000000000000"\]\)\./.test(refused), `a well-formed derived_from id naming no thought is refused in the tool's words too (${refused.slice(0, 90)})`);
+  assert(!/Note: this text was already captured/.test(await call("capture_thought", { content: "alpha thought about migrations", derived_from: [] })), "an empty derived_from names nothing, and no note fires for it");
+  const self = await call("capture_thought", { content: "alpha thought about migrations", supersedes: alpha });
+  assert(/names the thought itself; a thought cannot supersede itself\./.test(self) && !/call update_thought/.test(self), "…naming itself: refused in words, no edit advised");
+  const derived = await call("capture_thought", { content: "alpha thought about migrations", derived_from: [beta] });
+  assert(/the `derived_from` given here was not written/.test(derived) && /`derived_from` cannot be set on an existing thought through these tools\./.test(derived) && !/supersedes/.test(derived.split("Note:")[1] ?? ""), "…derived_from alone: told it cannot be set here, nothing about supersedes");
+  const fresh = await call("capture_thought", { content: "theta thought that is new", supersedes: beta });
+  assert(!/Note: this text was already captured/.test(fresh), "a first capture naming supersedes carries no such note");
+  await call("update_thought", { id: alpha, supersedes: null });
+  await call("delete_thought", { id: idOf(fresh) });
 }
 
 console.log("\n[8] the id a read prints round-trips to update_thought and delete_thought");
@@ -410,6 +461,46 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   await sql`DELETE FROM supersession_proposals`;
   await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
   await sql.close();
+}
+
+// ── The opt-in query log (034, SMD-1295), through the real handlers ──────────
+// The flag is on for the suite (set at boot). A search records one row with the
+// query and the ids it returned; a fetch of a returned id records an action row
+// the export join ties back to that search.
+console.log("\n[10] query log: a search and its follow-up fetch, recorded and joined (SMD-1295)");
+{
+  const qlog = new SQL({ url: URL_, max: 1 });
+  await qlog`DELETE FROM query_log`;
+
+  await call("capture_thought", { content: "gamma note the query log should find" });
+  const searched = await call("search_thoughts", { query: "gamma", limit: 5, threshold: -1 });
+  const hitId = searched.match(/ID:\s*([0-9a-f-]{36})/i)?.[1];
+  assert(!!hitId, `search returned an id to follow (${searched.split("\n")[0].slice(0, 40)}…)`);
+  await call("fetch", { id: hitId! });
+
+  const rows = await qlog<{ kind: string; tool: string; query: string | null; target_id: string | null; contains: boolean | null }[]>`
+    SELECT kind, tool, query, target_id,
+           CASE WHEN kind='search' THEN result_ids @> ARRAY[${hitId}::uuid] END AS contains
+      FROM query_log ORDER BY logged_at, kind`;
+  const searchRow = rows.find((r) => r.kind === "search");
+  const actionRow = rows.find((r) => r.kind === "action");
+  assert(searchRow?.tool === "search_thoughts" && searchRow.query === "gamma" && searchRow.contains === true,
+    `the search row carries the query and the returned id (${JSON.stringify(searchRow)})`);
+  assert(actionRow?.tool === "fetch" && actionRow.target_id === hitId,
+    `the fetch of the returned id is recorded as an action (${JSON.stringify(actionRow)})`);
+
+  // The export join links the action to the search that returned its id.
+  const joined = await qlog<{ from_query: string | null }[]>`
+    SELECT (SELECT s.query FROM query_log s
+             WHERE s.kind='search' AND s.agent_id IS NOT DISTINCT FROM act.agent_id
+               AND s.logged_at <= act.logged_at AND s.result_ids @> ARRAY[act.target_id]
+             ORDER BY s.logged_at DESC LIMIT 1) AS from_query
+      FROM query_log act WHERE act.kind='action'`;
+  assert(joined[0]?.from_query === "gamma", `the export join ties the fetch back to its search (${JSON.stringify(joined[0])})`);
+
+  await qlog`DELETE FROM query_log`;
+  await qlog`DELETE FROM thoughts`;
+  await qlog.close();
 }
 
 server.stop();

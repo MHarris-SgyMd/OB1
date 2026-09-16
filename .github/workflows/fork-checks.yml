@@ -106,7 +106,7 @@ jobs:
         run: deno check --node-modules-dir=none index.ts ../job-hunt/index.ts
 
       # The four recipes and integrations that still resolve under Deno after
-      # change 65 made them consumers of ../_shared/auth.ts (SMD-1455): each from
+      # change 67 made them consumers of ../_shared/auth.ts (SMD-1455): each from
       # its own directory, where its deno.json import map is.
       - name: deno check recipes/ob-graph
         working-directory: recipes/ob-graph
@@ -171,7 +171,7 @@ jobs:
 
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
-      # servers, HTTP APIs, workers and webhook receiver (change 65) — through a
+      # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
       # _shared/auth.ts beside it, a byte copy. Their test runs in THIS job
       # because main's ruleset requires it: a separate job would not gate a
       # merge. Pinned to the servers' deno.json files — the test fails if one
@@ -215,6 +215,28 @@ jobs:
         env:
           OB1_EMBEDDING_DIM: "768"
           OB1_EMBEDDING_MODEL: nomic-embed-text
+
+  replay-gate:
+    name: Retrieval replay gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # SMD-1295. Replays the committed, content-free fixture through the shipped
+      # retrieval on PGlite — no service container, no model, no key — and fails
+      # when recall@5 drops past the fixture's floor. The live corpus stays out
+      # of CI; the fixture is ids and vectors only (evals/build-replay-fixture.ts).
+      - name: Replay the query fixture and hold the recall floor
+        working-directory: db
+        run: bun test-replay.ts
 
   db-live:
     name: Schema against real Postgres

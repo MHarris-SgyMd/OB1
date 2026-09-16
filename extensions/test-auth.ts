@@ -4,7 +4,7 @@
  * auth path: the seven extension servers (SMD-1252, FORK.md change 64) and the
  * recipes and integrations that compared a key the same way — six more MCP
  * servers, two HTTP APIs, four workers and a webhook receiver (SMD-1455,
- * change 65).
+ * change 67).
  *
  * The claim is the one server-portable/test-auth.ts makes for the core server,
  * made here for each vendored server as it is deployed: a wrong key is refused;
@@ -159,7 +159,7 @@ const SERVERS: Server[] = [
     ["crm_add_contact", "crm_log_interaction", "crm_create_opportunity", "crm_update_contact", "crm_link_thought"]),
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
     { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
-  // The recipes and integrations (change 65).
+  // The recipes and integrations (change 67).
   vendored("recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", "mcp", ["list_vendors"], []),
   vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
     ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { url: HTTPS, health: "/health" }),

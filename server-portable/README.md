@@ -79,9 +79,11 @@ or recipe (SMD-1250) — replaces one with no error: a 3-argument body from
 before 022 leaves a re-capture's stale windows behind, one from before 025
 drops `derived_from` and `supersedes` silently, one from before 033 takes no
 fingerprint lock (a capture racing an edit of the same text raises the unique
-violation 018 removed for edits), and a 2-argument body from before 005
+violation 018 removed for edits), one from before 035 fills a NULL `supersedes`
+on a re-capture without walking for a loop and holds the supersession lock
+through every capture that names one, and a 2-argument body from before 005
 empties a double-encoded payload silently — or, from before 033, takes no
-lock either; each is a warning naming 033, the last definer of both forms. `provenance` reads
+lock either; each is a warning naming 035, the last definer of both forms. `provenance` reads
 `trace_provenance`'s body the same way and warns, naming 026, when the
 bounded walk is gone; `stats summary` warns when `thought_stats_summary`'s
 body is not 024's; and `work claims` fails when `release_thought`'s or
@@ -96,8 +98,12 @@ missing one with its GRANT (`db/config.mjs`'s `ROLE_GRANTS`, the same list
 whose text no row holds is a capture doubled in waiting — a warning naming the
 migration, or after it the one statement `SELECT backfill_content_fingerprints();`
 as the table's owner; NULL rows that share their text with the row holding the
-key (twins, or a stale key) are ok. Over PostgREST all three are skips: none is
-reachable there.
+key (twins, or a stale key) are ok. `query log` (034, SMD-1295): the opt-in query
+log — reported, never a refusal, since it is off by default and its write is
+best-effort. When `query_log` is present the check names it and whether
+`OB1_QUERY_LOG=on` here, says what it stores (personal data at rest) and its
+retention, and points at `evals/export-queries.ts`; absent, it is a skip. Over
+PostgREST the direct-connection checks are skips: none is reachable there.
 
 ## Choosing a data layer
 

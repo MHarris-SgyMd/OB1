@@ -7,7 +7,7 @@
 // ob1-fork (SMD-1455): the webhook secret Readwise echoes is compared timing-safe,
 // digest to digest, through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function.
-// FORK.md change 65; extensions/test-auth.ts exercises it.
+// FORK.md change 67; extensions/test-auth.ts exercises it.
 // readwise-capture / index.ts
 //
 // Supabase Edge Function that receives Readwise highlight webhooks,

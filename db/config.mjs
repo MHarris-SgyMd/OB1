@@ -1261,10 +1261,11 @@ export const coreColumnCommentStatement = (col) =>
  * 022's sentinel rather than adding one. Each regex is the one clause that
  * migration added and no earlier body has: 005 refuses a non-object payload;
  * 025 writes the provenance envelope. test-schema [31] holds each against the
- * body it names and against the body before it. 033 — the last definer of
- * both forms — declares itself with a sentinel of its own,
- * `ob1:capture-takes-fingerprint-lock`, read inline as 022's is; the two
- * regexes still tell which earlier body an unlocked one is.
+ * body it names and against the body before it. 033 declares itself with a
+ * sentinel of its own, `ob1:capture-takes-fingerprint-lock`, and 035 — the
+ * last definer of both forms — with `ob1:re-capture-writes-no-provenance` in
+ * the 3-argument body; both read inline as 022's is. The two regexes still
+ * tell which earlier body an unlocked one is.
  */
 export const UPSERT_TWO_ARG_SHIPPED_RE = /jsonb_typeof\(p_payload\)\s*<>\s*'object'/;
 export const UPSERT_THREE_ARG_SHIPPED_RE = /p_payload\s*->\s*'derived_from'/;
@@ -1415,10 +1416,20 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_entities", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
     Object.freeze({ table: "ob1_entity_edges", privileges: Object.freeze(["SELECT", "INSERT", "DELETE"]),           since: "016" }),
   ]),
+  // The opt-in query log (034, SMD-1295): the server writes one row per search
+  // and one per follow-up touch, but ONLY when OB1_QUERY_LOG=on. INSERT is all
+  // the server does; prune_query_log runs as the owner. Granted so a self-hosted
+  // role can turn the flag on and have it work — but off by default and not read
+  // by preflight (it cannot see a server env flag), so unlike the capture set a
+  // role missing this INSERT is not refused, only reported by the `query log`
+  // check as "log off; grant needed if you enable it".
+  querylog: Object.freeze([
+    Object.freeze({ table: "query_log", privileges: Object.freeze(["INSERT"]), since: "034" }),
+  ]),
 });
 
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction"]);
+export const ROLE_GRANT_GROUPS = Object.freeze(["capture", "server", "worker", "extraction", "querylog"]);
 
 /**
  * The (table, privilege) pairs the core capture/edit/search path needs
@@ -1445,6 +1456,39 @@ export const EXTRACTION_TRIGGER_WRITES = Object.freeze([
   Object.freeze({ table: "thought_work_claims", privilege: "INSERT", since: "016" }),
   Object.freeze({ table: "thought_work_claims", privilege: "UPDATE", since: "016" }),
 ]);
+
+/**
+ * The opt-in query log (migration 034, SMD-1295) — the one spelling the server,
+ * preflight and the tests share. `flag`/`on` is the env switch and its "on"
+ * value (the fork's on/off idiom); `table` and `prune` are the objects 034
+ * creates; `tools` lists the handlers that write each kind of row; `retentionEnv`
+ * and `retentionDaysDefault` are prune_query_log's window. Off by default:
+ * absent or any value other than `on` leaves the server writing nothing.
+ */
+export const QUERY_LOG = Object.freeze({
+  flag: "OB1_QUERY_LOG",
+  on: "on",
+  table: "query_log",
+  prune: "prune_query_log",
+  retentionEnv: "OB1_QUERY_LOG_RETENTION_DAYS",
+  retentionDaysDefault: 30,
+  // The tools whose calls produce each kind of row, for the doc/tests to read.
+  searchTools: Object.freeze(["search", "search_thoughts"]),
+  actionTools: Object.freeze(["fetch", "update_thought", "delete_thought"]),
+});
+
+/** True when a server env selects the query log on (the fork's "on" idiom). */
+export function queryLogEnabled(env) {
+  return (env?.[QUERY_LOG.flag] ?? "").toString().trim().toLowerCase() === QUERY_LOG.on;
+}
+
+/** prune_query_log's retention window in days, from the env or the default. */
+export function queryLogRetentionDays(env) {
+  const raw = env?.[QUERY_LOG.retentionEnv];
+  if (raw === undefined || raw === null || `${raw}`.trim() === "") return QUERY_LOG.retentionDaysDefault;
+  const n = Number.parseInt(`${raw}`.trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : QUERY_LOG.retentionDaysDefault;
+}
 
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups = ROLE_GRANT_GROUPS) {

@@ -10,7 +10,7 @@
  *
  *   Scopes. The tools that write — `capture_thought`, and since changes 22 and 60
  *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five,
- *   and the vendored recipes' and integrations' likewise since change 65 — are
+ *   and the vendored recipes' and integrations' likewise since change 67 — are
  *   registered only for a write-scoped key. A read-only key means a leaked
  *   ChatGPT connector URL cannot add or alter anything: read-only keys do not
  *   merely fail to write, the write tools are never registered for them, so they
@@ -37,7 +37,7 @@
  * URL query key and ran as the service role until they were made consumers of
  * this module (SMD-1252, FORK.md change 64); and the vendored recipes and
  * integrations that compared the same way — nine MCP and HTTP servers, four
- * workers and one webhook receiver (SMD-1455, change 65). Each imports
+ * workers and one webhook receiver (SMD-1455, change 67). Each imports
  * `../_shared/auth.ts` — a Supabase Edge Function is bundled from
  * supabase/functions/, one level under which every function sits, and
  * `_shared/` beside it is the one place a shared module can live — so a

@@ -22,7 +22,7 @@
 // server-portable/auth.ts, copied so the Docker build has it in its context — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
-// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
+// that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // The import is this file's first from outside its own directory (see the Dockerfile).
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";

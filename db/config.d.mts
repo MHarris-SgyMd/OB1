@@ -270,13 +270,28 @@ export type RoleGrant = { table: string; privileges: readonly string[]; since: s
  * caller, grouped by the role that needs each group. The single spelling read by
  * preflight's `write privileges` check, `migrate.ts --grant`, and db/README.md.
  */
-export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "extraction", readonly RoleGrant[]>>;
+export const ROLE_GRANTS: Readonly<Record<"capture" | "server" | "worker" | "extraction" | "querylog", readonly RoleGrant[]>>;
 /** The order groups are issued and documented in. */
-export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction")[];
+export const ROLE_GRANT_GROUPS: readonly ("capture" | "server" | "worker" | "extraction" | "querylog")[];
 /** The (table, privilege) pairs the core capture/edit/search path needs unconditionally — preflight's refusal set. */
 export const CAPTURE_WRITES: readonly { table: string; privilege: string; since: string }[];
 /** The (table, privilege) pairs 016's enqueue trigger adds to the capture path while ob1_config.entity_extraction_key is set — thought_work_claims INSERT/UPDATE, upserted as the caller on every capture. */
 export const EXTRACTION_TRIGGER_WRITES: readonly { table: string; privilege: string; since: string }[];
+/** The opt-in query log (migration 034, SMD-1295): the one spelling of its env flag, table/function names, tool sets, and retention window, shared by server, preflight and tests. */
+export const QUERY_LOG: Readonly<{
+  flag: "OB1_QUERY_LOG";
+  on: "on";
+  table: "query_log";
+  prune: "prune_query_log";
+  retentionEnv: "OB1_QUERY_LOG_RETENTION_DAYS";
+  retentionDaysDefault: number;
+  searchTools: readonly string[];
+  actionTools: readonly string[];
+}>;
+/** True when a server env selects the query log on (the fork's "on" idiom). */
+export function queryLogEnabled(env: Record<string, string | undefined> | undefined | null): boolean;
+/** prune_query_log's retention window in days, from OB1_QUERY_LOG_RETENTION_DAYS or the default. */
+export function queryLogRetentionDays(env: Record<string, string | undefined> | undefined | null): number;
 /** Every table named across the given groups (default: all), in group/list order, de-duplicated. */
 export function grantedTables(groups?: readonly string[]): string[];
 /** GRANT statements giving `role` the privileges the given groups need; `present` skips absent tables; the role is quoted. */

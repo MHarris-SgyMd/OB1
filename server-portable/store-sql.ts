@@ -32,6 +32,8 @@ import type {
   ListFilters,
   MutationResult,
   ProvenanceNode,
+  QueryActionLog,
+  QuerySearchLog,
   SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
@@ -49,6 +51,26 @@ import type {
 /** pgvector accepts a bracketed list; a JS number[] does not bind as a vector. */
 function toVector(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
+}
+
+/**
+ * A Postgres array literal for a `::uuid[]` bind. Bun.sql serialises a JS array
+ * by joining with commas — `a,b`, not `{a,b}` — which array_in rejects (the
+ * literal must start with `{`), so both array columns are built by hand here as
+ * toVector builds a vector. The ids come from our own search results (validated
+ * uuids), never from free text. Empty stays `{}`.
+ */
+function toUuidArray(ids: string[]): string {
+  return `{${ids.join(",")}}`;
+}
+
+/**
+ * A Postgres array literal for a `::real[]` bind, aligned to a uuid array. A
+ * null or non-finite score is the keyword NULL (a returned id whose score the
+ * retrieval path did not carry); a finite number is itself.
+ */
+function toRealArray(xs: (number | null)[]): string {
+  return `{${xs.map((x) => (x === null || !Number.isFinite(x as number) ? "NULL" : String(x))).join(",")}}`;
 }
 
 export class SqlStore implements ThoughtStore {
@@ -264,9 +286,13 @@ export class SqlStore implements ThoughtStore {
             ${toVector(opts.embedding)}::vector
           ) AS r`;
 
-    const id = (rows[0]?.r as { id?: string } | undefined)?.id;
+    const r = rows[0]?.r as { id?: string; existed?: unknown; supersedes?: unknown } | undefined;
+    const id = r?.id;
     if (!id) throw new Error("upsert_thought returned no id.");
-    return { id };
+    // 035: `existed` says the text was already there and the envelope's
+    // provenance was not written. Passed on only when the body said (a
+    // database before 035 returns none, and a guess would be a lie).
+    return { id, ...(typeof r?.existed === "boolean" ? { existed: r.existed, supersedes: typeof r.supersedes === "string" ? r.supersedes : null } : {}) };
   }
 
   async updateThought(opts: {
@@ -360,6 +386,25 @@ export class SqlStore implements ThoughtStore {
     } catch {
       return {};
     }
+  }
+
+  async logSearch(row: QuerySearchLog): Promise<void> {
+    // Migration 034. Arrays bind as Postgres arrays and cast to their element
+    // type; result_scores may carry nulls, which bind cleanly. filter is an
+    // object, never a string (the jsonb rule at the top of this file).
+    await this.sql`
+      INSERT INTO query_log
+        (kind, tool, agent_id, query, match_count, threshold, recency_weight, filter, result_ids, result_scores)
+      VALUES
+        ('search', ${row.tool}::text, ${row.agentId ?? null}::uuid, ${row.query}::text,
+         ${row.matchCount}::int, ${row.threshold}::real, ${row.recencyWeight}::real,
+         ${row.filter}::jsonb, ${toUuidArray(row.resultIds)}::uuid[], ${toRealArray(row.resultScores)}::real[])`;
+  }
+
+  async logAction(row: QueryActionLog): Promise<void> {
+    await this.sql`
+      INSERT INTO query_log (kind, tool, agent_id, target_id)
+      VALUES ('action', ${row.tool}::text, ${row.agentId ?? null}::uuid, ${row.targetId}::uuid)`;
   }
 
   async close(): Promise<void> {

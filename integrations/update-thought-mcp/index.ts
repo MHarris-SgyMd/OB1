@@ -8,7 +8,7 @@
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
-// that write. FORK.md change 65; extensions/test-auth.ts exercises it.
+// that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 /**
  * update-thought-mcp — Standalone MCP Edge Function that adds a single tool:
  *   update_thought(id, content?, metadata_patch?, if_unchanged_since?)
@@ -34,7 +34,7 @@
  * (the older single MCP_ACCESS_KEY still works, compared by digest), presented
  * as x-brain-key, x-access-key, ?key= or a bearer token — the core server's
  * path. update_thought writes, so a read-scoped key is given no tool at all
- * (SMD-1455, FORK.md change 65).
+ * (SMD-1455, FORK.md change 67).
  *
  * Env vars:
  *   SUPABASE_URL

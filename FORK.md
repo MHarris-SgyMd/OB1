@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-five numbered changes on top of the pin. Seven fix defects found in an
+Sixty-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–65 are the numbered `###` sections** further down, which is
+sections. Changes **18–67 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -183,13 +183,15 @@ scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
 <24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 65 widened it to every vendored server
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
-<17 vendored files>              # change 65 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
-recipes/_shared/auth.ts          # change 65 (new file — server-portable/auth.ts byte for byte)
-integrations/_shared/auth.ts     # change 65 (new file — the same)
-integrations/consolidation-workers/_shared/auth.ts  # change 65 (new file — the same, beside the workers' existing _shared/)
+<17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
+recipes/_shared/auth.ts          # change 67 (new file — server-portable/auth.ts byte for byte)
+recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — the same)
+recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same)
+integrations/_shared/auth.ts     # change 67 (new file — the same)
+integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -1387,7 +1389,10 @@ document lacks and scores against the exact answer within it.
   that many rows to find its candidates among, so it visits about `N / 25`
   tuples at the default count and the seeded bounds are its ceiling on tables
   past ~2.5 million rows; bench section D runs the walk's own statement on the
-  thin filters to show the bounds working when it is reached.
+  thin filters to show the bounds working when it is reached. (Measured at a
+  million and ten million rows by SMD-1018, below: the planner serves those
+  filters from the GIN index and the bounds are never what binds through the
+  function.)
 - **A `RETURN QUERY` branch per path, not an OR.** Drafts three through eight kept
   a single query text with `v_unfiltered OR metadata @> filter` and paid for it
   in layers: the OR against a parameter hid the GIN index from the generic plan,
@@ -1414,7 +1419,9 @@ document lacks and scores against the exact answer within it.
   110-row filter at 42 of 50 under the generic plan; with the multiplier at 8
   both complete. Arithmetic for the cap: `v_fetch / selectivity`; pgvector's
   default covers a 0.1% filter to `match_count` 5 on a million rows, 100,000
-  covers 25. They are seeded ONCE at **database** level by a DO block in the
+  covers 25 — arithmetic that SMD-1018 measured at a million and ten million
+  rows and retired; the "At scale" section at the end of this change has what
+  the bounds actually buy. They are seeded ONCE at **database** level by a DO block in the
   migration, and only where nothing has set them — not declared on the function.
   The third and fourth drafts put them on the function and then built a
   compensating layer: a function-level SET overrides any database or role value
@@ -1580,7 +1587,9 @@ mode. Section D runs the walk's own statement on the thin and empty filters at
 bounds are in force (seeded at database level, the session reconnected to read
 them). That is what the function no longer pays for those filters, and what
 the bounds buy when a table large enough to walk for them arrives — past ~2.5
-million rows at the default count, ~400,000 at the ceiling of 500.
+million rows at the default count, ~400,000 at the ceiling of 500, said the
+arithmetic; the "At scale" section below has the measurement, which is not
+that.
 
 **Around it.** `deploy/compose.yaml`, `db/with-postgres.sh` and the CI service
 containers now pin `pgvector/pgvector:0.8.6-pg16` instead of the floating `pg16`
@@ -1625,9 +1634,328 @@ arranges sixty nearer rows in front of the filtered ones and asserts both come
 back, including one reachable only through its chunk; `test-live.ts` [5b] asserts
 a 1% filter over 1,000 random rows agrees with an exact scan on a real server.
 
-**Not done here.** SMD-969 asks whether the *unfiltered* candidate scan reaches
-the HNSW index at scale; this bench explains only the filtered case, and only at
-1% — measured in change 36, at the shipped width, where the answer was no.
+**At scale — a million and ten million rows (SMD-1018).** Everything above
+this line was measured at 10,000 and 100,000 rows, and the header's claims
+past that — the seeded cap "covers tables to ~2.5 million rows at the default
+count", the walk "visits about `v_fetch × N / v_exact` tuples", the routing
+count's cost "grows with the matches" — were arithmetic. The bench now loads a
+million and ten million rows (`OB1_BENCH_SCALES`), and the arithmetic did not
+survive contact with the planner. Machine, for every number below: Apple M5
+Pro host, podman libkrun VM with 8 vCPUs and 14.8 GB, `pgvector/pgvector:0.8.6-pg16`
+(PostgreSQL 16.15) at its image defaults — `shared_buffers` 128 MB,
+`work_mem` 4 MB — so the ten-million-row index lives in the VM's page cache,
+not in Postgres's buffers. The 64-dimensional random corpus is the one above —
+the vectors, the queries and the share tiers' membership at the two published
+scales are exactly the published run's (nearest query-to-row cosine 0.560 and
+0.588, as before), though each row's metadata now also carries the fixed-count
+tiers it fell into, so the heap and the GIN index are a little wider — streamed
+from the same generator in two passes so nothing holds a million vectors in
+memory. The before arm runs at the published scales only; above them the
+question is about the shipped function.
+
+**Three full passes were run, and the tables are the third's — except the
+two published scales, re-measured twice more after the third review pass
+found the after arm's index full of dead twins (below); their rows are the
+last pass's.** Latencies on this VM run two to two and a half times the
+lines published above for the same tiers and vary by about 30% from pass to
+pass (the before arm's default path at 100,000 rows: 2.4 ms in one pass, 3.3
+in the next, against the published 1.26); the after arm's default path
+matches the before arm's within that spread, as it did in the published run,
+and the recall columns reproduce within 0.5. Between passes the recall
+figures agreed within 0.3 — with one exception that turned out to be the
+finding: for filters matching roughly half a percent to one percent of
+the table, the planner's choice between the GIN index and the HNSW walk
+flipped from pass to pass, at a million rows and at ten million, on the same
+rows under a fresh `ANALYZE` each time. Where a cell below has two values,
+that is why.
+
+*The load.* Bun's SQL driver has no COPY protocol (a `COPY … FROM STDIN` hangs),
+so rows go in as multi-row INSERTs into a table whose secondary indexes have
+all been dropped and whose user triggers are disabled — 008's audit trigger
+would otherwise write a row per row at every scale (it is in 001–013, so the
+published run's `thought_audit` held a row per thought where this run's is
+empty; nothing after 014 reads it), and 016's extraction trigger only above
+100,000 rows, since the before arm loads under 001–013 and the whole schema
+is applied above; what remains per row during the INSERTs is the heap and the
+primary key, the same under either schema — the set of indexes rebuilt
+afterwards is not, 023's and 025's three existing only under the whole one,
+which is what the "other indexes" column counts — and only the INSERT
+round-trips are timed. One
+more thing the arms did differently, found by the third review pass and
+fixed before the published-scale tables below were re-measured: at the two
+published scales the after arm applies 023 onto the loaded rows, and 023's
+apply-time fingerprint backfill rewrites every one of them (none carries a
+fingerprint, and the column is indexed, so the update is not HOT) — a second,
+identical HNSW entry per row beside a dead twin, which no VACUUM removed, so
+the earlier passes measured the 10,000- and 100,000-row tables on a graph
+half full of dead tuples that the large scales, whose schema is applied to an
+empty table, never had. The after arm now VACUUMs after its migrations, and
+the two scales were re-measured, twice — once after a plain VACUUM, once
+after the VACUUM FULL the code now runs, which rewrites the heap and rebuilds
+every index from scratch, the state the load produced, with the dead-tuple
+count asserted at zero. The recall floor did not move (8.2 and 5.0 of 10
+against 8.3 and 5.0: dead entries are skipped, not scored). What moved, in
+both re-measurements, were the calls that read the GIN bitmap over the table
+— the 50% tier 8.3 ms against 16.2 at 100,000 rows, its routing count 3.0
+against 11 — while the default path and the ceiling moved by less than the
+pass-to-pass spread. The published lines above predate 023, so they never had
+the twins; what separates this VM from them is the machine and the day. The indexes are built afterwards with
+`maintenance_work_mem` sized for the graph. The parallel build keeps the graph
+in dynamic shared memory, which a container gets 64 MB of by default — the
+first attempt failed at a million rows with "could not resize shared memory
+segment … No space left on device" — so `with-postgres.sh` now takes
+`OB1_PG_SHM_SIZE`. At ten million rows the graph fit in 9 GB (the container
+peaked at 10.0 GB; pgvector's "graph no longer fits" NOTICE never fired) and
+built in nineteen minutes. The bench's section L, as printed (the two large
+runs with `OB1_PG_SHM_SIZE=4g` and `OB1_PG_SHM_SIZE=11g
+OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say; the count in
+the "other indexes" column is the schema's — four under 001–013, seven under
+the whole set — and was added to the printout after the two large runs):
+
+| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 10,000 | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
+| 100,000 | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
+| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
+| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
+
+The index is 1.4× its heap at this width and about 570 bytes a row (the
+sizes are MiB; the heap is 410 bytes a row); the build
+runs at ~9,000 rows a second in memory. A hundred million rows was not run:
+by these slopes it is a 39 GB heap, a 54 GB index, 23 GB of chunks and their
+index, a graph that wants ~90 GB of `maintenance_work_mem` to build in memory
+(or pgvector's far slower on-disk phase), and about three hours of build — a
+machine with 128 GB and 200 GB of fast disk. Nothing below is stated past ten
+million except as that extrapolation.
+
+*The unfiltered default path, and the floor under everything.* Ten rows asked,
+no filter, median over 50 random queries, and — new in this run — the rows
+scored against an exact scan of the whole table, at pgvector's default
+`ef_search` of 40 and again at 400:
+
+| rows | median ms, asked 10 | median ms, asked 500 | in exact top-10 (ef_search 40) | at ef_search 400 | median ms at 400 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 1.82 | 15.3 | 8.2 | 10.0 | 4.7 |
+| 100,000 | 3.25 | 54.8 | 5.0 | 9.5 | 13.4 |
+| 1,000,000 | 6.95 | 181 | 2.2 | 6.8 | 41.7 |
+| 10,000,000 | 17.7 | 224 | 0.5 | 2.9 | 49.0 |
+
+The default path costs about 2× per decade of rows and is 18 ms at
+ten million; the ceiling of 500 rows is a quarter of a second (0.7 s and 1.2 s in the two earlier passes — the widest spread in these runs) there. But the
+recall column is the finding: at the default `ef_search` the index returns
+**two of the true ten** at a million random rows and one in twenty at ten
+million, and every filtered figure below sits under that floor — a 50% filter
+cannot beat the index with no filter in the way. Raising `ef_search` tenfold
+recovers most of it for 6× the latency. This is the "recall at these scales
+is a floor" caveat the ticket carried, now with a number on it: random
+uniform vectors in 64 dimensions are HNSW's worst case (every distance is
+nearly the same distance), a real embedding corpus is clustered and will do
+better, and how much better is a measurement on real vectors this run cannot
+make (SMD-1039's corpus is the place; SMD-1465 is the question). What it can
+say is that nothing in `match_thoughts` sets `ef_search`, so at whatever
+scale a real brain's recall turns, the knob is a session or database setting
+away and costs what the last column says.
+
+*Filtered, through the function.* Ten asked, 50 queries, the tiers above
+plus three fixed at 900, 2,000 and 5,000 matching rows wherever that is under
+half the table (so not 5,000 at 10,000 rows), so the same filter can be
+followed as the table grows. The `matches` column is
+what was actually planted (a row count is a coin per row). At a million rows,
+with the plan the function got this pass, and in brackets what the same tier
+did in the two passes where the planner walked HNSW for it:
+
+| filter | matches | returned | in exact top-10 | median ms | how the function answered |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 50% | 499,443 | 10.0 | 3.0 | 38.6 | route ~27 ms, then the HNSW walk |
+| 10% | 99,748 | 10.0 | 5.9 | 48.1 | route ~5 ms, then the HNSW walk |
+| 1% | 9,951 | 10.0 | 10.0 (9.0–9.2) | 32.8 (279–287) | the "walk" branch served by GIN — exact (passes 1–2: the HNSW walk) |
+| 5,000 rows | 4,916 | 10.0 | 10.0 (8.8) | 20.3 (352–368) | the same (passes 1–2: the HNSW walk) |
+| 2,000 rows | 1,963 | 10.0 | 10.0 | 12.1 | the "walk" branch served by GIN — exact, all three passes |
+| 0.1% | 1,034 | 10.0 | 10.0 | 9.0 | the same |
+| 900 rows | 934 | 10.0 | 10.0 | 8.7 | the exact branch |
+| 0.01% | 99 | 10.0 | 10.0 | 1.2 | the exact branch |
+| nothing | 0 | 0.0 | — | 0.3 | one GIN probe |
+
+And at ten million:
+
+| filter | matches | returned | in exact top-10 | median ms | how the function answered |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 50% | 4,998,406 | 10.0 | 0.8 | 268 | route ~240 ms of it, then the HNSW walk |
+| 10% | 999,827 | 10.0 | 1.9 | 151 | route ~50 ms, then the HNSW walk |
+| 1% | 99,633 | 10.0 | 10.0 (6.0) | 753 (1,450) | the "walk" branch served by GIN — exact, and slow (pass 2: the HNSW walk) |
+| 0.1% | 10,231 | 10.0 | 10.0 | 97 | the same, all three passes |
+| 5,000 rows | 5,088 | 10.0 | 10.0 | 52 | the same |
+| 2,000 rows | 1,978 | 10.0 | 10.0 | 30 | the same |
+| 0.01% | 959 | 10.0 | 10.0 | 10.6 | the exact branch |
+| 900 rows | 886 | 10.0 | 10.0 | 9.4 | the exact branch |
+| nothing | 0 | 0.0 | — | 0.2 | one GIN probe |
+
+**What the arithmetic got wrong.** The header modelled the walk branch as an
+HNSW walk that visits `v_fetch × N / matches` tuples and is cut by the seeded
+bounds when that exceeds 100,000 — so at ten million rows a filter matching
+2,000 thoughts (200,000 tuples by the formula) should have returned short
+under the seed and complete only under a larger one. It returned 10 of 10 in
+about 30 ms under the seed, under pgvector's defaults, and under any bound at
+all, in every pass, because the planner never walked HNSW for it: with the
+filter's selectivity in view (custom plan) it took the GIN index for the
+`thoughts` side and the parent's GIN index for the chunk side, sorted the
+matches by distance, and answered exactly. Section C reads that off the
+deployed body at every scale, and section E runs every walk tier through the
+function under the seeded bounds, under pgvector's defaults (`20000 / 1`) and
+under the seed with `ef_search` raised — the ticket's own verification,
+"returns exact under the seeded bounds and short under the defaults", asked
+of the function rather than of a statement extracted from it — beside the
+exact branch's own statement with its floor lifted to cover the same tier.
+The third pass's section E, with the earlier passes' HNSW-walk cells in
+brackets where the plan differed. The seeded column is section B's call for
+the same tier made again later in the same session, as the paired control for
+the other settings; where it reads under B's median, the difference is cache
+warmth:
+
+| rows | filter | matches | "walk visits" by the formula | seeded: in exact top-10 / ms | defaults: in exact top-10 / ms | ef_search 400: in exact top-10 / ms | exact branch, floor lifted: in exact top-10 / ms |
+| ---: | --- | ---: | ---: | --- | --- | --- | --- |
+| 1,000,000 | 0.1% | 1,034 | 38,685 | 10.0 / 8.5 | 10.0 / 9.6 | 10.0 / 9.8 | 10.0 / 9.3 |
+| 1,000,000 | 2,000 rows | 1,963 | 20,377 | 10.0 / 15.2 | 10.0 / 13.7 | 10.0 / 12.5 | 10.0 / 15.6 |
+| 1,000,000 | 5,000 rows | 4,916 | 8,137 | 10.0 / 22.6 (8.8 / 332) | 10.0 / 20.7 (**4.9** / 116) | 10.0 / 21.7 (8.9 / 364) | 10.0 / 28.4 |
+| 1,000,000 | 1% | 9,951 | 4,020 | 10.0 / 37.9 (9.2 / 283) | 10.0 / 41.2 (**5.5** / 119) | 10.0 / 41.8 (9.2 / 322) | 10.0 / 70.9 |
+| 1,000,000 | 10% | 99,748 | 401 | 5.9 / 67.0 | 5.9 / 65.7 | 6.6 / 91.9 | 10.0 / 784 |
+| 1,000,000 | 50% | 499,443 | 80 | 3.0 / 40.9 | 3.0 / 38.1 | 6.4 / 66.0 | — |
+| 10,000,000 | 2,000 rows | 1,978 | 202,224 | 10.0 / 30.1 | 10.0 / 31.7 | 10.0 / 31.0 | 10.0 / 18.6 |
+| 10,000,000 | 5,000 rows | 5,088 | 78,616 | 10.0 / 51.7 | 10.0 / 52.3 | 10.0 / 51.4 | 10.0 / 42.0 |
+| 10,000,000 | 0.1% | 10,231 | 39,097 | 10.0 / 93.5 | 10.0 / 92.5 | 10.0 / 92.4 | 10.0 / 119 |
+| 10,000,000 | 1% | 99,633 | 4,015 | 10.0 / 708 (6.0 / 1,463) | 10.0 / 713 (**2.7** / 368) | 10.0 / 719 (6.2 / 1,572) | 10.0 / 944 |
+| 10,000,000 | 10% | 999,827 | 400 | 1.9 / 125 | 1.9 / 124 | 2.5 / 158 | — |
+| 10,000,000 | 50% | 4,998,406 | 80 | 0.8 / 230 | 0.8 / 233 | 2.9 / 268 | — |
+
+Read across a row and four things fall out.
+
+- **Between about half a percent and one percent of the table, the walk
+  branch is on the planner's edge, and which side it lands on is decided by
+  the statistics sample.** At a million rows the 5,000-match and 10,000-match
+  tiers walked HNSW in two passes (332 ms and 283 ms for 8.8 and 9.2 of 10)
+  and were served from the GIN index in the third (23 and 38 ms for 10 of
+  10); at ten million the 1% tier was served from GIN in two passes (753 and 794 ms for 10 of 10) and walked HNSW in one (1,450 ms for 6.0). Same rows, same statistics
+  target, a fresh `ANALYZE` each time. The GIN side of the coin is exact and
+  an order of magnitude cheaper; the HNSW side is approximate, slower, and the
+  only place the seeded bounds do anything.
+- **The seeded bounds matter on that HNSW side, and nowhere else.** In the
+  passes that walked, the same tiers lost three to four points of recall
+  under pgvector's defaults (8.8 → 4.9, 9.2 → 5.5, and 6.0 → 2.7 at ten
+  million) and kept them under the seed. Which of the two bounds bit is
+  inferred, not measured: section E moves both together (`20000 / 1` against
+  `100000 / 8`), and the formula that says 4,000–8,000 tuples sit well under
+  the default cap of 20,000 is the formula this section retires — pgvector
+  counts every tuple the scan emits, filter-rejected ones included, so the
+  cap may be what bit. The second review pass of 014 measured the memory
+  bound binding first at 100,000 rows (`work_mem × 1` is 4 MB; the visited
+  set is graph nodes, not emitted tuples), which is the reading here too, and
+  two arms that move one bound each (SMD-1464) would settle it. Either way
+  the header's "pgvector's default covers 500,000 rows at the default count"
+  is wrong in the direction that matters, and the seed covers the case.
+  Everywhere else nothing binds:
+  every thinner tier is served by GIN whatever the bounds say, and the broad
+  tiers (10%, 50%) need a few hundred tuples and are bound by nothing but
+  `ef_search`. **Neither seed should scale with the table**; what they buy is
+  the HNSW side of that band, and they buy it.
+- **The exact branch with its floor lifted is exact, and its cost is the
+  match count: 6–8 µs a matching row at a million rows** (28 ms for 4,916,
+  71 ms for 9,951 — primary-key probes into a heap that fits in the page
+  cache), and 9–17 µs at ten million across the passes (42 ms for 5,088 and
+  944 ms for 99,633 in the third; 165 ms for 10,231 in the second), where the
+  heap no longer sits in Postgres's buffers. That puts it well under the HNSW walk in the
+  band (28 against 332, 71 against 283) and a little over the GIN-served walk
+  (28 against 23, 71 against 38), and far over either at 100,000 matches
+  (784 ms against 67 for the 10% tier at a million rows). So raising the
+  threshold from 1,000 to about 10,000 is not a universal win but a hedge: it
+  takes the band off the planner's coin at the cost of a few tens of
+  milliseconds on the GIN side, and it should not scale with the table. That
+  is a decision with a migration behind it, not a bench's to make; the
+  numbers are in SMD-1464, and the header's arithmetic is retired here either
+  way.
+- **The recall the walk loses on broad filters is the index's, not the
+  filter's.** 10% and 50% at a million rows score 5.9 and 3.0; the unfiltered
+  default path scores 2.2 on the same corpus. The iterative scan keeps going
+  for a filter and finds a little more than the plain scan does — which is the
+  fix working — and `ef_search` at 400 lifts both tiers to 6.4–6.6. A brain
+  that large wants a larger `ef_search`, whatever it does about filters, and
+  the measurement to size it is on real vectors (above).
+
+*Two costs that do grow with the table, measured.* The routing statement —
+the capped GIN collection every filtered call runs first — builds its whole
+bitmap before the `LIMIT v_exact + 1` can stop anything, and at 50% that is
+0.8 ms at 10,000 rows, 3.0 at 100,000, 27 at a million and 240 at ten
+million: about 50 ns a matching row, linear, paid by every broad filtered call
+before the walk starts, and at ten million it is nine tenths of the 50%
+tier's whole latency. The mitigation the twelfth review pass declined for want
+of a number — estimate the match count from `pg_class.reltuples` and the
+planner's `@>` selectivity, or a `TABLESAMPLE`, and run the capped collection
+only when the estimate is plausibly under the threshold — now has its number
+and is SMD-1463. And the plan mode: plpgsql runs a statement's first five
+executions on custom plans and may switch to a generic one after; for the walk
+branch the generic plan has the filter as a parameter and a flat estimate, and
+section C shows what that costs at a million rows — the 50% tier 292 ms
+generic against 15 custom (a GIN bitmap over 499,443 rows sorted by distance,
+where the custom plan walked HNSW for 80 tuples), the 0.1% tier 360 ms
+against 6 (the chunk side walking its HNSW index through some twenty thousand
+parent lookups where the custom plan took the parent's GIN bitmap).
+At ten million the generic plan for the 50% walk takes **11.6 seconds** (a
+GIN bitmap over 4,998,406 rows — hundreds of thousands of its heap blocks
+lossy under 4 MB of `work_mem`, every one rechecked — sorted by distance, on
+both sides) where the custom plan walks HNSW in 15 ms, and `jit = off`
+changes nothing there (11.7 s): that cost is the bitmap. Every other generic
+plan at ten million carries 30–110 ms its custom twin does not — the routing
+count on the EMPTY filter 31 ms against 0.03, the exact branch 108 against
+24, the 2,000-row walk 136 against 20 — and with `jit = off` those become
+0.03, 11 and 23: **it is JIT.** The generic plan's flat estimate carries these
+statements' costs past `jit_above_cost` (100,000) somewhere between a million
+rows (where the same generic route on the empty filter costs 0.02 ms) and ten
+million, and every call then compiles its expressions, the way 017 found
+`search_thoughts_hybrid` doing (15 ms where its arms cost 1.3). The second
+pass of this bench could only infer that, because its EXPLAIN ran with
+`COSTS OFF`, which also suppresses the JIT summary; the explainers now print
+costs and section C carries the `jit = off` arm. One more thing the harness
+change moved: the shared rewrite now splices the routing collection into the
+exact branch as one materialized CTE where it had spliced a scalar subquery
+per `v_ids` reference — two GIN collections per call where the function runs
+one — so `bench-plan.ts`'s filtered `exact` rows and section C's exact rows
+read one collection fewer than 019's header publishes for the same tier
+("5.4–6.5 ms for 936 matching rows at 100,000"); the function did not change,
+the harness did, and 019 is checksummed, so the note lives here and in
+bench-plan's header. Every session of this bench stayed on custom plans throughout
+— the medians above are the custom plans' — but the choice is the planner's
+estimate against its own average, made per session after five calls, and a
+session that lands on the generic plan pays these numbers on every filtered
+call. 014 removed the function-level `plan_cache_mode` on purpose (the ninth
+review pass, above); whether it comes back is part of SMD-1464.
+
+*Section D at scale.* The walk's own statement forced onto every tier under
+the threshold and the empty filter, where it has next to nothing to find:
+29 ms for ~1,000 matches and 145–147 ms for 90 or fewer at 100,000 rows,
+395 ms (900 matches), 1,193 ms (99) and 1,065 ms (none) at a million, and
+85–99 ms at ten million — the bounds hold it to about a second whatever the
+table, which is what they are for, and the function never sends those filters
+there.
+
+*What was not corrected, and where the correction lives.* The ticket asked
+for 014's header to be corrected where its arithmetic does not hold. It does
+not hold, and the header is not edited: migrations are append-only and
+checksummed — the migrator prints `ALREADY APPLIED BUT FILE CHANGED` and exits
+non-zero on any edited migration (change 56 made `--reapply` refuse the same
+way), so a comment fix in 014 would cost every deployment a hand edit of
+`schema_migrations`. The correction is this section, the bench's own header,
+and a line in the header of the next migration that redefines
+`match_thoughts`; 019 and 020 carry 014's body comment ("the seeded bounds
+are its ceiling on tables past ~2.5 million rows") verbatim, as snapshots do,
+and the redefinition retires it there.
+
+**Not done here.** A hundred million rows (above: the machine it needs). The
+recall floor on real embeddings rather than random vectors, and the
+`ef_search` that follows from it (SMD-1465). SMD-969 asked whether the
+*unfiltered* candidate scan reaches the HNSW index at scale: at 64 dimensions
+it does at every scale here (section A's row counts and the default path's
+slope, 1.8 → 3.3 → 7.0 → 17.7 ms), and at the shipped width change 36
+measured it to 100,000 rows, where the answer was no until 019; the shipped
+width at a million rows is 4 GB of vectors a run this bench has not made.
 SMD-958 (change 32) built beside this body and SMD-945 (change 37) redefined
 it on this body; neither reintroduced the post-filter.
 
@@ -4631,7 +4959,9 @@ sentinel) — reads `derived_from`/`supersedes` from the payload envelope and
 `supersedes`' existence is the self-FK's. Both ride the envelope like the actor
 (008) and the model (021), so capture sets them and both stores stay in sync; a
 bare re-capture adds provenance but never clears it (that is `update_thought`'s, a
-follow-up — landed as change 60, migration 032). Capture is the only write path this change gives provenance —
+follow-up — landed as change 60, migration 032; and since change 66, migration
+035, a re-capture adds none either: provenance lands on a first capture only,
+and the return says `existed`). Capture is the only write path this change gives provenance —
 `capture_thought` grows optional `derived_from`/`supersedes` inputs.
 
 **Read-back both ways.** `trace_provenance(id)` walks UP the `derived_from` chain
@@ -6683,7 +7013,7 @@ diff with the actor — what 029's `UPDATE` did under the triggers, now by the
 one path. Content, vector, label, fingerprint and windows are untouched unless
 `content` arrived. `derived_from` through the envelope **replaces** the array;
 a merge would be a second verb, and 025's re-capture already does "add if
-empty".
+empty" (until change 66, which drops the fill).
 
 **The row lock is `FOR NO KEY UPDATE` now, not 018's `FOR UPDATE`** — the one
 line of 018's this migration changes, found by the first review pass. Writing
@@ -7237,7 +7567,9 @@ elsewhere:
   3-argument form takes 029's `hashtext('ob1:supersession-review')` before the
   fingerprint lock, so a re-capture filling a NULL pointer is ordered against
   `update_thought`'s cycle walk and the review path's write (change 60's
-  carry-forward).
+  carry-forward). Until change 66: migration 035 drops the fill and, with it,
+  this lock from the capture path — 033's "what a successor must carry" list
+  is superseded by 035's.
 - **One copy of each rule.** `derived_from` is validated through 032's
   `validate_derived_from` — 025's inline copy is gone, and the refusals lose
   their `upsert_thought:` prefix — and both forms hash through 016's
@@ -7252,7 +7584,8 @@ elsewhere:
 **Lock order.** Every writer of `thoughts` now acquires in one order —
 supersession lock, fingerprint lock, row — or a suffix of it, and takes at most
 one lock of each class. A capture naming `supersedes`: supersession →
-fingerprint → the row the text lands on. A capture without: fingerprint → row.
+fingerprint → the row the text lands on (until change 66: fingerprint → row,
+like a capture without). A capture without: fingerprint → row.
 `update_thought` with content: supersession (when named) → fingerprint → the
 edited row; without content: supersession → row. The review path: the proposal
 row `FOR UPDATE` → supersession → the superseding row → `update_thought`
@@ -7332,21 +7665,26 @@ with no pointer, X superseding R, then R's text captured naming X, one after
 another with no race, writes R → X → R. 025's "add if empty" never walked; the
 lock orders the fill against the walk, it does not add one. `trace_provenance`
 is cycle-guarded, so the cost is two rows both labelled superseded; [33] writes
-the loop and shows `update_thought`'s walk seeing it, and **SMD-1453** holds
+the loop and shows `update_thought`'s walk seeing it (as of this change; since
+change 66 that case is [35]'s and asserts the reverse), and **SMD-1453** holds
 whether the fill should walk, refuse, or go — change 60's envelope makes "go"
-possible. Also unchanged on purpose: 022's "unknown vouches for nothing" for a
-caller sending a vector and no label (SMD-1245's question), and the 2-argument
+possible (gone, in change 66: migration 035 drops the fill, and with it the
+supersession lock from the capture path). Also unchanged on purpose: 022's
+"unknown vouches for nothing" for a caller sending a vector and no label
+(SMD-1245's question), and the 2-argument
 form's silence on `derived_from` / `supersedes`.
 
 **The sentinel, and the preflight.** Both bodies carry
 `ob1:capture-takes-fingerprint-lock` (014's convention). `atomic capture` reads
 it over a direct connection beside 022's sentinel and 025's clause, so the
 warning now grades a stale 3-argument body four ways — before 022, before 025,
-before 033, or missing — and a stale 2-argument body two ways — before 005 (no
-guard) or before 033 (005's guard, no lock) — and the remedy is one file in
-every case, since 033 is the last definer of both forms; the "apply 005, then
-025 again" two-step is gone. `test-preflight` walks 021, 022, 025, 003 and 005
-re-applied by hand over 033 and asserts each warning's text and its one remedy.
+before 033, or missing (five, with before 035, since change 66) — and a stale
+2-argument body two ways — before 005 (no guard) or before 033 (005's guard,
+no lock) — and the remedy is one file in every case, since 033 is the last
+definer of both forms (035 since change 66); the "apply 005, then 025 again"
+two-step is gone. `test-preflight` walks 021, 022, 025, 003 and 005 re-applied
+by hand over 033 (over 035, with 033 in the walk, since change 66) and asserts
+each warning's text and its one remedy.
 
 **Where the disclaimers went.** 018's file is applied and hashed by the ledger,
 so its header and COMMENT stay as written and 033 re-issues the COMMENT on
@@ -7379,7 +7717,9 @@ pipeline that writes pointers is bounded by it. A fresh row cannot close a
 loop — only the ON CONFLICT fill can — but which a capture is becomes known
 only under the fingerprint lock, and the supersession lock must precede that
 one, so the lock cannot be narrowed without changing the fill; SMD-1453 holds
-that question together with the fill's.
+that question together with the fill's (answered in change 66: the fill goes,
+the lock with it, and 200 concurrent pointer-naming captures take what 200
+plain ones do).
 
 **A third pass, at the user's call, run rather than read: two documentation
 findings, nothing that fails.** The migrator applied 033 onto a populated
@@ -7405,7 +7745,8 @@ acquisition order read by position in the source (supersession, fingerprint,
 the label read, the INSERT; supersession, fingerprint, the row in
 `update_thought`), no inline copy of either rule left, every earlier piece by
 name, a 2-argument capture attributed, no advisory lock held after a call, the
-residue loop written and seen by the walk, and the trap — 025 re-applied puts
+residue loop written and seen by the walk (as of this change — [35] holds the
+reverse since change 66), and the trap — 025 re-applied puts
 an unlocked 3-argument body back, 005 both, 032 puts 018's order back in
 `update_thought`, 033 restores all three; [22], [23], [31] follow the last
 definer. `test-live` [6f] (479): the four-way, by hand in 018's order to the
@@ -7416,7 +7757,8 @@ and is told `DUPLICATE_CONTENT` when the capture commits, one row holding X; a
 first 4-argument capture with a window held open while a chunkless re-capture
 waits on the same lock, the window kept at the same label and gone at another;
 a capture naming `supersedes` waiting on the supersession lock while one
-naming none is not. `test-upgrade` [12] (147): 033 onto a populated 032 — no
+naming none is not (as of this change; arm 3 asserts the reverse since change
+66). `test-upgrade` [12] (147): 033 onto a populated 032 — no
 column, signature, row, window or audit row moves, the 3-argument form's
 hardened ACL is kept across `CREATE OR REPLACE`, `update_thought` one function
 with the lock before its row where 032's had it after, a same-model re-capture
@@ -7848,7 +8190,270 @@ its key.
 
 
 
-### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto scoped keys through a `_shared/auth.ts`, four onto a compare of digests (one of them through the same module), and check 8's exception list empty (SMD-1455)
+### 65. An opt-in query log turns real use into a replayable eval, and a CI gate holds a recall floor against the searches people actually ran (SMD-1295)
+
+Every retrieval decision this fork has shipped is measured on one corpus the
+baseline already saturates — 441 Linear issues, recall@10 0.98 — so the reranker
+cascade, hybrid fusion, contextual chunks and GraphRAG all came out neutral or
+worse there, and each write-up (and change 30, SMD-1041) names the corpus as the
+reason. The other ground truth a real brain produces on every request — the query
+someone typed, and which returned thought they opened next — the server used to
+discard. This change records it, behind a flag, and gates PRs on it.
+
+**The log (migration 034, `query_log`).** Off by default; `OB1_QUERY_LOG=on`
+makes the two search tools write one row per call (query text, `match_count`,
+`threshold`, `recency_weight`, `filter`, and the ids returned in rank order with
+scores) and the three action tools (`fetch`, `update_thought`, `delete_thought`)
+write one row per touch of a *returned* id. Nothing reads it on the hot path; the
+write is best-effort — a failure is swallowed so it can never fail a search or a
+capture — and it is a new table off the capture path, no trigger, no `thoughts`
+change. A search and the action that followed are **not** joined at write time:
+there is no request/session token in the MCP handlers (008's actor envelope has a
+`session` slot nothing populates), so the link is recovered at export by the only
+keys both rows share — the acting agent (010) and the returned id, within a
+window — a NULL agent its own bucket, not a wildcard. `prune_query_log(p_keep_days)`
+is the retention window (default 30, `OB1_QUERY_LOG_RETENTION_DAYS`; the DELETE
+always bounded by `logged_at`), part of this version because the log is personal
+data at rest — every query typed. `db/config.mjs`'s `QUERY_LOG` is the one
+spelling of the flag, names, tool sets and retention, read by the server,
+preflight and the tests; a `querylog` grant group (query_log `INSERT`, since 034)
+means a self-hosted role that runs `--grant` can turn the flag on and have it
+work — documented, but not enforced, since preflight cannot read a server env
+flag and the log is off by default.
+
+**Export → replay → gate (`evals/`).** `export-queries.ts` reads the log and
+writes a fixture of query text and ids (`query`, `relevant` = the touched ids,
+`baseline` = the recorded ranking): no *thought content* leaves the brain, so it
+is committable — but the `query` strings are the searcher's own words, personal
+data, so committing an export fixture from a real brain commits real queries (a
+maintainer's call). `scripts/check-fork-consistency.mjs` check 9 is the guard: an
+allowlist, not a denylist of field names, so every committed string must be a
+thought id or free text under a known key (`query`/`note`) — a thought body, an
+array of chunks, or a content-derived `title` all fail closed. The attribution is
+click-through relevance — a proxy, a fetch can be a wrong guess — and it collapses
+distinct callers who typed the same query, and every anonymous caller (a NULL
+agent) into one bucket; kept beside the hand-labelled sets, not instead of them. `eval-replay.ts` replays a fixture through the shipped
+`search_thoughts_hybrid` over the live corpus and reports recall@k / MRR against
+`relevant` and rank drift against `baseline`, in `eval-real.ts`'s table shape.
+`db/test-replay.ts` is the CI gate (job *Retrieval replay gate*): offline PGlite,
+no model or key, ~0.5 s, replaying a committed **content-free** synthetic fixture
+(`build-replay-fixture.ts` — seeded vectors and ids) through `match_thoughts` and
+failing when mean recall@5 drops past the fixture's floor. It proves the floor has
+teeth by replaying random query vectors and watching recall collapse (0.154 <
+0.8), so a scrambling regression fails it without a git-revert to stage one.
+
+Upstream status: **not applicable** — a fork-only measurement mechanism; the log
+is a self-hosting feature and the gate is fork CI. **Unfiled** upstream.
+Reproduce: `OB1_QUERY_LOG=on`, capture then `search_thoughts` then `fetch` a
+returned id, and `SELECT kind, tool FROM query_log` shows the two rows;
+`bun db/test-replay.ts` runs the gate offline.
+
+### 66. A re-capture writes no provenance — migration 035 drops 025's "add if empty" from the capture path, so no capture can close a supersession loop and none takes the supersession lock (SMD-1453)
+
+Change 46 (migration 025) let the 3-argument `upsert_thought` fill a NULL
+`derived_from` or `supersedes` on a re-capture of the same text —
+`COALESCE(thoughts.x, EXCLUDED.x)`, add if empty, never change: the fill —
+because `update_thought` then had no way to set provenance after the fact. It
+never asked whether the pointer it filled closed a loop: change 54's cycle walk
+(migration 029) was the review path's, change 60 (migration 032) moved it into
+`update_thought`, and the capture path had none. So R with no pointer, X
+superseding R, then a capture of R's text naming `supersedes` X — sequentially,
+no race — wrote R → X → R, and both rows read as superseded. Change 63
+(migration 033) took the supersession lock around the fill to order it against
+the walk, stated the residue in its header, wrote the loop in `test-schema`
+[33], and measured what the lock cost: a capture *naming* `supersedes` held the
+one brain-wide key from before its label read to commit, HNSW insert included —
+about 145 such captures a second at 1,024 dimensions whatever the worker count,
+a ceiling. The lock existed only for the fill, but which of the two a capture
+is becomes known only under the fingerprint lock, so 033's order made every
+capture naming `supersedes` take it.
+
+SMD-1453 offered three: walk the fill (a refusal on the capture path, the lock
+and its ceiling kept), refuse the fill (a dedup of text that exists raises), or
+drop it. **Migration 035 drops it.** Change 60's envelope — migration 032's
+`p_provenance` on `update_thought`, an object naming `derived_from` and
+`supersedes` — has been the way to set, change and clear provenance on an
+existing thought since it landed, walked, audited, one function; so the fill's
+reason is gone, and the rule has one owner. A capture of text that is already
+there is a dedup: it merges as 021 and 022 say; it does not decide what the
+existing thought derives from or replaces. And the caller is told, not
+surprised: the return carries `existed`.
+
+**Migration 035.** The 3-argument form's `ON CONFLICT` clause no longer sets
+`derived_from` or `supersedes`; a fresh INSERT writes both from the envelope
+as 025 did, a re-capture leaves both columns as they were whatever the envelope
+names. Validation is unchanged and runs before the write is known to be a
+dedup, so a malformed reference is refused either way — a `derived_from`
+naming no thought included; a well-formed `supersedes` naming no thought is
+the FK's, which runs on the INSERT only (see "Closed, and not"). The
+supersession lock leaves the capture path — with no pointer ever written onto
+an existing row there is nothing for it to order. The return is `{id,
+fingerprint, existed, supersedes}`: `existed` true means the text was already
+there, the metadata merged, the vector and windows moved by 021/022, and any
+provenance named not written; `supersedes` is the row's pointer after the
+write, so a caller told the text existed can say what stands. `existed` is "a
+row held this fingerprint when the locked read ran": a writer that bypasses the
+fingerprint lock can make the merge report false (the class 018, 023 and 033
+already exclude), and a legacy row with a NULL fingerprint is not found. Also,
+022's `FOR NO KEY UPDATE` label read runs for every capture now, not only with
+a vector, so the flag is right for a vectorless capture too. The 2-argument
+body is carried verbatim from 033 so 035 is the last definer of both inserting
+forms and preflight keeps one remedy; `update_thought` is not redefined — 033
+stays its last definer, with the order 033 gave it. 032's `COMMENT ON
+review_supersession_proposal` said "a capture's add-if-empty through
+upsert_thought aside", and is re-issued here with the aside replaced by the
+rule, as 033 re-issued `update_thought`'s.
+
+**Callers.** Nothing changes its call. 013's 4-argument form returns `v_result
+|| {"chunks": n}`, so both keys pass through to both servers, and
+`CaptureResult` carries them. The `capture_thought` tool's reply says what
+stands when the caller sent `supersedes` and the text existed — it already
+supersedes what was named, currently supersedes another (`update_thought` would
+replace it), was named as its own predecessor, or holds no pointer and
+`update_thought`'s `supersedes` records it "if that thought exists and closes
+no loop"; the edit is named only where it would record or replace — and says
+the tools cannot set `derived_from` on an existing thought when that was sent.
+Two things at the same boundary are older than this change and follow it: the
+tool pre-checks `derived_from`'s shape as it pre-checked `supersedes`', before
+the two model calls are paid (since 032 a non-id element was refused only at
+the write); and a first capture naming a thought that does not exist is refused
+in the tool's words rather than Postgres's foreign-key text (since 025).
+
+**Why a capture needs no supersession lock.** The lock serialises writers of
+the `supersedes` column so that `update_thought`'s walk reads pointers no
+concurrent writer is changing. A capture now writes that column on a fresh
+row only, and a fresh row cannot be part of a loop: a loop through it needs
+some row's pointer to reach it, and until this transaction commits no other
+transaction can see its id to name it (READ COMMITTED; the FK would refuse an
+id that is not there). A walk running meanwhile reads the committed graph,
+which the fresh row is not yet in; once it is, it is a leaf pointing at an
+existing row. The `KEY SHARE` its FK check takes on the target does not
+conflict with `update_thought`'s `FOR NO KEY UPDATE` (change 60) and is taken
+last; `delete_thought`'s `FOR UPDATE` on the target does conflict, and the
+capture waits for the delete and fails its FK check — 23503, the outcome
+before this change too, and SMD-1462's to word. Change 63's order for every
+writer — supersession, fingerprint, row — stands; the capture path takes the
+suffix fingerprint → row, and `test-live` [6f]'s four writers on two texts
+finish as before.
+
+**Five review passes, triaged.** The first (three reviewers: the SQL, the
+callers and tests, the prose) found no schema defect. Its SQL reviewer ran
+eight workers of captures, edits and review decisions over a seeded brain with
+and without deletes: no loop of any length, no deadlock without deletes, and
+with them only SMD-1462's review-versus-delete cycle, never raised in a capture
+or an edit; the unconditional read against 023's `LOCK TABLE` held under a real
+backfill with fifty concurrent vectorless captures. It found the re-capture
+naming a `supersedes` that names no thought (stated under "Closed, and not"),
+one reply condition, and wording. The second found the number — main had taken
+migration 034 and changes 64 and 65 meanwhile, so this is 035, change 66 and
+`test-schema` [35] — and the one thing the reply could not know: built from the
+caller's inputs alone, it advised recording a pointer the thought already held,
+replacing one without saying so, or an edit `update_thought` refuses; the
+return's `supersedes` and the reply's four shapes are its fix. The third was
+the stop signal: the second pass's `RETURNING` had moved the anchor [35]
+sliced the `ON CONFLICT` clause by, so an assertion passed on an empty tail —
+the anchors are guarded now — and the reply compared ids case-sensitively
+against Postgres's lower-case text. The fourth took another altitude: hostile
+inputs at the tool boundary (the two pre-existing items under "Callers", an
+empty `derived_from` firing the note, and advice that could name an edit
+refused for a loop as well as for a missing thought — it carries the condition
+now); the operator who skipped a week — a brain at 032 with filled pointers, a
+loop, an accepted proposal, a legacy row and windows, upgraded through 033,
+034 and 035 in one run, `--reapply`, then 025, 033 and 034 re-applied by hand
+and `--reapply` again, byte-identical to a fresh install in every function
+body, ACL and COMMENT, two hundred captures, two hundred edits and fifty
+reviews with a backfill mid-way giving no deadlock and no loop; and a cold
+read, which caught a renumber miss hidden by a line wrap and the seams four
+passes had spliced. The fifth enumerated every input cell of the capture tool
+and drove each through the server — no false reply, every advised edit warned
+of the two conditions under which it is refused — ran every CI step locally,
+codemod round trip included, and read this section whole, which is why it is
+this length.
+
+**Closed, and not.** Closed: the capture path cannot write a supersession
+loop by any sequence — a loop now needs a writer outside the two functions
+(raw SQL) — and the ceiling with it. No longer refused, and stated: a
+re-capture naming a `supersedes` that names no thought, or one whose chain
+reaches this thought — the FK and the walk ran only where a pointer is
+written, and a re-capture writes none (a first capture's FK still refuses a
+missing target) — so `existed` comes back true and no provenance is written
+(the dedup's own merge runs: metadata, `updated_at`), and `update_thought`,
+which the reply names with the condition spelled out, refuses it by name
+(`SUPERSEDES_NOT_FOUND`, `WOULD_CYCLE`); the caller learns one step later, not
+never. Changed, and stated: 025's "a re-capture may add provenance the row did
+not have" is gone; a caller that later wants to record what a captured thought
+supersedes calls `update_thought` with the envelope. Not this change's:
+`delete_thought` outside the lock order (SMD-1462); the 2-argument form's
+silence on the envelope's provenance (PostgREST's two-step fallback has
+dropped it since 025); `derived_from`, an array with no acyclicity rule
+anywhere, which `trace_provenance` is cycle-guarded against (change 47); a
+`derived_from` id naming no thought still refused in Postgres's words; 022's
+"unknown vouches for nothing" (SMD-1245). No data changes: a pointer a
+re-capture filled before 035 stays, loop or not — no shipped code sends
+`supersedes` on its own, but `capture_thought` forwards a caller's, so a loop is
+possible wherever a client re-captured existing text naming one; the header
+gives a query that finds a two-row loop, one row per loop, and the envelope's
+`{"supersedes": null}` to clear one.
+
+**The sentinel, and the preflight.** The 3-argument body carries
+`ob1:re-capture-writes-no-provenance` beside 022's and 033's. `atomic capture`
+reads it and grades a stale 3-argument body five ways now — before 022, 025,
+033, 035, or missing — with 035 the one remedy; the cause follows the ledger
+as change 63 made it, and says both halves when the ledger records 033 but not
+035 and the body lacks 033's lock (025 re-applied by hand *and* 035 pending).
+`test-preflight` adds 033 re-applied by hand over 035 to the walk.
+
+**Cost.** Less, and measured with change 63's design — alternating arms each
+on a fresh schema, 033, 035, 033, 035, the cold first arm discarded — at 1,024
+dimensions, HNSW, a 300-row corpus, the SQL store with 64 connections: 50
+concurrent captures naming `supersedes` against 50 naming none, medians of
+four rounds, 292.6 vs 91.3 ms and 284.4 vs 87.7 ms at 033 (3.2×), 94.2 vs
+79.7 ms and 73.6 vs 74.0 ms at 035 (1.2×, 1.0×); 200 concurrent naming
+`supersedes` 1,650.7 and 1,358.6 ms at 033, 342.2 and 308.4 ms at 035 —
+inside the plain arms' own spread (200 naming none: 410.9 / 317.2 ms at 033,
+346.8 / 334.5 ms at 035); one serial capture naming `supersedes` 7.30 / 6.75
+ms at 033, 7.22 / 6.27 ms at 035. The per-call cost is the HNSW insert either
+way; the lock only took the parallelism. More: one index probe per vectorless
+3-argument capture, under the fingerprint lock, on the partial unique index the
+INSERT's arbitration reads anyway.
+
+**Verified.** `test-schema` [35] (841): 035 the last definer of
+`upsert_thought` and 033 of `update_thought`; the 3-argument body read from
+`pg_proc` — 035's sentinel beside the two before it, no supersession lock, an
+`ON CONFLICT` clause that sets neither column while the INSERT lists both, the
+row read unconditional, `existed` and the row's `supersedes` returned, 022's
+DELETE condition kept; a first capture writes provenance with `existed: false`;
+a re-capture naming other provenance leaves the row's, one over a row with none
+fills nothing, a vectorless one says `existed: true`; validation still refuses
+a malformed envelope on a dedup; SMD-1453's sequence writes no loop and
+`update_thought` refuses the same pointer; a capture naming `supersedes` holds
+one advisory lock inside its transaction; both COMMENTs; the trap — 033
+re-applied by hand puts the fill and the lock back and writes the loop, 035
+restores. [22], [23], [31], [33] follow the last definer ([33]'s own trap had
+restored `update_thought` by re-applying 033's whole file, which put 033's
+capture bodies back for every section after it; it restores both names now).
+The 4-argument pass-through is read from 013's source there and called on a
+real server in `test-live` [13]: PGlite aborts with a WASM out-of-bounds on a
+windowed capture through that form, at 033 as at 035. `test-live` (482): [6e]
+arm 3, a capture naming `supersedes` completes while another connection holds
+the supersession lock, its pointer written on its fresh row — where at 033 it
+waited; [13], a re-capture naming provenance over a row with none fills nothing
+and says `existed` with the pointer that stands, the envelope records it, and
+`existed` rides beside `chunks` through the 4-argument form. `test-upgrade`
+[13] (162): 035 onto a populated 033 whose re-capture had just written the
+loop — no column, signature, row, audit row or ACL moves, the loop stays, the
+2-argument body and `update_thought` byte-identical before and after, the next
+such re-capture fills nothing, the loop is cleared through the envelope and
+cannot be re-written, a re-run is a no-op. `test-e2e-sql` [7] (94): the reply's
+four `supersedes` shapes and `derived_from` alone through the server, upper-case
+ids, both refusals the advice warns of, both pre-checks. `test-preflight`
+(205), `test-search-path`, both store suites (each asserting the two keys),
+`test-update-delete`, `test-audit`, `tsc`, the consistency checker.
+
+Upstream status: **not applicable** — upstream's `upsert_thought` writes no
+provenance at all.
+
+### 67. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto scoped keys through a `_shared/auth.ts`, four onto a compare of digests (one of them through the same module), and check 8's exception list empty (SMD-1455)
 
 `server-portable/auth.ts` (one export added, the consumers paragraph), its six
 copies — `extensions/_shared/auth.ts`, and the new `recipes/_shared/auth.ts`,
@@ -8272,6 +8877,7 @@ nothing.
 **Upstream status:** not applicable — the compares are upstream's; the module
 they now use is this fork's.
 
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -8349,12 +8955,12 @@ best, under this repository's name, in a repo whose stated differentiator is
 that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
 carries the audit so a rebase cannot quietly undo it. Three rules are audited
-today. Credentials (SMD-1252, change 64; SMD-1455, change 65): check 8 fails
+today. Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
 the build on a value read from the environment under a credential's name
 compared with an equality operator — the one shared plaintext key seven
 extension servers, and then seventeen more vendored files, compared with `!==`
 before they became consumers of `server-portable/auth.ts` — with counted
-per-file exceptions, and the list has been empty since change 65. Core
+per-file exceptions, and the list has been empty since change 67. Core
 ownership (SMD-1250, change 58): check 7 fails the build on any
 vendored statement that redefines, drops or re-comments a function
 `db/migrations/` owns, the owned set read from the migrations, with counted
@@ -8371,7 +8977,7 @@ check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64 and SMD-1455 as change 65; one ticket holds the rest of the standard
+change 64 and SMD-1455 as change 67; one ticket holds the rest of the standard
 — SMD-1228 (integrations writing around `update_thought`) — and it should land
 the same way.
 

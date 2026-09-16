@@ -11,7 +11,7 @@
  * Auth: named, scoped, hashed keys in MCP_ACCESS_KEYS through ../_shared/auth.ts
  * (the older single MCP_ACCESS_KEY still works, compared by digest) — x-brain-key,
  * x-access-key, ?key= or a bearer token. The worker writes; a read-scoped key
- * may only dry_run (SMD-1455, FORK.md change 65).
+ * may only dry_run (SMD-1455, FORK.md change 67).
  *
  * Requires:
  *   - Enhanced thoughts schema (schemas/enhanced-thoughts)
@@ -26,7 +26,7 @@
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
-// change 65; extensions/test-auth.ts exercises it.
+// change 67; extensions/test-auth.ts exercises it.
 // Deploy this worker with _shared/auth.ts beside the function (supabase/functions/_shared/),
 // as the README says — next to the helpers this directory's _shared/ already held.
 import { createClient } from "@supabase/supabase-js"; // pinned by ../deno.json

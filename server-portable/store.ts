@@ -367,6 +367,22 @@ export type CaptureResult = {
   id: string;
   /** Set when the row was written but its embedding could not be attached. */
   embeddingFailed?: string;
+  /**
+   * Migration 035 (SMD-1453): true when the text was already captured — the
+   * metadata merged, the vector and windows moved by 021/022's rules, and any
+   * `derivedFrom` / `supersedes` named on this call NOT written, since a
+   * re-capture leaves an existing thought's provenance as it is (setting it is
+   * update_thought's). Absent when the database is from before 035, or on the
+   * PostgREST two-step fallback, whose 2-argument form does not say.
+   */
+  existed?: boolean;
+  /**
+   * Beside `existed` (migration 035): the row's `supersedes` pointer after the
+   * write — the fresh row's, or the one the existing row keeps — so a caller
+   * told the text existed can say what stands rather than guess. `null` is a
+   * row with no pointer; absent whenever `existed` is.
+   */
+  supersedes?: string | null;
 };
 
 /**
@@ -611,6 +627,36 @@ export function normaliseAgentResolution(raw: unknown): AgentResolution {
   };
 }
 
+/**
+ * A 'search' row for the opt-in query log (migration 034, SMD-1295): the query
+ * and its arguments, and the ids returned in rank order with their fused scores.
+ * `agentId` is 010's agent when a key was presented, else absent (NULL in the
+ * row). `resultScores` is aligned to `resultIds`; a null element is a returned
+ * id whose score the retrieval path did not carry.
+ */
+export type QuerySearchLog = {
+  tool: string;
+  agentId?: string;
+  query: string;
+  matchCount: number;
+  threshold: number;
+  recencyWeight: number;
+  filter: Record<string, unknown>;
+  resultIds: string[];
+  resultScores: (number | null)[];
+};
+
+/**
+ * An 'action' row for the query log: a fetch/edit/delete of a returned id.
+ * Carries only the acting tool, the agent, and the id touched — export links it
+ * back to the search that returned the id.
+ */
+export type QueryActionLog = {
+  tool: string;
+  agentId?: string;
+  targetId: string;
+};
+
 export interface ThoughtStore {
   readonly kind: "postgrest" | "sql";
 
@@ -713,7 +759,9 @@ export interface ThoughtStore {
      * artifact (digest, synthesis, consolidation) was built from — an array of
      * existing thought ids, validated by upsert_thought or the write is refused.
      * `supersedes` is the one prior thought this one replaces. Both ride the
-     * envelope; both absent is an ordinary first-hand capture.
+     * envelope; both absent is an ordinary first-hand capture. Written on a
+     * FIRST capture only (migration 035): a re-capture of text that exists
+     * leaves that thought's provenance as it is and reports `existed`.
      */
     derivedFrom?: string[];
     supersedes?: string;
@@ -794,6 +842,20 @@ export interface ThoughtStore {
    * the tool names the migration.
    */
   listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | null; limit?: number }): Promise<SupersessionProposal[]>;
+
+  /**
+   * The opt-in query log (migration 034, SMD-1295). The server calls these ONLY
+   * when OB1_QUERY_LOG=on, and the call is best-effort: the handler swallows any
+   * rejection so a log write can never fail a search, a fetch or a capture.
+   * Nothing reads them on the hot path — the export tool reads the table offline.
+   * `logSearch` records one search call and the ids it returned; `logAction`
+   * records a later fetch/edit/delete of a returned id. They are NOT joined at
+   * write time (there is no request token in the handlers); export links them by
+   * (agent, id, window). A store on a schema before 034 will reject — that is
+   * why the calls are guarded and swallowed, not why they are skipped.
+   */
+  logSearch(row: QuerySearchLog): Promise<void>;
+  logAction(row: QueryActionLog): Promise<void>;
 
   close(): Promise<void>;
 }
