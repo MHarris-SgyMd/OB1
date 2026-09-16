@@ -30,6 +30,18 @@
  * assertion whose message names the mechanism, and the guard is updated with
  * the file — the cost of holding behaviour this suite cannot drive.
  *
+ * SMD-1544 (FORK.md change 73) moved the bio worker from the read set to the
+ * driven one. Its source and profile queries filter on JSON paths
+ * (`metadata->>generated_by`, `->>subject` …), which the SQL shim refused, so
+ * on the fork the worker answered 500 at its first query and everything
+ * changes 69 and 71 gave its write paths was held by the text guards alone.
+ * With the shim rendering the path — and handing a timestamp back as a
+ * string, as PostgREST does, which the worker's prompt slices — the worker runs
+ * here on both paths: the sources chosen by the filters, the first profile
+ * through the 3-argument upsert_thought, the rewrite through update_thought
+ * with the previous profile found through three path equalities and the
+ * profile's own row kept out of its sources.
+ *
  * The files are imported under the stand-in extensions/test-auth.ts uses for
  * Deno's two globals and its loader for Deno's specifiers, plus one more
  * rewrite: `@supabase/supabase-js` resolves to compat/supabase-sql, so the two
@@ -42,7 +54,10 @@
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …),
  * schemas/agent-memory (the write-back's own tables) and schemas/readwise-books
- * (the receiver's book cache and its counter). Their tables and
+ * (the receiver's book cache and its counter) — and the bio worker's log
+ * table, `consolidation_log`, from `schemas/entity-extraction/schema.sql`'s
+ * definition alone (that sidecar's other tables include a `thought_entities`
+ * migration 016 owns). Their tables and
  * functions are dropped before they are applied and again at the end, whether
  * or not the run finished (an aborted run's orphaned agent_memories row made
  * the next run's write-back short-circuit on its idempotency key), because CI
@@ -97,9 +112,15 @@ async function dropSidecars() {
     for (const m of text.matchAll(/CREATE TABLE IF NOT EXISTS (?:public\.)?(\w+)/g)) await sql.unsafe(`DROP TABLE IF EXISTS public.${m[1]} CASCADE`);
     for (const m of text.matchAll(/CREATE OR REPLACE FUNCTION (?:public\.)?(\w+)\s*\(/g)) await sql.unsafe(`DROP FUNCTION IF EXISTS public.${m[1]} CASCADE`);
   }
+  await sql.unsafe("DROP TABLE IF EXISTS public.consolidation_log CASCADE");
 }
 await dropSidecars(); // an earlier run that aborted left its tables (CREATE TABLE IF NOT EXISTS keeps their rows)
 for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
+// The bio worker logs each run to consolidation_log (non-fatally, so a missing table would hide nothing but the log): the
+// table from the entity-extraction sidecar's own definition, alone.
+const LOG_TABLE = readFileSync(join(ROOT, "schemas/entity-extraction/schema.sql"), "utf8").match(/CREATE TABLE IF NOT EXISTS public\.consolidation_log \([\s\S]*?\);/)?.[0];
+if (!LOG_TABLE) throw new Error("test-writes.ts: schemas/entity-extraction/schema.sql no longer defines consolidation_log");
+await sql.unsafe(LOG_TABLE);
 
 // ── The model provider, stubbed ──────────────────────────────────────────────
 
@@ -113,6 +134,8 @@ const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
 /** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
 let embeddingsDown = false;
+/** The user message of each bio prompt the stub answered — what the worker's filters gathered. */
+const bioPrompts: string[] = [];
 /** The book Readwise's API answers for any book id — the receiver's write-through cache reads it once. */
 const BOOK = { id: 42, title: "Meditations", author: "Marcus Aurelius", category: "books", source: "kindle", source_url: null, cover_image_url: null, num_highlights: 3, last_highlight_at: null, tags: [] };
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -123,6 +146,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.endsWith("/embeddings")) {
     if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
     return Response.json({ data: [{ embedding: unit(String(body.input)) }] });
+  }
+  // The bio worker's prompt is answered with a profile — text, not metadata — naming its run, so each run's text is new.
+  if (/synthesizing a biographical profile/.test(String(body.messages?.[0]?.content ?? ""))) {
+    bioPrompts.push(String(body.messages?.[1]?.content ?? ""));
+    return Response.json({ choices: [{ message: { content: `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length}).` } }] });
   }
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
@@ -553,26 +581,121 @@ try {
   }
 }
 
+// ── integrations/consolidation-workers/bio (SMD-1544) ────────────────────────
+
+{
+  const F = "integrations/consolidation-workers/bio/index.ts";
+  console.log(`\n[${F}]`);
+  const h = await load(F);
+  // The sources the worker gathers, planted through the function with their enhanced columns set beside it: two
+  // person notes and a decision it should read; a restricted note, a minor decision and a note an earlier bio run
+  // generated that it should not — the last kept out by `.is("metadata->>generated_by", null)`, the filter the shim refused.
+  async function note(content: string, cols: { type: string; importance?: number; tier?: string; generated_by?: string }): Promise<string> {
+    const [{ r }] = await sql`SELECT upsert_thought(${content}::text, ${{ metadata: cols.generated_by ? { generated_by: cols.generated_by } : {}, embedding_model: MODEL }}::jsonb, ${vec(unit(content))}::vector) AS r`;
+    const id = String((r as { id: string }).id);
+    await sql`UPDATE thoughts SET type = ${cols.type}, importance = ${cols.importance ?? 3}, sensitivity_tier = ${cols.tier ?? "standard"} WHERE id = ${id}`;
+    return id;
+  }
+  await note("Test keeps a commonplace book of Stoic passages.", { type: "person_note" });
+  await note("Test reads Marcus Aurelius every morning.", { type: "person_note" });
+  await note("Decided that Test will lead the reading group.", { type: "decision", importance: 5 });
+  await note("Test's medical history, in confidence.", { type: "person_note", tier: "restricted" });
+  await note("Decided that Test brings the biscuits.", { type: "decision", importance: 2 });
+  await note("An earlier profile of Test, written by a bio run.", { type: "person_note", generated_by: "consolidation-bio" });
+  await note("Other collects fountain pens.", { type: "person_note" });
+  const [{ n: logsBefore }] = await sql`SELECT count(*)::int AS n FROM consolidation_log`;
+
+  // First run: the sources through the JSON-path filter, the profile through the 3-argument upsert_thought.
+  const r = await send(h, "POST", "/?name=Test");
+  assert(r.status === 200 && r.json?.action === "created" && r.json?.previous_profile_existed === false && UUID.test(String(r.json?.thought_id)),
+    `POST /?name=Test answers 200 created with the profile's id — the shim renders the JSON-path filter the worker 500ed on (${r.status} ${JSON.stringify(r.json).slice(0, 120)})`);
+  assert(r.json?.source_thought_count === 3 && r.json?.source_types?.person_notes === 2 && r.json?.source_types?.decisions === 1,
+    `three sources, two person notes and a decision — the restricted note, the minor decision and the generated note excluded (${JSON.stringify(r.json?.source_types)})`);
+  const prompt1 = bioPrompts[bioPrompts.length - 1] ?? "";
+  assert(/commonplace book/.test(prompt1) && /reading group/.test(prompt1) && !/medical history/.test(prompt1) && !/earlier profile/.test(prompt1) && !/biscuits/.test(prompt1),
+    "…and the prompt carries exactly those — the generated note kept out by `metadata->>generated_by IS NULL`");
+  assert(/\(\d{4}-\d\d-\d\d, importance: \d+\)/.test(prompt1), "the prompt dates each source from created_at — the string PostgREST hands back, which the shim now does too");
+  const id = String(r.json?.thought_id);
+  const text1 = String(r.json?.profile);
+  if (UUID.test(id)) {
+    judgeCapture("consolidation-bio first run", await row(id, text1), text1);
+    const [side] = await sql`SELECT type, importance, source_type, metadata FROM thoughts WHERE id = ${id}`;
+    assert(side.type === "person_note" && Number(side.importance) === 5 && side.source_type === "system_profile", "the enhanced-thoughts columns follow, by the raw update that carries neither content nor vector");
+    assert(side.metadata.generated_by === "consolidation-bio" && side.metadata.subject === "Test" && side.metadata.artifact_type === "biographical_profile" && side.metadata.source_thought_count === 3,
+      "the profile's metadata names its generator, subject, kind and source count");
+    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'capture'`;
+    assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.source === "consolidation-bio", `008's capture row names the key and the worker (${audit?.actor_name} ${audit?.source})`);
+    const [log] = await sql`SELECT operation, survivor_id, details FROM consolidation_log ORDER BY id DESC LIMIT 1`;
+    assert(log?.operation === "biographical_profile" && log?.survivor_id === id && log?.details?.action === "created", "the run is logged to consolidation_log as created");
+
+    // Second run, same subject: the profile row — a person note naming Test — is kept out of the sources by its
+    // generated_by, found as the existing profile by three path equalities, fed to the prompt, and rewritten
+    // through update_thought — change 69's path on this worker, driven for the first time.
+    await plantWindows(id);
+    await sql`UPDATE thoughts SET embedding_model = 'model-before' WHERE id = ${id}`;
+    const again = await send(h, "POST", "/?name=Test");
+    assert(again.status === 200 && again.json?.action === "updated" && again.json?.thought_id === id && again.json?.previous_profile_existed === true,
+      `a second run answers updated with the same id (${again.status} ${again.json?.action} ${again.json?.previous_profile_existed})`);
+    assert(again.json?.source_thought_count === 3, `…its own profile not among the sources (${again.json?.source_thought_count})`);
+    const prompt2 = bioPrompts[bioPrompts.length - 1] ?? "";
+    assert(prompt2.includes(`<previous_profile>\n${text1}\n</previous_profile>`), "…and the previous profile in the prompt, found through `metadata->>subject`");
+    const text2 = String(again.json?.profile);
+    assert(text2 !== text1 && text2.startsWith("Canonical Profile:"), "the model answered a new profile, so the rewrite moves the text");
+    judgeEdit("consolidation-bio rewrite", await row(id, text2), await oracle("consolidation-bio", text2), text2);
+    const [side2] = await sql`SELECT type, importance, source_type, metadata FROM thoughts WHERE id = ${id}`;
+    assert(side2.type === "person_note" && Number(side2.importance) === 5 && side2.source_type === "system_profile" && side2.metadata.source_thought_count === 3 && side2.metadata.subject === "Test",
+      "the enhanced columns and the metadata are rewritten");
+    const [audit2] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'update' ORDER BY created_at DESC LIMIT 1`;
+    assert(audit2?.actor_name === "MCP_ACCESS_KEY" && audit2?.source === "consolidation-bio", `008's update row names the key and the worker (${audit2?.actor_name} ${audit2?.source})`);
+    const [log2] = await sql`SELECT details FROM consolidation_log ORDER BY id DESC LIMIT 1`;
+    assert(log2?.details?.action === "updated", "the run is logged as updated");
+
+    // Another subject: a profile of its own, the first untouched.
+    const other = await send(h, "POST", "/?name=Other");
+    assert(other.status === 200 && other.json?.action === "created" && UUID.test(String(other.json?.thought_id)) && other.json?.thought_id !== id && other.json?.source_thought_count === 1,
+      `a run for another name creates that subject's profile from its one note (${other.status} ${other.json?.action} ${other.json?.source_thought_count})`);
+    assert((await row(id, text2)).content === text2, "…and leaves the first subject's profile as it was");
+    const [{ n: logsMid }] = await sql`SELECT count(*)::int AS n FROM consolidation_log`;
+    assert(logsMid === logsBefore + 3, `three runs, three log rows (${logsMid - logsBefore})`);
+    // A dry run: the profile answered, nothing written, nothing logged.
+    const [{ n: rowsBefore }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
+    const dry = await send(h, "POST", "/?name=Test&dry_run=true");
+    const [{ n: rowsAfter }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
+    const [{ n: logsAfter }] = await sql`SELECT count(*)::int AS n FROM consolidation_log`;
+    assert(dry.status === 200 && dry.json?.action === "preview" && dry.json?.thought_id === null && /^Canonical Profile:/.test(String(dry.json?.profile)) && rowsAfter === rowsBefore && logsAfter === logsMid,
+      `a dry run previews the profile and writes no row and no log (${dry.status} ${dry.json?.action} ${rowsAfter - rowsBefore} ${logsAfter - logsMid})`);
+    assert((await row(id, text2)).content === text2, "…the stored profile untouched");
+
+    // A first run whose text the brain already holds — a concurrent run's row, or a hand-captured one: the function
+    // answers `existed`, and the worker reports that row as not created and leaves its columns. The stub's next
+    // profile text is predictable, so the row is planted first, typed by hand.
+    const held = `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length + 1}).`;
+    const heldId = await note(held, { type: "idea", importance: 2 });
+    await note("Third annotates the margins.", { type: "person_note" });
+    const third = await send(h, "POST", "/?name=Third");
+    const [heldRow] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${heldId}`;
+    assert(third.status === 200 && third.json?.action === "updated" && third.json?.previous_profile_existed === false && third.json?.thought_id === heldId,
+      `a first run whose text a row already holds answers that row's id as updated, not created (${third.status} ${third.json?.action} ${third.json?.thought_id === heldId})`);
+    assert(heldRow.type === "idea" && Number(heldRow.importance) === 2 && heldRow.metadata.generated_by === "consolidation-bio" && heldRow.metadata.subject === "Third",
+      `…leaving its hand-set columns, the profile's metadata merged by the function (${heldRow.type} ${heldRow.importance} ${heldRow.metadata.subject})`);
+  }
+  const none = await send(h, "POST", "/?name=Nobody");
+  assert(none.status === 404 && /No source thoughts/.test(String(none.json?.error)), `a name with no sources is 404 (${none.status})`);
+}
+
 // ── The files that cannot run here say what this test assumes ────────────────
 
 console.log("\n[the files say what this test assumes]");
 const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFileSync(join(ROOT, rel), "utf8")), `${rel} ${what}`);
-// A paste-in snippet with free variables; a README's sample; a worker whose run needs an LLM pass over person notes.
+// A paste-in snippet with free variables; a README's sample.
 spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_content: content,\s*p_payload: \{[^}]*embedding_model: EMBEDDING_MODEL/s, "captures content, vector and label in one 3-argument upsert_thought");
 spells("recipes/provenance-chains/mcp-tools.ts", /p_embedding: embedding,/, "…passing the vector as p_embedding");
 spells("recipes/provenance-chains/mcp-tools.ts", /\.select\("id"\)\s*\.in\("id", wellFormed\)/s, "…and resolves each well-formed ref before the call, so a ghost parent is unresolved, not a refusal");
-spells("integrations/consolidation-workers/bio/index.ts", /p_embedding: embedding,\s*p_embedding_model: embeddingModelUsed\(\),/s, "…with the vector it embedded and its label, so a re-embedded profile is replaced, not blanked");
-spells("integrations/consolidation-workers/bio/index.ts", /const embedding = await embedText\(profileContent\);/, "…the vector being the new profile's text, embedded, not a stand-in");
-spells("integrations/consolidation-workers/bio/index.ts", /if \(!OPENROUTER_API_KEY && !OPENAI_API_KEY\) \{\s*return json\(\{ error: "An embedding key is required/s, "…and the worker refuses an Anthropic-only configuration before it pays for the profile it could not store");
+// The bio worker is driven above (SMD-1544); it reads its keys at import, so the one configuration it refuses is read here.
+spells("integrations/consolidation-workers/bio/index.ts", /if \(!OPENROUTER_API_KEY && !OPENAI_API_KEY\) \{\s*return json\(\{ error: "An embedding key is required/s, " refuses an Anthropic-only configuration before it pays for the profile it could not store");
 spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p_id: existing\[0\]\.id,\s*p_content: messageText,/s, "'s sample edits through update_thought");
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
-spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought", \{\s*p_id: existingId,\s*p_content: profileContent,/s, " rewrites the profile through update_thought");
-// SMD-1524: the first run, the example capture, the two Python recipes and the two README samples capture through the function.
-spells("integrations/consolidation-workers/bio/index.ts", /rpc\("upsert_thought", \{(?=[^;]*p_content: profileContent)(?=[^;]*embedding_model: embeddingModelUsed\(\))(?=[^;]*p_embedding: embedding)/s, " captures the first profile through the 3-argument upsert_thought, embedded, with its label (the three arguments in any order)");
-spells("integrations/consolidation-workers/bio/index.ts", /if \(result\.existed === true\) \{\s*return \{ id: thoughtId, created: false \};/s, "…and leaves a concurrent run's row its columns");
-spells("integrations/consolidation-workers/bio/index.ts", /embedding_model: embeddingModelUsed\(\), actor \},/, "…naming the key as 008's actor on the first run");
-spells("integrations/consolidation-workers/bio/index.ts", /p_embedding_model: embeddingModelUsed\(\),\s*p_actor: actor,/s, "…and on the rewrite");
-spells("integrations/consolidation-workers/bio/index.ts", /\{ name: principal\.name, source: "consolidation-bio" \}/, "…the actor being the authenticated key's name");
+// SMD-1524: the example capture, the two Python recipes and the two README samples capture through the function.
 spells("integrations/readwise-capture/index.ts", /\.update\(\{ \[column\]: value \}\)\s*\.eq\("id", result\.id\)\s*\.is\(column, null\)/s, " writes each column where it is NULL — a fresh row, or one an interrupted first write left half-shaped");
 spells("recipes/readwise-import/import-readwise.py", /for column in \("source_type", "type"\):\s*supabase\.table\("thoughts"\)\.update\(\s*\{column: thoughts\[0\]\[column\]\}\s*\)\.in_\("id", ids\)\.is_\(column, "null"\)\.execute\(\)/s, " writes each column over the batch's rows where it is NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
@@ -589,14 +712,16 @@ for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "i
   spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
   spells(readme, /no content fingerprint/, " says what its rows lack");
 }
-// Every runnable file the two changes touched is driven above, or read: the headers name them.
+// Every runnable file the three changes touched is driven above, or read: the headers name them.
+const BIO = "integrations/consolidation-workers/bio/index.ts";
 const DRIVEN = ["integrations/update-thought-mcp/index.ts", "integrations/enhanced-mcp/index.ts", "integrations/agent-memory-api/index.ts",
-  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts"];
-const TEXT_ONLY = ["integrations/consolidation-workers/bio/index.ts", "recipes/provenance-chains/mcp-tools.ts"];
-const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts"];
-const TEXT_ONLY_1524 = ["integrations/consolidation-workers/bio/index.ts", "recipes/adaptive-capture-classification/capture-with-gating.ts"];
+  "integrations/open-brain-rest/index.ts", "integrations/rest-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO];
+const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
+const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
+const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
 const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
-for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]]] as const) {
+const DRIVEN_1544 = [BIO];
+for (const [ticket, files] of [["SMD-1228", [...DRIVEN, ...TEXT_ONLY]], ["SMD-1524", [...DRIVEN_1524, ...TEXT_ONLY_1524, ...BYPASS_1524]], ["SMD-1544", DRIVEN_1544]] as const) {
   const headed = [...new Bun.Glob("{recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && new RegExp(ticket).test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(headed.join() === [...files].sort().join(), `every .ts file that names ${ticket} is driven here or read here, and vice versa (${headed.join(", ")})`);
