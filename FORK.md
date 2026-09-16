@@ -9245,7 +9245,11 @@ one container and after an aborted run; `bun test-auth.ts` 643/643 on the
 converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
 for `enhanced-mcp`, `agent-memory-api` and `consolidation-workers/metadata-norm`
 (the edited helpers' other importer), the three that resolve under Deno;
-every shim-migrated file still parses. The ticket's verify — the check fails
+every shim-migrated file still parses, and the codemod round-trips — PR #55's
+first CI run failed that step alone: `migrate-to-sql-shim.mjs` rewrites every
+quoted `@supabase/supabase-js` it finds, and the test's loader compared a
+specifier to that literal; it matches by regex now, the codemod unchanged.
+The ticket's verify — the check fails
 on the files today and passes after; an edit through each leaves
 `content_fingerprint`, `embedding_model` and `thought_chunks` as
 `update_thought` would, one round trip each against `with-postgres.sh` — is

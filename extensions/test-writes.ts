@@ -131,7 +131,9 @@ Bun.plugin({
       src = src.replace(/(from\s+|import\s+)(["'])([^"']+)\2/g, (whole, lead, q, spec) => {
         let s = spec as string;
         if (s.startsWith("npm:")) s = s.slice(4).replace(/^(@?[^@/]+(?:\/[^@/]+)?)@[^/]*/, "$1");
-        if (s === "@supabase/supabase-js") return `${lead}${q}${SHIM}${q}`;
+        // Matched by regex, not a quoted literal: scripts/migrate-to-sql-shim.mjs rewrites every
+        // quoted @supabase/supabase-js it finds, and this loader is not a consumer of it.
+        if (/^@supabase\/supabase-js$/.test(s)) return `${lead}${q}${SHIM}${q}`;
         if (PACKAGES.test(s)) return `${lead}${q}${Bun.resolveSync(s, HERE)}${q}`;
         return whole;
       });
