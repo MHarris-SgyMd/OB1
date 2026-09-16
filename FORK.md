@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy numbered changes on top of the pin. Seven fix defects found in an
+Seventy-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–70 are the numbered `###` sections** further down, which is
+sections. Changes **18–71 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -9682,7 +9682,8 @@ Read down the tables and four things fall out.
   10 ms on every filtered call. Sizing `shared_buffers` does not change it;
   a different sampling statement does — eight TID range probes, eight page
   reads whatever the heap, which also counts sampled pages exactly where
-  `pages_seen` today misses an empty one — and that is SMD-1526. The bench's own
+  `pages_seen` today misses an empty one — and that is SMD-1526 (done:
+  migration 038, change 71). The bench's own
   `estimate` row at ten million read 60 ms under both plan modes and 0.94
   with JIT off, which is why the table's last column is the JIT-off figure:
   the extraction had substituted the sample share as its declaring
@@ -9729,7 +9730,8 @@ give the `filtered search` check a "037's body" detail, the way `atomic
 capture` names 035's — a line for the next preflight change, not this one.
 The sample's per-page cost and its `pages_seen` denominator
 are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
-reads whatever the heap, sampled pages counted exactly). The threshold, the
+reads whatever the heap, sampled pages counted exactly — done: migration 038,
+change 71). The threshold, the
 plan mode and which of the two seeded bounds bites are SMD-1464; `ef_search`
 on real vectors is SMD-1465. One thing
 the prototype saw in passing belongs with SMD-1464: with `enable_seqscan` on,
@@ -9807,6 +9809,309 @@ commands run and label their arms `after (014–035)` (no estimate row, the
 "declares no sample share" note) and `after (014 on)` (three estimate rows).
 
 **Upstream status:** not applicable — 014's routing statement is this fork's.
+
+
+### 71. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
+
+Change 70 ended on a term that grows with the table, and this removes it.
+Migration 037 gates the routing count behind a sample of the heap: `FROM
+thoughts t TABLESAMPLE SYSTEM (v_pct)` with the share sized to eight pages.
+`SYSTEM` decides page by page over the *whole* heap — it hashes every block
+number against its cutoff — so the statement carried about 2 ns per heap page
+besides the eight pages' rows: a millisecond at ten million rows (526,000
+pages) on every filtered call, whatever the buffer pool held. The empty-filter
+shape one integration sends on every call went from 0.27 ms to 1.31 in change
+70's bench, and by the slope a hundred million rows would pay some 10 ms.
+Change 70's third finding measured the term, its header named this statement
+as the fix, and SMD-1526 filed it with a second, smaller defect from the same
+statement: `pages_seen` counted the distinct pages among the rows *returned*,
+so a sampled page with no live row — a mass delete and a plain `VACUUM` leave
+them — dropped out of the denominator and the scaled estimate was biased up.
+
+**Migration 038.** The gate is 037's — the same floor, eight pages, three
+conditions over three counts, the collection wrapped in the same `IF` — and
+only the statement that produces the counts changes:
+
+```sql
+SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
+  INTO v_hits, v_hit_pages, v_pages_seen
+FROM (SELECT DISTINCT floor(random() * v_pages)::int AS blk FROM generate_series(1, 8)) b
+LEFT JOIN LATERAL (
+  SELECT (t.metadata @> filter AND t.embedding IS NOT NULL) AS hit
+  FROM thoughts t
+  WHERE t.ctid >= ('(' || b.blk || ',0)')::tid
+    AND t.ctid <  ('(' || b.blk + 1 || ',0)')::tid
+  LIMIT 291
+) p ON true;
+```
+
+Eight block numbers are drawn from the heap's page count (`v_pages`, 037's
+local, still computed at entry from `pg_relation_size`), made distinct, and
+each is read as one TID range — every tuple of block *b* and nothing else, a
+TID Range Scan (PostgreSQL 14 and later), one page read per block whatever the
+heap holds. The rows on those pages are counted as 037 counted them, and the
+third count is now the distinct blocks *drawn*: the `LEFT JOIN` keeps a block
+that returned no row, which is the denominator the rule always meant. `v_pct`
+goes; it was `TABLESAMPLE`'s argument. Everything else is carried token for
+token — the rule, 014's collection ([20] compares it), 019's clauses, the
+sentinel, the two template constants, and 020's `DROP` of the 4-argument form
+with its ACL replay, since 038 is now the last definer that preflight's remedy
+and the suites' `restoreShipped` apply alone (test-upgrade [15] holds it).
+
+**Why this statement, and what the ticket's sketch got wrong — prototyped on
+a real Postgres before the file was written.**
+
+- *The probe needs a `LIMIT`, and it does two jobs.* The ticket's sketch was a
+  `VALUES`/`generate_series` of the blocks joined `LATERAL` to the range probe.
+  Written that way the planner pulls the `LATERAL` up into the join, the
+  `ctid` bounds become *join* quals, and the TID Range path — which reads a
+  relation's own restrictions only — is never built: the plan was a
+  sequential scan of the whole heap under `Materialize`, cost 10,000,002,844
+  under 019's `enable_seqscan = off`, 72 ms at 2,000 pages and 632 at
+  200,000. A `LIMIT` on the probe keeps it a subquery (a subquery with a
+  `LIMIT` is never pulled up), and 291 — `MaxHeapTuplesPerPage` on an 8 KB
+  page — is a value no block can exceed, so it never cuts a page. It also
+  caps the planner's estimate: the planner cannot see a bound that is an
+  expression over another relation's column, prices the range at half a per
+  cent of the heap, and uncapped that would put the eight probes at tens of
+  thousands of cost units at ten million rows, within reach of
+  `jit_above_cost` (100,000) on a larger heap — where JIT compiles the
+  statement on every execution, the 50 ms a call change 70's third finding
+  met. Capped, each probe is priced at 291 rows at most: the statement costs
+  107 / 849 / 2,405 units at 2,000 / 20,000 / 200,000 pages and is flat
+  from there. A build with 32 KB pages could hold more tuples on a dense page
+  than the `LIMIT` admits; the count would then be short and the collection
+  run — the safe side.
+- *The draw is inside the statement, not in plpgsql.* The sketch drew the
+  blocks in plpgsql. A `DISTINCT` subquery over `generate_series` costs no
+  extra SPI round trip at entry (the unfiltered path still pays for `v_pages`
+  alone, as under 037), keeps the estimate one statement over locals declared
+  at entry — which is what `extractBody` and `routingAt` read for [8e] and
+  the bench — and is never pulled up either. `random()` in a target list is
+  evaluated once per row of `generate_series` (the once-only trap is a scalar
+  subquery, an InitPlan, which change 70 met loading its fixture); `DISTINCT`
+  collapses a block drawn twice so no page is read or counted twice.
+- *Plan mode, which 037's statement lost on.* Both plan modes price the new
+  statement alike — the bounds are column references under either — so
+  plpgsql adopts the generic plan after the fifth call and never replans.
+  Measured through a plpgsql wrapper on a 200,000-page heap: 0.05 ms a call
+  over the round trip in the default mode, 0.22 under `force_custom_plan`
+  (the replan), and 0.66 for 037's statement, which was priced 200× cheaper
+  custom than generic and so replanned on every call. One plan, cached, eight
+  page reads.
+- *The bounds are text-built tids* (`'(b,0)'::tid` is at or below every
+  tuple of block *b*, offsets starting at 1; `'(b+1,0)'` above them) because
+  core Postgres has no constructor from a block number; the executor clamps
+  a bound past the heap, so the last block's upper bound and a block the heap
+  no longer has read nothing, cost nothing, and still count among the pages
+  drawn — the safe side.
+- *Not* `tsm_system_rows` (an extension the function would depend on — PGlite,
+  where test-schema runs, does not ship it — with rows rather than pages as
+  the unit and the `pages_seen` defect unchanged); *not* eight statements in
+  a plpgsql loop (eight plans and eight SPI calls where one does; eight
+  literal arms planned in 0.08–0.1 ms a call); *not* the planner's `@>`
+  estimate, for change 70's reasons.
+
+**The statement alone, one row a page, every page warm in `shared_buffers`**
+(`EXPLAIN ANALYZE` execution time, median of 30, `enable_seqscan` off as the
+function has it; change 70's first review pass measured 037's the same way):
+
+| heap pages | 037's sample (`TABLESAMPLE SYSTEM`) | 038's (eight TID ranges) |
+| ---: | ---: | ---: |
+| 2,000 | 0.036 ms | 0.034 ms |
+| 20,000 | 0.075 | 0.048 |
+| 200,000 | 0.469 | 0.052 |
+
+**The rule, re-measured for this draw** — 1,000 draws per filter on a
+500,000-row corpus of the bench's shape (24,999 pages, twenty rows a page,
+`v_exact` 1,000), 037's statement on the same corpus and the same draws'
+worth in brackets:
+
+| filter | matching rows | placement | skipped, 038 | skipped, 037 |
+| --- | ---: | --- | ---: | ---: |
+| 50% | 249,851 | uniform | 1,000 | 984 |
+| 10% | 49,829 | uniform | 987 | 901 |
+| 10,000 rows | 10,000 | one contiguous run | 0 | 1 |
+| 1% | 4,915 | uniform | 1 | 1 |
+| 2,000 rows | 1,882 | uniform | 0 | 0 |
+| 1,000 rows | 1,000 | one contiguous run | 0 | 0 |
+| 1,000 rows | 1,000 | four a page over 251 pages | 0 | 0 |
+| 900 rows | 858 | uniform | 0 | 0 |
+| 0.1% | 504 | uniform | 0 | 0 |
+| 0.01% | 58 | uniform | 0 | 0 |
+| nothing | 0 | — | 0 | 0 |
+
+Every filter at or under the threshold ran the collection every time, on this
+corpus and on a floor-sized one (163,840 rows, 8,191 pages: 50% skipped 1,000
+and 10% 979 of 1,000 there, against 993 and 905; the contiguous 10,000 was
+skipped 10 times against 13, not a wrong answer at ten times the threshold).
+The broad filters are skipped a little more often than under 037, because the
+draw always reaches its pages: `SYSTEM` took a binomial number of pages with
+mean eight and reached fewer than three about 1.4% of the time (e⁻⁸ × 41) —
+the misses test-live [5d] widened its band for — where eight draws with the
+duplicates collapsed reached eight distinct pages in all but a few of a
+thousand at the floor (the fewest seen: 7 in 1,000 draws, 6 in 20,000). The
+thin-spread layout, the one condition 3 is weakest against, was skipped 29
+times in 20,000 draws at the floor — 1.45e-3, which is what change 70's
+formula computes, C(8,3) × (251 / 8,191)³ = 1.6e-3. 037 measured 14 in
+20,000 for the same layout because `SYSTEM`'s variance made condition 1 fail
+whenever its draw reached nine pages or more; that accident is gone, the bound
+is the formula's and falls as the cube of the heap (7e-6 at a million rows,
+7e-9 at ten million), and `hit_pages ≥ 4` remains the knob if the band
+matters. At the ceiling count (`v_exact` 8,000) the picture is change 70's:
+near the floor the 10% filter is never skipped (0 of 2,000; 037: 0) and the
+50% filter about half the time (1,169 of 2,000; 037: 1,212), so the
+collection runs as before 037 plus the sample. On a heap three quarters empty
+— the 500,000-row corpus with its middle deleted and plain-`VACUUM`ed, 6,250
+live pages of 24,999 — the broad filters get their collection back for want of
+hits under both statements alike (50% skipped 332 of 1,000 against 337, 10%
+126 against 132, the thin filters 0), and the denominator is now honest:
+condition 1 failed in 105 of the 50% draws under 038 where under 037 it
+failed in none, because 037's `pages_seen` had shrunk to the two pages that
+answered and scaled twenty hits to the whole heap.
+
+**Through the function, before and after, on the machine change 28 describes**
+(`db/bench-hnsw.ts`, the before pass as `OB1_BENCH_UPTO=037` — the function
+with 037's sample — and the after pass with 038, from one tree, on the same
+day). The machine was busier than for change 70's tables: seven other
+Postgres containers held the VM's memory throughout, and the before arm's
+own figures sit above change 70's for the same 037 body at every tier (the
+empty filter 1.05 ms at a million rows against 0.43 then), so read the
+columns as a pair and not against change 70's. The ten-million after pass
+was started twice and killed twice mid-build by the VM's OOM killer — two
+other sessions' benches were building there by then, a kept ten-million
+corpus among them — and is queued to run when the VM is idle; the
+ten-million before pass ran, and its rows are here for that reason. Section
+B, ten asked, median over 50 random queries:
+
+| rows | filter | matching rows | 037: in exact top-10 | median ms | 038: in exact top-10 | median ms |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1,000,000 | 50% | 499,443 | 3.0 | 20.16 | 3.0 | 14.87 |
+| 1,000,000 | 10% | 99,748 | 5.5 | 63.47 | 5.4 | 53.62 |
+| 1,000,000 | 1% | 9,951 | 8.9 | 426.32 | 8.8 | 328.66 |
+| 1,000,000 | 5,000 rows | 4,916 | 10.0 | 31.93 | 8.6 | 399.43 |
+| 1,000,000 | 2,000 rows | 1,963 | 10.0 | 16.98 | 8.5 | 559.51 |
+| 1,000,000 | 0.1% | 1,034 | 10.0 | 11.73 | 10.0 | 9.33 |
+| 1,000,000 | 900 rows | 934 | 10.0 | 10.26 | 10.0 | 7.81 |
+| 1,000,000 | 0.01% | 99 | 10.0 | 2.38 | 10.0 | 1.39 |
+| 1,000,000 | nothing | 0 | 0.0 | 1.05 | 0.0 | 0.34 |
+| 10,000,000 | 50% | 4,998,406 | 0.9 | 132.40 | pending | pending |
+| 10,000,000 | 10% | 999,827 | 2.1 | 387.55 | pending | pending |
+| 10,000,000 | 1% | 99,633 | 5.5 | 2,608.58 | pending | pending |
+| 10,000,000 | 0.1% | 10,231 | 10.0 | 115.04 | pending | pending |
+| 10,000,000 | 900 rows | 886 | 10.0 | 13.91 | pending | pending |
+| 10,000,000 | 0.01% | 959 | 10.0 | 15.51 | pending | pending |
+| 10,000,000 | nothing | 0 | 0.0 | 1.67 | pending | pending |
+
+Section C, the two statements themselves, extracted from the deployed body and
+explained (execution time under a forced custom plan / a forced generic plan /
+generic with JIT off; the 10,000-row rows are the sanity passes both arms ran
+first, five queries):
+
+| rows | statement | filter | matching rows | 037: ms | 038: ms |
+| ---: | --- | --- | ---: | ---: | ---: |
+| 10,000 | route | 50% | 5,041 | 0.60 / 0.54 / 0.65 | 0.68 / 0.63 / 0.72 |
+| 10,000 | estimate | 50% | 5,041 | 0.10 / 0.10 / 0.08 | 0.12 / 0.08 / 0.09 |
+| 10,000 | estimate | nothing | 0 | 0.12 / 0.08 / 0.04 | 0.08 / 0.07 / 0.12 |
+| 1,000,000 | route | 50% | 499,443 | 35.09 / 33.41 / 33.67 | 28.13 / 29.54 / 27.70 |
+| 1,000,000 | route | 0.01% | 99 | 0.65 / 1.07 / 0.73 | 0.65 / 0.68 / 0.71 |
+| 1,000,000 | route | nothing | 0 | 0.05 / 0.04 / 0.07 | 0.03 / 0.04 / 0.03 |
+| 1,000,000 | estimate | 50% | 499,443 | 0.25 / 0.31 / 0.30 | 0.12 / 0.10 / 0.11 |
+| 1,000,000 | estimate | 0.01% | 99 | 0.30 / 0.22 / 0.25 | 0.09 / 0.08 / 0.09 |
+| 1,000,000 | estimate | nothing | 0 | 0.32 / 0.36 / 0.27 | 0.10 / 0.10 / 0.10 |
+| 10,000,000 | route | 50% | 4,998,406 | 297.21 / 316.29 / 283.95 | pending |
+| 10,000,000 | estimate | 50% | 4,998,406 | 1.17 / 1.14 / 1.15 | pending |
+| 10,000,000 | estimate | 900 rows | 886 | 1.10 / 1.13 / 1.20 | pending |
+| 10,000,000 | estimate | nothing | 0 | 1.20 / 1.12 / 1.14 | pending |
+
+Read down the tables and three things fall out.
+
+- **The sample's cost is flat, and the empty filter has its cost back.** The
+  `estimate` row reads 0.08–0.12 ms at 10,000 rows and 0.08–0.12 at a
+  million under 038, the same three columns for the 50% filter and the empty
+  one — against 037's 0.04–0.14 and 0.22–0.36, and 1.10–1.20 at ten million,
+  the 2 ns a page. Through the function the empty filter at a million rows
+  went from 1.05 ms to 0.34 in this pair; change 70 measured 0.21 before 037
+  and 0.43 after on a quieter machine, so the ticket's "within 0.2 ms of what
+  it cost before 037" holds at a million rows on this pair's own terms. The
+  ticket's two checks at ten million — the estimate row within a factor of
+  two of the smaller scales, the empty filter within 0.2 ms of 0.27 — are the
+  pending pass's; what stands for them today is the standalone table above
+  (0.052 ms at 200,000 pages, a fifth of the ten-million heap, against 037's
+  0.469 there and 1.1 in the bench at ten million) and the plan the bench
+  prints, eight `Tid Range Scan`s whose cost does not read the heap's size.
+- **The broad tiers lose the collection on every call now.** 50% at a
+  million: 20.2 ms → 14.9, 10%: 63.5 → 53.6, with the recall columns
+  unchanged (3.0 and 5.4–5.5, the index's own); the `route` rows are the same
+  statement at the same cost (35 → 28 ms is the day's cache), so the
+  difference is the calls that no longer run it — 037 skipped the 10% filter
+  nine times in ten, 038 987 in a thousand. The thin tiers moved by the
+  sample's saving and the spread (900 rows 10.3 → 7.8, 0.01% 2.4 → 1.4).
+- **The planner's coin, on two more tiers.** The 2,000- and 5,000-row tiers
+  were served from GIN under the walk branch in the before pass (10.0 of 10
+  at 17 and 32 ms) and walked HNSW in the after pass (8.5 and 8.6 at 560 and
+  399 ms); the 1% tier walked HNSW in both (8.9 / 8.8). Both tiers are above
+  the threshold and routed to the walk by both arms — the gate cannot skip
+  them (condition 2 needs eight hits and 160 sampled rows at 0.2–0.5% hold
+  well under one) and cannot choose the walk's plan, which section E shows
+  flipping under the seeded bounds on the same rows (17 ms and 10.0 against
+  577 ms and 8.5). Change 70 met the same flip on the 1% tier between its
+  own passes under a fresh `ANALYZE`; it is SMD-1464's band, with two more
+  rows for it.
+
+**What it costs where it does nothing.** Under the floor — every real brain
+today — nothing changes: the body computes `v_pages` at entry as under 037 and
+runs no sample. Above it, every filtered call pays eight page reads: about
+0.05 ms warm, eight random reads from disk on a heap larger than memory (on
+the order of 0.1 ms each on NVMe, more on network storage), and nothing that
+grows with the heap.
+
+**Not done here.** Preflight still has no recogniser for the gate's body (a
+037 or a 020 pasted over 038 passes the `filtered search` check; the
+operator's path below), as change 70 said — a sentinel of the gate's own is
+the line for the next preflight change. The threshold, the plan mode of the
+*walk* statement (which flips onto a generic plan under a recency weight at
+the ceiling and changes answers; change 70's "Not done here") and the seeded
+bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
+4` knob is stated, not turned. A hundred million rows was not run, for the
+reasons change 28 gives; what this change establishes is that the sample's
+cost no longer depends on it. The ten-million after pass is queued, not run:
+its two attempts were killed by the VM's OOM killer with other sessions'
+benches resident, and the tables above say so where its rows would be.
+
+**Verified:** `db/test-schema.ts` 873/873 under PGlite, [8e] rewritten (the
+TID range probe, the three load-bearing tokens — `DISTINCT`, `LEFT`, `LIMIT
+291` — no `TABLESAMPLE` in the body, the floor, exactness with the gate
+reached, five draws judged by the rule and reaching between one and eight
+pages, and five more over a heap with its middle deleted and vacuumed, each
+counting the pages it drew) and [20]'s definer pin moved to 038;
+`db/test-live.ts` 500/500 on real Postgres, [5d] now exact (the broad filter
+makes exactly one GIN scan fewer per call than under 020's body, twenty of
+twenty, where 037's band was 0.75–1.0; 0.33 ms a call for the sample on its
+386-page heap at the shipped width, round trip included); `db/test-upgrade.ts`
+184/184, [15] new (038 onto a populated 037: no column, signature, row or
+privilege moves; 014 re-applied by hand, then 038 alone, leaves one form);
+`server-portable` `tsc --noEmit` and `test-preflight.ts` (205/205) clean;
+`bun scripts/check-fork-consistency.mjs` PASS; `bench-hnsw.ts` before and
+after at a million rows and at 10,000 (both arms' estimate rows: 037's a
+`Sample Scan`, 038's a `Tid Range Scan`), the ten-million before pass, above,
+and the ten-million after pass pending.
+
+**The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
+db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`
+carrying the TID range probe and no `TABLESAMPLE`, a filtered call answering
+as before. The same brain with 037's file pasted over 038 by hand: the plain
+run reports "applied 0, skipped 38" — the ledger records both and cannot see
+the body — and what is lost is the per-page term coming back, a degradation
+preflight's stated scope does not cover (change 70's paragraph); `migrate.ts
+--reapply` re-runs every file in one transaction and the probe is back. The
+PostgREST contract — six argument names, the `RETURNS TABLE` shape — is
+byte-identical to 020's. The README's bench command with `OB1_BENCH_UPTO=037`
+labels its arm `after (014–037)` and explains 037's estimate as a sample scan;
+the default labels `after (014 on)` and explains 038's as a TID range scan.
+
+**Upstream status:** not applicable — 014's routing statement and 037's gate
+are this fork's.
 
 
 ## Detached from the fork network
