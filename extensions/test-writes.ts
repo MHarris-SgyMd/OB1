@@ -59,7 +59,11 @@ const { assert, report } = createAssert();
 // ── The schema, and the model the writers label their vectors with ───────────
 
 // Pinned, as test-e2e-sql.ts pins them: this suite asserts the data layer, not
-// the model choice, and every writer here spells the OpenRouter default.
+// the model choice, and every writer here spells the OpenRouter default — so
+// the brain is built at ITS width. The fork's default is qwen3-embedding:4b at
+// 1024, where every one of these writers' vectors is refused by the function
+// and the capture or edit fails whole; that case is the operator's to avoid
+// (each README says so) and is not driven here.
 const DIM = 1536;
 const MODEL = "openai/text-embedding-3-small";
 await resetSchema(URL_, { dim: DIM, model: MODEL });
@@ -305,6 +309,13 @@ try {
     assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
     const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
     assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
+    // A re-capture of the same text: the tool's own fingerprint check answers before the function
+    // does, and either way a hand-set tier stays — the second review pass found this gate undriven.
+    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
+    const again = await call(h, "brain_capture_thought", { content: captured });
+    const [kept] = await sql`SELECT sensitivity_tier FROM thoughts WHERE id = ${cid}`;
+    assert(!again.isError && String(again.structured?.thought_id) === cid && again.structured?.action !== "inserted" && kept.sensitivity_tier === "personal",
+      `a re-capture answers the same id, not as inserted, and leaves a hand-set tier (${again.structured?.action} ${kept.sensitivity_tier})`);
   }
 }
 
@@ -445,6 +456,8 @@ spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_con
 spells("recipes/provenance-chains/mcp-tools.ts", /p_embedding: embedding,/, "…passing the vector as p_embedding");
 spells("recipes/provenance-chains/mcp-tools.ts", /\.select\("id"\)\s*\.in\("id", wellFormed\)/s, "…and resolves each well-formed ref before the call, so a ghost parent is unresolved, not a refusal");
 spells("integrations/consolidation-workers/bio/index.ts", /p_embedding: embedding,\s*p_embedding_model: embeddingModelUsed\(\),/s, "…with the vector it embedded and its label, so a re-embedded profile is replaced, not blanked");
+spells("integrations/consolidation-workers/bio/index.ts", /const embedding = await embedText\(profileContent\);/, "…the vector being the new profile's text, embedded, not a stand-in");
+spells("integrations/consolidation-workers/bio/index.ts", /if \(!OPENROUTER_API_KEY && !OPENAI_API_KEY\) \{\s*return json\(\{ error: "An embedding key is required/s, "…and the worker refuses an Anthropic-only configuration before it pays for the profile it could not store");
 spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p_id: existing\[0\]\.id,\s*p_content: messageText,/s, "'s sample edits through update_thought");
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
 spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought", \{\s*p_id: existingId,\s*p_content: profileContent,/s, " rewrites the profile through update_thought");
@@ -460,8 +473,15 @@ const TEXT_ONLY = ["integrations/consolidation-workers/bio/index.ts", "recipes/p
     "scripts/check-fork-consistency.mjs check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
 
+} catch (e) {
+  // A throw is a failure with a tally, not a stack trace in place of one.
+  assert(false, `the suite threw: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
 } finally {
-  await dropSidecars();
+  try {
+    await dropSidecars();
+  } catch (e) {
+    console.error(`test-writes.ts: dropping the sidecars failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
   await sql.close();
 }
 report();

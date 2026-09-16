@@ -502,6 +502,8 @@ async function handleCapture(req: Request): Promise<Response> {
   // columns as they are — this file's tier rule is escalation-only (see
   // handleUpdateThought), a hand-set importance is the owner's, and the
   // function leaves that row's pointers the same way (db/migrations/035).
+  // …and the response reports what the row holds, not what this call detected.
+  let held = { type: prepared.type, sensitivity_tier: prepared.sensitivity_tier };
   if (result.action === "inserted") {
     const { error: sidecarErr } = await supabase.from("thoughts").update({
       type: prepared.type, sensitivity_tier: prepared.sensitivity_tier,
@@ -509,12 +511,15 @@ async function handleCapture(req: Request): Promise<Response> {
       source_type: prepared.source_type,
     }).eq("id", result.id);
     if (sidecarErr) throw new Error(`capture stored thought #${result.id} but the enhanced columns failed: ${sidecarErr.message}`);
+  } else {
+    const { data: kept } = await supabase.from("thoughts").select("type, sensitivity_tier").eq("id", result.id).single();
+    if (kept) held = { type: asString(kept.type, prepared.type), sensitivity_tier: asString(kept.sensitivity_tier, prepared.sensitivity_tier) };
   }
 
   return json({
-    thought_id: result.id, action: result.action, type: prepared.type,
-    sensitivity_tier: prepared.sensitivity_tier, content_fingerprint: result.fingerprint,
-    message: `${result.action === "inserted" ? "Captured new" : "Updated"} thought #${result.id} as ${prepared.type}`,
+    thought_id: result.id, action: result.action, type: held.type,
+    sensitivity_tier: held.sensitivity_tier, content_fingerprint: result.fingerprint,
+    message: `${result.action === "inserted" ? "Captured new" : "Updated"} thought #${result.id} as ${held.type}`,
   });
 }
 

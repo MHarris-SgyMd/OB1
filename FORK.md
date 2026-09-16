@@ -8886,7 +8886,8 @@ they now use is this fork's.
 `integrations/update-thought-mcp/index.ts`, `integrations/enhanced-mcp/index.ts`
 (and its `_shared/helpers.ts`), `integrations/agent-memory-api/index.ts`,
 `integrations/open-brain-rest/index.ts`, `integrations/rest-api/index.ts` (and
-its `_shared/helpers.ts`), `integrations/consolidation-workers/bio/index.ts`,
+its `_shared/helpers.ts`), `integrations/consolidation-workers/bio/index.ts`
+(and the workers' `_shared/helpers.ts`),
 `recipes/repo-learning-coach/server/brain.ts`,
 `recipes/provenance-chains/mcp-tools.ts`, the sample in
 `integrations/telegram-capture/README.md`; `scripts/check-fork-consistency.mjs`
@@ -8938,7 +8939,7 @@ wrote back whole now rides `p_metadata_patch`, which is `metadata || patch`
 under the function's row lock — the same result, without the read. The
 label is the caller's, as 021 requires: the four files that hard-coded
 OpenRouter's model name pass it as a constant, `repo-learning-coach` passes
-`OPENROUTER_EMBEDDING_MODEL`, and the two `_shared/helpers.ts` gained
+`OPENROUTER_EMBEDDING_MODEL`, and the three `_shared/helpers.ts` gained
 `embeddingModelUsed()` — OpenRouter's name when that key is configured
 (`embedText()`'s first choice), else OpenAI's under the same `openai/`
 prefix, so one model has one label whichever path served it. The
@@ -9009,9 +9010,9 @@ a metadata-only update, a payload spread from another object, one that
 arrives as a function's return value or parameter, a builder split across
 statements, a table name held in a variable, Python's `dict(content=…)`, a
 hand-built REST `PATCH` (none in the tree), and the remedy itself — the
-dataflow cases are what the test is for. Twenty-nine probes — one per
+dataflow cases are what the test is for. Thirty-five probes — one per
 statement the audit found, in its own shape, plus the forms a rebase could
-bring and the first review pass's escapes — and twenty-five non-probes run
+bring and the review passes' escapes — and twenty-seven non-probes run
 on every invocation through the scan's own function; exceptions are per file
 and counted, as checks 6–8's are, for a file whose README says it bypasses
 the functions and what it leaves stale; the list is empty. A name bound to a
@@ -9020,7 +9021,7 @@ hit on a second, cleaner send of the same name is answered with a rename.
 The checker's header now also names check 9 (change 65's fixture
 redaction), which it had not.
 
-**The test.** `extensions/test-writes.ts` (107 assertions), in the required
+**The test.** `extensions/test-writes.ts` (110 assertions), in the required
 "SQL data layer against real Postgres" job, last: each writer that can run is
 imported as deployed — the stand-in for Deno's two globals and the loader for
 Deno's specifiers from `test-auth.ts`, plus one rewrite, `@supabase/supabase-js`
@@ -9058,6 +9059,23 @@ embedding })` with a `number[]` fails at the shim rather than at the column
 assertions — loudly, not where the labels say — where PostgREST would coerce
 it and the assertions would name the stale columns (they do for the vector
 spelled as text).
+
+**The width, and the label, are the operator's.** Every writer here embeds
+with `openai/text-embedding-3-small`, 1536 wide — upstream's Supabase brain's
+model — and now hands that vector to a function declared at the brain's
+width. This fork's default is `qwen3-embedding:4b` at 1024 (`db/config.mjs`),
+where the function refuses the vector and the whole capture or edit fails,
+where the raw write failed the same way (`repo-learning-coach` saved the
+thought and then threw; `consolidation-bio`'s first insert has no vector, so
+its rewrites failed only from this change on) or had its error ignored
+(`agent-memory-api` created the memory row over an unembedded thought). Loud
+is right, and nothing here makes a vendored writer width-aware: each README
+says the brain must be at `OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`
+and `OB1_EMBEDDING_DIM=1536`, and the test pins that width and says why. The
+label the writers pass must equal the configured model's spelling for the
+re-embed's pool to leave the rows alone (change 38's `poolModelFor`); the
+helpers spell it `openai/…` whichever provider served it, and the README
+sentence names the spelling.
 
 **Decisions.** Updates, not inserts: the ticket's rule and the carry-forward
 comment named the update, and an insert leaves nothing *stale* — it leaves
@@ -9099,6 +9117,26 @@ form, a JSON `null` vector included, and 013's 4-argument form is never a
 candidate; a stale `p_if_unchanged_since` answers `STALE_READ`; the vector
 inside the 2-argument payload stores no vector (#379, reproduced).
 
+**Review pass 2, triaged — the stop signal.** Eleven of the two reviewers'
+findings were in the first pass's own additions. Fixed: `consolidation-bio`'s
+gate admitted an Anthropic-only configuration that `embedText()` then
+refused after the LLM call was paid for — refused at the gate now, and the
+README says which keys embed; the two capture responses reported the tier and
+type this call detected on a re-capture whose columns it had, by the first
+pass's rule, left alone — they read the row back; check 10's verb line was
+computed with a precedence slip that reported an `upsert` chain on the line
+before its verb (the probe check counted hits only; it holds the line now),
+its block walk read a brace inside a string as structure, its gap allowed a
+line comment but not a block comment, its verb took no type argument, its
+inline `Object.assign` branch read nested literals, and its SQL list took a
+`CASE WHEN content =` compare as an assignment; `enhanced-mcp`'s fresh-row
+gate had no test (a re-capture is driven); the test lost its tally when the
+body threw; the bio worker's text guard admitted an embedding of the wrong
+text; this section counted two helper files where three changed. Named, not
+changed: the width and label paragraph above, which the second reading pass
+found unsaid; a string value carrying `, content:` still reads as a key (the
+rule reads prose by design); `+=` on a payload property is bound now.
+
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
 10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
 a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
@@ -9110,8 +9148,9 @@ the rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
 eleven hits in nine files before the conversions and PASS after, exception
-list empty (29 probes, 25 non-probes); `../db/with-postgres.sh bun
-test-writes.ts` 107/107 under podman, twice on one container; `bun
+list empty (35 probes, 27 non-probes, each probe caught on its verb's line);
+`../db/with-postgres.sh bun test-writes.ts` 110/110 under podman, twice on
+one container and after an aborted run; `bun
 test-auth.ts` 643/643 on the converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
 for `enhanced-mcp` and `agent-memory-api`, the two that resolve under Deno;
 every shim-migrated file still parses. The ticket's verify — the check fails

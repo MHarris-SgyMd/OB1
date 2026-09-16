@@ -560,6 +560,13 @@ Deno.serve(async (req) => {
   if (!OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
     return json({ error: "No LLM API keys configured" }, 503);
   }
+  // The profile is embedded on every rewrite (FORK.md change 68), and
+  // embedText() knows OpenRouter and OpenAI only: an Anthropic-only
+  // configuration can synthesise the profile and then cannot store it.
+  // Refused here, before the LLM call is paid for.
+  if (!OPENROUTER_API_KEY && !OPENAI_API_KEY) {
+    return json({ error: "An embedding key is required: set OPENROUTER_API_KEY or OPENAI_API_KEY (the profile carries a vector; ANTHROPIC_API_KEY alone cannot embed)" }, 503);
+  }
 
   const targetName = url.searchParams.get("name") || undefined;
   // Subject key for the canonical-profile dedupe — "self" when caller did

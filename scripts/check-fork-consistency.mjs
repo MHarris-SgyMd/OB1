@@ -1041,9 +1041,9 @@ function checkCredentialCompares() {
 // README must say what it leaves stale; one fixed drops out as stale, one
 // added fails. The list is empty.
 /** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
-const THOUGHTS_TABLE = String.raw`\.(?:from|from_|table)(?:<[^>\n]*>)?\(\s*["'\x60]thoughts["'\x60]\s*\)`;
-/** What may sit between the table and its verb: whitespace, line comments. */
-const GAP = String.raw`(?:\s|//[^\n]*)*`;
+const THOUGHTS_TABLE = String.raw`\.(?:from|from_|table)(?:<[^>\n]*>)?\s*\(\s*["'\x60]thoughts["'\x60]\s*\)`;
+/** What may sit between the table and its verb: whitespace, line and block comments. */
+const GAP = String.raw`(?:\s|//[^\n]*|/\*[\s\S]*?\*/)*`;
 /**
  * A `content` or `embedding` KEY of an object literal: `content:`, `"embedding":`,
  * `["content"]:`, the shorthand `{ embedding }` / `content,`. A key follows `{`
@@ -1051,15 +1051,35 @@ const GAP = String.raw`(?:\s|//[^\n]*)*`;
  * on a literal's top level only — see topLevel() — so `{ metadata: { content } }`
  * is a metadata write.
  */
-const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["']?(?:content|embedding)["']?|\[\s*["'](?:content|embedding)["']\s*\])\s*(?::|,|\}|$)/;
+const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["'\x60]?(?:content|embedding)["'\x60]?|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?::|,|\}|$)/;
+/**
+ * Walk the characters of `text` from `open`, calling `visit(ch, i, inString)` for every character;
+ * a `"`, `'` or backtick run is a string (escapes honoured), so a brace inside
+ * one is not structure — `{ note: "}", content }` closes where the code says.
+ */
+function walkChars(text, open, visit) {
+  let quote = null;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") { visit(ch, i, true); visit(text[++i] ?? "", i, true); continue; }
+      if (ch === quote) quote = null;
+      visit(ch, i, true);
+    } else {
+      if (ch === '"' || ch === "'" || ch === "\x60") quote = ch;
+      if (visit(ch, i, false) === false) return;
+    }
+  }
+}
 /** The brace- or bracket-balanced block that opens at `text[open]`, or null when it never closes. */
 function blockAt(text, open) {
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    if (text[i] === "{" || text[i] === "[") depth++;
-    else if ((text[i] === "}" || text[i] === "]") && --depth === 0) return text.slice(open, i + 1);
-  }
-  return null;
+  let depth = 0, end = -1;
+  walkChars(text, open, (ch, i, inString) => {
+    if (inString) return;
+    if (ch === "{" || ch === "[") depth++;
+    else if ((ch === "}" || ch === "]") && --depth === 0) { end = i; return false; }
+  });
+  return end < 0 ? null : text.slice(open, end + 1);
 }
 /**
  * `block` with everything nested deeper than `depth` blanked — an object's own
@@ -1069,18 +1089,18 @@ function blockAt(text, open) {
 function topLevel(block, depth = 1) {
   let d = 0, out = "", last = "";
   const nests = [];
-  for (const ch of block) {
-    if (ch === "{" || ch === "[") {
+  walkChars(block, 0, (ch, _i, inString) => {
+    if (!inString && (ch === "{" || ch === "[")) {
       const nest = ch === "{" || !(last === "{" || last === ",");
       nests.push(nest);
       if (nest) d++;
       out += d <= depth ? ch : " ";
-    } else if (ch === "}" || ch === "]") {
+    } else if (!inString && (ch === "}" || ch === "]")) {
       out += d <= depth ? ch : " ";
       if (nests.pop() !== false) d--;
     } else out += d <= depth ? ch : " ";
     if (!/\s/.test(ch)) last = ch;
-  }
+  });
   return out;
 }
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
@@ -1102,7 +1122,7 @@ function thoughtWritesAroundIn(text) {
   const lines = new Set();
   // Identifiers bound to a payload with either key: `x = { … content … }` or
   // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.content = …`,
-  // `x.embedding ??= …`, `x["embedding"] = …`.
+  // `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
   const payloads = new Set();
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*([{[])`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
@@ -1110,18 +1130,28 @@ function thoughtWritesAroundIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`Object\.assign\(\s*(${IDENT})\s*,\s*\{`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
   }
-  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})(?:\.(?:content|embedding)|\[\s*["'](?:content|embedding)["']\s*\])\s*(?:\?\?|\|\|)?=(?![=>])`, "g"))) {
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})!?(?:\.(?:content|embedding)|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?:\?\?|\|\||\+)?=(?![=>])`, "g"))) {
     payloads.add(m[1]);
   }
-  // The verb: its first argument a literal, a bound name, or an `Object.assign(…)` whose literals are read.
-  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(?:update|upsert)\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
-    const verbAt = m.index + m[0].lastIndexOf(".update(") >= 0 ? m.index + m[0].lastIndexOf(".update(") : m.index + m[0].lastIndexOf(".upsert(");
+  // The verb (a type argument allowed): its first argument a literal, a bound
+  // name, or an `Object.assign(…)` whose own literals — not the ones nested in
+  // them — are read.
+  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
+    const verbAt = m.index + m[0].lastIndexOf("." + m[1]);
     let hit = false;
-    if (m[1]) hit = literalCarries(text, m.index + m[0].length - 1);
-    else if (m[2]) hit = payloads.has(m[2]);
+    if (m[2]) hit = literalCarries(text, m.index + m[0].length - 1);
+    else if (m[3]) hit = payloads.has(m[3]);
     else {
-      const args = blockAt(text.replace(/[()]/g, (c) => (c === "(" ? "[" : "]")), m.index + m[0].length - 1) ?? "";
-      for (let i = 0; i < args.length; i++) if (args[i] === "{" && literalCarries(args, i)) hit = true;
+      // The assign's argument list, parens read as brackets so blockAt() spans it; each `{` at its top level is a literal it merges.
+      const parens = text.replace(/[()]/g, (c) => (c === "(" ? "[" : "]"));
+      const args = blockAt(parens, m.index + m[0].length - 1) ?? "";
+      let d = 0;
+      walkChars(args, 0, (ch, i, inString) => {
+        if (inString) return;
+        if (ch === "{" && d === 1 && literalCarries(args, i)) hit = true;
+        if (ch === "{" || ch === "[") d++;
+        else if (ch === "}" || ch === "]") d--;
+      });
     }
     if (hit) lines.add(lineOf(verbAt));
   }
@@ -1130,7 +1160,8 @@ function thoughtWritesAroundIn(text) {
   for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/gi)) {
     const list = m[1];
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
-    if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|[\s,])"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
+    // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
+    if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -1178,6 +1209,15 @@ const THOUGHT_WRITE_PROBES = [
   'UPDATE ONLY thoughts SET embedding = $2 WHERE id = $1;',
   'UPDATE "public"."thoughts" SET "content" = $2 WHERE "id" = $1;',
   'UPDATE thoughts SET (content, embedding) = ($2, $3) WHERE id = $1;',
+  // The second review pass's escapes: a type argument on the verb, a block comment before it, a
+  // space before the table's paren, a string value with an unbalanced brace before the key, a
+  // backtick key, a backtick bracket assignment, an upsert chain (its line is the verb's).
+  'await supabase.from("thoughts").update<Thought>({ content }).eq("id", id);',
+  'await supabase\n  .from("thoughts")\n  /* the row */\n  .update({ content })\n  .eq("id", id);',
+  'await supabase.from ("thoughts").update({ embedding }).eq("id", id);',
+  'await supabase.from("thoughts").update({ note: "}", content }).eq("id", id);',
+  'await supabase.from("thoughts").update({ [`embedding`]: vec }).eq("id", id);',
+  'const p: Record<string, unknown> = {};\np[`content`] = text;\nawait supabase.from("thoughts").update(p).eq("id", id);',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1208,13 +1248,21 @@ const THOUGHT_WRITE_NON_PROBES = [
   'UPDATE thoughts SET summary = content, reviewed = true WHERE id = $1;',
   "UPDATE thoughts SET metadata = jsonb_set(metadata, '{content}', to_jsonb(summary)) WHERE id = $1;",
   'UPDATE thoughts SET metadata = metadata || jsonb_build_object(\'embedding\', 1) WHERE id = $1;',
+  // The second review pass's false positives: a column compared inside a CASE in the SET list, a
+  // nested object inside an inline Object.assign.
+  "UPDATE thoughts SET summary = CASE WHEN content = 'x' THEN 'y' ELSE summary END WHERE id = $1;",
+  'await supabase.from("thoughts").update(Object.assign({}, base, { metadata: { content: "x" } })).eq("id", id);',
 ];
 const THOUGHT_WRITE_EXCEPTIONS = new Map([]);
 
 function checkThoughtWritesAround() {
   const SELF = "scripts/check-fork-consistency.mjs";
   for (const probe of THOUGHT_WRITE_PROBES) {
-    if (thoughtWritesAroundIn(probe).length !== 1) fail(SELF, `thought-write rule no longer catches its probe (caught lines ${thoughtWritesAroundIn(probe).join(",") || "none"}, wanted one): ${JSON.stringify(probe)}`);
+    // Caught on exactly one line, and that line is the verb's (or the UPDATE's): the second review
+    // pass found an upsert chain reported on the line before its verb, which a count alone passed.
+    const got = thoughtWritesAroundIn(probe);
+    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert)\b/.test(l) || /\bUPDATE\s+(?:ONLY\s+)?"?(?:public|thoughts)\b/i.test(l)) + 1;
+    if (got.length !== 1 || got[0] !== verbLine) fail(SELF, `thought-write rule no longer catches its probe on its verb's line ${verbLine} (caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
   }
   for (const text of THOUGHT_WRITE_NON_PROBES) {
     if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);

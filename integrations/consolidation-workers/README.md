@@ -81,6 +81,8 @@ supabase secrets set \
   ANTHROPIC_API_KEY="your-anthropic-key"
 ```
 
+`consolidation-bio` embeds the profile it writes, and embeddings come from OpenRouter or OpenAI only — with `ANTHROPIC_API_KEY` alone the worker answers 503 before it spends an LLM call. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
+
 Optional tuning:
 
 ```bash

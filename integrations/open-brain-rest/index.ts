@@ -459,16 +459,21 @@ async function createThought(body: z.infer<typeof captureSchema>) {
     status_updated_at: status ? new Date().toISOString() : null,
   };
 
+  // …and the response reports what the row holds, not what this call detected.
+  let held: { type: string | null; sensitivity_tier: string | null } = { type, sensitivity_tier: update.sensitivity_tier };
   if (!existed) {
     const { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);
     if (error) throw new Error(error.message);
+  } else {
+    const { data: kept } = await supabase.from("thoughts").select("type, sensitivity_tier").eq("id", thoughtId).single();
+    if (kept) held = kept as typeof held;
   }
 
   return {
     thought_id: thoughtId,
     action: existed ? "updated" : "created",
-    type,
-    sensitivity_tier: update.sensitivity_tier,
+    type: held.type ?? type,
+    sensitivity_tier: held.sensitivity_tier ?? update.sensitivity_tier,
     content_fingerprint: String(upsert.data?.fingerprint || ""),
     message: existed ? "Thought already captured; its vector and metadata refreshed" : "Thought captured",
   };
