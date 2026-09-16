@@ -6,8 +6,9 @@
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
 // ob1-fork (SMD-1524): a captured thought — content and vector — is written through
 // the 3-argument upsert_thought, which writes the content fingerprint (003), the
-// vector's model label (021) and the audit actor (008) in the same statement; a raw
-// insert left the first two NULL, and 016's trigger fills neither. The enhanced-thoughts
+// vector's model label (021) in the same statement; a raw insert left both NULL, and
+// 016's trigger fills neither. No audit actor is named: the receiver holds a shared
+// secret, not a key, and 008 keeps a NULL actor for a write without one. The enhanced-thoughts
 // columns the function does not know follow by an update carrying neither content nor
 // vector, on a fresh row only. FORK.md change 70; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
@@ -195,11 +196,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const embedding = await getEmbedding(content);
 
     // The row through the 3-argument upsert_thought (db/migrations/033): the
-    // text, its fingerprint, the vector and the vector's label in one statement,
-    // the actor set for the audit. The raw insert this replaced left the
-    // fingerprint and the label NULL — the row invisible to dedup until 023's
-    // backfill, its vector of unknown model to the re-embed pass. A text the
-    // brain already holds comes back `existed`: metadata merged, vector replaced.
+    // text, its fingerprint, the vector and the vector's label in one statement.
+    // The raw insert this replaced left the fingerprint and the label NULL — the
+    // row invisible to dedup until 023's backfill, its vector of unknown model to
+    // the re-embed pass. A text the brain already holds comes back `existed`:
+    // metadata merged (this highlight's id over the earlier one's), vector
+    // replaced. No actor is named: this receiver holds a shared secret, not a
+    // key, and 008 keeps a NULL actor for a write without one.
     const { data, error } = await supabase.rpc("upsert_thought", {
       p_content: content,
       p_payload: {
@@ -229,14 +232,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     const result = (data ?? {}) as { id?: string; existed?: boolean };
 
-    // The enhanced-thoughts columns the function does not know, on a fresh row
-    // only: a raw update that carries neither content nor vector, so nothing it
-    // writes goes stale, and a re-capture leaves a hand-set type alone.
-    if (result.id && result.existed !== true) {
+    // The enhanced-thoughts columns the function does not know, by a raw update
+    // that carries neither content nor vector, so nothing it writes goes stale —
+    // WHERE source_type IS NULL: a fresh row takes them; a row whose first write
+    // was interrupted between the function and this update (a crash, a 500 and
+    // Readwise's retry) takes them on the re-capture, which the dedupe above
+    // cannot see (it filters on source_type) and the function answers `existed`;
+    // a complete row is left as it is, a hand-set type included.
+    if (result.id) {
       const { error: sidecarError } = await supabase
         .from("thoughts")
         .update({ source_type: "readwise", type: "reference" })
-        .eq("id", result.id);
+        .eq("id", result.id)
+        .is("source_type", null);
       if (sidecarError) {
         console.error("Supabase update error:", sidecarError);
         return new Response("error", { status: 500 });

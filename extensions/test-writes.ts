@@ -508,6 +508,15 @@ try {
     assert(twin.status === 200 && twin.text === "ok" && rows.length === 1 && rows[0].id === id && rows[0].metadata.readwise_highlight_id === 9002 && rows[0].sensitivity_tier === "personal",
       `the same passage highlighted again is one row, its metadata merged, its hand-set tier kept (${rows.length} row(s), ${rows[0]?.sensitivity_tier})`);
     assert((await row(id, content)).at_axis === true && (await row(id, content)).embedding_model === MODEL, "…its vector and label as the function leaves them");
+    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${id} AND action = 'capture' ORDER BY created_at LIMIT 1`;
+    assert(audit?.actor_name === null && audit?.source === "readwise", `008's audit row names no actor for a receiver without a key, and the source from metadata (${audit?.actor_name} ${audit?.source})`);
+    // A first write interrupted between the function and the sidecar: the row lacks source_type, the
+    // receiver's dedupe cannot see it, the function answers existed — and the sidecar heals it now.
+    await sql`UPDATE thoughts SET source_type = NULL, type = NULL WHERE id = ${id}`;
+    const healed = await send(h, "POST", "/", event(9004));
+    const [shape] = await sql`SELECT source_type, type FROM thoughts WHERE id = ${id}`;
+    assert(healed.status === 200 && healed.text === "ok" && shape.source_type === "readwise" && shape.type === "reference",
+      `a re-capture of a row whose first write was interrupted completes its columns (${shape.source_type} ${shape.type})`);
   }
   // An event whose secret is wrong writes nothing: test-auth.ts holds the refusals; here, the row count.
   const [{ n: before }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
@@ -533,6 +542,8 @@ try {
     assert(report.fp_set && report.fp_ok, "the report's content_fingerprint is its text's (003) — the raw insert left NULL");
     assert(!report.has_vec && report.embedding_model === null, "the report carries no vector and so no label — the 2-argument form, said in the file");
     assert(report.metadata.type === "audit_report" && report.metadata.finding_count === 0 && Array.isArray(report.metadata.findings), "the structured findings ride in metadata");
+    const [audit] = await sql`SELECT actor_name, source FROM thought_audit WHERE thought_id = ${sid} AND action = 'capture'`;
+    assert(audit?.actor_name === "MCP_ACCESS_KEY" && audit?.source === "auditor-function", `008's audit row names the key that ran the audit (${audit?.actor_name} ${audit?.source})`);
     assert(/Audit/i.test(content) && report.chunks === 0, "the text is the rendered report; no chunk rows");
   }
 }
@@ -554,11 +565,16 @@ spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought"
 // SMD-1524: the first run, the example capture, the two Python recipes and the two README samples capture through the function.
 spells("integrations/consolidation-workers/bio/index.ts", /rpc\("upsert_thought", \{(?=[^;]*p_content: profileContent)(?=[^;]*embedding_model: embeddingModelUsed\(\))(?=[^;]*p_embedding: embedding)/s, " captures the first profile through the 3-argument upsert_thought, embedded, with its label (the three arguments in any order)");
 spells("integrations/consolidation-workers/bio/index.ts", /if \(result\.existed === true\) \{\s*return \{ id: thoughtId, created: false \};/s, "…and leaves a concurrent run's row its columns");
+spells("integrations/consolidation-workers/bio/index.ts", /embedding_model: embeddingModelUsed\(\), actor \},/, "…naming the key as 008's actor on the first run");
+spells("integrations/consolidation-workers/bio/index.ts", /p_embedding_model: embeddingModelUsed\(\),\s*p_actor: actor,/s, "…and on the rewrite");
+spells("integrations/consolidation-workers/bio/index.ts", /\{ name: principal\.name, source: "consolidation-bio" \}/, "…the actor being the authenticated key's name");
+spells("integrations/readwise-capture/index.ts", /\.update\(\{ source_type: "readwise", type: "reference" \}\)\s*\.eq\("id", result\.id\)\s*\.is\("source_type", null\)/s, " writes its columns where they are NULL — a fresh row, or one an interrupted first write left half-shaped");
+spells("recipes/readwise-import/import-readwise.py", /\.in_\("id", ids\)\.is_\("source_type", "null"\)\.execute\(\)/, " writes its columns over the batch's rows where they are NULL");
 spells("recipes/adaptive-capture-classification/capture-with-gating.ts", /db\.rpc\("upsert_thought", \{\s*p_content: classified\.title,\s*p_payload: \{\s*metadata: \{/s, " captures through upsert_thought, the classifier's fields in metadata");
 spells("recipes/local-ollama-embeddings/embed-local.py", /\/rest\/v1\/rpc\/upsert_thought/, " posts to the function, not the table");
 spells("recipes/local-ollama-embeddings/embed-local.py", /"p_payload": \{"metadata": metadata_dict, "embedding_model": model\},\s*"p_embedding": embedding,/s, "…with the vector and the Ollama model's name as its label");
 spells("recipes/readwise-import/import-readwise.py", /supabase\.rpc\(\s*"upsert_thought",\s*\{\s*"p_content": thought\["content"\],\s*"p_payload": \{\s*"metadata": thought\["metadata"\],\s*"embedding_model": EMBEDDING_MODEL,\s*\},\s*"p_embedding": thought\["embedding"\],/s, " stores each highlight through the 3-argument upsert_thought with its label");
-spells("recipes/readwise-import/import-readwise.py", /if data\.get\("existed"\):\s*continue\s*fresh_ids\.append\(str\(data\["id"\]\)\)\s*if fresh_ids:\s*supabase\.table\("thoughts"\)\.update\(\s*\{"source_type": thoughts\[0\]\["source_type"\], "type": thoughts\[0\]\["type"\]\}\s*\)\.in_\("id", fresh_ids\)/s, "…and writes the enhanced columns over the fresh rows only, one update per batch");
+spells("recipes/readwise-import/import-readwise.py", /ids\.append\(str\(data\["id"\]\)\)\s*if not data\.get\("existed"\):\s*fresh \+= 1\s*finally:[\s\S]{0,400}?if ids:\s*supabase\.table\("thoughts"\)\.update\(\s*\{"source_type": thoughts\[0\]\["source_type"\], "type": thoughts\[0\]\["type"\]\}/s, "…and writes the enhanced columns once per batch, in a finally, so a refused reply leaves no half-shaped row behind it");
 spells("recipes/readwise-import/import-readwise.py", /if not data\.get\("id"\):[\s\S]{0,400}?raise RuntimeError\(/, "…and refuses a reply that names no id instead of skipping the row");
 for (const sample of ["integrations/telegram-capture/README.md", "integrations/slack-capture/README.md"]) {
   spells(sample, /rpc\("upsert_thought", \{\s*p_content: messageText,\s*p_payload: \{\s*metadata: \{[^}]*\},\s*embedding_model: EMBEDDING_MODEL,\s*\},\s*p_embedding: embedding,/s, "'s sample captures through the 3-argument upsert_thought with the label beside the vector");

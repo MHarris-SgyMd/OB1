@@ -4,7 +4,7 @@
 
 Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
 
-> **On this fork (FORK.md change 70, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint, its vector's model label and the audit actor; the raw insert it replaced left the first two NULL. WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
+> **On this fork (FORK.md change 70, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
 
 ## Prerequisites
 
@@ -200,9 +200,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ]);
 
     // The capture through the database's upsert_thought — the 3-argument form
-    // — so the row carries its content fingerprint, the vector's model label and
-    // the audit actor; a raw insert left the first two NULL. A message whose
-    // text is already held comes back `existed`: metadata merged, vector replaced.
+    // — so the row carries its content fingerprint and the vector's model label;
+    // a raw insert left both NULL. A message whose text is already held comes
+    // back `existed`: metadata merged, vector replaced. (No audit actor: the bot
+    // holds a shared secret, not a key; 008 records NULL for such a write.)
     const { error } = await supabase.rpc("upsert_thought", {
       p_content: messageText,
       p_payload: {

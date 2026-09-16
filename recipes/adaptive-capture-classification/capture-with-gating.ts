@@ -5,8 +5,9 @@
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
 // ob1-fork (SMD-1524): the example capture goes through the database's upsert_thought,
-// which writes the content fingerprint (003) and the audit actor (008) with the text; a
-// raw insert left the fingerprint NULL and the row invisible to dedup. No vector is made
+// which writes the content fingerprint (003) with the text; a raw insert left the
+// fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
+// one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
 // here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
 // change 70; scripts/check-fork-consistency.mjs check 10 holds it.
 /**
@@ -211,9 +212,10 @@ async function resolveOutcome(
 
 async function writeToOB1(classified: Classified): Promise<void> {
   // Example: the capture through the database's upsert_thought (FORK.md change
-  // 70), so the row carries its content fingerprint and the audit actor — the
-  // raw insert this replaced left the fingerprint NULL, and 016's trigger does
-  // not fill it. No vector is made here: the 2-argument form is resolved and
+  // 70), so the row carries its content fingerprint — the raw insert this
+  // replaced left the fingerprint NULL, and 016's trigger does not fill it. A
+  // server that authenticates a key passes `actor: { name }` in p_payload so
+  // 008's audit row names it; this example has no key and names none. No vector is made here: the 2-argument form is resolved and
   // the row waits for a re-embed pass (db/reembed.ts). The OB1 capture MCP tool
   // embeds as it captures — if you use it, call it here instead. The
   // classifier's fields ride in metadata: `thoughts` has no tags/project/

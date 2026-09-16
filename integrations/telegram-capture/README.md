@@ -16,7 +16,7 @@
 
 ## What It Does
 
-Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint, its vector's model label and the audit actor (FORK.md change 70; the raw insert it replaced left the first two NULL). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
+Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. The first capture goes through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label (FORK.md change 70; the raw insert it replaced left both NULL; no audit actor either way — the bot holds a shared secret, not an access key). Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
 
 ---
 
@@ -289,9 +289,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     ]);
 
     // The capture through the database's upsert_thought — the 3-argument form
-    // — so the row carries its content fingerprint, the vector's model label and
-    // the audit actor; a raw insert left the first two NULL. A message whose
-    // text is already held comes back `existed`: metadata merged, vector replaced.
+    // — so the row carries its content fingerprint and the vector's model label;
+    // a raw insert left both NULL. A message whose text is already held comes
+    // back `existed`: metadata merged, vector replaced. (No audit actor: the bot
+    // holds a shared secret, not a key; 008 records NULL for such a write.)
     const { error } = await supabase.rpc("upsert_thought", {
       p_content: messageText,
       p_payload: {

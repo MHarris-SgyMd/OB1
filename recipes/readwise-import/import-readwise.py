@@ -183,8 +183,7 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
 
     ob1-fork (SMD-1524, FORK.md change 70). The 3-argument form writes the
     text, its content fingerprint (003), the vector and the vector's model
-    label (021) in one statement, the actor set for the audit (008). The raw
-    batch INSERT this replaced left the fingerprint NULL — 016's trigger does
+    label (021) in one statement. The raw batch INSERT this replaced left the fingerprint NULL — 016's trigger does
     not fill it, so the row was invisible to dedup until 023's backfill — and
     the label NULL, a vector of unknown model to the re-embed pass.
 
@@ -195,41 +194,54 @@ def store_thoughts(supabase, thoughts: list[dict]) -> int:
     the highlight is counted as already present. The enhanced-thoughts
     columns the function does not know (source_type, type — the same for
     every highlight) follow by ONE update per batch that carries neither
-    content nor vector, over the fresh rows only.
+    content nor vector, over every row of the batch WHERE source_type IS
+    NULL: the fresh rows take them, a row whose earlier run was interrupted
+    between the function and this update takes them now (already_imported()
+    filters on source_type, so it re-sends such a row and the function answers
+    `existed`), and a complete row is left as it is.
+
+    No actor is named in the payload: this is a script run by hand, and 008
+    keeps a NULL actor for a write made without an access key.
     """
-    fresh_ids: list[str] = []
-    for thought in thoughts:
-        result = (
-            supabase.rpc(
-                "upsert_thought",
-                {
-                    "p_content": thought["content"],
-                    "p_payload": {
-                        "metadata": thought["metadata"],
-                        "embedding_model": EMBEDDING_MODEL,
+    ids: list[str] = []
+    fresh = 0
+    try:
+        for thought in thoughts:
+            result = (
+                supabase.rpc(
+                    "upsert_thought",
+                    {
+                        "p_content": thought["content"],
+                        "p_payload": {
+                            "metadata": thought["metadata"],
+                            "embedding_model": EMBEDDING_MODEL,
+                        },
+                        "p_embedding": thought["embedding"],
                     },
-                    "p_embedding": thought["embedding"],
-                },
+                )
+                .execute()
             )
-            .execute()
-        )
-        data = _rpc_object(result.data)
-        if not data.get("id"):
-            # The function always answers an id; anything else is a client or
-            # schema fault (an older brain without the 3-argument form, a
-            # client version wrapping the reply another way) — not a row to skip.
-            raise RuntimeError(
-                f"upsert_thought returned no id for highlight "
-                f"{thought['metadata'].get('readwise_highlight_id')}: {result.data!r}"
-            )
-        if data.get("existed"):
-            continue
-        fresh_ids.append(str(data["id"]))
-    if fresh_ids:
-        supabase.table("thoughts").update(
-            {"source_type": thoughts[0]["source_type"], "type": thoughts[0]["type"]}
-        ).in_("id", fresh_ids).execute()
-    return len(fresh_ids)
+            data = _rpc_object(result.data)
+            if not data.get("id"):
+                # The function always answers an id; anything else is a client or
+                # schema fault (an older brain without the 3-argument form, a
+                # client version wrapping the reply another way) — not a row to skip.
+                raise RuntimeError(
+                    f"upsert_thought returned no id for highlight "
+                    f"{thought['metadata'].get('readwise_highlight_id')}: {result.data!r}"
+                )
+            ids.append(str(data["id"]))
+            if not data.get("existed"):
+                fresh += 1
+    finally:
+        # The rows stored so far take their columns whether or not the batch
+        # finished — a refused reply or an interrupt after the function's write
+        # must not leave them half-shaped (the second review pass).
+        if ids:
+            supabase.table("thoughts").update(
+                {"source_type": thoughts[0]["source_type"], "type": thoughts[0]["type"]}
+            ).in_("id", ids).is_("source_type", "null").execute()
+    return fresh
 
 
 def _rpc_object(data) -> dict:

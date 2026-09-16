@@ -460,11 +460,13 @@ function buildAuditContent(result: AuditResult): string {
   return lines.join("\n").trim();
 }
 
-async function storeAuditReport(result: AuditResult): Promise<string> {
+async function storeAuditReport(result: AuditResult, actor: { name: string }): Promise<string> {
   const content = buildAuditContent(result);
   // Through the database's upsert_thought (FORK.md change 70): the content
-  // fingerprint and the audit actor are written with the text — the raw insert
-  // this replaced left the fingerprint NULL, and 016's trigger does not fill it.
+  // fingerprint is written with the text, and the key's name reaches 008's
+  // audit row as the actor (the function records one only when the caller
+  // names it) — the raw insert this replaced left the fingerprint NULL, and
+  // 016's trigger does not fill it.
   // No vector: the report is a record, not a search target, so the 2-argument
   // form is resolved and the row carries no label (a re-embed pass may give it
   // one). The window's timestamps are in the text, so two reports are two rows;
@@ -473,6 +475,7 @@ async function storeAuditReport(result: AuditResult): Promise<string> {
   const { data, error } = await supabase.rpc("upsert_thought", {
     p_content: content,
     p_payload: {
+      actor,
       metadata: {
         type: "audit_report",
         source: "auditor-function",
@@ -567,7 +570,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           "No synthesizable thoughts in window. Audit skipped LLM call; storing empty report for time-series continuity (R8.3).",
       };
       let storedId: string | null = null;
-      if (!dryRun) storedId = await storeAuditReport(baselineResult);
+      if (!dryRun) storedId = await storeAuditReport(baselineResult, { name: principal.name });
       return new Response(
         JSON.stringify({
           ok: true,
@@ -601,7 +604,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     let storedId: string | null = null;
     if (!dryRun) {
-      storedId = await storeAuditReport(result);
+      storedId = await storeAuditReport(result, { name: principal.name });
     }
 
     const criticalCount = findings.filter((f) => f.severity === "critical").length;

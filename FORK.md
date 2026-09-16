@@ -9297,7 +9297,9 @@ row is invisible to dedup until 023's backfill runs, and a later capture of
 the same text through `upsert_thought` makes a twin, which is the duplicate
 the fork's whole fingerprint machinery exists to refuse; `embedding_model`
 NULL — 021's vector of unknown model, which the re-embed pool treats as not at
-the target and re-embeds; and no actor for 008's audit row. Two of the eight
+the target and re-embeds; and, where the writer holds a key, no name for
+008's audit row — the functions record an actor the caller passes, a raw
+insert has nowhere to pass one. Two of the eight
 were worse than the shape: the bio worker's first run computed its own
 fingerprint and stored **no vector at all** (the comment said `upsert_thought`
 would drop the enhanced columns, which is true, and is what the sidecar
@@ -9310,8 +9312,8 @@ recipe's example inserted `tags`, `project` and `due_date` as columns
 to the 3-argument `upsert_thought(p_content, p_payload, p_embedding)` with
 `embedding_model` in the payload — the function writes the text, its
 fingerprint, the vector and the vector's label in one statement under 033's
-lock order, sets 008's actor, and answers `{id, fingerprint, existed,
-supersedes}`; a text the brain already holds comes back `existed` with its
+lock order, sets 008's actor from `p_payload.actor` when the caller names one,
+and answers `{id, fingerprint, existed, supersedes}`; a text the brain already holds comes back `existed` with its
 metadata merged and its vector replaced, which is what a re-sent webhook or a
 re-run backfill should do, and what a raw insert could not (the readwise
 backfill bisected its batches to find the row a unique violation aborted
@@ -9363,8 +9365,8 @@ outside the rule, said so). The one insert the non-probe list carried as
 shape and the forms a rebase could bring — and ten non-probes: another
 table's insert with a `content` column, the other columns, no column list,
 a metadata-only row, the remedy, prose naming the statement, the
-comprehension the rule cannot see. Fifty probes, thirty-seven non-probes
-(one of each from the review pass), each probe held to its verb's line. **Exceptions, seven, the list's first
+comprehension the rule cannot see. Fifty-two probes, thirty-nine non-probes
+(two of each from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
 entries** — none a bypass a fix here could remove, each a file whose header
 or README says what its rows lack: three deployments whose database is their
 own, built from the guide's shape, where the fork's functions are not —
@@ -9409,7 +9411,8 @@ none is in the tree.
 
 **Review pass 1** (a reading reviewer and a running one, the latter in its
 own worktree with real PostgREST v12.2.3 beside the database; eleven
-findings, none above MEDIUM, nine fixed). The readwise backfill read the
+findings, none above MEDIUM: eight fixed, two noted, one informational). The
+readwise backfill read the
 function's reply with `isinstance(data, dict) else {}` and skipped any other
 shape as "already present" — a client wrapping the reply in a list or a
 string would have stored every row and written no sidecar, silently; the
@@ -9442,7 +9445,51 @@ header states, not by naming the columns; five runs on one container, and a
 run after a SIGKILL, all green; `dropSidecars` drops the readwise-books
 table and both functions.
 
-**Not done here.** SMD-1525 (`enhanced-mcp`'s read tools address rows by
+**Review pass 2** (the same two lenses; seven findings, two MEDIUM, both in
+the original change — the running reviewer's top finding was in pass 1's
+batching, so the passes' fixes are among the top findings but not all of
+them). The fresh-row gate met the dedupe filter: `readwise-capture` and the
+backfill check for a row by `source_type = 'readwise'`, and wrote
+`source_type` only when the function said the row was fresh — so a first
+write interrupted between the function and that update (a crash, a 500 and
+Readwise's retry, the backfill's new `raise` after earlier rows of the batch
+were stored) left a row the dedupe could not see, which the re-capture then
+found `existed` and left without its columns for good — before the change
+the retry made a duplicate row, after it a permanently half-shaped one. The
+sidecar is written `WHERE source_type IS NULL` now, on every capture: a
+fresh row takes it, the interrupted row takes it on the re-capture, a
+complete row is left alone; the backfill writes it in a `finally`, so the
+rows stored before a refused reply take theirs before the error propagates
+(the running reviewer traced the raise path; the reading one the retry). The
+test interrupts a first write by hand and re-captures. The second MEDIUM was
+prose: every converted file, its README and this section said "the audit
+actor (008) is written with the text", and none of the writers named one —
+the functions set `ob1.actor` only from `p_payload.actor` (or
+`update_thought`'s `p_actor`), and change 69's five servers, which hold a
+principal, pass none either, so their headers' "the actor reaches the audit"
+has been false since change 69. Here: the two writers that authenticate a
+key — `consolidation-bio` (both paths) and the auditor — pass `{name:
+principal.name}`, and the test reads 008's row for the auditor's report
+(`actor_name = MCP_ACCESS_KEY`); the writers without a key (the receiver,
+the two scripts, the example, the two samples) say they name none, which is
+008's own distinction for a write without a key, and the test reads the
+receiver's audit row as NULL. Change 69's five are SMD-1541. Smaller: the
+UPDATE rule read a `-- comment` after a comma in a SET list as defeating the
+target match while pass 1's INSERT rule stripped it (asymmetry) — both rules
+blank line and block comments now, two probes and two non-probes (52/39); a
+`;` inside a string argument or a payload built into a variable first fails
+the bio text guards, within the header's stated sensitivity; pass 1's count
+sentence said nine fixed of eleven — eight fixed, two noted, one
+informational; the receiver's `existed` merge carries the latest highlight's
+id, said in the code. Run for real: the batched sidecar over PostgREST
+(`PATCH /thoughts?id=in.(…)` → 204; an empty `in.()` touches nothing);
+postgrest-py 2.31's rpc reply is the dict; the classification example's old
+insert fails `42703` on a plain fork brain and on one with the enhanced
+schema, so "failed on any brain" holds; two runs on one container green.
+
+**Not done here.** SMD-1541 (change 69's five servers hold a principal and
+pass no actor to `update_thought`/`upsert_thought`; their headers claim the
+actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
 integer id). SMD-1480 (deployability of the shim-importing writers —
 `readwise-capture`, `consolidation-bio` and the auditor among them; their
 behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun). A
@@ -9452,9 +9499,9 @@ thoughts` statements are the fork's fixtures and benches, outside the scan
 as they were for the update rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
-eight hits in eight files before the conversions and PASS after (50 probes,
-37 non-probes, each probe caught on its verb's line; seven exceptions, each
-matching its one line); `../db/with-postgres.sh bun test-writes.ts` 148/148
+eight hits in eight files before the conversions and PASS after (52 probes,
+39 non-probes, each probe caught on its verb's line; seven exceptions, each
+matching its one line); `../db/with-postgres.sh bun test-writes.ts` 156/156
 under podman — the receiver's capture judged column by column, its retry
 answered `duplicate` before any write, the same passage highlighted again one
 row with the newer highlight id and a hand-set tier kept, the book cached and

@@ -11,7 +11,9 @@
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // SMD-1524 (change 70): the first run's row too — the raw insert computed its own
-// fingerprint and stored no vector; the enhanced columns follow on a fresh row.
+// fingerprint and stored no vector; the enhanced columns follow on a fresh row —
+// and the key's name reaches 008's audit row as the actor on both paths (the
+// functions record an actor only when the caller names one; change 69 named none).
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -408,6 +410,7 @@ async function upsertProfile(
   sourceCount: number,
   existingId: string | null,
   subject: string,
+  actor: { name: string; source: string },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date().toISOString();
 
@@ -441,6 +444,7 @@ async function upsertProfile(
       p_metadata_patch: profileMetadata,
       p_embedding: embedding,
       p_embedding_model: embeddingModelUsed(),
+      p_actor: actor,
     });
     if (updateError) {
       throw new Error(`Failed to update existing profile (id=${existingId}): ${updateError.message}`);
@@ -475,11 +479,11 @@ async function upsertProfile(
   // the enhanced-thoughts columns follow by a raw update that carries neither
   // content nor vector, as the rewrite path's do. findExistingProfile() has
   // already run; `existed` is a concurrent run's row, reported as not created
-  // and left with its columns.
+  // and left with its columns. The key's name rides as the actor (008).
   const embedding = await embedText(profileContent);
   const { data, error: insertError } = await supabase.rpc("upsert_thought", {
     p_content: profileContent,
-    p_payload: { metadata: profileMetadata, embedding_model: embeddingModelUsed() },
+    p_payload: { metadata: profileMetadata, embedding_model: embeddingModelUsed(), actor },
     p_embedding: embedding,
   });
   if (insertError) {
@@ -598,7 +602,8 @@ Deno.serve(async (req) => {
 
     let result: { id: string | null; created: boolean } = { id: null, created: false };
     if (!dryRun) {
-      result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject);
+      result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject,
+        { name: principal.name, source: "consolidation-bio" });
       await logConsolidation(result.id!, sources.length, result.created);
     }
 

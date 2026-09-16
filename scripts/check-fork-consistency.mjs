@@ -1122,6 +1122,8 @@ function topLevel(block, depth = 1) {
   });
   return out;
 }
+/** SQL with its dash-dash line comments and slash-star block comments blanked: a column named in a comment is not a column, and one beside a comment is (the two review passes). */
+const uncommented = (sqlText) => sqlText.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, " ");
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
 const literalCarries = (text, open) => {
   const block = blockAt(text, open);
@@ -1181,7 +1183,7 @@ function thoughtWritesAroundIn(text) {
   // SQL: `UPDATE [ONLY] [public.]thoughts [[AS] alias] SET <list>` up to WHERE/RETURNING/;, identifiers
   // quoted or not — the list naming either column as an assignment target, or the tuple form `SET (a, b) = …`.
   for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/gi)) {
-    const list = m[1];
+    const list = uncommented(m[1]);
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
     // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
     if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
@@ -1189,8 +1191,7 @@ function thoughtWritesAroundIn(text) {
   // SQL: `INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` — the column list naming either
   // column (SMD-1524). No list, no rule: `INSERT INTO thoughts VALUES …` and `… SELECT …` say nothing.
   for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(([^()]*)\)/gi)) {
-    // A `-- comment` inside a multi-line list is not a column (the first review pass).
-    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(m[1].replace(/--[^\n]*/g, ""))) lines.add(lineOf(m.index));
+    if (/(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(uncommented(m[1]))) lines.add(lineOf(m.index));
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -1269,6 +1270,9 @@ const THOUGHT_WRITE_PROBES = [
   'INSERT INTO thoughts (content, metadata) SELECT body, \'{}\'::jsonb FROM staging;',
   // The first review pass: a column list over lines with a comment beside a column.
   'INSERT INTO thoughts (\n  content, -- the text\n  metadata\n) VALUES ($1, $2);',
+  // The second review pass: a comment after the comma in a SET list, a block comment beside a column.
+  'UPDATE thoughts SET metadata = $1, -- note\n  content = $3 WHERE id = $2;',
+  'INSERT INTO thoughts (content /* the text */, metadata) VALUES ($1, $2);',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1316,6 +1320,9 @@ const THOUGHT_WRITE_NON_PROBES = [
   'thoughts = [build_thought(h, book) for h in batch]\nsupabase.table("thoughts").insert(thoughts).execute()',
   // The first review pass: a comment naming the column is not the column.
   'INSERT INTO thoughts (\n  metadata -- not content\n) VALUES ($1);',
+  // The second review pass: the same in a block comment, and in a SET list.
+  'INSERT INTO thoughts (metadata /* content */) VALUES ($1);',
+  'UPDATE thoughts SET metadata = $1 /* content = $3, */ WHERE id = $2;',
 ];
 const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
