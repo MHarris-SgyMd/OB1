@@ -15,7 +15,7 @@
  * Postgres carrying the fork's schema, and the row it leaves is compared with
  * the row update_thought leaves for the same edit — the ticket's own verify.
  *
- * SMD-1524 (FORK.md change 70) added the other door: eight vendored files
+ * SMD-1524 (FORK.md change 71) added the other door: eight vendored files
  * INSERTED a fresh row with content, or content and a vector, around the
  * 3-argument upsert_thought — a webhook receiver, a worker's first run, an
  * auditor's report, a recipe's example capture, two Python recipes and two

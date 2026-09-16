@@ -181,7 +181,7 @@ def upsert_book(supabase, book: dict, set_highlight_count: bool) -> None:
 def store_thoughts(supabase, thoughts: list[dict]) -> int:
     """Store each highlight through the database's upsert_thought; return the fresh rows.
 
-    ob1-fork (SMD-1524, FORK.md change 70). The 3-argument form writes the
+    ob1-fork (SMD-1524, FORK.md change 71). The 3-argument form writes the
     text, its content fingerprint (003), the vector and the vector's model
     label (021) in one statement. The raw batch INSERT this replaced left the fingerprint NULL — 016's trigger does
     not fill it, so the row was invisible to dedup until 023's backfill — and

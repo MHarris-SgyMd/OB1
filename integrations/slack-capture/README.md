@@ -4,7 +4,7 @@
 
 Adds Slack as a quick-capture interface for your Open Brain. Type a thought in a Slack channel, it gets automatically embedded, classified, and stored — with a threaded confirmation reply showing how your message was categorized.
 
-> **On this fork (FORK.md change 70, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
+> **On this fork (FORK.md change 71, SMD-1524):** the sample stores each message through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label; the raw insert it replaced left both NULL (no audit actor either way: the bot holds a shared secret, not an access key). WIDTH: the sample embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024, where the capture fails whole).
 
 ## Prerequisites
 

@@ -1027,7 +1027,7 @@ function checkCredentialCompares() {
 // backfill and the fingerprint recipe's are theirs to write). In every
 // non-binary, non-ignored file under the seven category directories and
 // docs/, prose included — a README's code block is what the next integration
-// is copied from. SMD-1524 (change 70) added the fresh row: `.insert(` with
+// is copied from. SMD-1524 (change 71) added the fresh row: `.insert(` with
 // either key (a literal, an array of literals, a bound name — one filled by
 // `x.push({ … })` or Python's `x.append({ … })` too), and the SQL
 // `INSERT INTO [public.]thoughts [AS alias] (<columns>)` naming either column

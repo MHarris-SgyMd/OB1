@@ -94,7 +94,7 @@ audit, Q2 mobile app. Domain terms: Figma, Lottie, handoff, A11y, WCAG.
 > the implementation to your own capture interface — the logic is intentionally kept
 > separate from any specific bot, CLI, or workflow framework.
 >
-> **On this fork (FORK.md change 70, SMD-1524):** the example `writeToOB1()` captures
+> **On this fork (FORK.md change 71, SMD-1524):** the example `writeToOB1()` captures
 > through the database's `upsert_thought`, so the row carries its content fingerprint —
 > the raw insert it replaced left the fingerprint NULL and the row invisible to dedup. It
 > names no audit actor (a server with an access key passes `actor: { name }` in the payload). It makes no vector, so the 2-argument form is resolved and the row

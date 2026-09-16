@@ -9,7 +9,7 @@
 // fingerprint NULL and the row invisible to dedup. It names no audit actor (008 records
 // one only when the caller passes `actor` in p_payload; a server with a key would). No vector is made
 // here, so the 2-argument form is resolved and the row waits for a re-embed pass. FORK.md
-// change 70; scripts/check-fork-consistency.mjs check 10 holds it.
+// change 71; scripts/check-fork-consistency.mjs check 10 holds it.
 /**
  * Adaptive Capture Classification — TypeScript reference implementation
  *

@@ -29,7 +29,7 @@
 // ob1-fork (SMD-1524): the audit report is stored through the database's upsert_thought,
 // which writes the content fingerprint (003) and the audit actor (008) with the text; a
 // raw insert left the fingerprint NULL and the row invisible to dedup. The report carries
-// no vector, so the 2-argument form is resolved. FORK.md change 70; extensions/test-writes.ts
+// no vector, so the 2-argument form is resolved. FORK.md change 71; extensions/test-writes.ts
 // drives it against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
@@ -462,7 +462,7 @@ function buildAuditContent(result: AuditResult): string {
 
 async function storeAuditReport(result: AuditResult, actor: { name: string }): Promise<string> {
   const content = buildAuditContent(result);
-  // Through the database's upsert_thought (FORK.md change 70): the content
+  // Through the database's upsert_thought (FORK.md change 71): the content
   // fingerprint is written with the text, and the key's name reaches 008's
   // audit row as the actor (the function records one only when the caller
   // names it) — the raw insert this replaced left the fingerprint NULL, and

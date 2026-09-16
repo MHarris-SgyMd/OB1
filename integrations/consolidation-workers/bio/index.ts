@@ -10,7 +10,7 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
-// SMD-1524 (change 70): the first run's row too — the raw insert computed its own
+// SMD-1524 (change 71): the first run's row too — the raw insert computed its own
 // fingerprint and stored no vector; the enhanced columns follow on a fresh row —
 // and the key's name reaches 008's audit row as the actor on both paths (the
 // functions record an actor only when the caller names one; change 69 named none).

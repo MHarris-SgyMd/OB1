@@ -35,7 +35,7 @@ import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.t
 // this deployment's Postgres is its own, built by k8s/init.sql from the guide's shape,
 // and this fork's upsert_thought is not in it. The row carries no content fingerprint,
 // no model label and no audit actor; the README says so. Listed in
-// scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 70).
+// scripts/check-fork-consistency.mjs check 10's exceptions (FORK.md change 71).
 
 // --- Configuration ---
 

@@ -9,7 +9,7 @@ ob1-fork (SMD-1524): each thought is stored through the database's
 upsert_thought — POST /rest/v1/rpc/upsert_thought, the 3-argument form — which
 writes the text, its content fingerprint (003), the vector and the vector's
 model label (021) in one statement; a POST to the table left the fingerprint
-and the label NULL. FORK.md change 70; scripts/check-fork-consistency.mjs
+and the label NULL. FORK.md change 71; scripts/check-fork-consistency.mjs
 check 10 holds it.
 
 Usage:
@@ -125,7 +125,7 @@ def generate_embedding(text, model, ollama_url):
 
 
 def ingest_thought(content, embedding, metadata_dict, model):
-    """Store a thought through the database's upsert_thought (FORK.md change 70).
+    """Store a thought through the database's upsert_thought (FORK.md change 71).
 
     The 3-argument form writes the text, its content fingerprint, the vector
     and the vector's model label in one statement. The label is the Ollama

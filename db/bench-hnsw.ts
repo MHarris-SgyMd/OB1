@@ -96,9 +96,13 @@
  *      broadest, where it walks HNSW; the exact branch on the broadest filter
  *      under the threshold (the exact branch takes any
  *      filter matching at most 1,000 thoughts); the routing statement itself —
- *      the capped id collection every filtered call runs first — on the 50%
- *      filter, where GIN builds its largest bitmap before the LIMIT can stop
- *      anything, on the thinnest filter with rows, and on the empty one. That
+ *      the capped id collection every filtered call ran first until 037, and
+ *      every call the gate lets through still does — on
+ *      the 50% filter, where GIN builds its largest bitmap before the LIMIT
+ *      can stop anything, on the thinnest filter with rows, and on the empty
+ *      one; and 037's estimate — the TABLESAMPLE count that runs before it on
+ *      a large heap and decides whether it runs at all — on the same three,
+ *      so the sample's cost stands beside the collection's it saves. That
  *      inspects the SQL actually deployed rather than a copy of it kept here,
  *      and it fails loudly if the function no longer has the shape the rewrite
  *      expects.
@@ -132,6 +136,7 @@
  *   # a million rows and up: one scale per container, with the shared memory
  *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
+ *   OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 036: the function before 037
  *
  * Vectors are 64-wide random unit vectors: wide enough that HNSW behaves like
  * HNSW, narrow enough that a 100,000-row index builds in a minute and a
@@ -157,7 +162,10 @@
  * million rows. FORK.md change 28 has the tables and the three follow-ups
  * (SMD-1463 the routing count, SMD-1464 the threshold and plan mode, SMD-1465
  * the recall floor on real vectors); 014's own header is not edited, because
- * migrations are checksummed and append-only.
+ * migrations are checksummed and append-only. Migration 037 (SMD-1463, FORK.md
+ * change 70) then gated the routing count behind a sample of the heap; the
+ * before/after tables there are this bench with and without OB1_BENCH_UPTO=036,
+ * and section C prints the sample's cost beside the collection's.
  *
  * The before arm — the function as shipped by 001–013 — runs at the published
  * scales only (up to 100,000 rows). Its defect is established there; at a
@@ -244,6 +252,22 @@ if (!Number.isInteger(BUILD_WORKERS) || BUILD_WORKERS < 0) {
   console.error(`OB1_BENCH_BUILD_WORKERS must be a non-negative integer (got ${JSON.stringify(process.env.OB1_BENCH_BUILD_WORKERS)})`);
   process.exit(2);
 }
+/**
+ * The after arm's schema stops at this migration prefix ("035"), so one tree
+ * can measure the function as it was before a later file and as it is: the
+ * before/after a redefinition of match_thoughts is judged by (SMD-1463 was
+ * the first). Unset, the whole set applies. The arm's label says which.
+ */
+const UPTO = process.env.OB1_BENCH_UPTO;
+if (UPTO !== undefined && (!/^\d{3}$/.test(UPTO) || UPTO < "014")) {
+  // 014 or later: the after arm reads the function's locals from the
+  // catalog, and a body from before 014 has none to read (review pass 1).
+  console.error(`OB1_BENCH_UPTO must be a three-digit migration prefix of 014 or later, such as 036 (got ${JSON.stringify(UPTO)})`);
+  process.exit(2);
+}
+/** Whether the after arm applies this migration file. */
+const upTo = (f: string) => UPTO === undefined || f.slice(0, 3) <= UPTO;
+const AFTER: Arm = UPTO === undefined ? "after (014 on)" : `after (014–${UPTO})`;
 
 /**
  * Planted selectivities. `tiers` is one key so a filter is one containment
@@ -682,6 +706,7 @@ function shapeOf(plan: string, ms: number): PlanShape {
     if (new RegExp(`Index (Only )?Scan using thought_chunks_(thought_id_idx|pkey) on ${a}`).test(plan)) return "chunk lookups by parent";
     if (alias.startsWith("thought_chunks") && new RegExp(`Bitmap Heap Scan on ${a}`).test(plan) && /Bitmap Index Scan on thought_chunks_(thought_id_idx|pkey)/.test(plan)) return "chunk lookups by parent (bitmap)";
     if (new RegExp(`Bitmap Heap Scan on ${a}`).test(plan)) return "GIN bitmap";
+    if (new RegExp(`Sample Scan on ${a}`).test(plan)) return "sample scan"; // 037's estimate: TABLESAMPLE SYSTEM
     if (new RegExp(`Seq Scan on ${a}`).test(plan)) return "seq scan";
     return "?";
   };
@@ -706,7 +731,12 @@ function shapeOf(plan: string, ms: number): PlanShape {
 type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
-  const body = await extractBody(sql, branch, DIM);
+  // The estimate's sample share as a literal, the value the function's own
+  // custom plan sees: left as its declaring expression (volatile) the planner
+  // could not size the sample scan and, at ten million rows, JIT-compiled a
+  // statement the function runs in a millisecond (routingAt says more).
+  const overrides = branch === "estimate" && routing.vPct !== undefined ? { v_pct: String(routing.vPct) } : undefined;
+  const body = await extractBody(sql, branch, DIM, { overrides });
   const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
@@ -764,7 +794,7 @@ async function reconnect(): Promise<void> {
   sql = new SQL({ url: URL_, max: 1 });
 }
 
-type Arm = "before (001–013)" | "after (014 on)";
+type Arm = "before (001–013)" | "after (014 on)" | `after (014–${string})`;
 type Cell = FilteredResult & { label: string; matches: number };
 type Result = {
   scale: number;
@@ -805,7 +835,7 @@ const bounds: BoundsRow[] = [];
  * (test-support's routingAt), so the tiers are routed by the threshold the
  * function actually has, not by a copy of 014's arithmetic.
  */
-let routing = { vFetch: NaN, vExact: NaN };
+let routing: { vFetch: number; vExact: number; vPct?: number } = { vFetch: NaN, vExact: NaN };
 /**
  * pgvector's own defaults for the bounds 014 seeds, read from the server once
  * the library is loaded (`pg_settings.boot_val`) over the same HNSW_BOUNDS
@@ -842,7 +872,7 @@ let banner = false;
 for (const n of SCALES) {
   const beforeArm = n <= BEFORE_ARM_MAX;
   console.log(`▸ ${n.toLocaleString()} rows — loading${beforeArm ? "" : " (schema applied whole; the before arm runs up to " + BEFORE_ARM_MAX.toLocaleString() + " rows)"}`);
-  await resetSchema(URL_, { ...OPTS, only: beforeArm ? (f) => f < "014" : undefined });
+  await resetSchema(URL_, { ...OPTS, only: beforeArm ? (f) => f < "014" : upTo });
   await reconnect();
   if (!banner) {
     // The extension exists only once the schema does, so the banner waits.
@@ -882,15 +912,15 @@ for (const n of SCALES) {
   }
   console.log(" done");
 
-  const arms: Arm[] = beforeArm ? ["before (001–013)", "after (014 on)"] : ["after (014 on)"];
+  const arms: Arm[] = beforeArm ? ["before (001–013)", AFTER] : [AFTER];
   for (const arm of arms) {
-    if (arm === "after (014 on)") {
+    if (arm === AFTER) {
       // 014 and everything after it: 019 redefines match_thoughts, and the
       // plans below are read from the catalog, so the arm holds the function
       // a deployment actually has rather than a superseded one. Above the
       // before arm's scales the schema was applied whole before the load.
       if (beforeArm) {
-        await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
+        await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" && upTo(f) });
         // 023's apply-time fingerprint backfill UPDATEs every loaded row (none
         // carries a fingerprint), and the column is indexed, so the update is
         // not HOT: every row gets a new heap tuple and a second, identical
@@ -945,7 +975,7 @@ for (const n of SCALES) {
     const exactTier = [...withRows].reverse().find((t) => t.matches <= routing.vExact);
     const broadest = withRows[withRows.length - 1];
     const thinnest = withRows[0];
-    const plan: Result["plan"] = arm === "after (014 on)" ? {} : undefined;
+    const plan: Result["plan"] = arm === AFTER ? {} : undefined;
     if (plan) {
       if (walkTier) plan.walk = { branch: "walk", tier: walkTier.label, matches: walkTier.matches, ...(await plans(sql, queries[0], tierFilter(walkTier.key), "walk")) };
       else console.log(`\n  (no tier above the exact threshold of ${routing.vExact} rows at this scale; the walk branch is not explained)`);
@@ -954,6 +984,21 @@ for (const n of SCALES) {
       if (broadest) plan.routeBroad = { branch: "route", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "route")) };
       if (thinnest && thinnest !== broadest) plan.routeThin = { branch: "route", tier: thinnest.label, matches: thinnest.matches, ...(await plans(sql, queries[0], tierFilter(thinnest.key), "route")) };
       plan.routeNone = { branch: "route", tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "route")) };
+      // 037's estimate — the sample of the heap that runs before `route` and
+      // decides whether it runs — on the same three filters: its cost is the
+      // pages it reads, so the three rows should agree, and the difference
+      // between them and `route`'s is what the gate saves or costs a call. A
+      // body from before 037 (OB1_BENCH_UPTO=036) has no such statement.
+      // Whether the body declares the sample share is routingAt's to say;
+      // a rewrite failure on a body that does must propagate, not read as
+      // "before 037" (review pass 1).
+      const gated = routing.vPct !== undefined;
+      if (!gated) console.log("\n  (the deployed match_thoughts declares no sample share — a body from before 037 — so no estimate is explained)");
+      if (gated) {
+        if (broadest) plan.estimateBroad = { branch: "estimate", tier: broadest.label, matches: broadest.matches, ...(await plans(sql, queries[0], tierFilter(broadest.key), "estimate")) };
+        if (thinnest && thinnest !== broadest) plan.estimateThin = { branch: "estimate", tier: thinnest.label, matches: thinnest.matches, ...(await plans(sql, queries[0], tierFilter(thinnest.key), "estimate")) };
+        plan.estimateNone = { branch: "estimate", tier: "nothing", matches: 0, ...(await plans(sql, queries[0], tierFilter("none"), "estimate")) };
+      }
     }
     results.push({ scale: n, arm, counts, ms10, msMax, overlap, ms10Raised, overlapRaised, cells, plan });
     console.log(" done");
@@ -1059,13 +1104,13 @@ for (const r of results) {
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
-console.log("`route` is the capped id collection that runs on every filtered call and decides between the other two; it has no chunk side.\n");
+console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 037's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the sample share is substituted as the literal the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make is exactly what the substitution removes.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
   if (!r.plan) continue;
   for (const { branch, tier, matches, custom, generic, genericNoJit } of Object.values(r.plan)) {
-    const chunks = branch === "route" ? "—" : `${custom.chunks} / ${generic.chunks}`;
+    const chunks = branch === "route" || branch === "estimate" ? "—" : `${custom.chunks} / ${generic.chunks}`;
     console.log(
       `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} / ${genericNoJit.ms.toFixed(2)} |`
     );
