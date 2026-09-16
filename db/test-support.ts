@@ -570,7 +570,7 @@ function declaredLocals(def: string): Map<string, string> {
  * 020 re-based it on v_base, and a redefinition that raises the floor
  * (SMD-1464) moves every consumer at once (SMD-1018 review pass).
  */
-export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number }> {
+export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number; vPct?: number }> {
   const { def, argNames } = await matchThoughtsDef(sql);
   const locals = declaredLocals(def);
   if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
@@ -590,8 +590,18 @@ export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch:
         half_life_days: "90.0::float",
       },
     });
-  const [row] = await sql.unsafe(`SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact`);
-  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact) };
+  // 036's sample share too, where the body declares it: the fraction of the
+  // heap TABLESAMPLE reads, evaluated NOW against this table. An explainer
+  // that substituted the declaring expression instead — pg_relation_size is
+  // volatile — left the planner unable to size the sample scan; it priced a
+  // scan of the whole heap, and at ten million rows that estimate crossed
+  // jit_above_cost and the explained statement paid ~50 ms of JIT the
+  // function never pays (its custom plan knows the parameter's value). The
+  // bench passes this back as the local's override (SMD-1463).
+  const [row] = await sql.unsafe(
+    `SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact${locals.has("v_pct") ? `, ${resolve("v_pct")}::float AS v_pct` : ""}`
+  );
+  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact), ...(locals.has("v_pct") ? { vPct: Number(row.v_pct) } : {}) };
 }
 
 /**

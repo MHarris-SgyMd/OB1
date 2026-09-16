@@ -203,6 +203,17 @@
 --   * Wide metadata. A metadata value past the TOAST threshold is detoasted
 --     for each sampled row; 160 detoasts. The collection's recheck pays the
 --     same per fetched row and always did.
+--   * A heap larger than the buffer pool. The sample is eight RANDOM page
+--     reads, and their cost is wherever the pages are: 0.10–0.17 ms from
+--     shared_buffers (the scratch corpus, the bench at 100,000 rows), about
+--     a millisecond from the OS page cache (the bench at ten million rows —
+--     a 4 GB heap against the image's 128 MB shared_buffers: the empty
+--     filter's call went from 0.27 ms to 1.31), and eight seeks from a cold
+--     disk. The 50% tier went from 241 ms to 13 on the same table, so the
+--     trade holds, but the ticket's "no more than the empty probe costs
+--     today" holds only where the heap is buffered. A server sized for its
+--     table (SMD-1499) keeps the pages in the pool; a brain on spinning
+--     disk should size shared_buffers before it reaches the floor.
 --   * The table is under the floor. Nothing here runs; the header's Why is
 --     the cost, at most a few milliseconds on the broadest filter.
 --   * Statistics have nothing to do with it: nothing here reads pg_statistic
@@ -232,8 +243,13 @@
 --     the two locals at entry                     0.005 ms
 --
 --   Through the function, db/bench-hnsw.ts before and after this file on the
---   same machine — the tables are in FORK.md change 68, and section C prints
---   the sample's own cost beside the collection's at every scale.
+--   same machine (FORK.md change 68 has the tables; section C prints the
+--   sample's own cost beside the collection's at every scale): the 50% tier
+--   241 ms → 13 at ten million rows and 36.5 → 10.4 at a million, the 10%
+--   tier 138 → 45 and 47 → 37, the thin tiers within the pass-to-pass
+--   spread, the empty filter 0.21 → 0.43 ms at a million rows and 0.27 →
+--   1.31 at ten million (the eight page reads, uncached — the last failure
+--   mode above).
 --
 -- What a successor must carry
 --   019's list, unchanged — `SET hnsw.iterative_scan = relaxed_order`, `SET

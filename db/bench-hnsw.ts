@@ -728,7 +728,12 @@ function shapeOf(plan: string, ms: number): PlanShape {
 type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
-  const body = await extractBody(sql, branch, DIM);
+  // The estimate's sample share as a literal, the value the function's own
+  // custom plan sees: left as its declaring expression (volatile) the planner
+  // could not size the sample scan and, at ten million rows, JIT-compiled a
+  // statement the function runs in a millisecond (routingAt says more).
+  const overrides = branch === "estimate" && routing.vPct !== undefined ? { v_pct: String(routing.vPct) } : undefined;
+  const body = await extractBody(sql, branch, DIM, { overrides });
   const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
@@ -827,7 +832,7 @@ const bounds: BoundsRow[] = [];
  * (test-support's routingAt), so the tiers are routed by the threshold the
  * function actually has, not by a copy of 014's arithmetic.
  */
-let routing = { vFetch: NaN, vExact: NaN };
+let routing: { vFetch: number; vExact: number; vPct?: number } = { vFetch: NaN, vExact: NaN };
 /**
  * pgvector's own defaults for the bounds 014 seeds, read from the server once
  * the library is loaded (`pg_settings.boot_val`) over the same HNSW_BOUNDS
@@ -1098,7 +1103,7 @@ for (const r of results) {
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
 console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
-console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 036's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter.\n");
+console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is 036's sample of the heap, which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes.\n");
 console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {

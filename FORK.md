@@ -8878,6 +8878,276 @@ nothing.
 they now use is this fork's.
 
 
+### 68. The routing count is gated by a sample of the heap — migration 036 reads eight random pages before 014's capped GIN collection and skips it when the sample says the filter is far too broad for the exact branch (SMD-1463)
+
+Change 28's "At scale" section ended on two costs that grow with the table, and
+this is the first of them. Every filtered `match_thoughts` call since migration
+014 opened with the routing statement — `SELECT array_agg(id) FROM (SELECT id
+FROM thoughts WHERE metadata @> filter AND <scoreable> LIMIT v_exact + 1)` —
+to decide between the exact branch and the HNSW walk. GIN builds its whole
+bitmap for the filter before the first row comes back, so the `LIMIT` caps the
+heap fetches and nothing else: the statement costs the number of *matching*
+rows, about 50 ns each, whatever it returns. SMD-1018 measured it through
+`db/bench-hnsw.ts` section C on the 50% tier: 0.8 ms at 10,000 rows, 3.0 at
+100,000, 27 at a million, 240 at ten million — nine tenths of that tier's
+whole call at ten million, where the walk that follows needs some eighty
+tuples. The twelfth review pass of 014 had named the mitigation — estimate the
+match count first, run the collection only when the estimate is plausibly
+under the threshold — and declined it for want of a number. The ticket's
+brief: bias the guess towards running the collection (a wrong estimate that
+runs it costs what today costs; one that skips it sends a thin filter to the
+walk, which is correct but slower and, at a million rows, can return short),
+keep the empty filter at one GIN probe, and hold `test-schema` [8b], [8c] and
+[8d].
+
+**Migration 036.** On a heap of at least 8,192 pages (64 MB), a filtered call
+first reads eight random pages of `thoughts` through `TABLESAMPLE SYSTEM` and
+counts three things: the sampled rows that pass the filter and carry a vector
+(`hits`), the distinct pages those rows sit on (`hit_pages`), and the distinct
+pages the sample reached (`pages_seen`). The collection is skipped — the call
+goes straight to the walk — only when all three hold:
+
+1. `hits × pages ≥ 10 × v_exact × pages_seen` — the sample, scaled to the
+   table, puts the filter at ten times the exact threshold or more. Ten is the
+   bias.
+2. `hits ≥ 8` — a floor on the evidence. At ten million rows the first
+   condition is met by a single sampled row (eight pages of 500,000 are one
+   sixty-thousandth of the table; one hit scales to 60,000), and one row is
+   luck. Eight from a filter matching exactly `v_exact` thoughts there has
+   probability about 1e-19; from one matching 1% of the table, two in ten
+   thousand.
+3. `hit_pages ≥ 3` — `SYSTEM` sampling is by page, so a filter whose matches
+   sit together on disk (one import, one day's captures, one tag written in
+   one session) shows the sample a page full of hits or nothing, and one full
+   page passes the first two conditions by itself. Three different pages means
+   three separate draws landed on the filter; for a contiguous run of
+   `v_exact` rows that is C(8,3) × (run pages / heap pages)³ — about 1e-5 at
+   the floor, 6e-8 at a million rows, 6e-11 at ten million.
+
+Anything less runs the collection exactly as before — the same statement, byte
+for byte, wrapped in an `IF` (test-schema [20] compares it with 014's, with
+whitespace collapsed) — and the same routing after it. Under the floor nothing
+runs but that collection: a brain of a few thousand thoughts never reads the
+sample, and its empty-filter probe stays the one GIN probe 014 made it. The
+page count and the floor are `config.mjs` constants (`ROUTE_SAMPLE_PAGES`,
+`ROUTE_ESTIMATE_MIN_PAGES`) templated into the file, so the header, the bench
+and the tests read one value; they are not operator knobs, and a suite lowers
+the floor only to reach the gate on a small table (`SchemaOptions.routeEstimateMinPages`).
+The threshold, the three branches, the walk's bounds and the plan mode are
+untouched — SMD-1464's questions. 036 is now the last definer of
+`match_thoughts`, which is what preflight's remedy and the suites'
+`restoreShipped` apply *alone*, so it carries 020's `DROP` of the 4-argument
+form and 020's replay of that form's privileges onto the new one: a hand
+re-apply of 014 or 019 puts the 4-argument form back beside the 6-argument one
+and every 4-argument call is "function is not unique"; the first draft of this
+file left that to 020 and test-schema [8c] found the two forms at once. On a
+database in order the `DROP` finds nothing, the capture reads an empty ACL, and
+`CREATE OR REPLACE` over the same signature keeps the function's privileges
+(test-upgrade [14] holds both directions). The same review found the mirror
+image in preflight's signature remedy: "apply 020" re-installs 020's
+`search_thoughts_hybrid` too, without change 48's relative floor — test-live
+[5d]'s first run did exactly that and [15] failed behind it — so the remedy
+now names 020, then 027 and 036, the last definers of the two functions.
+
+**Why a sample, and why this one — measured on a 500,000-row scratch corpus of
+the bench's shape before the file was written.**
+
+- *Not the planner's estimate*, which the ticket offered first. An `EXPLAIN`
+  of the predicate costs 0.7 ms and said 297,980 for a filter matching 249,623
+  rows, 50,505 for 49,994, 10,101 for 5,007 — and 50 for every filter under
+  that: 479 rows, 52, 895, a 1,000-row cluster and one matching nothing, all
+  50. jsonb has no per-key statistics; `@>` is priced from the column's
+  most-common *whole* values, which on the bench's few metadata shapes covers
+  the broad filters and on a real brain, where every row's metadata differs by
+  a timestamp or a title, covers none — every filter gets the default, one per
+  cent of the table, which at ten million rows is 100,000 for a filter
+  matching five and would send every thin filter to the walk: the opposite of
+  the bias asked for.
+- *`TABLESAMPLE SYSTEM`, not `BERNOULLI`*: `BERNOULLI` decides per row and reads
+  every page; `SYSTEM` decides per page and reads eight — 0.10 / 0.14 / 0.24 /
+  0.39 ms of execution for 4 / 8 / 16 / 32 pages, the same for the 50% filter
+  and the empty one, because the cost is the rows read, not the rows that
+  pass. Eight pages: a 10% filter puts sixteen expected hits in 160 sampled
+  rows and was skipped in 908 of 1,000 draws, a 50% filter in 984 (the misses
+  are draws that landed on fewer than three pages — `SYSTEM` picks a binomial
+  number of them); sixteen pages bought 998 and 1,000 for 0.1 ms more on every
+  filtered call, and the empty filter's own probe is 0.012 ms, so the sample
+  is already the larger part of that call. No `REPEATABLE` seed: a fixed seed
+  reads the same pages every call, which is a warm cache and a systematically
+  wrong sample of a clustered filter.
+- *The hit is `metadata @> filter AND embedding IS NOT NULL`*, not the
+  collection's `OR EXISTS (chunk)`: inside a SELECT-list expression the
+  `EXISTS` became a hashed subplan — the planner built a hash of the whole
+  chunk table before the sample scan started, 18 ms — where the collection's
+  WHERE-clause `EXISTS` is an index probe per row that lacks a vector. Not
+  counting a chunk-only row lowers the estimate, which biases towards running
+  the collection, which counts it; [8d]'s answer is unchanged.
+- *`pg_relation_size`, not `relpages`*: `relpages` is a statistic, 0 on a table
+  never analysed — a bulk import queried before autovacuum reaches it — which
+  would put the share at 100% and sample the whole heap (the prototype did
+  exactly that, once). `to_regclass('thoughts')` rather than a `regclass`
+  literal, which binds the OID at plan time and would size a table a suite
+  has since dropped and recreated.
+- *The floor* is where the bitmap can cost more than the sample: at 50 ns a
+  matching row, 8,192 pages — some 160,000 rows at the bench's width, fewer
+  with long content, more at the shipped width with short content (the
+  vectors are TOASTed, so the heap holds ~80 rows a page there) — puts the
+  collection at 4 ms for a 50% filter against a sample of 0.15 ms on every
+  filtered call.
+
+**The rule, tried a thousand times per filter on that corpus** (24,999 pages,
+`v_exact` 1,000; `skip` is how many of 1,000 draws met all three conditions):
+
+| filter | matching rows | placement | skipped, 8 pages | skipped, 16 pages |
+| --- | ---: | --- | ---: | ---: |
+| 50% | 249,623 | uniform | 984 | 1,000 |
+| 10% | 49,994 | uniform | 908 | 998 |
+| 10,000 rows | 10,000 | one contiguous run | 1 | 3 |
+| 1% | 5,007 | uniform | 2 | 19 |
+| 2,000 rows | 2,012 | uniform | 0 | 0 |
+| 1,000 rows | 1,000 | one contiguous run | 0 | 0 |
+| 900 rows | 895 | uniform | 0 | 0 |
+| 0.1% | 479 | uniform | 0 | 0 |
+| 0.01% | 52 | uniform | 0 | 0 |
+| nothing | 0 | — | 0 | 0 |
+
+Every filter at or under the threshold — the five bottom rows, the contiguous
+1,000 among them — ran the collection every time. The two filters between one
+and ten times the threshold (5,007 and the contiguous 10,000) were skipped
+once or twice in a thousand, and a skip there is not a wrong answer: both are
+above the threshold, so the collection would have routed them to the walk
+anyway. The broad filters, where the collection costs, were skipped nine
+times in ten or better.
+
+**Through the function, before and after, on the machine change 28 describes**
+(Apple M5 Pro, podman VM, 8 vCPUs, 14.8 GB, pgvector 0.8.6 at its image
+defaults; `db/bench-hnsw.ts`, the before pass from the tree without 036 and
+the after pass with it — reproducible from one tree as `OB1_BENCH_UPTO=035`
+against the default, which the bench gained for this). Section B, ten asked,
+median over 50 random queries:
+
+| rows | filter | matching rows | before: in exact top-10 | median ms | after: in exact top-10 | median ms |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 100,000 | 50% | 49,991 | 6.6 | 6.85 | 6.4 | 5.54 |
+| 100,000 | 10% | 10,116 | 8.6 | 12.45 | 8.8 | 10.10 |
+| 100,000 | 1% | 998 | 10.0 | 3.17 | 10.0 | 2.66 |
+| 100,000 | 0.1% | 90 | 10.0 | 0.55 | 10.0 | 0.57 |
+| 100,000 | 900 rows | 910 | 10.0 | 3.03 | 10.0 | 2.44 |
+| 100,000 | 0.01% | 6 | 6.0 | 0.23 | 6.0 | 0.25 |
+| 100,000 | nothing | 0 | 0.0 | 0.19 | 0.0 | 0.21 |
+| 1,000,000 | 50% | 499,443 | 2.8 | 36.54 | 2.8 | 10.38 |
+| 1,000,000 | 10% | 99,748 | 5.2 | 47.06 | 5.4 | 37.26 |
+| 1,000,000 | 1% | 9,951 | 10.0 | 31.06 | 8.8 | 242.44 |
+| 1,000,000 | 0.1% | 1,034 | 10.0 | 8.17 | 10.0 | 6.31 |
+| 1,000,000 | 900 rows | 934 | 10.0 | 6.42 | 10.0 | 4.34 |
+| 1,000,000 | 0.01% | 99 | 10.0 | 0.95 | 10.0 | 1.16 |
+| 1,000,000 | nothing | 0 | 0.0 | 0.21 | 0.0 | 0.43 |
+| 10,000,000 | 50% | 4,998,406 | 0.9 | 240.87 | 0.8 | 13.22 |
+| 10,000,000 | 10% | 999,827 | 2.1 | 138.07 | 2.1 | 45.18 |
+| 10,000,000 | 1% | 99,633 | 5.8 | 545.81 | 10.0 | 726.15 |
+| 10,000,000 | 0.1% | 10,231 | 10.0 | 97.11 | 10.0 | 92.60 |
+| 10,000,000 | 900 rows | 886 | 10.0 | 9.83 | 10.0 | 10.93 |
+| 10,000,000 | 0.01% | 959 | 10.0 | 9.26 | 10.0 | 11.50 |
+| 10,000,000 | nothing | 0 | 0.0 | 0.27 | 0.0 | 1.31 |
+
+Section C, the two statements themselves, extracted from the deployed body and
+explained (execution time): the collection under a forced custom plan, the
+sample from the arm with JIT off — the third finding below says why that arm
+is the one that prices it as the function pays it:
+
+| rows | filter | matching rows | route (the collection): before ms | after ms | estimate (the sample): after ms, JIT off |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100,000 | 50% | 49,991 | 2.70 | 2.54 | 0.11 |
+| 100,000 | 0.01% | 6 | 0.04 | 0.04 | 0.09 |
+| 100,000 | nothing | 0 | 0.01 | 0.02 | 0.14 |
+| 1,000,000 | 50% | 499,443 | 25.40 | 24.05 | 0.22 |
+| 1,000,000 | 0.01% | 99 | 0.65 | 0.60 | 0.19 |
+| 1,000,000 | nothing | 0 | 0.02 | 0.01 | 0.21 |
+| 10,000,000 | 50% | 4,998,406 | 250.45 | 217.14 | 0.94 |
+| 10,000,000 | 900 rows | 886 | 5.55 | 5.72 | 1.04 |
+| 10,000,000 | nothing | 0 | 0.02 | 0.03 | 0.99 |
+
+Read down the tables and four things fall out.
+
+- **The broad tiers lose the collection, and at ten million rows that is
+  most of the call.** 50% at ten million: 241 ms → 13, the 250 ms bitmap
+  gone; at a million 36.5 → 10.4. 10%: 138 → 45 and 47 → 37 — the gate
+  skips a 10% filter nine times in ten (a binomial draw of eight pages
+  sometimes lands on fewer than three), and the walk that follows costs what
+  it always cost. The recall columns are the index's and did not move (0.8
+  and 2.1 at ten million, 2.8 and 5.4 at a million — change 28's floor).
+- **The thin tiers and the exact branch are unchanged, plus the sample.**
+  900 rows: 9.8 → 10.9 ms at ten million, 6.4 → 4.3 at a million (cache
+  warmth; the same tier ran 5.7–9.3 across change 28's passes); every one
+  returned 10 of 10 in the exact top-10 before and after, as [8b]–[8e] and
+  [5d] hold them to.
+- **The empty filter pays the sample, and the sample's cost is eight random
+  page reads.** 0.21 → 0.43 ms at a million rows, where the 400 MB heap sits
+  in the VM's page cache; 0.27 → 1.31 at ten million, where it does not: a
+  4 GB heap against the image's 128 MB `shared_buffers`, eight pages a call
+  from the OS cache at ~0.1 ms each. The scratch corpus and the 100,000-row
+  bench (where the function does not run it) price the same statement at
+  0.10–0.17 ms with the pages in `shared_buffers`. So the ticket's "the
+  estimate must not cost more than the 0.01–0.2 ms the empty filter does
+  today" holds where the heap is buffered and not where it is not: on this
+  VM at ten million rows the shape enhanced-mcp sends on every call costs a
+  millisecond more, against 228 ms less on the 50% tier and 93 less on the
+  10%. A server sized for the table (SMD-1499 — `shared_buffers` a quarter
+  of RAM, not 128 MB) puts the pages back in the buffer pool; on a cold disk
+  the eight reads are eight seeks, and the header says so. The bench's own
+  `estimate` row at ten million read 60 ms under both plan modes and 0.94
+  with JIT off, which is why the table's last column is the JIT-off figure:
+  the extraction had substituted the sample share as its declaring
+  expression (`pg_relation_size` is volatile), the planner could not size
+  the sample scan and priced a scan of the whole heap, and that estimate
+  crossed `jit_above_cost` — the function's own custom plan knows the
+  parameter's value and pays none of it, which the 1.31 ms call is the proof
+  of. The bench now substitutes the evaluated share (`routingAt` returns it),
+  so its next run prices the row as the function does.
+- **The 1% tier is the planner's coin, as before.** At a million rows it was
+  served from GIN under the walk branch in the before pass (31 ms, 10 of 10)
+  and walked HNSW in the after pass (242 ms, 8.8 of 10); at ten million GIN
+  served it both times (546 and 726 ms). Change 28 found the same flip
+  between its own passes on the same rows under a fresh `ANALYZE`; the gate
+  is not in it — a filter at 1% of a million rows (9,951) is skipped twice
+  in a thousand draws, and either way the collection routed it to the walk
+  branch, whose plan the coin decides. That band is SMD-1464's.
+
+**What it costs where it does nothing.** Under the floor — 10,000 and 100,000
+rows in the bench, every real brain today — the body computes two locals at
+entry (the heap's page count and the sample share, ~5 µs) and nothing else
+changes; the 100,000-row rows above differ by the pass-to-pass spread. Above
+it, every filtered call pays the sample: eight page reads, 0.2 ms when the
+heap is cached and about a millisecond when it is not (the third finding
+above), and the thin tiers move by less than the spread.
+
+**Not done here.** The threshold, the plan mode and which of the two seeded
+bounds bites are SMD-1464; `ef_search` on real vectors is SMD-1465. One thing
+the prototype saw in passing belongs with SMD-1464: with `enable_seqscan` on,
+the planner ran the 50% collection as a sequential scan with a `LIMIT` — 1.3 ms
+against 12.6 for the GIN bitmap it takes under 019's `enable_seqscan = off` —
+so 019's setting, right for the vector CTEs it was measured on, is what makes
+the collection's cost the bitmap's on a broad filter; a `LIMIT`-shaped
+alternative for that one statement is a plan question, not this change's, and
+its estimate would rest on the same `@>` selectivity this change found
+uninformative on real metadata. A hundred million rows was not run, for the
+reasons change 28 gives.
+
+**Verified:** `db/test-schema.ts` 855/855 under PGlite, [8e] new (the
+shape, the floor, exactness with the gate reached at floor 0) and [20]'s
+definer pin moved to 036; `db/test-live.ts` 492/492 on real Postgres, [5d]
+new (25,000 rows at the configured width, the gate reached, the broad filter
+makes one GIN scan fewer per call than under 020's body and the thin filter
+the same, both exact); `db/test-upgrade.ts` 173/173, [14] new (036 onto a
+populated 035: no column, signature, row or privilege moves; 014 re-applied by
+hand, then 036 alone, leaves one form); `server-portable` `tsc --noEmit` clean;
+`bun scripts/check-fork-consistency.mjs` PASS (check 7 reads 036 as
+`match_thoughts`' owner from the files); `bench-hnsw.ts` before and after at
+100,000, 1,000,000 and 10,000,000 rows, above.
+
+**Upstream status:** not applicable — 014's routing statement is this fork's.
+
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
