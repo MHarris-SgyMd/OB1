@@ -60,7 +60,7 @@ curl -o supabase/functions/FUNCTION_NAME/index.ts https://raw.githubusercontent.
 curl -o supabase/functions/FUNCTION_NAME/deno.json https://raw.githubusercontent.com/MHarris-SgyMd/OB1/main/DOWNLOAD_PATH/deno.json
 ```
 
-The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it:
+The server imports the access-key module from `../_shared/auth.ts` — Supabase bundles `supabase/functions/_shared/` with every function. Download it once; every extension shares it, and so do the recipes and integrations that authenticate the same way (every `_shared/auth.ts` under `recipes/` and `integrations/` is the same file byte for byte, so this one copy serves them all):
 
 ```bash
 mkdir -p supabase/functions/_shared
@@ -192,6 +192,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 **Deploy succeeds but function returns errors**
 - Check Edge Function logs: Supabase Dashboard → Edge Functions → your function → Logs
 - Verify secrets are set: `supabase secrets list` should show `MCP_ACCESS_KEYS` (or the older `MCP_ACCESS_KEY`)
+- 401 on every request with the secret set: an entry that is not `name:read|write:<64 hex characters>` is ignored — and the vendored servers do not log it. Check each entry is three fields, the scope lower-case, the digest 64 hex characters (the hash, not the key); `bun preflight.ts` in `server-portable/` with the same `MCP_ACCESS_KEYS` in its environment prints the parse problem
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected — if they're missing, your Supabase project may need to be restarted
 
 **"Invalid JWT" or authentication errors**

@@ -28,7 +28,7 @@
  *   8. a credential read from the environment is never compared with an
  *      equality operator — inline or through an identifier bound from the read
  *      — in the same files as 7, with counted per-file exceptions for the
- *      vendored files a ticket holds
+ *      vendored files a ticket holds (none today)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -63,9 +63,10 @@ function contributionDirs() {
     const base = join(ROOT, cat);
     if (!existsSync(base)) continue;
     for (const name of readdirSync(base).sort()) {
-      // _template is the category's placeholder, _shared the module the
-      // extensions import, node_modules extensions/test-auth.ts's install
-      // (gitignored) — none is a contribution.
+      // _template is the category's placeholder, _shared the auth module the
+      // category's servers import (a copy of server-portable/auth.ts), and
+      // node_modules extensions/test-auth.ts's install (gitignored) — none is
+      // a contribution.
       if (name === "_template" || name === "_shared" || name === "node_modules") continue;
       const dir = join(base, name);
       if (statSync(dir).isDirectory()) out.push({ cat, name, dir, rel: `${cat}/${name}` });
@@ -422,7 +423,7 @@ const SHELL_HAZARD_EXCEPTIONS = new Map([
 // Text is scanned by construction (checks 6 and 7): only known binary shapes
 // and lockfiles are skipped, so an extensionless Dockerfile, Procfile or CNAME
 // is read like everything else.
-const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
+const BINARY_FILES = /\.(png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|pdf|zip|gz|tgz|lock|mp3|mp4|mov|m4a|wav|webm)$|(?:^|\/)(?:package-lock\.json|bun\.lockb?)$/i;
 
 /**
  * Files git ignores under ROOT — recipe run output (email packs, OAuth state),
@@ -698,7 +699,10 @@ function checkCoreFunctions() {
 // key accepted from a URL query string. FORK.md change 64 made them consumers
 // of server-portable/auth.ts — named, scoped, hashed keys; a read-scoped key
 // is never given the tools that write — and this is what keeps the next rebase
-// from bringing the two lines back.
+// from bringing the two lines back. Its first run found the same compare in
+// seventeen more vendored files; change 67 (SMD-1455) moved every one — the
+// MCP and HTTP servers onto the module, the webhook receivers onto a
+// timing-safe compare of digests — and the exception list below emptied.
 //
 // The rule is the MECHANISM, not the seven files' spelling: a strict or loose
 // (in)equality with a value read from the environment under a credential's
@@ -725,18 +729,31 @@ function checkCoreFunctions() {
 // both silencing real compares and failing ordinary code, because scope in
 // regex over unparsed text is not a thing; the fourth took the altitude. A
 // false positive here fails CI in the open and is answered with a rename or a
-// counted exception; a miss is silent. Outside the rule, and said so: `.includes`,
+// counted exception; a miss is silent. Also outside the rule, by design: a
+// compare of a secret the CALLER echoes — a webhook's `secret_token` — when it
+// is not read from the environment on either side, and any compare routed
+// through a function (`secretMatches(a, b)`, `timingSafeEqual`): the rule
+// catches the operator, and a call is where the timing-safe compare lives.
+// Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
-// an object property, a helper that returns the key, several declarators on
+// an object property — unless the object was bound from a statement that
+// reads a credential from the environment (`const keys = { MCP_ACCESS_KEY:
+// Deno.env.get(…) }`, one line or many, the shape change 67's workers use),
+// whose credential-named properties, bracket reads and destructured names are
+// followed; a free property clause fired on `opts.MAX_TOKENS` and
+// `table.PRIMARY_KEY`, so it is anchored to those objects (not followed: a
+// property assigned after the object was made, `cfg.API_KEY = process.env.API_KEY`;
+// a nested one, `cfg.auth.KEY`; a literal that never closes) — a helper that
+// returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable, a read
 // by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
 // (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
 // and braces or `=>` inside a string, comment or regex literal — each a
 // spelling the review passes named and this rule does not chase. Exceptions are
-// per file and COUNTED, as checks 6 and 7's are: the vendored recipes and
-// integrations that carry the same compare are listed with the ticket that
-// holds their fix, for exactly the lines each has today — one fixed drops out
-// as stale, one added fails.
+// per file and COUNTED, as checks 6 and 7's are: a vendored file that must keep
+// a compare is listed with the ticket that holds its fix, for exactly the lines
+// it has today — one fixed drops out as stale, one added fails. The list has
+// been empty since change 67.
 const CREDENTIAL_ENV_NAME = /(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)(?:S|_?V?\d+)?\b/i;
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 /** One read of the environment; the variable's name is the first defined group. */
@@ -764,8 +781,24 @@ function credentialComparesIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])\s*[^;\n]*?${ENV_READ}`, "g"))) {
     if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
   }
-  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
-  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\))(?![\w$])/g)) {
+  // An object bound from a statement that reads a credential from the
+  // environment — `const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") }`,
+  // on one line or many (the binding rule above stops at the line break; this
+  // walks the braces). Its credential-named properties, bracket reads and a
+  // destructure from it are the credential below. Anchored to these objects
+  // only: a clause over any object's upper-case properties fired on
+  // `opts.MAX_TOKENS` and `table.PRIMARY_KEY`.
+  const objects = new Set();
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*\{`, "g"))) {
+    let depth = 0, i = m.index + m[0].length - 1;
+    for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
+    if (i === text.length) continue; // a literal that never closes (prose, a truncated block) binds nothing
+    const block = text.slice(m.index, i + 1);
+    if ([...block.matchAll(new RegExp(ENV_READ, "g"))].some((r) => CREDENTIAL_ENV_NAME.test(envNameOf(r.slice(1))))) objects.add(m[1]);
+  }
+  const OBJECTS = [...objects].map((o) => o.replace(/\$/g, "\\$"));
+  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one; so does a destructure from an object above.
+  for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\)${OBJECTS.map((o) => "|" + o).join("")})(?![\w$])`, "g"))) {
     for (const part of m[1].split(",")) {
       const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
       if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
@@ -786,6 +819,16 @@ function credentialComparesIn(text) {
     flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${bound(N)}`, "g"));
     // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
     flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
+  }
+  // A credential-named property of an object bound from the environment (above):
+  // `keys.MCP_ACCESS_KEY`, `keys?.MCP_ACCESS_KEY`, `keys["MCP_ACCESS_KEY"]`, with
+  // `.trim()` allowed. Same guards as a bound name: not `typeof`, not against a
+  // nullish, empty or string literal, not `.x`, `(`, `[` after it.
+  for (const O of OBJECTS) {
+    const P = String.raw`(?<![\w$.])${O}(?:(?:\?\.|\.)(${IDENT})|(?:\?\.)?\[\s*["'](${IDENT})["']\s*\])(?:(?:\?\.|\.)trim\(\))?`;
+    const cred = (m) => CREDENTIAL_ENV_NAME.test(m[1] ?? m[2] ?? "");
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${P}(?!\s*(?:[.(\[]|\?\.))`, "g"), cred);
+    flag(new RegExp(String.raw`(?<!typeof\s+)${P}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), cred);
   }
   return [...lines].sort((a, b) => a - b);
 }
@@ -850,6 +893,13 @@ const CREDENTIAL_COMPARE_PROBES = [
   // The fifth pass: Hono's adapter form.
   'import { env } from "hono/adapter";\nif (provided !== env(c).MCP_ACCESS_KEY) deny();',
   'const { MCP_ACCESS_KEY } = env(c);\nif (provided !== MCP_ACCESS_KEY) deny();',
+  // Change 67's third and fourth passes: an object bound from the environment, its
+  // credential-named property compared — dotted, bracketed, or destructured out of it.
+  'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys.MCP_ACCESS_KEY) deny();',
+  'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nif (!provided || provided !== keys.MCP_ACCESS_KEY?.trim()) deny();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys["MCP_ACCESS_KEY"]) deny();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys?.["MCP_ACCESS_KEY"]) deny();',
+  'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nconst { MCP_ACCESS_KEY } = keys;\nif (provided !== MCP_ACCESS_KEY) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -874,30 +924,29 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const key = process.env.API_KEY;\nfor (const key of Object.keys(row)) if (key === "id") continue;',
   'const c = new Hono();\nif (c.env.OB1_STORE === "sql") {',
   'const expected = Deno.env.get("MCP_ACCESS_KEY");\nif (expected?.length !== 64) warn();',
+  // Change 67's servers: a property of a bound principal is not the credential, and a
+  // typeof test beside a bound secret is a type check, not a compare of it.
+  'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS") });\nif (session.scope !== principal.scope) session = undefined;',
+  'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) deny();',
+  // A property's presence, type or absence is not a compare of it; the workers' fail-closed check.
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (keys.MCP_ACCESS_KEY === undefined) warn();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (typeof keys.MCP_ACCESS_KEY === "string") ok();',
+  'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) return json({ error: "misconfigured" }, 503);',
+  // An upper-case property with a credential suffix on an object NOT bound from the
+  // environment is not the credential — the fourth pass anchored the clause after these fired.
+  'if (opts.MAX_TOKENS === 4096) trim();',
+  'if (col === table.PRIMARY_KEY) skip();',
+  // A helper that returns the key is outside the rule, and said so above.
+  'const cfg = accessKeys();\nif (k !== cfg.MCP_ACCESS_KEY) deny();',
+  // An object literal that never closes binds nothing, whatever is read below it.
+  'const keys = {\nconst KEY = Deno.env.get("KEY");\nif (p === keys.KEY) deny();',
 ];
-// The vendored recipes and integrations that carry the same compare, each for
-// exactly this many lines, held by the ticket named; fixing one makes its entry
-// stale (remove it), adding a compare beside one fails.
-const HELD = "the same compare as the extensions had; SMD-1455 holds the fix — move it onto server-portable/auth.ts as change 64 did";
-const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([
-  ["recipes/edge-function-cost-optimization/examples/before/per-request-server.ts", { why: `${HELD} (the recipe's "before" example)`, lines: 1 }],
-  ["recipes/edge-function-cost-optimization/examples/after/index.ts", { why: `${HELD} (the recipe's "after" example)`, lines: 1 }],
-  ["recipes/ob-graph/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/work-operating-model-activation/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/editorial-policy/auditor/index.ts", { why: HELD, lines: 1 }],
-  ["recipes/vercel-neon-telegram/src/app/api/telegram/route.ts", { why: `${HELD} (Telegram's webhook secret header)`, lines: 1 }],
-  ["integrations/delete-thought-mcp/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/update-thought-mcp/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/kubernetes-deployment/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/entity-extraction-worker/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/consolidation-workers/bio/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/consolidation-workers/metadata-norm/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/agent-memory-api/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/open-brain-rest/index.ts", { why: HELD, lines: 1 }],
-  ["integrations/readwise-capture/index.ts", { why: `${HELD} (the secret Readwise echoes in the webhook body)`, lines: 1 }],
-  ["integrations/telegram-capture/README.md", { why: `${HELD} (the README's sample handler)`, lines: 1 }],
-  ["docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs", { why: `${HELD} (the walkthrough's stub REST server)`, lines: 1 }],
-]);
+// Empty since SMD-1455 (FORK.md change 67) moved the seventeen files check 8's
+// first run found onto the shared module. The shape stays for the next audit: a
+// vendored file that must keep a compare is listed with its line count and the
+// ticket that holds its fix, and the count is checked both ways — one fixed
+// makes its entry stale (remove it), one added beside it fails.
+const CREDENTIAL_COMPARE_EXCEPTIONS = new Map([]);
 
 function checkCredentialCompares() {
   const SELF = "scripts/check-fork-consistency.mjs";
@@ -911,7 +960,7 @@ function checkCredentialCompares() {
   for (const text of CREDENTIAL_COMPARE_NON_PROBES) {
     if (credentialComparesIn(text).length > 0) fail(SELF, `credential-compare rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through server-portable/auth.ts as the extensions do (SMD-1252, FORK.md change 64), or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
+  const MSG = "compares a credential from the environment with an equality operator — one shared plaintext secret, a timing leak, no scope and no revocation; authenticate through the _shared/auth.ts beside the file (a copy of server-portable/auth.ts) as the extensions, recipes and integrations do (SMD-1252 and SMD-1455, FORK.md changes 64 and 67) — or, for a secret the caller echoes, compare digests with its secretMatches() — or list the file in CREDENTIAL_COMPARE_EXCEPTIONS with its line count and the ticket that holds its fix";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);

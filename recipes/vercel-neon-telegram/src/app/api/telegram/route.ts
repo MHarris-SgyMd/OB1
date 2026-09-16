@@ -4,6 +4,7 @@ import { Bot, webhookCallback } from "grammy";
 import { captureThought } from "@/lib/capture";
 import { searchThoughts } from "@/lib/db";
 import { generateEmbedding } from "@/lib/ai";
+import { secretMatches } from "@/lib/auth";
 
 function createBot(): Bot {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -78,8 +79,8 @@ export async function POST(req: Request) {
   if (!expectedSecret) {
     return Response.json({ error: "Telegram webhook not configured" }, { status: 503 });
   }
-  const secret = req.headers.get("x-telegram-bot-api-secret-token");
-  if (secret !== expectedSecret) {
+  // Timing-safe: both sides hashed, the digests compared with timingSafeEqual (lib/auth.ts).
+  if (!secretMatches(req.headers.get("x-telegram-bot-api-secret-token"), expectedSecret)) {
     return Response.json({ error: "Invalid webhook secret" }, { status: 401 });
   }
 

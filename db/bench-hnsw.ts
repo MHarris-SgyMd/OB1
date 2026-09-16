@@ -133,7 +133,8 @@
  *
  *   ./with-postgres.sh bun bench-hnsw.ts             # 10,000 and 100,000 rows, 50 queries
  *   OB1_BENCH_SCALES=1000 OB1_BENCH_QUERIES=20 ./with-postgres.sh bun bench-hnsw.ts
- *   OB1_BENCH_SCALES=1000000,10000000 ./with-postgres.sh bun bench-hnsw.ts
+ *   # a million rows and up: one scale per container, with the shared memory
+ *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
  *
  *   # Keep the ten-million-row corpus between passes: the first run builds it,
@@ -155,7 +156,7 @@
  * every filter up to about 1% of a ten-million-row table from the GIN index
  * (exact, whatever the bounds say) and walks HNSW only for broad filters,
  * where the walk needs a few hundred tuples and the recall it loses is the
- * index's own at the default ef_search (section A's control: 8.3 / 5.0 / 2.2
+ * index's own at the default ef_search (section A's control: 8.2 / 5.0 / 2.2
  * of 10 unfiltered at 10k / 100k / 1M random rows). The seeded bounds matter
  * in one band — moderately selective filters at around a million rows, where
  * the walk does walk and pgvector's default MEMORY bound cuts it short — and
@@ -183,15 +184,16 @@
  * index are a little wider than the published run's. Bun's SQL driver has no
  * COPY protocol (a `COPY ... FROM STDIN` hangs), so the rows go in as
  * multi-row INSERTs into a table whose secondary indexes have been dropped
- * and whose user triggers are disabled for the load; the indexes are rebuilt
- * after it, with `maintenance_work_mem` sized for the graph. That is also how
- * a brain that size would be bulk-loaded.
+ * and whose user triggers are disabled for the load (so 008's audit table
+ * stays empty, where the published run's held a row per thought); the indexes
+ * are rebuilt after it, with `maintenance_work_mem` sized for the graph. That
+ * is also how a brain that size would be bulk-loaded.
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, assertThrowawayDatabase, dropSchema, explainPrepared, extractBody, ledgerNames, ledgerStrangers, migratorEnv, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, runMigrator, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, parseSetConfig } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("bench-hnsw.ts");
 const PRINT_PLANS = process.argv.includes("--plans");
@@ -249,6 +251,8 @@ const CHUNKED_SHARE = 0.2;
 const CHUNKS_PER = 2;
 /** Rows per INSERT statement during the load. */
 const BATCH = 2000;
+/** The two vector indexes the load drops and rebuilds, timed each; section L reads them by these names. */
+const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"] as const;
 /**
  * `maintenance_work_mem` for the HNSW builds, or "auto": pgvector builds the
  * graph in memory while it fits and falls back to a far slower on-disk phase
@@ -308,11 +312,12 @@ function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
   // share are the same rows under two names (5,000 rows at five million is
   // the 0.1% tier, 2,000 at 20,000 the 10% one); they are one tier, labelled
   // with both names, so nothing is measured twice and nothing vanishes.
+  const aliases = new Map<string, string[]>();
   const push = (t: Tier) => {
     const twin = out.find((o) => o.share === t.share);
     if (twin) {
-      twin.label = `${twin.label} (also the ${t.label} tier)`;
-      notes.push(`${t.label} is the ${twin.label.split(" (")[0]} tier at this scale`);
+      aliases.set(twin.key, [...(aliases.get(twin.key) ?? []), t.label]);
+      notes.push(`${t.label} is the ${twin.label} tier at this scale`);
     } else out.push(t);
   };
   for (const t of TIERS) {
@@ -326,8 +331,11 @@ function tiersAt(n: number): { tiers: Tier[]; notes: string[] } {
       push({ key: t.key, share: 0, label: "nothing" });
     } else if (n * t.share >= 1) {
       push({ key: t.key, share: t.share, label: `${t.share * 100}%` });
+    } else {
+      notes.push(`${t.share * 100}% of ${n.toLocaleString()} rows is under one row; not planted`);
     }
   }
+  for (const t of out) if (aliases.has(t.key)) t.label = `${t.label} (also the ${aliases.get(t.key)!.join(" and the ")} tier)`;
   return { tiers: out.sort((a, b) => b.share - a.share), notes };
 }
 
@@ -361,15 +369,19 @@ function queriesFor(n: number): number[][] {
   return Array.from({ length: Q }, () => unitVector(DIM));
 }
 
-// The skip must equal the draws it stands in for, or the queries are not the
-// published ones: checked once against a thousand real draws before anything
-// loads.
+// The skip must equal the draws a ROW costs, or the queries are not the
+// published ones: checked once, before anything loads, by generating one row
+// the way rowBatches does (the tier coin, then the vector) beside one skip of
+// the budget queriesFor assumes — so a generator that starts caching its
+// second Gaussian, or a row that gains a draw, fails here rather than
+// landing the queries off the stream while every other check still passes.
 {
   const a = seedFor(1);
   const b = seedFor(1);
-  for (let i = 0; i < 1000; i++) a.rnd();
-  b.skip(1000);
-  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip does not reproduce the stream; the queries would not be the published ones");
+  a.rnd();
+  a.unitVector(DIM);
+  b.skip(1 + 2 * DIM);
+  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip(1 + 2 * DIM) does not reproduce one row's draws; the queries would not be the published ones");
 }
 
 type Row = { doc: number; v: number[]; tiers: string[] };
@@ -438,6 +450,8 @@ type LoadStats = {
   chunkRows: number;
   chunkS: number;
   buildS: Record<string, number>;
+  /** The non-HNSW indexes rebuilt after the load, and their time together; the set differs by schema. */
+  otherIndexes: string[];
   otherIndexesS: number;
   sizes: Record<string, number>;
   maintenanceMem: string;
@@ -589,16 +603,26 @@ async function migrateWhole(sql: SQL, onto: "kept" | "fresh"): Promise<string[]>
  * generator, the JSON and the confound check run between them on the client
  * and would otherwise scale the "load" with OB1_BENCH_QUERIES. The schema
  * under the load differs between the arms (001–013 or the whole set), which
- * is why the indexes and triggers come off: what remains per row is the heap
- * and the primary key, the same in both. Returns the tier match counts too —
+ * is why the indexes and triggers come off: what remains per row during the
+ * INSERTs is the heap and the primary key, the same in both. The set rebuilt
+ * afterwards is not the same — 023's and 025's three indexes exist only under
+ * the whole schema — so section L names how many "other indexes" its column
+ * timed. Returns the tier match counts too —
  * counted as the rows are generated, so no pass over the table is needed.
  */
 async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries: number[][]): Promise<{ stats: LoadStats; matches: Map<string, number> }> {
-  const HNSW_INDEXES = ["thoughts_embedding_idx", "thought_chunks_embedding_idx"];
+  // Every index on the two tables that a constraint does not own — the
+  // primary keys stay, and so would a UNIQUE constraint's index if one were
+  // added (none today; 003's unique partial index is a plain index).
   const secondary: { name: string; def: string }[] = await sql.unsafe(
-    `SELECT indexname AS name, indexdef AS def FROM pg_indexes
-     WHERE schemaname = 'public' AND tablename IN ('thoughts', 'thought_chunks') AND indexname NOT LIKE '%_pkey'
-     ORDER BY indexname`
+    `SELECT i.relname AS name, pg_get_indexdef(ix.indexrelid) AS def
+     FROM pg_index ix
+     JOIN pg_class i ON i.oid = ix.indexrelid
+     JOIN pg_class t ON t.oid = ix.indrelid
+     JOIN pg_namespace ns ON ns.oid = t.relnamespace
+     WHERE ns.nspname = 'public' AND t.relname IN ('thoughts', 'thought_chunks')
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)
+     ORDER BY i.relname`
   );
   for (const name of HNSW_INDEXES) {
     if (!secondary.some((i) => i.name === name)) throw new Error(`index ${name} is not defined; the load cannot rebuild it`);
@@ -647,6 +671,11 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   const [{ chunkRows }] = await sql.unsafe(`SELECT count(*)::int AS "chunkRows" FROM thought_chunks`);
 
   const maintenanceMem = MAINTENANCE_MEM === "auto" ? `${Math.max(256, Math.ceil(n / 1024))}MB` : MAINTENANCE_MEM;
+  // The parallel build keeps its graph in dynamic shared memory sized by this
+  // setting, and the container's /dev/shm is the ceiling (with-postgres.sh
+  // gives 1 GB unless OB1_PG_SHM_SIZE says more). Nothing here can read the
+  // ceiling, so say what the build is about to ask for.
+  if (BUILD_WORKERS > 0) process.stdout.write(`(parallel build under ${maintenanceMem}: /dev/shm must hold it — OB1_PG_SHM_SIZE) `);
   await sql.unsafe(`SET maintenance_work_mem = '${maintenanceMem}'`);
   // pgvector says when the graph stops fitting in maintenance_work_mem with a
   // NOTICE, which this driver does not surface; sent to the server log it can
@@ -654,13 +683,17 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   await sql.unsafe(`SET log_min_messages = notice`).catch(() => undefined);
   await sql.unsafe(`SET max_parallel_maintenance_workers = ${BUILD_WORKERS}`);
   const buildS: Record<string, number> = {};
+  const otherIndexes: string[] = [];
   let otherIndexesS = 0;
   for (const { name, def } of secondary) {
     const t2 = performance.now();
     await sql.unsafe(def);
     const s = (performance.now() - t2) / 1000;
-    if (HNSW_INDEXES.includes(name)) buildS[name] = s;
-    else otherIndexesS += s;
+    if ((HNSW_INDEXES as readonly string[]).includes(name)) buildS[name] = s;
+    else {
+      otherIndexes.push(name);
+      otherIndexesS += s;
+    }
   }
   for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`ALTER TABLE ${rel} ENABLE TRIGGER USER`);
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
@@ -672,12 +705,15 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   await sql.unsafe(`RESET log_min_messages`).catch(() => undefined);
 
   return {
-    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS, builtAt: new Date().toISOString(), source: "loaded" },
+    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexes, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS, builtAt: new Date().toISOString(), source: "loaded" },
     matches,
   };
 }
 
 // ── The measurements ────────────────────────────────────────────────────────
+
+/** The `wants` key for the exact answer over the whole table (section A's control); no tier is keyed so. */
+const WHOLE_TABLE = "whole table";
 
 /** A filter for a tier: `{"tiers": ["t1"]}` — array containment, one key. */
 const tierFilter = (key: string) => JSON.stringify({ tiers: [key] });
@@ -710,27 +746,25 @@ async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): 
   // and the ceiling's: what asking for the most the function will return costs.
   // The default path's rows are also scored against the exact top-K over the
   // whole table — the index's recall with no filter in the way.
-  let overlap = 0;
-  const time = async (count: number) => {
+  const time = async (count: number): Promise<{ ms: number; overlap: number }> => {
     const times: number[] = [];
+    let overlap = 0;
     for (const [i, q] of queries.entries()) {
       const t0 = performance.now();
       const got = (await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${count}, '{}'::jsonb)`)).map((r: { id: string }) => r.id);
       times.push(performance.now() - t0);
-      if (count === K) overlap += got.filter((id) => wants[i].has(id)).length;
+      overlap += got.filter((id) => wants[i].has(id)).length;
     }
-    return median(times);
+    return { ms: median(times), overlap: overlap / queries.length };
   };
-  const ms10 = await time(K);
-  const msMax = await time(ASKS[ASKS.length - 1]);
-  const overlapDefault = overlap / queries.length;
+  const at10 = await time(K);
+  const atMax = await time(ASKS[ASKS.length - 1]);
   // The same default-path call with the index asked to look harder: the
   // function does not set ef_search, so a session SET reaches it.
-  overlap = 0;
   await sql.unsafe(`SET hnsw.ef_search = ${EF_SEARCH_RAISED}`);
-  const ms10Raised = await time(K);
+  const raised = await time(K);
   await sql.unsafe(`RESET hnsw.ef_search`);
-  return { counts, ms10, msMax, overlap: overlapDefault, ms10Raised, overlapRaised: overlap / queries.length };
+  return { counts, ms10: at10.ms, msMax: atMax.ms, overlap: at10.overlap, ms10Raised: raised.ms, overlapRaised: raised.overlap };
 }
 
 /**
@@ -863,13 +897,7 @@ type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
   const body = await extractBody(sql, branch, DIM);
-  const out: Record<string, PlanShape> = {};
-  // The generic plan twice: as the function would get it, and with JIT off.
-  // At ten million rows every generic plan carried 30–130 ms of startup its
-  // custom twin did not, and the flat estimate that makes a plan generic is
-  // also what carries its cost past jit_above_cost; the third arm reads that
-  // rather than inferring it (SMD-1018 review pass).
-  for (const [key, mode, jit] of [["custom", "force_custom_plan", true], ["generic", "force_generic_plan", true], ["genericNoJit", "force_generic_plan", false]] as const) {
+  const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets —
@@ -878,9 +906,37 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
       if (!jit) await tx.unsafe(`SET LOCAL jit = off`);
       return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode });
     });
-    out[key] = shapeOf(text, ms);
-  }
-  return out as Plans;
+    return shapeOf(text, ms);
+  };
+  // The generic plan twice: as the function would get it, and with JIT off.
+  // At ten million rows every generic plan carried 30–130 ms of startup its
+  // custom twin did not, and the flat estimate that makes a plan generic is
+  // also what carries its cost past jit_above_cost; the third arm reads that
+  // rather than inferring it (SMD-1018 review pass).
+  return { custom: await arm("force_custom_plan", true), generic: await arm("force_generic_plan", true), genericNoJit: await arm("force_generic_plan", false) };
+}
+
+/**
+ * PREPARE an extracted statement under the function's own settings and a
+ * plan mode, hand the caller an EXECUTE builder for it, and take everything
+ * down afterwards — the bracket sections D and E both open (session scope,
+ * since the EXECUTEs run outside a transaction; the caller's plan mode,
+ * since the two sections exist to pin different ones).
+ */
+async function withPrepared<T>(
+  name: string,
+  body: string,
+  mode: "force_custom_plan" | "force_generic_plan",
+  run: (via: (q: number[], filter: string) => string) => Promise<T>
+): Promise<T> {
+  const applied = await applyFunctionSettings(sql, { scope: "session" });
+  await sql.unsafe(`SET plan_cache_mode = ${mode}`);
+  await sql.unsafe(`PREPARE ${name}${preparedSignature(DIM)} AS ${body}`);
+  const result = await run((q, filter) => `EXECUTE ${name}('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`);
+  await sql.unsafe(`DEALLOCATE ${name}`);
+  await sql.unsafe(`RESET plan_cache_mode`);
+  for (const setting of applied) await sql.unsafe(`RESET ${setting}`);
+  return result;
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
@@ -899,7 +955,7 @@ async function reconnect(): Promise<void> {
 }
 
 type Arm = "before (001–013)" | "after (014 on)";
-type Cell = FilteredResult & { key: string; label: string; matches: number };
+type Cell = FilteredResult & { label: string; matches: number };
 type Result = {
   scale: number;
   arm: Arm;
@@ -945,8 +1001,24 @@ assertThrowawayDatabase(URL_);
  * function actually has, not by a copy of 014's arithmetic.
  */
 let routing = { vFetch: NaN, vExact: NaN };
-/** pgvector's own defaults for the two bounds 014 seeds. */
-const PGVECTOR_DEFAULTS: Record<string, string> = { "hnsw.max_scan_tuples": "20000", "hnsw.scan_mem_multiplier": "1" };
+/**
+ * pgvector's own defaults for the bounds 014 seeds, read from the server once
+ * the library is loaded (`pg_settings.boot_val`) over the same HNSW_BOUNDS
+ * list the in-force assertion and the RESETs use — not a second literal map,
+ * which a third seeded bound would have left out of the "defaults" arm
+ * (third review pass).
+ */
+let pgvectorDefaults: Record<string, string> = {};
+async function readPgvectorDefaults(sql: SQL): Promise<Record<string, string>> {
+  // The hnsw.* settings exist in pg_settings only once the library is loaded
+  // in THIS session (014's header: they come from vector.so, not the catalog),
+  // and this runs right after a reconnect. One cast loads it.
+  await sql.unsafe(`SELECT '[1]'::vector`);
+  const rows = await sql.unsafe(`SELECT name, boot_val FROM pg_settings WHERE name = ANY($1)`, [sql.array(HNSW_BOUNDS, "TEXT")]);
+  const out: Record<string, string> = Object.fromEntries(rows.map((r: { name: string; boot_val: string }) => [r.name, r.boot_val]));
+  for (const b of HNSW_BOUNDS) if (!(b in out)) throw new Error(`pg_settings has no boot value for ${b}; is pgvector loaded in this session?`);
+  return out;
+}
 /** The raised `hnsw.ef_search` for the recall controls in sections A and E; pgvector's default is 40, the function leaves it alone. */
 const EF_SEARCH_RAISED = 400;
 /**
@@ -1060,7 +1132,7 @@ for (const n of SCALES) {
     process.stdout.write("  inserting         ");
     ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
     console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
-    console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
+    console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, ${stats.otherIndexes.length} other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
   }
   // The oracle's premise, checked on the build before the marker, and on a
   // reuse whenever the ledger differs from the one it last passed under — a
@@ -1120,7 +1192,7 @@ for (const n of SCALES) {
       console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
       process.stdout.write("                    ");
     }
-    wants.set("", answers);
+    wants.set(WHOLE_TABLE, answers);
     process.stdout.write(".");
   }
   console.log(" done");
@@ -1132,7 +1204,25 @@ for (const n of SCALES) {
       // plans below are read from the catalog, so the arm holds the function
       // a deployment actually has rather than a superseded one. Above the
       // before arm's scales the schema was applied whole before the load.
-      if (beforeArm) await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
+      if (beforeArm) {
+        await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "014" });
+        // 023's apply-time fingerprint backfill UPDATEs every loaded row (none
+        // carries a fingerprint), and the column is indexed, so the update is
+        // not HOT: every row gets a new heap tuple and a second, identical
+        // entry in the HNSW index beside its dead twin (third review pass). A
+        // plain VACUUM removes the dead entries but leaves the heap at twice
+        // its pages and the graph as the incrementally inserted twins, repaired
+        // — a state the large scales, whose schema is applied to an empty
+        // table, never have (fourth review pass). VACUUM FULL rewrites the
+        // heap and rebuilds every index from scratch, the bulk-built state the
+        // load produced, and the dead-tuple count is asserted rather than
+        // assumed.
+        for (const rel of ["thoughts", "thought_chunks"]) {
+          await sql.unsafe(`VACUUM FULL ANALYZE ${rel}`);
+          const [{ dead }] = await sql.unsafe(`SELECT n_dead_tup::int AS dead FROM pg_stat_user_tables WHERE relname = $1`, [rel]);
+          if (Number(dead) !== 0) throw new Error(`${rel} still has ${dead} dead tuples after VACUUM FULL; the after arm would measure a table the load did not produce`);
+        }
+      }
       await reconnect(); // the database-level bounds 014 seeded are read at connect
       const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
       const [row] = await sql.unsafe(DB_LEVEL_SETTINGS_SQL);
@@ -1142,14 +1232,15 @@ for (const n of SCALES) {
       }
       console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
       routing = await routingAt(sql, K);
-      console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts`);
+      pgvectorDefaults = await readPgvectorDefaults(sql);
+      console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts; pgvector defaults ${HNSW_BOUNDS.map((b) => `${b}=${pgvectorDefaults[b]}`).join(", ")}`);
     }
     process.stdout.write(`  ${arm.padEnd(18)}`);
-    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get("")!);
+    const { counts, ms10, msMax, overlap, ms10Raised, overlapRaised } = await unfiltered(sql, queries, wants.get(WHOLE_TABLE)!);
     const cells: Cell[] = [];
     for (const t of withCounts) {
       const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-      cells.push({ ...r, key: t.key, label: t.label, matches: t.matches });
+      cells.push({ ...r, label: t.label, matches: t.matches });
       process.stdout.write(".");
     }
     // Plans only for the function under test: see shapeOf. Each branch is
@@ -1200,23 +1291,16 @@ for (const n of SCALES) {
   const walkTiers = withCounts.filter((t) => t.matches > routing.vExact).sort((a, b) => a.matches - b.matches);
   for (const t of walkTiers) {
     const seeded = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-    for (const [name, value] of Object.entries(PGVECTOR_DEFAULTS)) await sql.unsafe(`SET ${name} = ${value}`);
+    for (const name of HNSW_BOUNDS) await sql.unsafe(`SET ${name} = ${pgvectorDefaults[name]}`);
     const defaults = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
-    for (const name of Object.keys(PGVECTOR_DEFAULTS)) await sql.unsafe(`RESET ${name}`);
+    for (const name of HNSW_BOUNDS) await sql.unsafe(`RESET ${name}`);
     await sql.unsafe(`SET hnsw.ef_search = ${EF_SEARCH_RAISED}`);
     const raised = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!);
     await sql.unsafe(`RESET hnsw.ef_search`);
     let exact: FilteredResult | undefined;
     if (t.matches <= EXACT_CEILING) {
       const body = await extractBody(sql, "exact", DIM, { overrides: { v_exact: String(t.matches + 1) } });
-      const applied = await applyFunctionSettings(sql, { scope: "session" });
-      await sql.unsafe(`SET plan_cache_mode = force_custom_plan`);
-      await sql.unsafe(`PREPARE bench_exact(vector(${DIM}), float, int, jsonb, float, float) AS ${body}`);
-      const viaExact = (q: number[], filter: string) => `EXECUTE bench_exact('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
-      exact = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaExact);
-      await sql.unsafe(`DEALLOCATE bench_exact`);
-      await sql.unsafe(`RESET plan_cache_mode`);
-      for (const name of applied) await sql.unsafe(`RESET ${name}`);
+      exact = await withPrepared("bench_exact", body, "force_custom_plan", (via) => filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via));
     }
     bounds.push({ scale: n, label: t.label, matches: t.matches, tuples: Math.round((routing.vFetch * n) / t.matches), seeded, defaults, raised, exact });
     process.stdout.write(".");
@@ -1237,23 +1321,18 @@ for (const n of SCALES) {
   // for its scale — the next scale resets the schema — so nothing needs
   // restoring.
   process.stdout.write("  the walk, forced  ");
+  // Under the function's own SET clauses — under 019 that is the scan mode AND
+  // enable_seqscan, and a plan the deployed function cannot produce is not
+  // worth timing — and a forced generic plan.
   const walkBody = await extractBody(sql, "walk", DIM);
-  // The function's own SET clauses, session-scoped since the EXECUTEs below run
-  // outside a transaction — under 019 that is the scan mode AND enable_seqscan,
-  // and a plan the deployed function cannot produce is not worth timing.
-  const applied = await applyFunctionSettings(sql, { scope: "session" });
-  await sql.unsafe(`SET plan_cache_mode = force_generic_plan`);
-  await sql.unsafe(`PREPARE bench_walk(vector(${DIM}), float, int, jsonb, float, float) AS ${walkBody}`);
-  const viaWalk = (q: number[], filter: string) => `EXECUTE bench_walk('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`;
   const thin = withCounts.filter((t) => t.matches <= routing.vExact);
-  for (const t of thin) {
-    const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, viaWalk);
-    walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
-    process.stdout.write(".");
-  }
-  await sql.unsafe(`DEALLOCATE bench_walk`);
-  await sql.unsafe(`RESET plan_cache_mode`);
-  for (const name of applied) await sql.unsafe(`RESET ${name}`);
+  await withPrepared("bench_walk", walkBody, "force_generic_plan", async (via) => {
+    for (const t of thin) {
+      const r = await filtered(sql, queries, tierFilter(t.key), wants.get(t.key)!, via);
+      walk.push({ scale: n, label: t.label, matches: t.matches, ...r });
+      process.stdout.write(".");
+    }
+  });
   console.log(" done");
 }
 
@@ -1264,13 +1343,13 @@ await sql.close();
 const mb = (b: number) => (b / 1048576).toFixed(0);
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
-console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated.\n");
-console.log("| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |");
+console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together, with how many there were (the set differs by schema: 023's and 025's three exist only under the whole one). Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MiB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched. \"source\" says whether this run built the corpus or reused one kept from an earlier run (OB1_PG_KEEP); a reused row's numbers are the build that made it, dated.\n");
+console.log("| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |");
 console.log("| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
 for (const l of loads) {
   const source = l.source === "loaded" ? "loaded" : `reused (built ${l.builtAt.slice(0, 16).replace("T", " ")})`;
   console.log(
-    `| ${l.scale.toLocaleString()} | ${source} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
+    `| ${l.scale.toLocaleString()} | ${source} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} (${l.otherIndexes.length}) | ${l.maintenanceMem} | ${l.workers} |`
   );
 }
 
@@ -1330,8 +1409,8 @@ for (const g of walk) {
   );
 }
 
-console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => b.replace("hnsw.", "")).join(" / ")} as in force), under pgvector's defaults (${Object.values(PGVECTOR_DEFAULTS).join(" / ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
-console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of 100,000 and pgvector's 20,000. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
+console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${HNSW_SEEDS[b as keyof typeof HNSW_SEEDS]}`).join(", ")}), under pgvector's defaults (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${pgvectorDefaults[b]}`).join(", ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
+console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of ${Number(HNSW_SEEDS["hnsw.max_scan_tuples"]).toLocaleString()} and pgvector's ${Number(pgvectorDefaults["hnsw.max_scan_tuples"]).toLocaleString()}. The seeded column is section B's after-arm call for the same tier made again, later in the same session, as the paired control for the other two settings — its median differs from B's by cache warmth, not by anything the function did. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
 console.log(`| rows | filter matches | matching rows | walk visits | seeded: returned | in exact top-10 | median ms | defaults: returned | in exact top-10 | median ms | ef_search ${EF_SEARCH_RAISED}: returned | in exact top-10 | median ms | exact branch: returned | in exact top-10 | median ms |`);
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 const cell = (r: FilteredResult) => `${r.returned.toFixed(1)} | ${r.overlap.toFixed(1)} | ${r.ms.toFixed(2)}`;

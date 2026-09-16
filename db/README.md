@@ -185,7 +185,7 @@ thought_chunks` shows five columns since 013 added `context`.
 | `011_text_search_trgm.sql` | `pg_trgm`, plus a trigram GIN index on `thoughts.content` for leading-wildcard `ILIKE`. On by default since 012 gave it a caller; `OB1_TRGM_INDEX=off` omits it | Ported from `schemas/text-search-trgm` |
 | `012_search_thoughts_keyword.sql` | `search_thoughts_keyword` — exact substring search with occurrence counts, true `total_count` and stable paging | This fork |
 | `013_chunk_context.sql` | `thought_chunks.context` for a situating blurb, carried through both chunk writers. Off by default and measured off — see below | This fork, from Anthropic's Contextual Retrieval |
-| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library | This fork; upstream #417 |
+| `014_filtered_match_thoughts.sql` | `match_thoughts` applies the metadata filter inside the HNSW scan (iterative scan, pgvector 0.8+) instead of after the candidate LIMIT, answers a filter matching at most ~1,000 thoughts exactly with no index walk at all, and honours `match_count` above the default up to a ceiling of 500. The walk's two bounds (`hnsw.max_scan_tuples = 100000`, `hnsw.scan_mem_multiplier = 8`) are seeded once at database level and never overwritten, so `ALTER DATABASE … SET` is the tuning knob and survives every redefinition. Requires pgvector 0.8.0; the migrator refuses 014 up front on an older library. The header's sizing of those bounds is arithmetic; SMD-1018 measured them at a million and ten million rows (FORK.md change 28, "At scale") and found the planner's GIN-or-HNSW choice, not the bounds, is what decides a filtered call there | This fork; upstream #417 |
 | `015_thought_work_claims.sql` | `thought_work_claims` — one lease per (thought, job key) so parallel workers divide a bulk pass without overlap. `enqueue_thoughts` builds the pool, `claim_thoughts` hands out batches with `FOR UPDATE SKIP LOCKED` under a TTL that `renew_claims` (031) moves forward on a heartbeat, expired leases return to the pool (and are marked failed after three), `release_thought` / `release_claims_for_worker` finish or hand back. Terminal rows are the record of the pass, so a re-run does only what is new. `reembed.ts` is the first consumer — see below | Ported from `schemas/thought-work-claims` |
 | `016_entity_extraction.sql` | `ob1_entities`, `thought_entities` (mentions) and `ob1_entity_edges`, where every edge row carries the thought that evidenced it; `record_thought_entities` writes one thought's extraction atomically and idempotently; `normalize_entity_name` is the resolution rule; `merge_entities` and `prune_orphan_entities` are the human steps; a trigger on `thoughts` enqueues new and edited content into `thought_work_claims` once `extract-entities.ts` has set the key. Costs nothing until that worker is run — see below | Rewritten from `schemas/entity-extraction` |
 | `017_search_thoughts_hybrid.sql` | `search_thoughts_hybrid` — `match_thoughts` and `search_thoughts_keyword` fused: reciprocal rank on the vector arm, presence per matched literal on the keyword arm, each hit's own similarity as the tiebreak; a query with no identifier returns exactly what `match_thoughts` returns. `extract_search_needles` is the one rule for which literals the keyword arm is asked for (quoted spans, identifier-shaped tokens). Fixed top-N, no paging. `search` and `search_thoughts` call it; the header carries the measurement (`evals/eval-hybrid.ts`) | This fork |
@@ -198,7 +198,8 @@ thought_chunks` shows five columns since 013 added `context`.
 
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
-029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63).
+029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
+034 change 67, 035 change 66).
 
 ## What changed relative to the guide
 
@@ -966,7 +967,11 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 # At scale (SMD-1018): one scale per container, and give the container the
 # shared memory the parallel HNSW build keeps its graph in — at least the
 # maintenance_work_mem the bench builds with (1 KB a row by default; the
-# script's default /dev/shm of 1 GB covers the two published scales).
+# script's default /dev/shm of 1 GB covers the two published scales). The
+# size is a cap on the VM's RAM, not a reservation: the ten-million-row run
+# needs a podman machine or Docker VM with more than 11 GB (14.8 GB was
+# used; `podman machine init` gives 2 GB), or OB1_BENCH_BUILD_WORKERS=0 to
+# build serially in backend memory.
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
@@ -1288,10 +1293,18 @@ podman volume rm ob1-pg-keep-<name>
   open. Then a 4-argument capture of Y with windows held open while a
   3-argument re-capture of Y waits on the same lock: the windows stay when the
   labels match and go when they do not, where before 033 the read found no
-  row and left them either way. And a capture naming `supersedes` waits on
-  the supersession lock an edit holds. `test-upgrade.ts` [12] applies 033 onto
-  a populated 032: no row moves, the bodies carry every earlier piece and the
-  sentinel, a capture through the 2-argument form is attributed.
+  row and left them either way. And a capture naming `supersedes` is NOT held
+  by the supersession lock an edit holds (since 035; at 033 it waited on it).
+  `test-upgrade.ts` [12] applies 033 onto a populated 032: no row moves, the
+  bodies carry every earlier piece and the sentinel, a capture through the
+  2-argument form is attributed.
+- **A re-capture writes no provenance** (migration 035). [13] captures a
+  chain through `upsert_thought` and re-captures one text naming different
+  provenance: the existing values stay, a row with none stays with none, and
+  the return says `existed` and the pointer that stands. `test-upgrade.ts` [13] applies 035 onto a
+  populated 033 whose re-capture had just filled a pointer: the pointer stays
+  (no data change), the next such re-capture fills nothing, and no capture
+  takes the supersession lock.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the
@@ -1584,7 +1597,13 @@ default — are unaffected.
   in WASM) *and* a real `pgvector/pgvector:0.8.6-pg16` container, but neither is RDS or
   Neon. Run `--dry-run` first against the real target.
 - **HNSW index build time is not represented.** On an empty table it is instant; on
-  a populated one it is not. Build it after a bulk load, not before.
+  a populated one it is not. Build it after a bulk load, not before — and with
+  `maintenance_work_mem` sized for the graph, which a parallel build keeps in
+  `/dev/shm`: a container's default 64 MB fails the build past a few hundred
+  thousand rows ("could not resize shared memory segment"), so `deploy/compose.yaml`
+  sets `shm_size` (`POSTGRES_SHM_SIZE`), and where it cannot be raised
+  `max_parallel_maintenance_workers = 0` builds in ordinary backend memory.
+  `bench-hnsw.ts` section L has the build times by scale.
 - **Data migration is not covered here.** These migrations create the schema. Moving
   rows is `pg_dump --data-only`, plus `bun reembed.ts --switch-model` if the model
   family changes at the same width.

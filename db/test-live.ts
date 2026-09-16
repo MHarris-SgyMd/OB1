@@ -718,9 +718,13 @@ console.log("\n[6e] A capture and an edit of one text: the edit waits on the adv
   const other = await armTwo("a first capture with a window, re-captured at another model", "model-a", "model-b");
   assert(other.windows === 0 && other.label === "model-b" && other.axis === 4, `at another model it removes the window as it moves the vector and label — where before 033 the read found no row and left it (${other.windows} windows, ${other.label})`);
 
-  // Arm 3 — the supersession lock, taken first when the envelope names a
-  // pointer: A stands where update_thought or the review path stands, holding
-  // 029's lock; B's capture naming supersedes waits on it and completes after.
+  // Arm 3 — the supersession lock is not the capture path's (035; 033 took it
+  // first when the envelope named a pointer, to order the ON CONFLICT fill
+  // against update_thought's walk, and the fill is gone): A stands where
+  // update_thought or the review path stands, holding 029's lock; B's
+  // capture naming supersedes is not held by it — it completes, its pointer
+  // written on its fresh row, while A still holds the lock. Under 033 B
+  // waited here (an 8 s statement_timeout would turn that into b.error).
   {
     const rId = ((await sql`SELECT upsert_thought('the note a capture will supersede', '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
     const connA = new SQL({ url: URL_, max: 1 });
@@ -730,17 +734,18 @@ console.log("\n[6e] A capture and an edit of one text: the edit waits on the adv
     const aDone = hold(connA, async (tx) => tx`SELECT pg_advisory_xact_lock(hashtext('ob1:supersession-review'))`, doneP, a);
     await waitFor(() => a.result !== undefined || a.error !== undefined);
     const b: { pid: number; error?: string } = { pid: -1 };
-    const bDone = runB(connB, async (tx) => (await tx`SELECT upsert_thought('the note that supersedes it', ${{ metadata: {}, supersedes: rId }}::jsonb, ${unit(5)}::vector) AS r`)[0].r as { id: string }, b);
-    await waitFor(async () => b.pid > 0 && (await advisoryWaiters(b.pid)) === 1);
-    assert((await advisoryWaiters(b.pid)) === 1, "a capture naming supersedes waits on the supersession lock an edit or a review holds");
+    const bResult = await runB(connB, async (tx) => (await tx`SELECT upsert_thought('the note that supersedes it', ${{ metadata: {}, supersedes: rId }}::jsonb, ${unit(5)}::vector) AS r`)[0].r as { id: string; existed?: boolean }, b);
+    assert(bResult?.id !== undefined && b.error === undefined && a.result !== undefined && a.error === undefined,
+           `a capture naming supersedes is not held by the supersession lock an edit or a review holds — it completes while A still holds the lock (035; at 033 it waited) (${b.error ?? "ok"})`);
+    assert(bResult?.existed === false && (await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${bResult!.id}::uuid`)[0].s === rId, "…with its pointer written on its fresh row, existed: false");
+    const [{ c: waiting }] = await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+    assert(Number(waiting) === 0, `…and nothing waits on any advisory lock (${waiting})`);
     const plain: { pid: number; error?: string } = { pid: -1 };
     const connC = new SQL({ url: URL_, max: 1 });
     const cResult = await runB(connC, async (tx) => (await tx`SELECT upsert_thought('a capture naming no pointer meanwhile', '{"metadata":{}}'::jsonb, ${unit(6)}::vector) AS r`)[0].r as { id: string }, plain);
-    assert(cResult?.id !== undefined && plain.error === undefined, "…while a capture naming no pointer is not held by it");
+    assert(cResult?.id !== undefined && plain.error === undefined, "…while a capture naming no pointer is not held by it either, as before");
     done();
     await aDone;
-    const bResult = await bDone;
-    assert(bResult?.id !== undefined && b.error === undefined && (await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${bResult!.id}::uuid`)[0].s === rId, `…and completes with its pointer once the lock is released (${b.error ?? "ok"})`);
     await connA.close(); await connB.close(); await connC.close();
   }
   await sql`DELETE FROM thoughts`;
@@ -2305,8 +2310,9 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   // Round-trip through upsert_thought, as 016's eval does — not a raw INSERT.
   // A three-thought chain: grandparent ← parent ← child, and the child also
   // supersedes the parent.
-  const cap = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) =>
-    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: meta, ...(prov ?? {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string }).id;
+  const capR = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) =>
+    (await sql`SELECT upsert_thought(${content}, ${{ metadata: meta, ...(prov ?? {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string; existed?: boolean; supersedes?: string | null };
+  const cap = async (content: string, meta: Record<string, unknown>, at: number, prov?: { derived_from?: string[]; supersedes?: string }) => (await capR(content, meta, at, prov)).id;
 
   const gp = await cap("provenance grandparent: the raw note", { type: "observation" }, 0);
   const parent = await cap("provenance parent: a first digest", { type: "synthesis", derivation_method: "synthesis" }, 1, { derived_from: [gp] });
@@ -2316,19 +2322,32 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   const row = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
   assert(JSON.stringify(row.derived_from) === JSON.stringify([parent]) && row.supersedes === parent, "capture wrote derived_from and supersedes to the columns");
 
-  // ON CONFLICT is add-only: a re-capture of the child's exact text (a dedup)
-  // that names DIFFERENT provenance does not overwrite the established
-  // derivation — the existing value wins; changing it is update_thought's job
-  // (review pass 2). A re-capture of a first-hand thought CAN fill provenance
-  // it did not have.
-  await cap("provenance child: a digest of the digest", { type: "synthesis" }, 2, { derived_from: [gp], supersedes: gp });
+  // A re-capture writes no provenance (035). A re-capture of the child's exact
+  // text (a dedup) that names DIFFERENT provenance does not overwrite the
+  // established derivation (025, review pass 2), and since 035 a re-capture of
+  // a first-hand thought does not fill provenance it did not have either —
+  // the envelope's provenance lands on a first capture only, and the return
+  // says `existed`. Recording it afterwards is update_thought's envelope
+  // (032): walked, audited, one function.
+  const childAgain = await capR("provenance child: a digest of the digest", { type: "synthesis" }, 2, { derived_from: [gp], supersedes: gp });
   const kept = (await sql`SELECT derived_from, supersedes FROM thoughts WHERE id = ${child}`)[0];
-  assert(JSON.stringify(kept.derived_from) === JSON.stringify([parent]) && kept.supersedes === parent, "a re-capture with different provenance keeps the original, it does not overwrite");
-  const plain = await cap("provenance plain: a first-hand note", { type: "note" }, 6);
-  assert((await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from === null, "a first-hand capture has null derived_from");
-  // Derives from `child` (not gp/parent, whose derivative counts are asserted below).
-  await cap("provenance plain: a first-hand note", { type: "note" }, 6, { derived_from: [child] });
-  assert(JSON.stringify((await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from) === JSON.stringify([child]), "…and a re-capture fills provenance the row did not have (add-only, not no-op)");
+  assert(childAgain.id === child && childAgain.existed === true && childAgain.supersedes === parent && JSON.stringify(kept.derived_from) === JSON.stringify([parent]) && kept.supersedes === parent, "a re-capture with different provenance keeps the original, it does not overwrite — and says existed: true with the pointer that stands");
+  const first = await capR("provenance plain: a first-hand note", { type: "note" }, 6);
+  const plain = first.id;
+  assert(first.existed === false && (await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from === null, "a first-hand capture has null derived_from, existed: false");
+  const plainAgain = await capR("provenance plain: a first-hand note", { type: "note" }, 6, { derived_from: [child] });
+  assert(plainAgain.id === plain && plainAgain.existed === true && (await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from === null, "…and a re-capture naming provenance over it fills nothing (035: a re-capture writes no provenance) and says existed: true");
+  // Derives from `child` (not gp/parent, whose derivative counts are asserted
+  // below) — recorded the one way there is now.
+  const recorded = (await sql`SELECT update_thought(${plain}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${{ derived_from: [child] }}::jsonb) AS r`)[0].r as { ok: boolean };
+  assert(recorded.ok === true && JSON.stringify((await sql`SELECT derived_from FROM thoughts WHERE id = ${plain}`)[0].derived_from) === JSON.stringify([child]), "…update_thought's envelope records it");
+  // Through the 4-argument form — the one the servers call — `existed` rides
+  // beside `chunks` (013 appends to the inner return); on a real server, since
+  // PGlite aborts on a windowed capture through it (test-schema [35]'s note).
+  const viaFour = (await sql`SELECT upsert_thought(${"provenance plain: a first-hand note"}, ${{ metadata: { type: "note" }, supersedes: child }}::jsonb, ${unit(6)}::vector, ${[{ content: "a window", embedding: unit(6) }]}::jsonb) AS r`)[0].r as { id: string; existed?: boolean; chunks?: number };
+  assert(viaFour.id === plain && viaFour.existed === true && viaFour.chunks === 1 && (await sql`SELECT supersedes FROM thoughts WHERE id = ${plain}`)[0].supersedes === null,
+         `…and through the 4-argument form existed rides beside chunks, the pointer named still not written (${JSON.stringify({ existed: viaFour.existed, chunks: viaFour.chunks })})`);
+  await sql`DELETE FROM thought_chunks WHERE thought_id = ${plain}`;
 
   // trace UP: child(0) → parent(1) → grandparent(2), the whole chain.
   const up = await sql`SELECT thought_id, depth, parent_id, cycle FROM trace_provenance(${child}::uuid)`;

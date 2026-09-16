@@ -121,7 +121,12 @@ trap 'exit 130' INT TERM
 # rows and up (SMD-1018). The size is a tmpfs cap, backed only as it is used,
 # so 1 GB by default costs nothing the tests notice; a large bench sets
 # OB1_PG_SHM_SIZE at least as large as the maintenance_work_mem it builds with
-# (the README's commands say how much).
+# (the README's commands say how much). It is a cap, not a reservation: the
+# pages the build fills are the VM's RAM, so the podman machine or Docker
+# Desktop VM must have more memory than the size named here (the published
+# ten-million-row run used a 14.8 GB VM; `podman machine init` gives 2 GB).
+# Where the VM cannot grow, OB1_BENCH_BUILD_WORKERS=0 builds serially in
+# ordinary backend memory and needs no /dev/shm at all.
 SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 
 MOUNT_ARGS=()

@@ -7,7 +7,11 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": { "const": "openbrain.openclaw.recall_response.v1" },
-    "request_id": { "type": "string", "minLength": 1 },
+    "request_id": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "The stored recall trace, to report usage against. null when the key was read-scoped: no trace is stored for it, so there is nothing to report (ob1-fork, SMD-1455)."
+    },
     "memories": {
       "type": "array",
       "items": {

@@ -367,6 +367,22 @@ export type CaptureResult = {
   id: string;
   /** Set when the row was written but its embedding could not be attached. */
   embeddingFailed?: string;
+  /**
+   * Migration 035 (SMD-1453): true when the text was already captured — the
+   * metadata merged, the vector and windows moved by 021/022's rules, and any
+   * `derivedFrom` / `supersedes` named on this call NOT written, since a
+   * re-capture leaves an existing thought's provenance as it is (setting it is
+   * update_thought's). Absent when the database is from before 035, or on the
+   * PostgREST two-step fallback, whose 2-argument form does not say.
+   */
+  existed?: boolean;
+  /**
+   * Beside `existed` (migration 035): the row's `supersedes` pointer after the
+   * write — the fresh row's, or the one the existing row keeps — so a caller
+   * told the text existed can say what stands rather than guess. `null` is a
+   * row with no pointer; absent whenever `existed` is.
+   */
+  supersedes?: string | null;
 };
 
 /**
@@ -743,7 +759,9 @@ export interface ThoughtStore {
      * artifact (digest, synthesis, consolidation) was built from — an array of
      * existing thought ids, validated by upsert_thought or the write is refused.
      * `supersedes` is the one prior thought this one replaces. Both ride the
-     * envelope; both absent is an ordinary first-hand capture.
+     * envelope; both absent is an ordinary first-hand capture. Written on a
+     * FIRST capture only (migration 035): a re-capture of text that exists
+     * leaves that thought's provenance as it is and reports `existed`.
      */
     derivedFrom?: string[];
     supersedes?: string;
