@@ -99,7 +99,8 @@ jobs:
         run: deno check --node-modules-dir=none index.ts
 
       # The two extensions still on supabase-js resolve under Deno (the other
-      # five import the SQL shim, which imports `bun`), so they are checked as
+      # five import the SQL shim, which imports `bun`, and run under Bun — the
+      # Portable-server job starts each; change 74), so they are checked as
       # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
       - name: deno check extensions/family-calendar and job-hunt
         working-directory: extensions/family-calendar
@@ -183,7 +184,9 @@ jobs:
       # Imported as deployed under a stand-in for Deno's two globals and a loader
       # for Deno's specifiers: a wrong or revoked key is refused, a read-scoped
       # key never sees a tool that writes, is told so by a route that writes and
-      # may only dry-run a worker, every copy is byte for byte auth.ts. No database.
+      # may only dry-run a worker, every copy is byte for byte auth.ts. Then every
+      # server on the SQL shim is started under `bun` for real and answered over
+      # its port (change 74). No database.
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts

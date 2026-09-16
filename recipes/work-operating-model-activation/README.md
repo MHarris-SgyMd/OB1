@@ -86,7 +86,13 @@ Save it to your credential tracker, then set it in Supabase:
 supabase secrets set DEFAULT_USER_ID=your-generated-uuid
 ```
 
-> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset):
+>
+> ```bash
+> NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' DEFAULT_USER_ID='your-generated-uuid' bun recipes/work-operating-model-activation/index.ts
+> ```
+>
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.mjs --revert recipes/work-operating-model-activation/index.ts`, which puts it back on supabase-js.
 
 ### 4. Deploy the MCP server
 

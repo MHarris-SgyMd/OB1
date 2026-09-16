@@ -32,7 +32,7 @@ A professional contact management system with interaction logging, opportunity t
 
 - Working Open Brain setup
 - Extensions 1-4 recommended (RLS concepts from Extension 4 are required knowledge)
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
 - **Required reading:** [Row Level Security](../../primitives/rls/) primitive
 
 ## Credential Tracker
@@ -63,14 +63,13 @@ MCP SERVER (you'll create these)
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` in your Supabase SQL Editor:
+Run the SQL in `schema.sql` against your Open Brain database:
 
 ```bash
-# Navigate to your Supabase project SQL editor
-# https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
+psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql
 ```
 
-Copy and paste the contents of `schema.sql` and click Run. This creates three RLS-enabled tables with proper foreign key relationships.
+(Or paste its contents into the Supabase SQL Editor, if that is where your database lives.) This creates three RLS-enabled tables with proper foreign key relationships.
 
 ### 2. Generate Your User ID
 
@@ -83,24 +82,23 @@ uuidgen | tr '[:upper:]' '[:lower:]'
 # Or use any UUID generator — the value just needs to be unique to you
 ```
 
-Set it as an environment variable for your Edge Function:
-
-```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
-```
+Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 > If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
 
-### 3. Deploy the MCP Server
+### 3. Run the MCP Server
 
-> **Not deployable as it stands.** This server imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`.
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
+```bash
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
+DEFAULT_USER_ID='your-generated-uuid-here' \
+PORT=8000 bun extensions/professional-crm/index.ts
+```
 
-| Setting | Value |
-|---------|-------|
-| Function name | `professional-crm-mcp` |
-| Download path | `extensions/professional-crm` |
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8000/`; your **MCP Server URL** is `http://your-host:8000/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8000/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI.
 
 ### 4. Connect to Your AI
 

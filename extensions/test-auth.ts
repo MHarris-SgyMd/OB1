@@ -39,6 +39,16 @@
  * the SQL shim and supabase-js both connect lazily, so a stub URL is never
  * dialled otherwise.
  *
+ * Then, for real (SMD-1480, change 74): every server that imports the SQL
+ * shim — which imports `bun` — also imports compat/deno-on-bun.ts first, the
+ * two Deno members these files use on Bun, and `bun <file>` serves it. The
+ * stand-in above is installed before any import, so nothing above exercised
+ * that; the last section starts each such file as a child process on a port
+ * of the OS's choosing, with the environment its README documents, asks it
+ * over HTTP for the one thing that proves it is that server authenticating,
+ * and stops it. Every file in the tree that imports the shim and calls
+ * Deno.serve is started, or this fails.
+ *
  * Run: bun install && bun test-auth.ts   (in extensions/)
  */
 
@@ -262,6 +272,10 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   } finally {
     Object.assign(console, console_);
   }
+  return parse(r);
+}
+/** A server's answer: its status, its text, and the JSON in it — direct, or the first SSE data line. */
+async function parse(r: Response): Promise<Reply> {
   const text = await r.text();
   const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
   let json: any = null;
@@ -416,6 +430,102 @@ console.log(`\n[${WEBHOOK.file}]`);
   assert((await post({ event_type: "readwise.other" })).status === 401, "no secret is refused with 401");
   assert((await post({ secret: 12345, event_type: "readwise.other" })).status === 401, "a secret that is not a string is refused, not hashed");
   assert((await post({ secret: hashKey(WEBHOOK.secret), event_type: "readwise.other" })).status === 401, "the secret's digest is not the secret");
+}
+
+// ── Under bun, for real ──────────────────────────────────────────────────────
+//
+// Everything above ran under this file's stand-in for Deno's globals. The
+// servers that import the SQL shim (which imports `bun`) import
+// compat/deno-on-bun.ts as their first line (SMD-1480, FORK.md change 74) —
+// `Deno.env.get` and `Deno.serve` on Bun, nothing else — and that is what
+// lets `bun <file>` serve them; the stand-in is installed first, so nothing
+// above touched it. Each is started here as a child process: `bun <file>`
+// with the environment its README documents — PORT=0, and the polyfill
+// prints the port the OS chose in Deno's own `Listening on` line; NODE_PATH,
+// since a recipe or integration has no node_modules on its own path and
+// resolves hono and the SDK from this directory's pinned install, as its
+// README says — then asked over the port for the one thing that proves it is
+// that server, authenticating: an MCP server's tools/list under a write key
+// is its full tool list, an API's read probe passes under a read key, a
+// worker dry-runs under one, the receiver admits its secret; each refuses a
+// wrong key; each is still running afterwards; then stopped. The two APIs on
+// their own constant-time compare of a single key (rest-api, smart-ingest;
+// not consumers of _shared/auth.ts, and check 8 passes them) are started too,
+// with a probe of their own. Every file in the tree that imports the shim and
+// calls Deno.serve is in the list, or the guard below fails.
+console.log("\n[each server on the SQL shim starts under bun and answers over the port]");
+type Live = { file: string; env: Record<string, string>; probe: (base: string) => Promise<void> };
+const onShim = (file: string) => /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, file), "utf8"));
+const rpcHeaders = (key: string) => ({ ...RPC, "x-access-key": key });
+const fill = (path: string) => path.replace(/:[a-z_]+/g, "test-id");
+const LIVE: Live[] = [
+  ...SERVERS.filter((s) => onShim(s.file)).map((s): Live => ({
+    file: s.file,
+    env: { [s.keys]: KEYS, SUPABASE_URL: s.url },
+    probe: async (base) => {
+      if (s.kind === "mcp") {
+        const all = [...s.reads, ...s.writes].sort();
+        const r = await parse(await fetch(`${base}/mcp`, { method: "POST", headers: rpcHeaders(WRITE_KEY), body: JSON.stringify(LIST) }));
+        assert(r.status === 200 && toolsOf(r).join() === all.join(), `${s.file}: under bun, a write key's tools/list is its ${all.length} tool(s) (${r.status}: ${toolsOf(r).length})`);
+        assert((await fetch(`${base}/mcp`, { method: "POST", headers: rpcHeaders("not-a-key"), body: JSON.stringify(LIST) })).status === 401, "…and a wrong key is refused with 401");
+      } else if (s.kind === "rest") {
+        const [method, path] = s.readProbe!.split(" ");
+        const body = method === "GET" ? undefined : "{}";
+        const r = await parse(await fetch(base + fill(path), { method, headers: rpcHeaders(READ_KEY), body }));
+        assert(passed(r), `${s.file}: under bun, a read key passes the gate on ${s.readProbe} (${r.status})`);
+        assert((await fetch(base + fill(path), { method, headers: rpcHeaders("not-a-key"), body })).status === 401, "…and a wrong key is refused with 401");
+      } else {
+        const dry = s.dryRun === "body" ? { path: "/", body: JSON.stringify({ dry_run: true }) } : { path: "/?dry_run=true", body: undefined };
+        const r = await parse(await fetch(base + dry.path, { method: "POST", headers: rpcHeaders(READ_KEY), body: dry.body }));
+        assert(passed(r), `${s.file}: under bun, a read key may dry-run (${r.status})`);
+        assert((await fetch(base + dry.path, { method: "POST", headers: rpcHeaders("not-a-key"), body: dry.body })).status === 401, "…and a wrong key is refused with 401");
+      }
+    },
+  })),
+  { file: WEBHOOK.file, env: { [WEBHOOK.secretEnv]: WEBHOOK.secret, SUPABASE_URL: PG }, probe: async (base) => {
+    const post = (body: unknown) => fetch(base, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const right = await post({ secret: WEBHOOK.secret, event_type: "readwise.other" });
+    assert(right.status === 200 && (await right.text()) === "ignored", `${WEBHOOK.file}: under bun, the echoed secret admits the request (${right.status})`);
+    assert((await post({ secret: "not-the-secret", event_type: "readwise.other" })).status === 401, "…and a wrong secret is refused with 401");
+  } },
+  ...([["integrations/rest-api/index.ts", "GET", "/health"], ["integrations/smart-ingest/index.ts", "POST", "/"]] as const).map(([file, method, path]): Live => ({
+    file, env: { MCP_ACCESS_KEY: LEGACY_KEY, SUPABASE_URL: PG },
+    probe: async (base) => {
+      const body = method === "GET" ? undefined : "{}";
+      const r = await fetch(base + path, { method, headers: { "x-brain-key": LEGACY_KEY, "Content-Type": "application/json" }, body });
+      assert(r.status !== 401 && r.status !== 503, `${file}: under bun, the configured key passes the gate on ${method} ${path} (${r.status})`);
+      assert((await fetch(base + path, { method, headers: { "x-brain-key": "not-a-key", "Content-Type": "application/json" }, body })).status === 401, "…and a wrong key is refused with 401");
+    },
+  })),
+];
+{
+  const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
+    .filter((f) => !f.includes("node_modules") && onShim(f) && /^Deno\.serve\(/m.test(readFileSync(join(ROOT, f), "utf8"))).sort();
+  assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and calls Deno.serve is started here (${inTree.length}: ${inTree.join(", ")})`);
+}
+for (const live of LIVE) {
+  const env: Record<string, string | undefined> = { ...process.env, PORT: "0", NODE_PATH: join(HERE, "node_modules"), ...live.env };
+  for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY"]) delete env[name];
+  const proc = Bun.spawn([process.execPath, join(ROOT, live.file)], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+  // The port, from the polyfill's `Listening on http://host:port/` line — or nothing within the deadline.
+  const reader = proc.stdout.getReader();
+  const deadline = Date.now() + 30_000;
+  let out = "", port: number | null = null;
+  while (port === null && Date.now() < deadline && proc.exitCode === null) {
+    const chunk = await Promise.race([reader.read(), new Promise<{ done: true; value?: undefined }>((res) => setTimeout(() => res({ done: true }), 500))]);
+    if (chunk.value) out += new TextDecoder().decode(chunk.value);
+    port = Number(/Listening on http:\/\/[^/:]+:(\d+)\//.exec(out)?.[1] ?? NaN) || null;
+    if (chunk.done && !chunk.value && proc.exitCode !== null) break;
+  }
+  const stderr = async () => (await new Response(proc.stderr).text()).trim().split("\n").slice(0, 3).join(" | ");
+  assert(port !== null, `${live.file}: \`bun ${live.file}\` starts and says which port it listens on${port === null ? ` (exit ${proc.exitCode}: ${await stderr()})` : ""}`);
+  if (port !== null) {
+    await live.probe(`http://127.0.0.1:${port}`);
+    assert(proc.exitCode === null, "…and is still running after the probes");
+  }
+  reader.releaseLock();
+  proc.kill();
+  await proc.exited;
 }
 
 // ── Where the key may travel ─────────────────────────────────────────────────

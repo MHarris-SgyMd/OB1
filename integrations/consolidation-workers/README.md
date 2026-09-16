@@ -52,11 +52,17 @@ cp integrations/consolidation-workers/deno.json supabase/functions/consolidation
 cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and needs it only once SMD-1480 lands. Both workers import the access-key module from `../_shared/auth.ts`.
+Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and runs under Bun (the callout below), so the copy is for `consolidation-metadata`. Both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
 
-> **`consolidation-bio` is not deployable as it stands.** It imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix; its access-key behaviour is exercised by `extensions/test-auth.ts` and its two write paths by `extensions/test-writes.ts`, under Bun. `consolidation-metadata` deploys.
+> **Runs under Bun, not as an Edge Function.** This worker (`consolidation-bio`) imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset):
+>
+> ```bash
+> SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts
+> ```
+>
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives both of its write paths against Postgres; `consolidation-metadata` deploys as below. The `supabase functions deploy consolidation-bio` below applies to the file after `bun scripts/migrate-to-sql-shim.mjs --revert integrations/consolidation-workers/bio/index.ts`, which puts it back on supabase-js.
 
 ```bash
 supabase functions deploy consolidation-bio --no-verify-jwt

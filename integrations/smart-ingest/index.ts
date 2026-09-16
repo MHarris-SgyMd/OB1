@@ -29,6 +29,7 @@
  *   - Enhanced thoughts columns (schemas/enhanced-thoughts)
  */
 
+import "../../compat/deno-on-bun.ts";
 import { createClient } from "../../compat/supabase-sql/index.ts";
 import {
   embedText,

@@ -30,7 +30,7 @@ node scripts/migrate-to-sql-shim.mjs --apply --all      # rewrite every eligible
 node scripts/migrate-to-sql-shim.mjs --revert <file>    # undo, byte-for-byte
 ```
 
-The rewrite is one line:
+The rewrite is one line — two, for a file that reads `Deno.env` or calls `Deno.serve` (step 3):
 
 ```diff
 - import { createClient } from "@supabase/supabase-js";
@@ -46,7 +46,53 @@ accepted and ignored — with SQL the credentials live in the URL.
 Passing a `https://…supabase.co` URL fails immediately with an explanation rather
 than at the first query.
 
-### 3. Run the tests
+### 3. Run a migrated server under Bun
+
+A migrated server was written as a Supabase Edge Function — `Deno.env.get` for its
+environment, `Deno.serve` at the end — and the shim imports `bun`, so one import
+line left it running nowhere: not under Deno, which cannot resolve `bun`, and not
+under Bun, which has no `Deno` (SMD-1480, FORK.md change 74). The codemod
+therefore gives such a file a second line, first among its imports:
+
+```diff
++ import "../../compat/deno-on-bun.ts";
+```
+
+That module installs exactly the two Deno members these files use — `Deno.env.get`
+reading the process environment, `Deno.serve` as `Bun.serve` on `PORT` (8000 unset,
+Deno's default), printing Deno's `Listening on` line — and nothing else, so a file
+that starts using another `Deno.*` fails at the call rather than running on a
+guess at another runtime's semantics. Where the file's first import was Supabase's
+type-only `import "jsr:@supabase/functions-js/edge-runtime.d.ts"`, which Bun cannot
+resolve, that is the line replaced, the original recorded beside it for `--revert`.
+Then, from a checkout:
+
+```bash
+(cd extensions && bun install)     # once: the pinned hono, zod and MCP SDK the servers import
+
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+PORT=8000 bun extensions/home-maintenance/index.ts                      # an extension
+
+NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
+bun integrations/delete-thought-mcp/index.ts                             # a recipe or integration
+```
+
+An extension sits beside `extensions/node_modules` and resolves its packages from
+there; a recipe or integration does not, and `NODE_PATH` points it at the same
+pinned install (only the servers that import `hono` or the MCP SDK need it — the
+workers, the APIs on their own key and the webhook receiver import nothing but the
+shim and their own files). The other variables are the ones the file's README has
+its Supabase deploy set as secrets, passed as environment instead; each README's
+callout gives its own line. Check 11 of `scripts/check-fork-consistency.mjs` holds
+every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
+`jsr:`/`npm:`/URL specifier, through the files it imports — and
+`extensions/test-auth.ts` starts each one under `bun` and answers it over its port
+in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the
+reason: `recipes/local-brain-no-mcp`'s client runs inside that recipe's own
+self-hosted Supabase stack, where PostgREST is present and `bun` is not.
+
+### 4. Run the tests
 
 ```bash
 cd compat/supabase-sql && bun run test
@@ -123,7 +169,7 @@ development — the test caught it.
 ## Caveats
 
 - **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers
-  cannot pool connections at all.
+  cannot pool connections at all. The servers on it run as `bun <file>` (step 3).
 - **Most migrated files are not individually tested.** Most need live credentials —
   Gmail, Slack, Readwise. The shim is tested; each migrated file is verified to
   parse, and `extensions/test-writes.ts` drives the writers among them against a
@@ -142,5 +188,6 @@ development — the test caught it.
 ## Related
 
 - `../../scripts/migrate-to-sql-shim.mjs` — the codemod
+- `../deno-on-bun.ts` — Deno's two globals on Bun, for the servers on the shim
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against
