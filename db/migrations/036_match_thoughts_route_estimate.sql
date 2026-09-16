@@ -30,13 +30,13 @@
 --
 --   At ten million rows it is nine tenths of the broadest tier's latency,
 --   and at 10% (~50 ms of ~150) a third. The walk that follows needs some
---   eighty tuples at 50%. 014's header named the mitigation —
---   estimate the match count first, run the collection only when the
---   estimate is plausibly under the threshold — and declined it for want of
---   a number; SMD-1018's tables are the number, and this file is the
---   mitigation. Nothing else moves: the threshold, the three branches, the
---   walk's bounds and the plan mode are SMD-1464's questions, and one
---   mechanism per migration is the rule.
+--   eighty tuples at 50%. 014's header named the mitigation — estimate the
+--   match count first, run the collection only when the estimate is
+--   plausibly under the threshold — and declined it for want of a number;
+--   SMD-1018's tables are the number, and this file is the mitigation.
+--   Nothing else moves: the threshold, the three branches, the walk's bounds
+--   and the plan mode are SMD-1464's questions, and one mechanism per
+--   migration is the rule.
 --
 -- What
 --   On a heap of at least {{ROUTE_ESTIMATE_MIN_PAGES}} pages (64 MB), a
