@@ -451,16 +451,18 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 030 by name, not "the last file". The scenario deletes only 030 from the
   // ledger, so a plain run attempts only 030 — 031 (renew_claims, SMD-1023),
   // 032 (the provenance envelope, SMD-1323), 033 (the capture's fingerprint
-  // lock, SMD-1043) and 034 (the opt-in query log, SMD-1295) stay recorded and
-  // are never tried. 030 is the right one to make pending because its
+  // lock, SMD-1043), 034 (the opt-in query log, SMD-1295) and 035 (a
+  // re-capture writes no provenance, SMD-1453) stay recorded and are never
+  // tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's embedding_model column — are exactly what a
   // through-020 schema lacks, so it fails by name rather than with a bare error.
   // The window guard trips whenever a migration lands past 030, to force this
-  // note to be re-read (035 was checked; it redefines delete_thought and needs
-  // only 009's body and 029's supersession lock, both present in a through-034
-  // schema — so it never becomes the plain-run failure point above).
+  // note to be re-read (034 needs only 001/010; 035 needs 016, 025, 032 and 033;
+  // 036 redefines delete_thought and needs only 009's body and 029's supersession
+  // lock — all recorded in a through-035 schema, so none becomes the plain-run
+  // failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 6, `030 is among the last six migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 7, `030 is among the last seven migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -1012,6 +1014,79 @@ console.log("\n[12] Migration 033 onto a populated 032 — both capture forms ta
   assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await windows()) === 1, "re-applying 033 is a no-op: the ACL, the shape and the window as they were");
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer33`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_capturer33`);
+  await sql.close();
+}
+
+console.log("\n[13] Migration 035 onto a populated 033 — a re-capture no longer fills provenance, no capture takes the supersession lock, no row or privilege moves (SMD-1453)");
+{
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "035" });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const TWO = "upsert_thought(text, jsonb)";
+  const THREE = "upsert_thought(text, jsonb, vector)";
+  const bodyOf = async (sig: string) => (await sql`SELECT prosrc FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].prosrc as string;
+  const aclOf = async (sig: string) => String((await sql`SELECT proacl::text AS a FROM pg_proc WHERE oid = ${sig}::regprocedure`)[0].a ?? "");
+  type R = { id: string; existed?: boolean };
+  const cap = async (content: string, payload: Record<string, unknown>, axis: number) =>
+    (await sql`SELECT upsert_thought(${content}, ${payload}::jsonb, ${vec(axis)}::vector) AS r`)[0].r as R;
+  const pointer = async (id: string) => (await sql`SELECT supersedes AS s FROM thoughts WHERE id = ${id}::uuid`)[0].s as string | null;
+  const twoRowLoops = async () => Number((await sql`SELECT count(*)::int AS c FROM thoughts a JOIN thoughts b ON b.id = a.supersedes AND b.supersedes = a.id AND a.id < b.id`)[0].c);
+
+  // A corpus at 033, with the loop 033's header states written the way it
+  // could be: R with no pointer, X superseding R, R's text re-captured
+  // naming X. And a first-hand thought, and a hardened 3-argument form.
+  const R_TEXT = "upgrade 035: the earlier note";
+  const r = await cap(R_TEXT, { metadata: {} }, 0);
+  const x = await cap("upgrade 035: the later note", { metadata: {}, supersedes: r.id }, 1);
+  const filled = await cap(R_TEXT, { metadata: {}, supersedes: x.id }, 0);
+  assert(filled.existed === undefined && (await pointer(r.id)) === x.id && (await twoRowLoops()) === 1, "at 033 a re-capture naming supersedes fills R's NULL pointer — R → X → R, one row from the header's query — and the return has no existed");
+  assert(/supersession-review/.test(await bodyOf(THREE)) && /COALESCE\(thoughts\.supersedes/.test(await bodyOf(THREE)) && !/ob1:re-capture-writes-no-provenance/.test(await bodyOf(THREE)), "…the 3-argument body takes the supersession lock, fills, and carries no 035 sentinel");
+  const plain = await cap("upgrade 035: a first-hand note", { metadata: {} }, 2);
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_capturer34') THEN CREATE ROLE ob1_upgrade_capturer34 NOLOGIN; END IF; END $r$`);
+  await sql.unsafe(`REVOKE ALL ON FUNCTION ${THREE} FROM PUBLIC`);
+  await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${THREE} TO ob1_upgrade_capturer34`);
+  const acl = await aclOf(THREE);
+  const before = await shape(sql);
+  const editBefore = await bodyOf(UPDATE_THOUGHT_SIGNATURE);
+  const twoBefore = await bodyOf(TWO);
+  const snapshot = async () => JSON.stringify(await sql`SELECT id, content_fingerprint, supersedes, derived_from, embedding_model, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const rows = await snapshot();
+  const [{ c: auditBefore }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("035") });
+
+  const after = await shape(sql);
+  assert(before.columns === after.columns && before.functions === after.functions, "035 adds no column and changes no signature — three upsert_thought overloads as before");
+  assert((await snapshot()) === rows && (await twoRowLoops()) === 1, "no row moved: the loop a re-capture wrote at 033 stays — nothing here is a backfill (the header says how to find and clear one)");
+  const [{ c: auditAfter }] = await sql`SELECT count(*)::int AS c FROM thought_audit`;
+  assert(Number(auditAfter) === Number(auditBefore), "…and no audit row was written");
+  assert((await aclOf(THREE)) === acl && !/(^\{|,)=X\//.test(acl), `CREATE OR REPLACE under the same signature keeps the 3-argument form's ACL: PUBLIC still revoked, the role still granted (${acl})`);
+  const three = await bodyOf(THREE);
+  assert(/ob1:re-capture-writes-no-provenance/.test(three) && /ob1:capture-takes-fingerprint-lock/.test(three) && /ob1:vector-replaces-chunks/.test(three) && !/supersession-review/.test(three) && !/COALESCE\(thoughts\.(supersedes|derived_from)/.test(three),
+         "…the 3-argument body carries 035's sentinel beside 022's and 033's, takes no supersession lock and fills nothing");
+  assert((await bodyOf(TWO)) === twoBefore, "…the 2-argument body is byte-identical to 033's — carried, not changed");
+  assert((await bodyOf(UPDATE_THOUGHT_SIGNATURE)) === editBefore && Number((await sql`SELECT count(*)::int AS c FROM pg_proc WHERE proname = 'update_thought'`)[0].c) === 1, "…and update_thought is untouched: one function, 033's body byte for byte");
+
+  // The mirror: the day after. A re-capture naming supersedes over a row with
+  // none fills nothing and says existed; a first capture naming one writes
+  // it; the loop written at 033 is found by the header's query and cleared
+  // through the envelope; no advisory lock outlives a call.
+  const plainAgain = await cap("upgrade 035: a first-hand note", { metadata: { k: 1 }, supersedes: x.id }, 2);
+  const [pRow] = await sql`SELECT supersedes AS s, (metadata->>'k')::int AS k FROM thoughts WHERE id = ${plain.id}::uuid`;
+  assert(plainAgain.id === plain.id && plainAgain.existed === true && pRow.s === null && pRow.k === 1, "after 035 a re-capture naming supersedes over a row with none fills nothing, says existed: true, and merges the metadata as before");
+  const fresh = await cap("upgrade 035: a note captured after", { metadata: {}, supersedes: plain.id }, 3);
+  assert(fresh.existed === false && (await pointer(fresh.id)) === plain.id, "…a first capture naming supersedes writes it, existed: false");
+  const cleared = (await sql`SELECT update_thought(${r.id}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{"supersedes": null}'::jsonb) AS r`)[0].r as { ok: boolean };
+  assert(cleared.ok === true && (await twoRowLoops()) === 0 && (await pointer(x.id)) === r.id, "…the loop written at 033 is cleared through update_thought's envelope, X → R kept");
+  const again = (await sql`SELECT update_thought(${r.id}::uuid, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ${{ supersedes: x.id }}::jsonb) AS r`)[0].r as { ok: boolean; error?: string };
+  assert(again.ok === false && again.error === "WOULD_CYCLE", `…and cannot be re-written by the one path left to it (${again.error})`);
+  assert(Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory'`)[0].c) === 0, "…and no advisory lock is held once the calls return");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f.startsWith("035") });
+  assert((await aclOf(THREE)) === acl && JSON.stringify(await shape(sql)) === JSON.stringify(after) && (await bodyOf(THREE)) === three, "re-applying 035 is a no-op: the ACL, the shape and the body as they were");
+  await sql.unsafe(`DROP OWNED BY ob1_upgrade_capturer34`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_capturer34`);
   await sql.close();
 }
 
