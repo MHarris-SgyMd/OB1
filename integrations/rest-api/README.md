@@ -21,8 +21,8 @@ All endpoints share the same authentication, sensitivity filtering, and enrichme
 | GET | `/recent` | Recent thoughts (paginated) |
 | GET | `/thoughts` | Browse with filters and pagination |
 | GET | `/thought/:id` | Get a single thought |
-| PUT | `/thought/:id` | Update thought content |
-| PATCH | `/thought/:id/enrich` | Re-enrich a thought |
+| PUT | `/thought/:id` | Update thought content, through the database's `update_thought` |
+| PATCH | `/thought/:id/enrich` | Re-enrich a thought (a new vector goes through `update_thought`) |
 | DELETE | `/thought/:id` | Delete a thought |
 | GET | `/thought/:id/connections` | Related thoughts |
 | GET | `/count` | Count thoughts with filters |
@@ -157,6 +157,8 @@ keys never touch log output.
 ## How It Connects to Other Components
 
 The REST API uses the same `_shared/` helpers as the Enhanced MCP Server (`integrations/enhanced-mcp`), ensuring consistent behavior for search, capture, and enrichment. The `/ingest` endpoints proxy to the Smart Ingest Edge Function (`integrations/smart-ingest`).
+
+> **On this fork (FORK.md change 69, SMD-1228).** `:id` is the thought's UUID (`thoughts.id` here; an integer on upstream's enhanced schema — both are accepted). `POST /capture`, `PUT /thought/:id` and `PATCH /thought/:id/enrich` write a thought's content and vector through the database's own functions — the 3-argument `upsert_thought` (`db/migrations/035`) and `update_thought` (`033`) — rather than with a raw update of the row, so the content fingerprint follows the text, the model label follows the vector and the previous vector's chunk rows go; the enhanced-thoughts columns (`type`, `sensitivity_tier`, `importance`, `quality_score`, `source_type`) are written beside them by an update that carries neither. Two consequences: `/capture` reads the fork's return (`id`, `fingerprint`, `existed`) and no longer throws after the write, and a `PUT` whose embedding call failed leaves the row without a vector — not with the old vector under the new text — answers `embedding_updated: false` with a message saying so, and `PATCH /thought/:id/enrich?fill=embedding` refills it. The enhanced-thoughts columns are set for a fresh row; a re-capture of text already stored leaves them (the tier rule is escalation-only, and `PUT` is the way to change them). `extensions/test-writes.ts` drives the three routes against Postgres. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
 
 For guidance on managing tool count and token overhead when running multiple integrations, see the [tool audit guide](../../docs/05-tool-audit.md).
 

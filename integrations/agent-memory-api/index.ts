@@ -1,3 +1,9 @@
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -16,6 +22,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector this API produces (021): the model
+// name as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -194,7 +203,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBEDDING_MODEL,
       input: text,
     }),
   });
@@ -495,9 +504,17 @@ app.post("/writeback", requireWrite, async (c) => {
     }
 
     const embedding = await getEmbedding(row.content);
+    // The 3-argument form (db/migrations/004, last redefined by 035): the
+    // vector and its label (021) land with the row, the fingerprint with the
+    // text. This route used to call the 2-argument form and then write the
+    // vector with a raw update, which left embedding_model NULL — a vector of
+    // unknown model to preflight and the re-embed — and, on a re-capture, the
+    // previous vector's chunk rows in place (022).
     const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
       p_content: row.content,
+      p_embedding: embedding,
       p_payload: {
+        embedding_model: EMBEDDING_MODEL,
         metadata: {
           source: "agent_memory",
           source_type: "agent_memory",
@@ -516,7 +533,6 @@ app.post("/writeback", requireWrite, async (c) => {
     if (upsertError) return c.json({ error: upsertError.message }, 500, corsHeaders);
 
     const thoughtId = upsertResult?.id;
-    if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
 
     const { data: memory, error: memoryError } = await supabase.from("agent_memories").insert({
       thought_id: thoughtId ?? null,

@@ -4,6 +4,12 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: @supabase/supabase-js
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -20,6 +26,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector this API produces (021): the model
+// name as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -195,7 +204,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBEDDING_MODEL,
       input: text,
     }),
   });
@@ -412,17 +421,22 @@ async function createThought(body: z.infer<typeof captureSchema>) {
     source_type: sourceType,
   };
 
-  const [embedding, upsert] = await Promise.all([
-    getEmbedding(content),
-    supabase.rpc("upsert_thought", {
-      p_content: content,
-      p_payload: { metadata },
-    }),
-  ]);
+  // The 3-argument upsert_thought (db/migrations/004, last redefined by 035):
+  // the vector and its label (021) land with the row, the fingerprint with
+  // the text, and a re-capture replaces the previous vector's chunk rows
+  // (022). This used to be the 2-argument form and a raw update of the vector
+  // after it, which left embedding_model NULL and the old windows in place.
+  const embedding = await getEmbedding(content);
+  const upsert = await supabase.rpc("upsert_thought", {
+    p_content: content,
+    p_payload: { metadata, embedding_model: EMBEDDING_MODEL },
+    p_embedding: embedding,
+  });
   if (upsert.error) throw new Error(upsert.error.message);
 
   const thoughtId = String(upsert.data?.id || "");
   if (!thoughtId) throw new Error("upsert_thought did not return an id");
+  const existed = upsert.data?.existed === true;
 
   const status = body.status !== undefined
     ? body.status
@@ -430,9 +444,12 @@ async function createThought(body: z.infer<typeof captureSchema>) {
       ? "new"
       : null;
 
+  // The enhanced-thoughts columns the function does not know: a raw update
+  // that carries neither content nor vector, so nothing it writes goes stale
+  // — for a fresh row. A re-capture of existing text leaves them as they are
+  // (a hand-set tier or importance is the owner's; PUT /thought/:id changes
+  // them), as the function leaves that row's pointers (db/migrations/035).
   const update = {
-    embedding,
-    metadata,
     type,
     source_type: sourceType,
     importance: body.importance ?? numberValue(extracted.importance, 50),
@@ -442,16 +459,23 @@ async function createThought(body: z.infer<typeof captureSchema>) {
     status_updated_at: status ? new Date().toISOString() : null,
   };
 
-  const { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);
-  if (error) throw new Error(error.message);
+  // …and the response reports what the row holds, not what this call detected.
+  let held: { type: string | null; sensitivity_tier: string | null } = { type, sensitivity_tier: update.sensitivity_tier };
+  if (!existed) {
+    const { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);
+    if (error) throw new Error(error.message);
+  } else {
+    const { data: kept } = await supabase.from("thoughts").select("type, sensitivity_tier").eq("id", thoughtId).single();
+    if (kept) held = kept as typeof held;
+  }
 
   return {
     thought_id: thoughtId,
-    action: "created_or_updated",
-    type,
-    sensitivity_tier: update.sensitivity_tier,
+    action: existed ? "updated" : "created",
+    type: held.type ?? type,
+    sensitivity_tier: held.sensitivity_tier ?? update.sensitivity_tier,
     content_fingerprint: String(upsert.data?.fingerprint || ""),
-    message: "Thought captured",
+    message: existed ? "Thought already captured; its vector and metadata refreshed" : "Thought captured",
   };
 }
 
@@ -514,17 +538,33 @@ app.put("/thought/:id", requireWrite, async (c) => {
     const { data: existing, error: existingError } = await supabase.from("thoughts").select(thoughtSelect).eq("id", id).single();
     if (existingError) return c.json({ error: existingError.message }, 404, corsHeaders);
 
-    const metadata = {
-      ...metadataOf(existing as DbThought),
-      ...(parsed.data.metadata || {}),
-    };
+    const metadata: Record<string, unknown> = { ...(parsed.data.metadata || {}) };
     if (parsed.data.type) metadata.type = parsed.data.type;
 
-    const update: Record<string, unknown> = { metadata };
-    if (parsed.data.content !== undefined) {
-      update.content = parsed.data.content;
-      update.embedding = await getEmbedding(parsed.data.content);
+    // Content, vector and metadata through update_thought (db/migrations/033):
+    // the fingerprint follows the text (003/018), the label the vector (021),
+    // the chunk rows are replaced (022), and the patch is shallow-merged into
+    // metadata — what the read-then-spread here did, in the function, under
+    // its row lock. A raw update of these columns left every one stale.
+    const content = parsed.data.content;
+    const embedding = content !== undefined ? await getEmbedding(content) : null;
+    const edit = await supabase.rpc("update_thought", {
+      p_id: id,
+      p_content: content ?? null,
+      p_metadata_patch: metadata,
+      p_embedding: embedding,
+      p_embedding_model: embedding ? EMBEDDING_MODEL : null,
+    });
+    if (edit.error) return c.json({ error: edit.error.message }, 500, corsHeaders);
+    const result = (edit.data ?? {}) as Record<string, unknown>;
+    if (result.ok !== true) {
+      const reason = String(result.error ?? "unknown");
+      return c.json({ error: `update_thought refused: ${reason}` }, reason === "NOT_FOUND" ? 404 : 409, corsHeaders);
     }
+
+    // The enhanced-thoughts columns the function does not know: a raw update
+    // that carries neither content nor vector, so nothing it writes goes stale.
+    const update: Record<string, unknown> = {};
     if (parsed.data.type !== undefined) update.type = parsed.data.type;
     if (parsed.data.importance !== undefined) update.importance = parsed.data.importance;
     if (parsed.data.quality_score !== undefined) update.quality_score = parsed.data.quality_score;
@@ -533,9 +573,10 @@ app.put("/thought/:id", requireWrite, async (c) => {
       update.status = parsed.data.status;
       update.status_updated_at = new Date().toISOString();
     }
-
-    const { error } = await supabase.from("thoughts").update(update).eq("id", id);
-    if (error) return c.json({ error: error.message }, 500, corsHeaders);
+    if (Object.keys(update).length > 0) {
+      const { error } = await supabase.from("thoughts").update(update).eq("id", id);
+      if (error) return c.json({ error: error.message }, 500, corsHeaders);
+    }
     return c.json({ id, action: "updated", message: "Thought updated" }, 200, corsHeaders);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Update failed" }, 500, corsHeaders);
