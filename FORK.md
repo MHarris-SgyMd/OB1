@@ -8391,7 +8391,10 @@ data at rest — every query typed. The bound is strict: a row logged in the
 prune's own transaction shares its `now()` and stays, and `test-schema` [34]
 asserts that with insert and prune in one transaction (SMD-1498 — the section
 had assumed each statement's `now()` is later than the last's, which PGlite's
-millisecond clock does not promise, and its wipe assertion flaked once).
+millisecond clock does not promise, and its wipe assertion flaked once). The
+window's unit is asserted too (SMD-1515): the section had checked the default
+over rows hours old and rows going only at 0, which a body counting hours
+passes; now a 31-day row goes and a 29-day row stays under the default.
 `db/config.mjs`'s `QUERY_LOG` is the one spelling of the flag, names, tool sets
 and retention, read by the server, preflight and the tests; a `querylog` grant
 group (query_log `INSERT`, since 034) means a self-hosted role that runs
