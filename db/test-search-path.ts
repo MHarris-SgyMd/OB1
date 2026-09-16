@@ -168,7 +168,7 @@ try {
     // The two capture forms are matched by a signature built from pg_type's
     // names; regprocedure's text would spell `ext.vector` here and call the
     // present 3-argument form missing (SMD-1250, second review pass).
-    assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 033's/.test(r.out),
+    assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both 035's/.test(r.out),
            "…while atomic capture still finds both upsert_thought forms with pgvector off the path");
   }
 

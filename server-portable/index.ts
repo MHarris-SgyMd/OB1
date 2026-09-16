@@ -961,9 +961,9 @@ function buildServer(principal: Principal): McpServer {
         // neither. Validated at the write — an id that is not an existing thought
         // is refused, so a synthesis cannot claim a source it does not have.
         derived_from: z.array(z.string()).optional()
-          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result)."),
+          .describe("For a thought SYNTHESISED from others (a digest, consolidation, summary): the ids of the source thoughts it was built from. Each must be an existing thought id (from a search or capture result). Recorded when the thought is new; if this text was already captured, the existing thought's provenance is left as it is."),
         supersedes: z.string().optional()
-          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded."),
+          .describe("The id of a prior thought this one REPLACES (a corrected or updated version). Search will label the older thought as superseded. Recorded when the thought is new; for text already captured, use update_thought's `supersedes` on that thought instead."),
       },
     },
     async ({ content, derived_from, supersedes }) => {
@@ -972,6 +972,11 @@ function buildServer(principal: Principal): McpServer {
         // update_thought's `supersedes` is refused (032). upsert_thought would
         // raise on it after the embedding and the metadata were already paid for.
         if (supersedes !== undefined && !UUID_RE.test(supersedes)) return toolError(refuseSupersedesShape(supersedes));
+        // derived_from's SHAPE likewise (fourth review pass): a non-id element
+        // paid both model calls before validate_derived_from refused it.
+        // Existence stays the write's.
+        const badDerived = derived_from?.find((d) => !UUID_RE.test(d));
+        if (badDerived !== undefined) return toolError(`Refused: every \`derived_from\` entry must be a thought id (the ID: line of a search result), not "${badDerived.slice(0, 40)}".`);
         // Independent of each other, so they overlap.
         const [embedded, metadata] = await Promise.all([
           embedCapture(content),
@@ -1052,6 +1057,35 @@ function buildServer(principal: Principal): McpServer {
         }
         confirmation += explainHeadWindow(embedded);
 
+        // Migration 035 (SMD-1453): a re-capture writes no provenance. The text
+        // was already a thought, so the derived_from / supersedes named here
+        // were not written; say so and name the edit that records it, since
+        // otherwise nothing would — the trace would show nothing and no
+        // error would say why.
+        const derivedNamed = derived_from !== undefined && derived_from.length > 0;
+        if (captured.existed === true && (derivedNamed || supersedes !== undefined)) {
+          const named = [derivedNamed ? "`derived_from`" : null, supersedes !== undefined ? "`supersedes`" : null].filter(Boolean);
+          // What stands, from the row's pointer the store returned beside
+          // `existed` (035) — not from the caller's inputs alone, which the
+          // second review pass found advising a redundant edit, a replacement
+          // it did not mention, or one update_thought would refuse.
+          const current = captured.supersedes ?? null;
+          // Postgres hands ids back lower-case; the shape check admits either
+          // case, so compare — and print — the caller's in lower case (third
+          // review pass: an upper-case self-pointer slipped past to an edit
+          // update_thought refuses).
+          const given = supersedes?.toLowerCase();
+          const advice = given === undefined ? ""
+            : given === captured.id ? ` The \`supersedes\` given names the thought itself; a thought cannot supersede itself.`
+            : current === given ? ` It already supersedes ${given}; there is nothing to record.`
+            : current !== null ? ` It currently supersedes ${current}; to replace that pointer with ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`
+            : ` To record that it supersedes ${given}, call update_thought with id ${captured.id} and \`supersedes\` ${given}; it records the pointer if that thought exists and closes no loop.`;
+          confirmation +=
+            `\n\nNote: this text was already captured as ${captured.id}, so the ${named.join(" and ")} given here ${named.length > 1 ? "were" : "was"} not written — ` +
+            `a re-capture leaves an existing thought's provenance as it is.` + advice +
+            (derivedNamed ? ` \`derived_from\` cannot be set on an existing thought through these tools.` : "");
+        }
+
         // Tell the user when tags are placeholders rather than real extraction,
         // so a broken env().OPENROUTER_API_KEY does not look like a successful capture.
         if (typeof meta.metadata_extraction_failed === "string") {
@@ -1065,8 +1099,18 @@ function buildServer(principal: Principal): McpServer {
           content: [{ type: "text" as const, text: confirmation }],
         };
       } catch (err: unknown) {
+        const msg = (err as Error).message;
+        // 025's self-FK is what refuses a first capture's supersedes naming no
+        // thought (a re-capture writes no pointer, so it never fires there —
+        // migration 035). Said as update_thought says it, not as Postgres does
+        // (fourth review pass).
+        if (/thoughts_supersedes_fkey/.test(msg)) return toolError("Refused: no thought with the id given as supersedes. Pass the id of an existing thought — the ID: line of a search result.");
+        // Its sibling: validate_derived_from's existence refusal (032), the
+        // one provenance refusal that still reached the caller as a raw error
+        // (fifth review pass).
+        if (/derived_from references a thought that does not exist/.test(msg)) return toolError(`Refused: a \`derived_from\` id names no thought — ${msg.replace(/^.*?\(in /, "(in ").replace(/\.$/, "")}. Each must be an existing thought id (the ID: line of a search result).`);
         return {
-          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
           isError: true,
         };
       }
