@@ -4,8 +4,9 @@
 --
 -- BEFORE RUNNING:
 --   Replace <YOUR-PROJECT-REF> with your Supabase project reference.
---   Replace <YOUR-AUDITOR-KEY> with the value of your AUDITOR_ACCESS_KEY
---   secret (any random string you choose — used to gate the function URL).
+--   Replace <YOUR-AUDITOR-KEY> with the KEY whose sha256 is an entry in your
+--   AUDITOR_ACCESS_KEYS secret (name:scope:sha256; the URL carries the key,
+--   the secret its hash). Use a write-scoped key: the run stores a report.
 -- ============================================================
 --
 -- Prerequisites:

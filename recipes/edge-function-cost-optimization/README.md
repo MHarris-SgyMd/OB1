@@ -25,7 +25,7 @@ Multiply that by **4 connectors** at session startup → **16 invocations** befo
 
 ### 1. Consolidate N edge functions into 1
 
-Tools are uniquely named across extensions. There's no technical reason they need separate functions — splitting them only multiplies the per-session handshake cost. One Hono app + one `McpServer` + N `register(server)` calls covers all extensions and exposes them via a single connector URL.
+Tools are uniquely named across extensions. There's no technical reason they need separate functions — splitting them only multiplies the per-session handshake cost. One Hono app + one `McpServer` per key scope + N `register(server, principal)` calls covers all extensions and exposes them via a single connector URL.
 
 ```
 4 connectors × 4-step handshake = 16 invocations per session start
@@ -88,21 +88,24 @@ Upstream's [`migrations/20260417_edge_fn_optimizations.sql`](./migrations/202604
 Convert your N MCP functions into **one** function with the structure shown in [`examples/after/`](./examples/after/):
 
 ```
+supabase/functions/_shared/
+  auth.ts             # the access-key module index.ts and server.ts import — any _shared/auth.ts in this repository, e.g. examples/_shared/auth.ts
 supabase/functions/open-brain-mcp/
-  index.ts            # Hono app, auth, CORS, session map, transport wiring
-  server.ts           # module-scope McpServer; calls register() per tool module
+  deno.json           # pins hono, @hono/mcp, @modelcontextprotocol/sdk, zod (copy an extension's)
+  index.ts            # Hono app, auth (../_shared/auth.ts: scoped keys), CORS, session map, transport wiring
+  server.ts           # module-scope McpServer per key scope; calls register(server, principal) per tool module
   lib/
     cache.ts          # TTL Map with tag-based invalidation
     supabase.ts       # createClient() singleton
     embeddings.ts     # getEmbedding() + 10-min cache
     metadata.ts       # extractMetadata() (LLM call)
   tools/
-    <extension-1>.ts  # exports register(server)
+    <extension-1>.ts  # exports register(server, principal); a tool that writes only if canWrite(principal)
     <extension-2>.ts
     ...
 ```
 
-Each extension's tools live in their own module, exporting a `register(server)` function called once at module load. **Move tool implementations verbatim** from the old per-extension files; only the wrapper changes.
+Each extension's tools live in their own module, exporting a `register(server, principal)` function called once per key scope, on the first request that needs that scope; a tool that writes is registered only `if (canWrite(principal))`. **Move tool implementations verbatim** from the old per-extension files; only the wrapper changes.
 
 ### Step 3 — Add session reuse to `index.ts`
 
@@ -169,8 +172,10 @@ In Claude Desktop → Settings → Connectors:
 2. **Add** a single new connector pointing to:
 
    ```
-   https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<MCP_ACCESS_KEY>
+   https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-key>
    ```
+
+   The key itself — `MCP_ACCESS_KEYS` on the function holds its `name:scope:sha256` entry, minted as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. A `read`-scoped key gets a server on which the tools that write were never registered.
 
 3. Restart Claude Desktop. All your tools (now from a single server) appear in the tools panel.
 

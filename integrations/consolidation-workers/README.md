@@ -18,7 +18,7 @@ Both workers:
 - Use three-tier LLM fallback: OpenRouter (primary) > OpenAI > Anthropic
 - Support dry-run mode for previewing changes without writing
 - Log all operations to the `consolidation_log` table for auditability
-- Use fail-closed authentication via `MCP_ACCESS_KEY`
+- Authenticate through `_shared/auth.ts` (the core server's module): named, scoped, SHA-256-hashed keys in `MCP_ACCESS_KEYS`, fail-closed when none is configured; a `read` key may only dry-run
 - Use wildcard CORS for flexible deployment
 
 For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repository root.
@@ -44,14 +44,19 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 Copy the `integrations/consolidation-workers/` folder into your Supabase project's `supabase/functions/` directory. Each subfolder becomes its own edge function:
 
 ```bash
-cp -r integrations/consolidation-workers/bio supabase/functions/consolidation-bio
-cp -r integrations/consolidation-workers/metadata-norm supabase/functions/consolidation-metadata
-cp -r integrations/consolidation-workers/_shared supabase/functions/_shared
+mkdir -p supabase/functions/consolidation-bio supabase/functions/consolidation-metadata supabase/functions/_shared
+cp integrations/consolidation-workers/bio/index.ts supabase/functions/consolidation-bio/index.ts
+cp integrations/consolidation-workers/metadata-norm/index.ts supabase/functions/consolidation-metadata/index.ts
+cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-bio/deno.json
+cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-metadata/deno.json
+cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-If you already have a `_shared/` folder from the enhanced MCP server, the files are identical — no need to overwrite.
+Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and needs it only once SMD-1480 lands. Both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
+
+> **`consolidation-bio` is not deployable as it stands.** It imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix; its access-key behaviour is exercised by `extensions/test-auth.ts`. `consolidation-metadata` deploys.
 
 ```bash
 supabase functions deploy consolidation-bio --no-verify-jwt
@@ -62,9 +67,11 @@ supabase functions deploy consolidation-metadata --no-verify-jwt
 
 ```bash
 supabase secrets set \
-  MCP_ACCESS_KEY="your-access-key" \
+  MCP_ACCESS_KEYS="cron:write:<sha256-of-your-key>" \
   OPENROUTER_API_KEY="your-openrouter-key"
 ```
+
+`MCP_ACCESS_KEYS` holds one `name:scope:sha256` entry per caller — the hash, never the key; mint one as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows. The older single `MCP_ACCESS_KEY` still works, compared by digest. The secret is project-wide — one `MCP_ACCESS_KEYS` for every function in the project — so set the whole list, your existing entries plus this one, comma-separated. Both workers write, so a real run needs a `write` key; a `read` key may only `dry_run=true`.
 
 Optional multi-provider fallback:
 
@@ -92,7 +99,7 @@ supabase secrets set \
 
 ### 4. Run the Bio Worker
 
-Generate a biographical profile (dry run first):
+Generate a biographical profile (dry run first — the one thing a `read`-scoped key may do):
 
 ```bash
 curl -X POST "https://<project-ref>.supabase.co/functions/v1/consolidation-bio?dry_run=true" \
@@ -202,7 +209,8 @@ Solution: Ensure the knowledge graph schema is applied. The `consolidation_log` 
 
 ```
 consolidation-workers/
-  _shared/           # Shared config and helpers (same as enhanced-mcp)
+  _shared/           # Shared config and helpers (config and helpers as in enhanced-mcp)
+    auth.ts          # Access keys — a copy of server-portable/auth.ts (this fork)
     config.ts        # Constants, models, prompt, patterns
     helpers.ts       # Type coercion, embedding, metadata extraction
   bio/

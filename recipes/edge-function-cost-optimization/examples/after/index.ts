@@ -1,23 +1,29 @@
 // ✅ Unified edge function with Mcp-Session-Id reuse.
 //
 // Key elements:
-//  - Singleton McpServer + Supabase client at module scope (no per-request
-//    reconstruction)
+//  - One McpServer per key scope + Supabase client at module scope (no
+//    per-request reconstruction)
 //  - app.options("*") returns CORS preflights cheaply BEFORE auth
 //  - Mcp-Session-Id header is minted on first request and reused on
 //    subsequent ones, collapsing the 4-step MCP handshake
 //  - Access-Control-Expose-Headers includes mcp-session-id so browser
 //    clients (Claude Desktop, claude.ai) can read it off the response
+//  - Access keys through ../_shared/auth.ts (examples/_shared/, the core
+//    server's server-portable/auth.ts): named, scoped, hashed entries in
+//    MCP_ACCESS_KEYS, and a read-scoped key is handed a server on which the
+//    tools that write were never registered (ob1-fork, SMD-1455, FORK.md
+//    change 67)
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { Hono } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
-import { server } from "./server.ts";
-
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+import { serverFor } from "./server.ts";
+import { authenticateRequest, type Scope } from "../_shared/auth.ts";
 
 // ── Session reuse ──────────────────────────────────────────────────────────
-type Session = { transport: StreamableHTTPTransport; lastSeen: number };
+// A session remembers the scope it was minted under: a session id is not a
+// credential, so a request under a key of another scope does not resume it.
+type Session = { transport: StreamableHTTPTransport; lastSeen: number; scope: Scope };
 const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
@@ -55,11 +61,14 @@ app.all("*", async (c) => {
     return c.json({ error: "Method not allowed" }, 405, { ...corsHeaders, Allow: "POST, OPTIONS" });
   }
 
-  const provided =
-    c.req.header("x-brain-key") ||
-    c.req.header("x-access-key") ||
-    new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  // ✅ Named, scoped, hashed keys through the shared module: every presented
+  // form tried, digests compared timing-safe, and the server this principal
+  // gets is the one built for its scope (server.ts).
+  const principal = authenticateRequest(c.req.raw, {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  });
+  if (!principal) {
     return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
   }
 
@@ -82,13 +91,14 @@ app.all("*", async (c) => {
   // ── Session lookup or mint ───────────────────────────────────────────────
   const sid = c.req.header("mcp-session-id") || undefined;
   let session = sid ? sessions.get(sid) : undefined;
-  let id = sid;
+  if (session && session.scope !== principal.scope) session = undefined; // another scope's session: mint a new one
+  let id = session ? sid : undefined;
 
   if (!session) {
     id = crypto.randomUUID();
     const transport = new StreamableHTTPTransport();
-    await server.connect(transport); // bind once per session, not per request
-    session = { transport, lastSeen: Date.now() };
+    await serverFor(principal).connect(transport); // bind once per session, not per request
+    session = { transport, lastSeen: Date.now(), scope: principal.scope };
     sessions.set(id, session);
   } else {
     session.lastSeen = Date.now();

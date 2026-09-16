@@ -8,7 +8,10 @@
  *   ?limit=20     — batch size (default 20, max 100)
  *   ?dry_run=true — evaluate but don't write changes
  *
- * Auth: MCP_ACCESS_KEY via x-brain-key header, Authorization bearer, or ?key= param.
+ * Auth: named, scoped, hashed keys in MCP_ACCESS_KEYS through ../_shared/auth.ts
+ * (the older single MCP_ACCESS_KEY still works, compared by digest) — x-brain-key,
+ * x-access-key, ?key= or a bearer token. The worker writes; a read-scoped key
+ * may only dry_run (SMD-1455, FORK.md change 67).
  *
  * Requires:
  *   - Enhanced thoughts schema (schemas/enhanced-thoughts)
@@ -19,7 +22,15 @@
  * See docs/05-tool-audit.md for the full tool and worker inventory.
  */
 
-import { createClient } from "npm:@supabase/supabase-js@2";
+// ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
+// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
+// works, compared by digest), and a read-scoped key may only dry_run. FORK.md
+// change 67; extensions/test-auth.ts exercises it.
+// Deploy this worker with _shared/auth.ts beside the function (supabase/functions/_shared/),
+// as the README says — next to the helpers this directory's _shared/ already held.
+import { createClient } from "@supabase/supabase-js"; // pinned by ../deno.json
+import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
   isRecord,
   asString,
@@ -39,7 +50,6 @@ import { fetchWithTimeout, isTransientError, resolveLlmFetchTimeoutMs } from "..
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
@@ -68,25 +78,13 @@ function getCorsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key, x-mcp-key",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key, x-access-key",
     "Content-Type": "application/json",
   };
 }
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), { status, headers: getCorsHeaders() });
-}
-
-// --- Auth ---
-
-function isAuthorized(req: Request): boolean {
-  const url = new URL(req.url);
-  const key =
-    req.headers.get("x-brain-key")?.trim() ||
-    req.headers.get("x-mcp-key")?.trim() ||
-    url.searchParams.get("key")?.trim() ||
-    (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  return key === MCP_ACCESS_KEY;
 }
 
 // --- LLM call ---
@@ -326,21 +324,36 @@ Deno.serve(async (req) => {
     return new Response(null, { status: 204, headers: getCorsHeaders() });
   }
 
-  if (!MCP_ACCESS_KEY) {
-    console.warn("MCP_ACCESS_KEY not set — rejecting all requests.");
+  // Named, scoped, hashed keys through the shared module (MCP_ACCESS_KEYS; the
+  // older single MCP_ACCESS_KEY still works, compared by digest); every presented
+  // form — x-brain-key, x-access-key, ?key=, a bearer token — is tried. Fail
+  // closed with neither configured, as before.
+  const keys = {
+    MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
+    MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
+  };
+  if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) {
+    console.warn("MCP_ACCESS_KEYS not set — rejecting all requests.");
     return json({ error: "Service misconfigured: auth key not set" }, 503);
   }
-  if (!isAuthorized(req)) {
+  const principal = authenticateRequest(req, keys);
+  if (!principal) {
     return json({ error: "Unauthorized" }, 401);
+  }
+
+  const url = new URL(req.url);
+  const dryRun = url.searchParams.get("dry_run") === "true";
+  // The worker writes. A read-scoped key may preview — dry_run writes nothing —
+  // and nothing more.
+  if (!canWrite(principal) && !dryRun) {
+    return json({ error: "Forbidden: this key is read-scoped; only dry_run=true is allowed" }, 403);
   }
 
   if (!OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
     return json({ error: "No LLM API keys configured" }, 503);
   }
 
-  const url = new URL(req.url);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "20", 10) || 20, 1), 100);
-  const dryRun = url.searchParams.get("dry_run") === "true";
 
   // Step 1: Find candidate thoughts with weak metadata
   const { data: candidates, error: queryError } = await supabase
