@@ -19,7 +19,7 @@
  */
 
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
-// server-portable/auth.ts, copied so Supabase bundles it with the function — named,
+// server-portable/auth.ts, copied so the Docker build has it in its context — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 65; extensions/test-auth.ts exercises it.

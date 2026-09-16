@@ -20,7 +20,9 @@ import { authenticateRequest, canWrite, type Principal } from "../_shared/auth.t
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const DEFAULT_USER_ID = Deno.env.get("DEFAULT_USER_ID");
+// `?? ""` so the name is a string inside buildServer() too: the throw below
+// narrows a `string | undefined` only at module scope, not in a hoisted function.
+const DEFAULT_USER_ID = Deno.env.get("DEFAULT_USER_ID") ?? "";
 
 // The access keys themselves are read per request, where they are used (app.all
 // below); starting with none configured is still refused here.

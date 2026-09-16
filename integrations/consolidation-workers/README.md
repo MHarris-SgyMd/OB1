@@ -44,15 +44,15 @@ For the full tool and worker inventory, see `docs/05-tool-audit.md` in the repos
 Copy the `integrations/consolidation-workers/` folder into your Supabase project's `supabase/functions/` directory. Each subfolder becomes its own edge function:
 
 ```bash
-cp -r integrations/consolidation-workers/bio supabase/functions/consolidation-bio
-cp -r integrations/consolidation-workers/metadata-norm supabase/functions/consolidation-metadata
+mkdir -p supabase/functions/consolidation-bio supabase/functions/consolidation-metadata supabase/functions/_shared
+cp integrations/consolidation-workers/bio/index.ts supabase/functions/consolidation-bio/index.ts
+cp integrations/consolidation-workers/metadata-norm/index.ts supabase/functions/consolidation-metadata/index.ts
 cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-bio/deno.json
 cp integrations/consolidation-workers/deno.json supabase/functions/consolidation-metadata/deno.json
-mkdir -p supabase/functions/_shared
 cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-The `deno.json` pins `@supabase/supabase-js` for each function's own imports — Supabase reads one per function directory, and the workers import the package by its bare name. `_shared/` is copied file by file so a `_shared/` folder you already have (from the enhanced MCP server, or any other server on this fork) gains the files rather than a nested copy; both workers import the access-key module from `../_shared/auth.ts`.
+Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and needs it only once SMD-1480 lands. Both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
 

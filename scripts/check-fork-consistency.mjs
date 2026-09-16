@@ -736,10 +736,13 @@ function checkCoreFunctions() {
 // catches the operator, and a call is where the timing-safe compare lives.
 // Outside the rule, and said so: `.includes`,
 // `Object.is`, `switch`, `.localeCompare`, a compare through a class field or
-// a lower-case object property (an upper-case credential-named one —
-// `keys.MCP_ACCESS_KEY`, the shape change 65's workers bind — is caught, in
-// the one-line and the multi-line binding alike), a helper that returns the
-// key, several declarators on
+// an object property — unless the object was bound from a statement that
+// reads a credential from the environment (`const keys = { MCP_ACCESS_KEY:
+// Deno.env.get(…) }`, one line or many, the shape change 65's workers use),
+// whose credential-named properties, bracket reads and destructured names are
+// followed; a free property clause fired on `opts.MAX_TOKENS` and
+// `table.PRIMARY_KEY`, so it is anchored to those objects — a helper that
+// returns the key, several declarators on
 // one statement, a read through `Deno.env.toObject()` into a variable, a read
 // by a non-literal name (`Deno.env.get(name)`), a parenthesised bound name
 // (`(expected) === key`), a shell test (`[ "$KEY" != "$MCP_ACCESS_KEY" ]`),
@@ -776,8 +779,23 @@ function credentialComparesIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*(?:\?\?|\|\|)?(?<![=!<>])=(?![=>])\s*[^;\n]*?${ENV_READ}`, "g"))) {
     if (CREDENTIAL_ENV_NAME.test(envNameOf(m.slice(2)))) names.add(m[1]);
   }
-  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one.
-  for (const m of text.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\))(?![\w$])/g)) {
+  // An object bound from a statement that reads a credential from the
+  // environment — `const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") }`,
+  // on one line or many (the binding rule above stops at the line break; this
+  // walks the braces). Its credential-named properties, bracket reads and a
+  // destructure from it are the credential below. Anchored to these objects
+  // only: a clause over any object's upper-case properties fired on
+  // `opts.MAX_TOKENS` and `table.PRIMARY_KEY`.
+  const objects = new Set();
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*\{`, "g"))) {
+    let depth = 0, i = m.index + m[0].length - 1;
+    for (; i < text.length; i++) { if (text[i] === "{") depth++; else if (text[i] === "}" && --depth === 0) break; }
+    const block = text.slice(m.index, i + 1);
+    if ([...block.matchAll(new RegExp(ENV_READ, "g"))].some((r) => CREDENTIAL_ENV_NAME.test(envNameOf(r.slice(1))))) objects.add(m[1]);
+  }
+  const OBJECTS = [...objects].map((o) => o.replace(/\$/g, "\\$"));
+  // `const { MCP_ACCESS_KEY } = process.env` binds the env name; `{ MCP_ACCESS_KEY: expected }` binds the local one; so does a destructure from an object above.
+  for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:process\.env|Deno\.env\.toObject\(\)|Bun\.env|c\.env|env\(\s*\w+\s*\)${OBJECTS.map((o) => "|" + o).join("")})(?![\w$])`, "g"))) {
     for (const part of m[1].split(",")) {
       const [envName, local] = part.split(":").map((p) => p.trim().split(/[\s=]/)[0]);
       if (envName && CREDENTIAL_ENV_NAME.test(envName)) names.add(local || envName);
@@ -799,16 +817,16 @@ function credentialComparesIn(text) {
     // The credential on the left: `MCP_ACCESS_KEY === key` — not `typeof MCP_ACCESS_KEY`, not against a nullish, empty or string literal.
     flag(new RegExp(String.raw`(?<![\w$.])(?<!typeof\s+)${bound(N)}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
   }
-  // A credential-named upper-case property of any object but the environment
-  // ones ENV_READ reads — `keys.MCP_ACCESS_KEY`, `cfg.API_SECRET` — the shape
-  // change 65's workers bind their keys in (`const keys = { MCP_ACCESS_KEY:
-  // Deno.env.get(…) }`), which the binding rule above does not follow into: the
-  // object is bound, its property is not, in either the one-line or the
-  // multi-line form. Same guards as a bound name: not `typeof`, not against a
+  // A credential-named property of an object bound from the environment (above):
+  // `keys.MCP_ACCESS_KEY`, `keys?.MCP_ACCESS_KEY`, `keys["MCP_ACCESS_KEY"]`, with
+  // `.trim()` allowed. Same guards as a bound name: not `typeof`, not against a
   // nullish, empty or string literal, not `.x`, `(`, `[` after it.
-  const PROP = String.raw`(?<![\w$.])(?!(?:process|Deno|Bun|c|ctx|context)\.env\b)(?!import\.meta\.env\b)(?:${IDENT}(?:\?\.|\.))+(?:[A-Z][A-Z0-9_]*_)?(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD)S?\b(?:(?:\?\.|\.)trim\(\))?`;
-  flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${PROP}(?!\s*(?:[.(\[]|\?\.))`, "g"));
-  flag(new RegExp(String.raw`(?<!typeof\s+)${PROP}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"));
+  for (const O of OBJECTS) {
+    const P = String.raw`(?<![\w$.])${O}(?:(?:\?\.|\.)(${IDENT})|\[\s*["'](${IDENT})["']\s*\])(?:(?:\?\.|\.)trim\(\))?`;
+    const cred = (m) => CREDENTIAL_ENV_NAME.test(m[1] ?? m[2] ?? "");
+    flag(new RegExp(String.raw`(?<!${NOT_A_VALUE}\s*)${EQ}\s*${P}(?!\s*(?:[.(\[]|\?\.))`, "g"), cred);
+    flag(new RegExp(String.raw`(?<!typeof\s+)${P}\s*${EQ}(?!\s*${NOT_A_VALUE})`, "g"), cred);
+  }
   return [...lines].sort((a, b) => a - b);
 }
 
@@ -872,10 +890,12 @@ const CREDENTIAL_COMPARE_PROBES = [
   // The fifth pass: Hono's adapter form.
   'import { env } from "hono/adapter";\nif (provided !== env(c).MCP_ACCESS_KEY) deny();',
   'const { MCP_ACCESS_KEY } = env(c);\nif (provided !== MCP_ACCESS_KEY) deny();',
-  // Change 65's third pass: a credential-named property, however the object was bound.
+  // Change 65's third and fourth passes: an object bound from the environment, its
+  // credential-named property compared — dotted, bracketed, or destructured out of it.
   'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys.MCP_ACCESS_KEY) deny();',
   'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nif (!provided || provided !== keys.MCP_ACCESS_KEY?.trim()) deny();',
-  'const cfg = accessKeys();\nif (k !== cfg.MCP_ACCESS_KEY) deny();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (provided === keys["MCP_ACCESS_KEY"]) deny();',
+  'const keys = {\n  MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),\n};\nconst { MCP_ACCESS_KEY } = keys;\nif (provided !== MCP_ACCESS_KEY) deny();',
 ];
 /** Texts the rule must not catch — ordinary code and prose. */
 const CREDENTIAL_COMPARE_NON_PROBES = [
@@ -905,9 +925,15 @@ const CREDENTIAL_COMPARE_NON_PROBES = [
   'const principal = authenticateRequest(c.req.raw, { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS") });\nif (session.scope !== principal.scope) session = undefined;',
   'const READWISE_WEBHOOK_SECRET = Deno.env.get("READWISE_WEBHOOK_SECRET")!;\nif (!secretMatches(typeof body.secret === "string" ? body.secret : null, READWISE_WEBHOOK_SECRET)) deny();',
   // A property's presence, type or absence is not a compare of it; the workers' fail-closed check.
-  'if (keys.MCP_ACCESS_KEY === undefined) warn();',
-  'if (typeof keys.MCP_ACCESS_KEY === "string") ok();',
-  'if (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) return json({ error: "misconfigured" }, 503);',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (keys.MCP_ACCESS_KEY === undefined) warn();',
+  'const keys = { MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (typeof keys.MCP_ACCESS_KEY === "string") ok();',
+  'const keys = { MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"), MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY") };\nif (!keys.MCP_ACCESS_KEYS && !keys.MCP_ACCESS_KEY) return json({ error: "misconfigured" }, 503);',
+  // An upper-case property with a credential suffix on an object NOT bound from the
+  // environment is not the credential — the fourth pass anchored the clause after these fired.
+  'if (opts.MAX_TOKENS === 4096) trim();',
+  'if (col === table.PRIMARY_KEY) skip();',
+  // A helper that returns the key is outside the rule, and said so above.
+  'const cfg = accessKeys();\nif (k !== cfg.MCP_ACCESS_KEY) deny();',
 ];
 // Empty since SMD-1455 (FORK.md change 65) moved the seventeen files check 8's
 // first run found onto the shared module. The shape stays for the next audit: a

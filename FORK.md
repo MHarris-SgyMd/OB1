@@ -7850,8 +7850,10 @@ its key.
 
 ### 65. The vendored recipes and integrations authenticate the way the extensions do — seventeen files off a plaintext `===`: thirteen servers and samples onto a `_shared/auth.ts` with scopes, three webhook receivers and a stub onto a compare of digests, and check 8's exception list empty (SMD-1455)
 
-`server-portable/auth.ts` (one export added, the consumers paragraph), its four
+`server-portable/auth.ts` (one export added, the consumers paragraph), its six
 copies — `extensions/_shared/auth.ts`, and the new `recipes/_shared/auth.ts`,
+`recipes/editorial-policy/_shared/auth.ts`,
+`recipes/edge-function-cost-optimization/examples/_shared/auth.ts`,
 `integrations/_shared/auth.ts` and
 `integrations/consolidation-workers/_shared/auth.ts` — the seventeen files
 check 8 held by count: `recipes/ob-graph/index.ts`,
@@ -7871,9 +7873,16 @@ and `examples/after/index.ts` (with `examples/after/server.ts`),
 `integrations/telegram-capture/README.md`,
 `docs/walkthroughs/ob1-agent-dashboard/demo-rest-server.mjs`; the READMEs of
 those servers and `recipes/editorial-policy/schedule.sql`;
-`primitives/deploy-edge-function/README.md`; `extensions/test-auth.ts`;
-`scripts/check-fork-consistency.mjs` and `.github/workflows/fork-checks.yml`
-(Linear SMD-1455, filed from change 64's implementation). No migration.
+`primitives/deploy-edge-function/README.md`; `extensions/test-auth.ts`,
+`extensions/package.json` and `extensions/README.md`;
+`server-portable/test-auth.ts`; `integrations/.dockerignore`;
+`integrations/consolidation-workers/deno.json`; `recipes/ob-graph/.env.example`;
+`recipes/openclaw-agent-memory/README.md` and its
+`contracts/recall-response.schema.json`;
+`dashboards/open-brain-dashboard-next/README.md` and
+`open-brain-dashboard-pro/README.md`; `scripts/check-fork-consistency.mjs` and
+`.github/workflows/fork-checks.yml` (Linear SMD-1455, filed from change 64's
+implementation). No migration.
 
 **The finding.** Change 64 made the seven extension servers consumers of the
 core server's auth module and gave the fork checker check 8: a value read from
@@ -7955,8 +7964,7 @@ lives in one place: `auth.ts` gained `secretMatches(presented, expected)`,
 which hashes both sides and compares the digests with `timingSafeEqual`, so
 neither the secret's length nor its prefix reaches the response time and an
 empty value on either side is a refusal. `readwise-capture` uses it through
-`integrations/_shared/auth.ts`, with a string check first so a non-string
-payload field is refused rather than hashed. The Next.js recipe's route uses a
+`integrations/_shared/auth.ts`. The Next.js recipe's route uses a
 `secretMatches` added to its own `src/lib/auth.ts`, beside the
 `timingSafeEqual` it already had for the access key — a Next.js app does not
 import this fork's server. The module refuses anything that is not a string
@@ -8007,12 +8015,16 @@ and the failure message names both places a fix can go — the `_shared/auth.ts`
 beside the file, or `secretMatches()` for a secret the caller echoes. Said in
 the rule's text too: a compare routed through a function is outside the rule
 by design, because the operator is what it catches and a call is where the
-timing-safe compare lives. The third pass widened the rule by one clause: a
-credential-named upper-case property of any object but the environment's —
-`keys.MCP_ACCESS_KEY`, the shape the workers here bind their keys in — compared
-with an operator is caught, in the one-line and the multi-line binding alike,
-which the binding rule did not follow into; three probes and three non-probes
-hold it, and a scan of the eight roots found no existing hit.
+timing-safe compare lives. The third and fourth passes widened the rule by
+one clause: an object bound from a statement that reads a credential from the
+environment — `const keys = { MCP_ACCESS_KEY: Deno.env.get(…) }`, on one line
+or many, the shape the workers here bind their keys in, which the binding rule
+alone did not follow into — has its credential-named properties, bracket reads
+and destructured names treated as the credential. (The third pass's clause
+had fired on any object's upper-case credential-suffixed property —
+`opts.MAX_TOKENS`, `table.PRIMARY_KEY` — no hit in the tree today and a false
+positive the first such compare would have paid; the fourth anchored it.) Four
+probes and six non-probes hold it.
 
 **Docs.** Each converted server's README: the secret is `MCP_ACCESS_KEYS`
 (`name:scope:sha256`, minted as the deploy primitive's Step 3 shows, the older
@@ -8094,7 +8106,8 @@ test (and the Telegram revert by check 8 as well); the Docker build from
 `integrations/` succeeds and `deno check` inside the image resolves
 `../_shared/auth.ts`; an SDK probe of the empty-tools server answers `{ tools:
 [] }` and -32601 on a call, as this section says; every shim-importing file's
-`deno check` errors are the shim's (fix 13), none inside this branch's hunks;
+`deno check` errors are the shim's (fix 13), none inside this branch's hunks
+— one, it turned out, was: see the fourth pass;
 two overlapping requests to a module singleton hang on `main` and here alike —
 SMD-1497 has the trigger, any two, not a burst. Text: `metadata-norm` deploys
 through its `deno.json`, not an inline specifier; fourteen importers, not
@@ -8124,9 +8137,10 @@ through `deno.json` — had made the one consolidation worker that deployed on
 by file, since `cp -r` into an existing `_shared/` — which every other README
 now creates — nests. Every `supabase secrets set MCP_ACCESS_KEYS="one:entry"`
 example said, in effect, drop every other client's key: the secret is
-project-wide, and each README says to set the whole list. The seven
-shim-importing READMEs carry the extensions' SMD-1480 callout above their
-deploy steps. The rule: check 8 was silent on the shape this change introduced
+project-wide, and each README says to set the whole list. The
+shim-importing READMEs — seven then, eight with `readwise-capture`'s in the
+fourth pass — carry the extensions' SMD-1480 callout above their deploy
+steps. The rule: check 8 was silent on the shape this change introduced
 — `if (provided === keys.MCP_ACCESS_KEY)` after the workers' `keys` object —
 in both its one-line and multi-line forms; the property clause above.
 `secretMatches` refuses a non-string in the module rather than trusting each
@@ -8143,6 +8157,40 @@ the auditor's legacy-key principal is named `MCP_ACCESS_KEY` though its
 variable is `AUDITOR_ACCESS_KEY` — a logging name, never logged; the exceptions
 mechanism has nothing to exercise it while the list is empty.
 
+**Review, fourth pass** (at the user's call; two reviewers — one re-running
+the deployer simulation against every README after the third pass's six-copy
+change and mutating its new guards, one reading the whole diff as its merger —
+thirteen findings, two of them one defect seen twice; nine fixed, the rest
+noted). `readwise-capture`'s README had never been given the `_shared/auth.ts`
+copy step — the implementation moved its secret compare onto the module, and
+three passes of READMEs walked past the one that was not an MCP server or a
+worker; it has the step and the SMD-1480 callout, the eighth. The
+work-operating-model conversion lost a type narrowing: the module-scope throw
+that made `DEFAULT_USER_ID` a `string` for the old top-level tool bodies does
+not reach the hoisted `buildServer()` they moved into, three `deno check`
+errors the second pass's "none inside this branch's hunks" had missed (the
+shim's errors hid them) — a `?? ""` at the declaration, since the throw already
+refuses the empty string. The cost recipe's README tree named `../_shared/auth.ts`
+and never told the reader to place it, nor the `deno.json` beside `index.ts`,
+and still said `register(server)`. The consolidation README's `cp -r` of the
+two function directories nested on a second run as its `_shared/` copy had;
+files are copied one by one, and the `deno.json` sentence says which worker
+needs it today. The third pass's check-8 clause fired on any object's
+upper-case credential-suffixed property — `opts.MAX_TOKENS`, `table.PRIMARY_KEY`,
+`this.API_KEY` — with no hit in the tree today and a red build waiting for the
+first; it is anchored to objects bound from an environment read, follows
+bracket reads and destructures out of them, and the helper-returned object is
+back outside the rule where the header always said it was. Text: this section's
+opening still counted four copies and described readwise's removed string
+check; the Verified line's core count; `metadata-norm`'s note claimed a first
+outside import it never had (its `_shared/` helpers came first); the Kubernetes
+note said Supabase bundles what Docker copies; the other dashboard README named
+the single key against `open-brain-rest`. Run and held: every README layout
+assembled literally and `deno check`ed — clean for the four that deploy, the
+shim's errors alone for the rest; five mutations of the third pass's guards
+each caught; `docker build` from `integrations/` with the image holding exactly
+three files; a bisect across the four commits before this one green at each.
+
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
@@ -8150,13 +8198,13 @@ deployability of everything that imports the shim. `recipes/vercel-neon-telegram
 length leak the ticket did not name and this change did not touch.
 
 **Verified:** `extensions/test-auth.ts` 643/643 (the seven extensions' 243
-among them); `server-portable/test-auth.ts` 59/59, `test-server.ts` 73/73,
+among them); `server-portable/test-auth.ts` 67/67, `test-server.ts` 73/73,
 `tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
 --node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
 `agent-memory-api`, `consolidation-workers/metadata-norm` and
 `kubernetes-deployment`, each from its own directory — the four CI now checks;
 `bun scripts/check-fork-consistency.mjs` PASS with the exception list empty
-(50 probes, 26 non-probes, no vendored hit). The ticket's verify grep —
+(51 probes, 29 non-probes, no vendored hit). The ticket's verify grep —
 `req.query("key")` under `extensions/`, `recipes/`, `integrations/` — returns
 nothing.
 
