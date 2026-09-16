@@ -1062,19 +1062,22 @@ confound is taken from the exact pass, and the oracle's premise is re-checked
 whenever the ledger differs from the one it last passed under. The exact pass
 itself is not paid again either (SMD-1562): it is most of a reuse's minutes at
 ten million rows — about 450 full scans — and its answers are a pure function
-of the rows, the queries and K, so the marker keeps them (per tier and for the
-whole table, each query's exact top-10 in distance order, and the nearest
-cosine the confound reads). A reuse takes the first Q of the queries the
-marker holds — the stream's first Q are the same whatever the count asked —
-computes only the ones it lacks (a run with a larger `OB1_BENCH_QUERIES`, or a
-marker from before the answers were kept), and extends the marker with them.
-The answers are trusted exactly as far as the rows are: they ride inside the
-marker the checks above protect, and a corpus that changed is refused before
-they are read. Section L's `source` column says `loaded` or `reused (built …)`
-per scale — and for a reused corpus whether the oracle was `reused`,
-`computed` or `extended (n of Q from the marker)` — and the run prints what it
-counted and which files it applied. `test-bench-reuse.ts` holds the reuse to
-the computation at 150,000 rows (see [Testing](#testing)). Under
+of the rows, the queries and the oracle's statement, so the marker keeps them,
+keyed by a digest of that statement (per tier and for the whole table, each
+query's exact top-10 in distance order and the nearest cosine, with a digest
+of each query). A reuse takes the answers whose queries are its own — the
+stream's first Q are the same whatever the count asked, so the leading ones —
+computes only the ones it lacks (a run with a larger `OB1_BENCH_QUERIES`, a
+marker from before the answers were kept, a tree whose statement differs),
+and writes its entry back beside any other tree's. Before it computes, the
+plan the exact scan gets is read once and refused if it reaches the vector
+index. The answers are trusted exactly as far as the rows are: they ride
+inside the marker the checks above protect, and a corpus that changed is
+refused before they are read. Section L's `source` column says `loaded` or
+`reused (built …)` per scale and its `oracle` column `computed`, `reused` or
+`n of Q reused, the rest computed`, and the run prints what it counted, which
+files it applied and where the answers went. `test-bench-reuse.ts` holds the
+reuse to the computation at 150,000 rows (see [Testing](#testing)). Under
 `OB1_PG_KEEP` a run is exactly one scale above 100,000 rows, refused otherwise
 before anything is connected to or dropped (an empty kept volume is the worst
 such a refusal leaves, and the exit line names it): a kept database holds one

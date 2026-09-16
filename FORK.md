@@ -1877,12 +1877,12 @@ OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say; the count in
 the "other indexes" column is the schema's — four under 001–013, seven under
 the whole set — and was added to the printout after the two large runs):
 
-| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
-| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
-| 10,000 | loaded | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
-| 100,000 | loaded | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
-| 1,000,000 | loaded | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
-| 10,000,000 | loaded | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
+| rows | source | oracle | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 10,000 | loaded | computed | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
+| 100,000 | loaded | computed | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
+| 1,000,000 | loaded | computed | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
+| 10,000,000 | loaded | computed | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
 
 The index is 1.4× its heap at this width and about 570 bytes a row (the
 sizes are MiB; the heap is 410 bytes a row); the build
@@ -10570,37 +10570,52 @@ query count and K — the same on every reuse, and recomputed on every reuse.
 Change 72's eighth and ninth review passes named it as the first thing cut for
 space, and its boyscout left it out as new behaviour.
 
-**The cache (`db/bench-hnsw.ts`).** The marker gains one field, `oracle`: for
-each tier key and for the whole table, every query's exact top-K ids in
-distance order, and for each whole-table query the nearest row's cosine (the
-confound the run prints and section L records), with the K and the query count
-they were computed for. A build writes it with the marker, after the exact
-pass — the marker was already written last, once the pass's own confound gate
-had passed, so a refused build still leaves nothing. A reuse reads it where it
-can answer for this run's keys at this K, and takes the first Q of the queries
-it holds: the queries are drawn from the seeded stream after the rows'
-draws, so the first Q of a longer run's queries *are* a shorter run's, and a
-run asking fewer needs nothing computed. A run asking more computes the
-queries the marker lacks — per key, only those — and extends the marker with
-the whole set (`corpus || {oracle}` replaces the key); a marker holding more
-than a run asked is left as it is. The confound is the largest nearest-cosine
-over the first Q whole-table queries, the number a computing run prints for
-the same queries, and the gate on it stays. No new invalidation: the answers
-are valid exactly while the rows are, and they ride inside the marker whose
-physical fingerprint a reuse judges first — every refusal (another scale,
-other parameters, a `rewritten` corpus, counts or regenerated rows that
-differ, a ledger stranger, a drifted migration, a relation that moved, a row
-written since the build's transaction id) exits before the oracle is
-consulted. A marker without the field — written before this change, or
-under another K — is computed for and extended, not refused: the answers are
+**The cache (`db/bench-hnsw.ts`).** The marker gains one field, `oracle`: a
+map from the *shape* of the exact pass — a digest of the oracle's statement
+in both filter forms (K inside it), the tier filter's form, the planner
+settings the scan runs under and a probe of how a vector is rendered into
+its literal — to that shape's entry: a digest of each query's literal, in
+order, and for each tier key and the whole table one answer per query, the
+exact top-K ids in distance order and the nearest row's cosine (the whole
+table's is the confound the run prints). A build writes it with the marker,
+after the exact pass — the marker was already written last, once the pass's
+own confound gate had passed, so a refused build still leaves nothing. A
+reuse looks up its own shape's entry, checks it whole (one well-formed answer
+per query for every key: at most K distinct ids and a finite cosine), and
+takes answers from the front while the entry's query digests match its own:
+the queries are drawn from the seeded stream after the rows' draws, so the
+first Q of a longer run's queries *are* a shorter run's, and a run asking
+fewer needs nothing computed. A run asking more computes the queries the
+entry lacks — per key, only those — and writes its entry back whole, merged
+into the map beside other shapes' entries; an entry answering for every query
+is left as it is. Before anything is computed the plan the statement gets on
+this server is read once, and a plan that reaches the vector index is
+refused: the pass is exact because `enable_indexscan` is off and
+`enable_seqscan` on, and an approximate pass written under a shape that
+vouches for it would be trusted by every later reuse. The confound is the
+largest nearest-cosine over this run's whole-table answers, the marker's and
+the computed alike, and the gate on it stays. No new invalidation: the
+answers are valid exactly while the rows are, and they ride inside the marker
+whose physical fingerprint a reuse judges first — every refusal (another
+scale, other parameters, a `rewritten` corpus, counts or regenerated rows
+that differ, a ledger stranger, a drifted migration, a relation that moved,
+a row written since the build's transaction id) exits before the oracle is
+consulted. A marker without an entry for this shape — written before this
+change, or by a tree whose statement differs — or whose digests stop
+matching is computed for and extended, not refused: the answers are
 derivable, the thirty-minute build is not, and `MARKER_FORMAT` stays at 2
-because an optional field's absence has one meaning. The oracle hands its ids
-back in distance order (the marker's form) and the arms build their sets from
-that; the run line says `reused from the marker (…)`, `n of Q queries from the
-marker, computing the rest` or nothing, as before; and section L's `source`
-cell for a reused corpus ends `oracle reused`, `oracle computed` or `oracle
-extended (n of Q from the marker)`. At ten million rows and fifty queries the
-field is nine keys × fifty × ten uuids, under 200 KB of jsonb.
+because the cache names its own inputs. Answers are written back only under
+`OB1_PG_KEEP` (a persistent database reached some other way is not this
+bench's to mark), and the run says which: `corpus kept: marker written`,
+`marker extended: … (had n, m of them this run's)`, or `not kept`. The oracle
+hands its ids back in distance order (the marker's form) and the arms score
+against those lists; the run line says `reused from the marker (…)`, `n of Q
+queries from the marker, computing the rest` or nothing, as before; and
+section L gains an `oracle` column — `computed`, `reused`, or `n of Q
+reused, the rest computed` — beside `source`, since the heap is warmer after
+a computed pass and latencies compare between rows with the same value. At
+ten million rows and fifty queries an entry is nine keys × fifty × ten
+uuids, under 200 KB of jsonb.
 
 **Held to the computation (`db/test-bench-reuse.ts`, new).** The claim that
 matters is that what a reuse takes from the marker is what it would have
@@ -10690,6 +10705,37 @@ parenthetical are read from, and the cell says `computed … not kept (no
 OB1_PG_KEEP)` where the answers went nowhere, instead of `extended`; and the
 arms take the answers themselves (`ids.includes` over lists of at most ten)
 where a second copy as sets had stood behind eight non-null assertions.
+
+**Fourth pass.** Two things at the root. The suite's exit dropped the marker
+table unconditionally — under a kept name it would have dropped a kept
+corpus's marker, the one witness `dropSchema` has, after run 1 was refused
+for asking another scale; it now refuses a database that already holds a
+marker and drops only the one it planted, on a normal exit and on a signal
+(Bun runs no `finally` on one), through a connection it opens only after
+the throwaway-database guard the other suites' resets go through. And the
+oracle's exactness rested on `enable_indexscan = off` alone, unasserted:
+with `enable_seqscan` also off — 019's setting on `match_thoughts`, or a
+database- or role-level one — the planner reaches for the HNSW index again
+(EXPLAIN on the bench's image), and this change raises the stakes, since an
+approximate pass would be kept under a shape that vouches for it; the scan
+now sets both, the settings are in the shape, and the plan is read once per
+scale and refused, in the named form, if it touches the index (reproduced by
+forcing `enable_seqscan` off: the refusal quotes the `Index Scan using
+thoughts_embedding_idx` line). Then: `amendOracle` merges into
+the map only where the map is an object (`||` on a hand-cleared `null` built
+an array and killed the cache from then on); the shape digests a rendering
+probe of `lit`, so two trees that agree on the statement and differ in the
+literal — a last-ulp change in the generator, a formatter — hold two
+entries instead of overwriting each other's; section L's `oracle` is its own
+column, decided by provenance alone (`computed`, `reused`, `n of Q reused,
+the rest computed`), and where the answers went is the marker lines' to say,
+with a line for the reuse that was not kept; an entry carries only its
+queries and answers, its key being the shape; the prewarm comment no longer
+claims a heap warmed by a pass a reuse does not run, and says which rows'
+latencies compare; the suite asserts every scored section is present rather
+than a row count both reports could lack a section under; and this
+section's lead now describes the shipped mechanism rather than the first
+draft with the passes as errata.
 
 ## Detached from the fork network
 
