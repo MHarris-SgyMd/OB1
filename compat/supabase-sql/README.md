@@ -103,8 +103,10 @@ The codemod treats all of these as blockers and refuses to touch those files.
 Identifiers cannot be parameterised in Postgres, so table and column names are
 validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws. A
 JSON path's keys are held to the same shape and rendered as quoted string
-literals (`"meta"->>'key'`). Values always travel as bound parameters. A test asserts that a value containing
-`'; DROP TABLE …` is stored as data and the table survives.
+literals (`"meta"->>'key'`). Values always travel as bound parameters — against
+a path, cast to text, so a number or a null in an `.in()` list compares as its
+text where a plain text column would refuse the integer. A test asserts that a
+value containing `'; DROP TABLE …` is stored as data and the table survives.
 
 ## Two gotchas worth knowing
 

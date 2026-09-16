@@ -10194,15 +10194,20 @@ the cast Bun binds a JavaScript number as an integer and Postgres has no
 `.contains()` does not (its operator is jsonb's; containment under a key is
 `.contains("meta", { key })`), and `ident()` still holds a select list, an
 insert or update payload key, a conflict target, a table, a function and its
-argument names. Rows from a
-table verb and from `rpc()` pass through `jsonShaped()`: a `Date` with a
-finite time becomes its `toISOString()` string; everything else — the number
-±Infinity Bun gives an infinite timestamp, `Date(NaN)` for a BC date,
-numerics as text — stays as Bun returns it, which `server-portable/store.ts`'s
-`isoTimestamp` already knows. `test-compat.ts` pins both: [12] a path in
-every filter, in `.or()` and `.order()`, a nested `meta->a->>b`, `is(null)`
+argument names. Rows from a table verb and from `rpc()` pass through
+`jsonShaped()`: a `Date` with a finite time becomes its `toISOString()`
+string; everything else — the number ±Infinity Bun gives an infinite
+timestamp, a simple query's `Date(NaN)` for a BC date (the parameterised
+case is under Decisions), numerics as text — stays as Bun returns it, which
+`server-portable/store.ts`'s `isoTimestamp` already knows. The walk costs
+about 75 ns a row and doubles a Date-heavy projection's client time (25 ms
+against 13 for 20,000 rows of three timestamps — the second pass's runner
+measured it); a row without a `Date` is returned as the same object.
+`test-compat.ts` pins both: [12] a path in the comparison filters, `is`,
+`in`, `match`, `.or()` and `.order()`, a nested `meta->a->>b`, `is(null)`
 selecting the rows without the key, a number comparing as text, the
-generated SQL's shape, and seven refusals; [13] a timestamp as a string on a
+generated SQL's shape, and seven refusals (`.contains()` among them); [13] a
+timestamp as a string on a
 one-row, a many-row and a set-returning function's result, a NULL staying
 null. `test-writes.ts` drives the worker: seven sources planted through the
 function with their enhanced columns set beside it; `POST /?name=Test`
@@ -10281,15 +10286,40 @@ and not `"100"`; `meta->owner=eq.ann` is 400 `22P02` while `eq."ann"`
 matches — the JSON reading that is the reason the shim refuses a `->`
 ending; `or` and `order` with a path agree.
 
+**Review pass 2** (the same two reviewers; ten findings, none above LOW
+in the code, one MEDIUM about the merge). The stop signal: the top findings
+were pass 1's own residue — the Mechanism paragraph still said "every
+filter" after the header and README had been corrected, its BC-date clause
+had not been brought in line with the Decisions sentence pass 1 added, and
+the Verified paragraph credited pass 1's runner with a named failure that
+only this pass's error-first read produces; all three corrected above, and
+the runner re-ran the mutation (three named failures, a tally). The README's
+Safety paragraph, left with one unwrapped line, says now that a number or a
+null in an `.in()` list against a path compares as text where a plain text
+column refuses the integer (the runner's live probe). The runner also
+confirmed each pass-1 fix under mutation — the `existed` drive fails loudly
+when the early return is removed, moved after the sidecar, or reported as
+created, and when the predicted text is off by one run; `rowsOf` cannot
+pass vacuously (no `.length === 0` pin in [12]/[13]) — measured
+`jsonShaped()`'s cost (above), and found that the four shim-migrated
+extensions parse the timestamps they read (`new Date(row.x)`), none holding
+a `Date` instance. The MEDIUM is not in this branch: `origin/main` has taken
+FORK change 72 for SMD-1493 while this was in review, so this section is 73
+at the merge, renumbered with the pattern change 71 used.
+
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
 before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
 186/186 under podman (157 before: eight bio text guards gone, the header
 guard's third ticket and the drive added); with `jsonShaped()` removed the
 bio block fails four assertions — the first `POST` answers 500 at the
 prompt's `.slice` and the run ends there — and with `column()` reduced to
-`ident()` the ticket's own 500 returns at the first query (five); the
-running reviewer's mutations each caught by name: the `::text` cast (the
-`gte` pin), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
+`ident()` the ticket's own 500 returns at the first query (five) — both
+re-measured after pass 1, the later assertions skipping inside their
+`if`; the two running reviewers' mutations each caught by name: the `::text`
+cast (three, the `gte` pins and the SQL's shape — pass 1's runner saw the
+`TypeError` this pass's error-first read replaced, pass 2's the tally),
+`column()` reduced to `ident()` in the shim suite (one counted `[12] threw`,
+no crash), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
 one-row, many-row and rpc pins), the worker's `generated_by` filter (five),
 its `subject` equality (three), its actor on either path and its first-run
 sidecar (one each); `bun test-store-postgrest.ts` 86/86, the store still
