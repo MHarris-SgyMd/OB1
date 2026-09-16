@@ -1259,16 +1259,20 @@ function buildServer(principal: Principal): McpServer {
 
 // The methods the MCP endpoint serves. The transport is offered POST only: it is
 // built per request and is sessionless, so there is no server stream for a GET
-// to open and no session for a DELETE to end. One list derives the catch-all's
-// guard, its `Allow` and the CORS preflight's advertisement, so none of the
-// three can drift from the others. The method guard in the catch-all says why.
-const MCP_METHODS: readonly string[] = ["POST"];
+// to open and no session for a DELETE to end. One list registers the handler
+// and names the 405's `Allow`, so the two cannot drift. FORK.md change 73.
+const MCP_METHODS = ["POST"];
 const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
 
+// The CORS list is a different question — what a browser may send so it can
+// hear our answer — so it keeps GET and DELETE: a browser-hosted SDK client
+// given a session id by its constructor sends DELETE from terminateSession()
+// and accepts the 405 it gets here; a preflight that hid DELETE would turn that
+// into a network error instead.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
-  "Access-Control-Allow-Methods": ALLOWED_METHODS,
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
 
 // JSON-RPC error code for unauthorized requests.
@@ -1300,13 +1304,11 @@ const REVOKED_MESSAGE =
 
 /**
  * Read the request body as text without consuming the original request's
- * body stream for downstream handlers. Returns null on bodyless methods
- * or read failure.
+ * body stream for downstream handlers. Returns null on read failure. Only the
+ * methods in MCP_METHODS reach the callers (the route table answers the rest
+ * with 405), so there is no bodyless-method branch here.
  */
 async function readBodyText(req: Request): Promise<string | null> {
-  if (req.method === "GET" || req.method === "HEAD" || req.method === "DELETE") {
-    return null;
-  }
   try {
     return await req.text();
   } catch {
@@ -1391,31 +1393,24 @@ app.options("*", (c) => {
 // be registered ABOVE this line or it never fires. FORK.md change 42.
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
-app.all("*", async (c) => {
-  // The endpoint speaks Streamable HTTP through a per-request, sessionless
-  // transport: it has no server-initiated stream to offer, so the spec's answer
-  // to a GET is 405 with `Allow`. Answered BEFORE authenticate(). An
-  // authenticated GET used to cost an agent-registry resolve and a server build,
-  // then reach the transport, which opened an SSE stream nothing wrote to or
-  // closed — a socket held until the runtime's idle timeout, once per probe, from
-  // a browser opening the connector URL or any client echoing `?key=` on GET
-  // (upstream #424: mcp-remote's handshake GET waited 60 s for it). Gating the
-  // Accept patch below on POST would not have been enough: the SDK client sets
-  // `Accept: text/event-stream` on its own GET, and it treats a 405 as "no
-  // stream here", which is the answer it wants. HEAD, PUT and PATCH take the
-  // same door, and so does DELETE: the SDK client sends one only to end a
-  // session it was handed an id for (terminateSession() returns before sending
-  // when it holds none), this server strips `mcp-session-id` from every
-  // response, so no client ever sends one here — and a keyed DELETE still cost
-  // the resolve and the build before landing on a transport with nothing to
-  // close. The client accepts 405 from terminateSession() by spec. A keyless
-  // GET or HEAD now gets 405 where it got the 200 JSON-RPC refusal: an HTTP
-  // health check must POST, as the image's HEALTHCHECK does, or use OPTIONS.
-  // FORK.md change 73 (SMD-1259).
-  if (!MCP_METHODS.includes(c.req.method)) {
-    return c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS });
-  }
+// Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
+// uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
+// GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
+// process is serving and nothing else. Readiness — is the database reachable —
+// is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
+// HEAD probe gets a bodiless 200. FORK.md change 73.
+app.get("/health", (c) => c.text("ok", 200, corsHeaders));
 
+// The MCP endpoint, registered for MCP_METHODS only. The transport is built per
+// request and is sessionless, so a GET has no server stream to open: before
+// change 73 an authenticated GET cost an agent-registry resolve and a server
+// build, then reached the transport, which opened an SSE stream nothing wrote
+// to — pinged every 30 s, closed only by the client or by Bun's idle reset —
+// from a browser opening the connector URL or any client echoing `?key=` on GET
+// (upstream #424). The SDK client sets `Accept: text/event-stream` on its own
+// GET, so gating the Accept patch below would not have been enough; it treats
+// the 405 the trailing route gives as "no stream here". FORK.md change 73.
+app.on(MCP_METHODS, "*", async (c) => {
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
   // `?key=` does not shadow it. The query form stays because Claude Desktop
@@ -1457,8 +1452,8 @@ app.all("*", async (c) => {
   // Fix: Claude Desktop connectors don't send the Accept header that
   // StreamableHTTPTransport requires. Build a patched request if missing.
   // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  // Only POST gets this far (the method guard above), so the patch never tells
-  // a GET to expect an event stream — that was SMD-1259's mechanism.
+  // Only MCP_METHODS reach this handler, so the patch never tells a GET to
+  // expect an event stream — that was SMD-1259's mechanism.
   if (!c.req.header("accept")?.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
     headers.set("Accept", "application/json, text/event-stream");
@@ -1481,6 +1476,14 @@ app.all("*", async (c) => {
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
   return response;
 });
+
+// Every other method at every other path: 405 with `Allow`, before
+// authenticate(), so no key shape reaches the agent registry or builds a server
+// and the answer is the same for no key, a wrong key and a revoked one. This is
+// where GET, HEAD, PUT, PATCH and DELETE land; a keyless GET or HEAD used to get
+// the 200 JSON-RPC refusal, so a platform probe must use /health above.
+// Registered last: Hono dispatches in registration order. FORK.md change 73.
+app.all("*", (c) => c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS }));
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.

@@ -273,18 +273,15 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
 
 console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
 {
-  // Before the method guard, an authenticated GET here cost an agent-registry
-  // resolve and a server build, then reached the transport, which — because the
-  // Accept patch had stamped text/event-stream on it — opened the standalone SSE
-  // stream. Sessionless and per-request, nothing ever wrote to it or closed it:
-  // 200 text/event-stream, empty, held until the runtime's idle timeout. The SDK
-  // client (1.24.3, _startOrAuthSse) sends this GET on its own after initialize
-  // and treats a 405 as "no server stream", so 405 is the answer it wants, and
-  // any other 4xx would be an error it reports. Drilled by disabling the guard:
-  // every GET row holding a valid key fails as `TimeoutError`; the raw-socket
-  // row below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get
-  // the transport's own 405, after auth, with an `Allow` that names GET; the
-  // keyed DELETE gets the transport's 200.
+  // The MCP handler is registered for POST only and a trailing route answers
+  // everything else with 405 before authenticate(); FORK.md change 73 has the
+  // mechanism this closes (an authenticated GET opened an SSE stream the
+  // per-request transport never closed). Drilled by registering the handler
+  // with app.all and dropping the trailing route — the pre-change shape: every
+  // GET row holding a valid key fails as `TimeoutError`; the raw-socket row
+  // below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get the
+  // transport's own 405, after auth, with an `Allow` that names GET; the keyed
+  // DELETE gets the transport's 200; /health keeps passing (it is its own route).
   const ALLOW = "POST, OPTIONS";
   const rows: [string, string, RequestInit][] = [
     // Every key shape, because the answer is about the method, not the caller:
@@ -298,11 +295,8 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     ["HEAD, right key", `/?key=${KEY}`, { method: "HEAD" }],
     ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
     ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
-    // DELETE too. The SDK client sends one only from terminateSession(), which
-    // returns before sending when it holds no session id, and this server strips
-    // mcp-session-id from every response — so no client sends one here, and a
-    // keyed one used to buy a resolve and a build for a transport with nothing
-    // to close. The client accepts 405 from terminateSession() by spec.
+    // DELETE too: there is no session here for it to end, and the SDK client
+    // accepts 405 from terminateSession() by spec (change 73 has the rest).
     ["DELETE, right key", "/", { method: "DELETE", headers: AUTH }],
     ["DELETE, no key", "/", { method: "DELETE", headers: H }],
     // One of the two shapes SMD-1246's review found falling past the
@@ -344,10 +338,28 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   const doubled = await rawStatusLine(`GET //.well-known/oauth-protected-resource?key=${KEY}`);
   assert(doubled.startsWith("HTTP/1.1 405"), `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
 
-  // One list derives the guard, its Allow and the preflight's advertisement:
-  // what OPTIONS advertises is what the 405 names. Drilled by editing the list.
+  // The CORS list is not the Allow list: it says what a browser may send so it
+  // can hear our answer, and a browser-hosted SDK client holding a session id
+  // sends DELETE and accepts the 405. Hiding GET or DELETE from the preflight
+  // would turn that 405 into a network error, so both stay advertised.
   const pre = await probe("/", { method: "OPTIONS" });
-  assert(pre.status === 200 && pre.methods === ALLOW, `OPTIONS advertises the same list the 405 names (${pre.methods})`);
+  assert(pre.status === 200 && pre.methods === "GET, POST, OPTIONS, DELETE", `OPTIONS still advertises GET and DELETE, so a browser hears the 405 (${pre.methods})`);
+
+  // /health is the probe target for platforms that can only GET and want 2xx
+  // (Kubernetes httpGet, load-balancer target checks): its own route, before
+  // authenticate(), so it needs no key and a key changes nothing. HEAD is routed
+  // as GET by Hono.
+  for (const [label, path, init] of [
+    ["GET /health", "/health", {}],
+    ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
+    ["HEAD /health", "/health", { method: "HEAD" }],
+  ] as [string, string, RequestInit][]) {
+    const p = await probe(path, init);
+    assert(p.status === 200, `${label} → 200 (${p.status})`);
+    assert(p.cors && !p.envelope, `${label}: CORS present, body is not a JSON-RPC envelope`);
+  }
+  const healthNear = await probe("/healthz", {});
+  assert(healthNear.status === 405, `GET /healthz is not /health → 405 (${healthNear.status})`);
 
   // The POST path is untouched — [4] through [10] above ran against the same
   // server; a spot check here so this block fails on its own if the guard ever

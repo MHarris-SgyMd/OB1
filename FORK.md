@@ -4791,8 +4791,10 @@ Cloudflare Worker in front that returns 404 for the prefix.
 `server-portable` had the same defect by a different door. `app.all("*")` caught
 every path, so the discovery GET went through `authenticate()`. With no key it
 got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an MCP
-request and wrong for this one. With a key — not the connector's shape, its
-discovery GET carries none, but any client that echoes the URL's `?key=` — it
+request and wrong for this one. With a key — which IS the URL-only connector's
+shape: the SDK copies the connector URL's query onto its path-aware discovery
+GET (`client/auth.js`, `url.search = issuer.search`), a fact this paragraph got
+wrong until change 73's review — it
 authenticated, cost an agent-registry resolve, and was handed to
 `StreamableHTTPTransport`, which opened an SSE stream nothing wrote to or
 closed: the response never completed (SMD-1259, found by this change's review
@@ -4823,7 +4825,7 @@ with no key and following redirects, as the SDK client does, and naming the URL
 and code that missed; the base URL must carry a scheme and no query string, or
 the script refuses it rather than derive the wrong origin. It was the
 one check a Supabase deployment cannot pass, and that failure is real; change
-72's check 3 is the second.
+73’s check 3 is the second.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
 
@@ -10357,11 +10359,14 @@ filed from change 42's first review pass; upstream
 the header — set `Accept: application/json, text/event-stream` on GETs too, and
 `StreamableHTTPTransport.handleRequest` then took an authenticated GET as a
 request to open the standalone SSE stream. The transport here is built per
-request and is sessionless: nothing ever wrote to that stream or closed it. The
-response was `200 text/event-stream`, empty, held until the runtime's idle
-timeout — 10–12 s on Bun before the socket reset, longer on Node and Workers
-(SMD-1259's measurement) — and each such GET first cost an agent-registry
-resolve and a server build. Change 42's review reproduced it three ways:
+request and is sessionless: nothing ever wrote a message to that stream or
+closed it. The response was `200 text/event-stream`, its headers flushed at
+once, its body a `ping` event every 30 s from the transport's keep-alive and
+nothing else, until the client hung up — or, on Bun alone, until its 10 s
+per-connection idle reset beat the ping (SMD-1259 measured 10–12 s there). On
+Node and Workers nothing on the server side ended it: an uptime checker
+configured with the key parked one connection per probe, indefinitely. Each
+such GET first cost an agent-registry resolve and a server build. Change 42's review reproduced it three ways:
 `GET /?key=…`; `GET //.well-known/…?key=…` (a trailing slash on the base URL
 doubles the slash, which Hono does not match to `/.well-known/*`); and
 `GET /.Well-Known/…` (Hono matches case-sensitively). Upstream #424 reports the
@@ -10370,39 +10375,51 @@ a key — a browser opening the connector URL the docs hand out, an uptime check
 configured with the key, a client echoing `?key=` on GET — could park
 connections at will, and nothing rate-limited it.
 
-**The change.** At the top of the catch-all, before `authenticate()`: a request
-whose method is not POST gets `405 Method Not Allowed` with
-`Allow: POST, OPTIONS` and the CORS headers. That is the Streamable HTTP
-transport's documented answer from a server that offers no server-initiated
-stream. Before auth, so no key shape reaches the agent registry or builds a
-server, and the answer is the same for no key, a wrong key and a revoked one — it
-is about the method, not the caller. HEAD, PUT and PATCH take the same door (the
-transport's own 405 for PUT and PATCH came after auth and named `GET` in its
-`Allow`), and so does DELETE. The first draft kept DELETE on the premise that the
-SDK client sends it from `terminateSession()` and accepts 200 or 405; the review
-pass read the client and found the premise false in the way that matters:
-`terminateSession()` returns before sending anything when it holds no session
-id, the id comes only from an `mcp-session-id` response header, and this server
-strips that header from every response. No client sends DELETE here; a keyed
-one bought a resolve and a server build for a transport with nothing to close.
-The client accepts 405 from `terminateSession()` by spec, so there is nothing
-to keep the door open for. One list — `["POST"]` — derives the guard, the
-405's `Allow` and the OPTIONS preflight's `Access-Control-Allow-Methods`, so the
-three cannot drift; the first draft had the list in a string and the guard in a
+**The change.** The route table now says what the endpoint serves. The MCP
+handler is registered with `app.on(MCP_METHODS, "*", …)` for `["POST"]` alone,
+and a trailing `app.all("*")` answers every other method at every other path
+with `405 Method Not Allowed`, `Allow: POST, OPTIONS` and the CORS headers —
+before `authenticate()`, so no key shape reaches the agent registry or builds a
+server, and the answer is the same for no key, a wrong key and a revoked one; it
+is about the method, not the caller. That 405 is the Streamable HTTP transport's
+documented answer from a server that offers no server-initiated stream. HEAD,
+PUT and PATCH land there (the transport's own 405 for PUT and PATCH came after
+auth and named `GET` in its `Allow`), and so does DELETE. The first draft kept
+DELETE on the premise that the SDK client sends it from `terminateSession()` and
+accepts 200 or 405; the first review pass read the client and found the premise
+true and irrelevant: `terminateSession()` returns before sending anything when
+it holds no session id, the id comes from an `mcp-session-id` response header —
+which this server strips from every response — or from a `sessionId` the
+application passes to the transport's constructor, so the only DELETE that can
+arrive is from a client an application seeded by hand, and it accepts the 405 by
+spec. A keyed DELETE bought a resolve and a server build for a transport with
+nothing to close. One list — `MCP_METHODS` — registers the handler and names the
+405's `Allow`, so the two cannot drift; the first draft had a string beside a
 hand-written boolean, which the review named as a value defined twice. The CORS
-header thereby loses `GET` and `DELETE`. That changes nothing for a
-browser-hosted client: a preflight's method check passes a CORS-safelisted
-method (GET, HEAD, POST) whether or not the header lists it, so a preflighted GET
-— one carrying `mcp-protocol-version` or an auth header — still goes out and
-meets the 405.
+`Access-Control-Allow-Methods` is left as it was on main, `GET, POST, OPTIONS,
+DELETE`, on purpose: it answers a different question — what a browser may send
+so that it can hear our answer — and the first review pass's version, which
+derived it from the served list, would have turned a browser-hosted client's
+DELETE (or a preflighted GET carrying `mcp-protocol-version`; GET itself is
+CORS-safelisted, but a preflight still happens for the header) into a network
+error where the server would have said 405. The second pass caught that.
 
-**A contract change for health checks.** A keyless `GET /` or `HEAD /` used to
-get the 200 JSON-RPC refusal; it now gets 405. A platform-default HTTP probe —
-Kubernetes `httpGet`, a load balancer's target check, an uptime monitor — that
-expects 2xx from GET will mark a healthy server down. The image's `HEALTHCHECK`
-POSTs and is unaffected; `deploy/README.md` now says a probe must POST or use
-OPTIONS. Nothing in the tree GETs the endpoint for liveness (checked: the
-Dockerfile, `compose.yaml`, `smoke.sh`, the workflows).
+**A contract change for health checks, and its remedy.** A keyless `GET /` or
+`HEAD /` used to get the 200 JSON-RPC refusal; it now gets 405. A
+platform-default HTTP probe — Kubernetes `httpGet`, a load balancer's target
+check, an uptime monitor — can only GET and expects 2xx, so aimed at `/` it
+would mark a healthy server down. So `GET /health` is a route of its own,
+registered between `/.well-known/*` and the MCP handler, before
+`authenticate()`: `ok`, 200, no key needed, a key ignored; Hono routes HEAD to
+it as GET, so a HEAD probe gets a bodiless 200. It says the process is serving
+and nothing else — readiness (is the database reachable) stays preflight's job
+at the entrypoint, as the Dockerfile comment records. The image's `HEALTHCHECK`
+keeps POSTing to the endpoint, which also proves the MCP path serves;
+`deploy/README.md` points platform probes at `/health` and says a browser
+opening the connector URL sees `Method Not Allowed`, which is expected. Nothing
+in the tree GETs the endpoint for liveness (checked: the Dockerfile,
+`compose.yaml`, `smoke.sh`, the workflows; the Kubernetes integration uses a
+`tcpSocket` probe).
 
 **What the ticket's smallest fix would have missed.** SMD-1259's second review
 pass offered a method condition on the Accept patch as the minimal fix. Read
@@ -10420,37 +10437,46 @@ expected case that should not trigger an error" — and any other non-2xx is a
 `StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
 client. A live connector has not been seen to do it; see below.
 
-**Verified.** `test-server.ts` [13], 47 assertions against the real server:
-eleven fetch rows — GET under no key, a wrong key, the right key in the header
-and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT, PATCH,
-DELETE with and without a key, and the case-variant discovery path — each
+**Verified.** `test-server.ts` [13], 54 assertions against the real
+server: eleven fetch rows — GET under no key, a wrong key, the right key in the
+header and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT,
+PATCH, DELETE with and without a key, and the case-variant discovery path — each
 asserted for 405, an `Allow` naming the served methods, CORS, and a body that
 is not a JSON-RPC envelope; the doubled-slash path written as a raw request line
 over a socket, because Bun's `fetch()` collapses `//` to `/` before sending and
 a fetch row probed the 404 route instead (found when that row failed), asserted
 on the status code alone since the reason phrase is Bun's, not Hono's; the
-OPTIONS preflight's method list equal to the 405's, through the same abortable
-probe as every other row; POST still reaching the transport. Drilled by
-disabling the guard, 29 assertions fail: the fetch rows holding a valid
-GET fail as `TimeoutError`; the raw-socket row as a `200 OK` status line (the
-stream's headers flush at once; it is the body that never ends); the rows
-without a key as 200 with an envelope; HEAD, PUT and PATCH by an `Allow` that
-names GET, from the transport's own 405 after auth; the keyed DELETE by the
-transport's 200. The suite's 2 s abort on every routing probe stays: it is what
-turns the failure mode this change closes into a red assertion instead of a
-stuck CI job, so it is the test's teeth, not scaffolding to retire.
-`deploy/smoke.sh` check 3 GETs the endpoint **with no key** and expects 405. No
-key, because the answer comes before `authenticate()` so a key proves nothing,
-and because the script's status helper follows redirects with `-L`, on which
-curl forwards a custom header to whatever host comes next — the first draft sent
-the key, and behind a redirecting front proxy it would have landed in a third
-party's access log. A 200 there is the guard missing; a hang would also read as
-200 under `--max-time`, since the stream's headers flush before the body stalls
-(the first draft said `000`, which curl prints only when no status line arrives
-at all). The former checks 3–7 are now 4–8; `deploy/README.md` and `SETUP.md`
-say eight. `tsc --noEmit` clean; the Workers bundle builds
-(`wrangler deploy --dry-run`, 281 KiB gzipped). The compose stack's smoke run is
-CI's `deploy-stack` job.
+OPTIONS preflight still advertising GET and DELETE, through the same abortable
+probe as every other row; `GET /health`, with and without a key, and
+`HEAD /health` → 200 with CORS, and `/healthz` → 405 so the route is exact; POST
+still reaching the transport. Drilled by restoring the pre-change shape — the
+handler on `app.all` and no trailing route — 30 of 140 assertions fail: the fetch
+rows holding a valid GET fail as `TimeoutError`; the raw-socket row as a
+`200 OK` status line (the stream's headers flush at once; it is the body that
+never ends); the rows without a key as 200 with an envelope; HEAD, PUT and PATCH
+by an `Allow` that names GET, from the transport's own 405 after auth; the keyed
+DELETE by the transport's 200; `/healthz` by the 200 refusal; `/health` keeps
+passing, being its own route. The
+suite's 2 s abort on every routing probe stays: it is what turns the failure
+mode this change closes into a red assertion instead of a stuck CI job, so it is
+the test's teeth, not scaffolding to retire. `deploy/smoke.sh` check 3 GETs the
+endpoint and expects 405, then GETs `/health` and expects 200, both **with no
+key**. No key, because both answers come before `authenticate()` so a key proves
+nothing, and because the script's status helper follows redirects with `-L`, on
+which curl forwards a custom header to whatever host comes next — the first
+draft sent the key, and behind a redirecting front proxy it would have landed in
+a third party's access log. A 200 from the endpoint is the guard missing or a
+front proxy answering `GET /` itself, and the message says both; a hang would
+also read as 200 under `--max-time`, since the stream's headers flush before the
+body stalls (the first draft said `000`, which curl prints only when no status
+line arrives at all). Check 2's comment now says why a keyless discovery probe
+suffices — the route answers before auth whether or not the key rides along —
+rather than the false claim that the connector sends none. The former checks
+3–7 are now 4–8; `deploy/README.md` and `SETUP.md` say eight, and `SETUP.md`'s
+tool counts (ten for a write key, seven for a read key; three tools gated, not
+two) are corrected where they contradicted each other eight lines apart.
+`tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
+281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
 
 **Not verified: a live connector.** The same standing as change 42: a real
 Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
@@ -10458,8 +10484,10 @@ build of this `main`, each completing `initialize` and listing tools. The SDK
 reading above says they will. It is not the same as seeing it.
 
 **Not done here.** The path axis — mounting the transport at a path and letting
-Hono's `notFound` answer `/favicon.ico`, `/robots.txt` and `/health` without a
-resolve — remains the deployment-contract decision change 42 describes.
+Hono's `notFound` answer `/favicon.ico` and `/robots.txt` — remains the
+deployment-contract decision change 42 describes; `/health` no longer waits on
+it. Today those stray paths get the 405 like any other GET, which is a complete
+answer if not the most descriptive one.
 `server/index.ts`, the Deno Edge Function upstream deploys, carries the same
 Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
 their fix for it. A Supabase deployment therefore fails smoke check 3 as it

@@ -344,9 +344,11 @@ http://localhost:8000/?key=<your-raw-key>
 In Claude Desktop: Settings → Connectors → Add custom connector, and paste that
 URL. For anything reachable from outside your machine, put it behind TLS first.
 
-A write key sees nine tools; a read key sees six. `update_thought` and
-`delete_thought` are never registered for a read key, so they do not appear in
-`tools/list` at all rather than failing when called. `capture_thought` returns the
+A write key sees ten tools; a read key sees seven. `capture_thought`,
+`update_thought` and `delete_thought` are never registered for a read key, so
+they do not appear in `tools/list` at all rather than failing when called.
+Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
+serves POST only, and that answer is expected. `capture_thought` returns the
 new thought's id, which is what the other two take.
 
 ## Expected outcome

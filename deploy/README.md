@@ -60,11 +60,12 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
 followed by `Started server`. `smoke.sh` prints `8 checks: 8 passed, 0 failed`.
 
-An HTTP health check against the server must **POST** (an unauthenticated POST
-answers 200 with a JSON-RPC refusal, which is what the image's `HEALTHCHECK`
-sends) or use **OPTIONS**. `GET /` and `HEAD /` answer 405 since FORK.md change
-73 — a platform-default probe that expects 2xx from GET will mark a healthy server
-down.
+Point an HTTP liveness probe at **`GET /health`** (200, no key). The MCP endpoint
+itself serves POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 73,
+so a platform-default probe aimed at `/` marks a healthy server down. The image's
+own `HEALTHCHECK` POSTs to the endpoint instead, which also proves the MCP path
+serves; either is fine. Opening the connector URL in a browser shows
+`Method Not Allowed`, which is expected.
 
 ## Why the server runs preflight before serving
 
