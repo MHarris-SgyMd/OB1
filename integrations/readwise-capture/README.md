@@ -169,7 +169,7 @@ Every new highlight you make across every Readwise-connected source automaticall
 
 Check the Edge Function logs: Supabase Dashboard → Edge Functions → `readwise-capture` → Logs. The most common causes:
 
-- `401 unauthorized` — the `secret` in the webhook payload doesn't match `READWISE_WEBHOOK_SECRET`. Rotate one to match the other and redeploy.
+- `401 unauthorized` — the `secret` in the webhook payload doesn't match `READWISE_WEBHOOK_SECRET`. Rotate one to match the other; secrets are read at runtime, so no redeploy is needed.
 - `500 error` — an OpenRouter or Supabase call failed. Check the log for the specific error.
 
 ### Highlights are being captured but without book title/author
@@ -180,7 +180,7 @@ You can fix existing rows by calling `GET /api/v2/books/{book_id}/` manually and
 
 ### Duplicate highlights in the database
 
-The Edge Function deduplicates on `metadata->>readwise_highlight_id` before inserting. If you see duplicates, confirm you're on the latest version of `index.ts` and have redeployed. Also check that your Readwise webhook isn't configured twice pointing at the same URL.
+The Edge Function deduplicates on `metadata->>readwise_highlight_id` before inserting. If you see duplicates, confirm you're on the latest version of `index.ts` (and of `_shared/auth.ts` beside it) and have redeployed. Also check that your Readwise webhook isn't configured twice pointing at the same URL.
 
 ### `increment_book_highlight_count` RPC not found
 

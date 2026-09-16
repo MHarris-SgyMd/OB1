@@ -30,10 +30,10 @@
  * the fetch handler instead of listening, and console.error/warn silenced for
  * the length of a request, since a refused port is the proof and not noise —
  * and, for the recipes and integrations, under a loader that reads their Deno
- * specifiers on Bun: a
- * `jsr:` type-only import is dropped, `npm:pkg@version` becomes `pkg`, the
- * Deno postgres driver becomes a stub that never connects, and a bare package
- * name resolves from this directory's install, since theirs is a deno.json.
+ * specifiers on Bun: a `jsr:` type-only import is dropped, `npm:pkg@version`
+ * becomes `pkg`, the Deno postgres driver becomes a stub that never connects,
+ * and a bare package name resolves from this directory's install, since theirs
+ * is a deno.json.
  * No database: nothing here reaches a handler that queries with a key that
  * would let it, or the client refuses at once (a port nothing listens on) —
  * the SQL shim and supabase-js both connect lazily, so a stub URL is never
@@ -60,7 +60,10 @@ const served: Handler[] = [];
 (globalThis as unknown as { Deno: unknown }).Deno = {
   env: { get: (name: string) => process.env[name] },
   // `Deno.serve(handler)` and `Deno.serve({ port }, handler)` both capture the handler.
-  serve: (a: Handler | object, b?: Handler) => { served.push(typeof a === "function" ? a : b!); return { finished: Promise.resolve() }; },
+  serve: (a: Handler | object, b?: Handler) => {
+    served.push(typeof a === "function" ? a : b!);
+    return { finished: Promise.resolve() };
+  },
 };
 
 // ── Deno's specifiers, on Bun ────────────────────────────────────────────────
@@ -68,7 +71,8 @@ const served: Handler[] = [];
 /** The packages this directory installs; the recipes' and integrations' deno.json pin the same names. */
 const PACKAGES = /^(hono|zod|@hono\/mcp|@modelcontextprotocol\/sdk|@supabase\/supabase-js)(\/|$)/;
 const PG_STUB = join(tmpdir(), `ob1-test-auth-deno-postgres-stub-${process.pid}.ts`);
-await Bun.write(PG_STUB, "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
+await Bun.write(PG_STUB,
+  "export class Pool { constructor(..._: unknown[]) {} connect(): never { throw new Error('the test never queries'); } }\n");
 /** Only this checkout's recipes/ and integrations/ — not a checkout that happens to sit under a directory so named. */
 const VENDORED = new RegExp("^" + ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/(recipes|integrations)/.*\\.ts$");
 Bun.plugin({

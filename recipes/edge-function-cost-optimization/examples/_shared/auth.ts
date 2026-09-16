@@ -9,8 +9,9 @@
  * What changes, and why each matters here:
  *
  *   Scopes. The tools that write — `capture_thought`, and since changes 22 and 60
- *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five
- *   — are registered only for a write-scoped key. A read-only key means a leaked
+ *   `update_thought` and `delete_thought`; twenty-four of the extensions' forty-five,
+ *   and the vendored recipes' and integrations' likewise since change 65 — are
+ *   registered only for a write-scoped key. A read-only key means a leaked
  *   ChatGPT connector URL cannot add or alter anything: read-only keys do not
  *   merely fail to write, the write tools are never registered for them, so they
  *   do not appear in tools/list at all.

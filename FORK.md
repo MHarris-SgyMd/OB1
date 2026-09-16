@@ -7991,7 +7991,8 @@ empty value on either side is a refusal. `readwise-capture` uses it through
 import this fork's server. The module refuses anything that is not a string
 before hashing, so a payload field shaped by the caller is refused, not thrown
 on; on `main`, Readwise admitted a body with no `secret` field whenever the
-secret was unset — `undefined !== undefined` is false — which this closes. The Telegram README's sample handler — pasted into
+secret was unset — `undefined !== undefined` is false — which this closes.
+The Telegram README's sample handler — pasted into
 a fresh Supabase project, where nothing else of this fork exists — and the
 dashboard walkthrough's Node stub each carry a five-line `node:crypto` version:
 the two calls `_shared/auth.ts` makes, proven on the target runtime. (The
@@ -8243,13 +8244,22 @@ README says both "no redeploy is needed" and "redeploy" about a rotated secret,
 and frames an update as fetching `index.ts` alone — `main`'s prose, outside
 this ticket.
 
+**Boyscout.** What the passes cut for space, in the files this change
+touched, no behaviour changed: two lines of this section rewrapped;
+`readwise-capture`'s README no longer tells a reader to redeploy after
+rotating a secret it also says is read at runtime, and its update note names
+`_shared/auth.ts` beside `index.ts`; `auth.ts`'s docblock counts the vendored
+servers' write tools beside the extensions' (six copies follow); the test's
+Deno stand-in and postgres stub lines are wrapped.
+
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
 (integrations writing around `update_thought`). SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
-**Verified:** `extensions/test-auth.ts` 643/643 (243 at change 64); `server-portable/test-auth.ts` 67/67, `test-server.ts` 73/73,
+**Verified:** `extensions/test-auth.ts` 643/643 (243 at change 64);
+`server-portable/test-auth.ts` 67/67, `test-server.ts` 73/73,
 `tsc --noEmit` clean, the Cloudflare Workers dry-run build; `deno check
 --node-modules-dir=none` clean under Deno 2.9.6 for `ob-graph`,
 `agent-memory-api`, `consolidation-workers/metadata-norm` and
