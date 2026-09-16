@@ -3617,8 +3617,8 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   // prune_query_log: default arg, bounded delete, the default window's unit,
   // the strict bound, and a refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
-  const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
-  assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  const deletedFresh = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
+  assert(deletedFresh === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
   // The bound is `logged_at < now()`, strict, and now() is the transaction's
   // start, read from a clock that under PGlite has millisecond grain, so a row
   // inserted a few statements earlier can share the prune's now() and survive
