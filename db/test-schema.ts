@@ -3716,11 +3716,11 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
       FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
   assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
 
-  // prune_query_log: default arg, bounded delete, the strict bound, and a
-  // refusal on a bad window.
+  // prune_query_log: default arg, bounded delete, the default window's unit,
+  // the strict bound, and a refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
-  const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
-  assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  const deletedFresh = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
+  assert(deletedFresh === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
   // The bound is `logged_at < now()`, strict, and now() is the transaction's
   // start, read from a clock that under PGlite has millisecond grain, so a row
   // inserted a few statements earlier can share the prune's now() and survive
@@ -3729,6 +3729,30 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   await db.exec(`UPDATE query_log SET logged_at = logged_at - interval '1 hour'`);
   const wiped = (await db.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n;
   assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes every row older than now() (${wiped} of ${nBefore})`);
+  // The default window, unit and number. "deletes nothing fresh" above ran
+  // over rows at most two hours old, and rows going was asserted only at 0,
+  // so a body reading `make_interval(hours => p_keep_days)` — 30 hours keeps
+  // a 2-hour-old row, 0 wipes — passed every prune line here (SMD-1515). One
+  // row each side of the 30-day edge, half a day out: 30.5 days goes, 29.5
+  // stays. Half a day, not a day: rows at 31 and 29 days sit exactly on a
+  // 31- or 29-day bound whenever the INSERT and the prune share a now(), and
+  // one ms under it when they do not, so the tick decides those mutants — a
+  // 29-day default slips on the shared tick (its row equals the bound, and
+  // `<` keeps it), a 31-day default on the drift (its row falls under the
+  // bound and goes); this ticket's first review pass saw the first slip 3 of
+  // 3 runs and the second 2 of 3. Twelve hours dwarf the tick and a DST hour
+  // both; the hours body deletes both rows, a weeks body neither.
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, query, logged_at) VALUES
+      ('search', 'search_thoughts', 'half a day past the window', now() - interval '30 days 12 hours'),
+      ('search', 'search_thoughts', 'half a day inside the window', now() - interval '29 days 12 hours')`);
+  const deletedByDefault = Number((await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n);
+  const leftByDefault = (await db.query<{ q: string }>(`SELECT query AS q FROM query_log`)).rows.map((r) => r.q);
+  assert(deletedByDefault === 1 && leftByDefault.length === 1 && leftByDefault[0] === "half a day inside the window",
+    `prune_query_log()'s default window is 30 days: the 30.5-day row goes, the 29.5-day row stays (deleted ${deletedByDefault}, left: ${leftByDefault.join(", ") || "none"})`);
+  // Both by name, whatever the prune did, so the same-transaction keep below
+  // (left === 1) is judged alone.
+  await db.exec(`DELETE FROM query_log WHERE query IN ('half a day past the window', 'half a day inside the window')`);
   // The same now(), on purpose: a row logged in the prune's own transaction is
   // kept — the strict bound the COMMENT states ("older than now()"). now() is
   // the transaction's start on Postgres proper too; only the clock's grain
