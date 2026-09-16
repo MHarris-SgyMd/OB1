@@ -93,7 +93,10 @@
 --   advisory-lock line and a COMMENT clause naming it. And 032's
 --   review_supersession_proposal body verbatim, with only the advisory-lock
 --   acquisition relocated to the top — the two update_thought calls, the
---   no-UPDATE-of-its-own and no-walk-of-its-own shape are 032's. Both
+--   no-UPDATE-of-its-own and no-walk-of-its-own shape are 032's. Its COMMENT is
+--   re-issued as migration 035 (SMD-1453) corrected it — the "add-if-empty
+--   aside" gone, since 035 removed the fill it named — plus this change's
+--   lock-move clause; only the COMMENT follows 035, the body is 032's. Both
 --   signatures unchanged: delete_thought(uuid, jsonb) and
 --   review_supersession_proposal(uuid, text, text, text, jsonb, boolean) — the
 --   stores and the tools call them as before.
