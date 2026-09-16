@@ -10167,6 +10167,32 @@ optional environment and the three suites still spelling the spawn use it;
 one `migrationFiles()` lists the directory for the bare apply, the ledger
 comparison and test-upgrade's count.
 
+**Tenth pass, on the tree merged with main again** (changes 68–70; this
+section became 71, its test case [15]; main's `OB1_BENCH_UPTO` applies bare
+on the whole-schema path and is refused with `OB1_PG_KEEP`, since a schema
+cut at a migration is not one the ledger describes). Two things at the root.
+The marker records the build's transaction id, and a reuse counts the rows of
+either table whose `xmin` is newer — exact at any share and blind to a
+statistics reset, where a subset backfill committed on an earlier interrupted
+run had grown the heap by less than the tolerance and moved counters a
+recovery then zeroed; with that, the ledger-keyed re-check of the oracle's
+premise went, since no row written since the build is the premise's proof.
+And the database-level HNSW bounds in force are compared with the tree's
+seeds on both paths: a kept database carries the `ALTER DATABASE` its build's
+014 ran, the migrator skips a recorded 014 and 014's guard leaves a seed in
+place, so a config-only change to `HNSW_SEEDS` would have walked under the old
+bound while section E's header named the new one. Then: `--no-env-file`
+rides on every `bun` spawn `runScript` makes with its own environment, not
+only the migrator's (test-live's re-embed worker with a stripped shell was
+the reachable case); `dropSchema` refuses a database holding a kept corpus
+unless `OB1_DROP_KEPT_CORPUS=1` names the intent, so a suite run under a kept
+name cannot drop thirty minutes of build in silence; the kept-table checks
+throw a tagged error and anything else — a dropped connection, a timeout —
+is rethrown rather than blamed on the corpus; the script's comment says what
+its `created` arm does and the kept hint prints only for a container that
+started; the marker's `stats.confound` is documented as the exact pass's
+value; the reuse assigns its stats once.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

@@ -1243,9 +1243,12 @@ the command the same database. The container carries the name too, so a
 second invocation while one is running under it is refused rather than sharing
 the database, and the readiness wait is thirty minutes rather than one, since a
 kept data directory may start into crash recovery. `bench-hnsw.ts` uses it to
-reuse a loaded corpus across passes (SMD-1493). What was kept is yours to
-remove, and the exit line prints the command with the runtime as the script
-found it (`/opt/podman/bin/podman` where `podman` is off `PATH`):
+reuse a loaded corpus across passes (SMD-1493). Only `bench-hnsw.ts` should
+run under a kept name: any suite's schema reset refuses a database holding a
+kept corpus (set `OB1_DROP_KEPT_CORPUS=1` to drop it deliberately). What was
+kept is yours to remove, and the exit line prints the command with the
+runtime as the script found it (`/opt/podman/bin/podman` where `podman` is
+off `PATH`):
 
 ```bash
 podman volume rm ob1-pg-keep-<name>

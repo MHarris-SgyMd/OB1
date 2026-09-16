@@ -83,6 +83,7 @@ fi
 # the runtime as this script found it: `/opt/podman/bin/podman` is chosen
 # exactly when `podman` is not on PATH, so its basename would not paste.
 CID=""
+STARTED=0
 cleanup() {
   # A Ctrl-C during the stop below must not abort the removal and the hint:
   # ignored, not reset — the default disposition would let a second Ctrl-C
@@ -97,13 +98,19 @@ cleanup() {
     return 0
   fi
   if [ -n "$KEEP" ]; then
-    echo
-    echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
-    echo "  Remove: $RUNTIME volume rm $NAME"
-    echo -n "  stopping $NAME (a checkpoint; up to two minutes) "
+    # The hint only for a container that started: a start that failed (the
+    # port taken between the pick and the bind; a namesake removed under it)
+    # kept nothing Postgres wrote, and the volume may be empty or another
+    # invocation's.
+    if [ "$STARTED" = 1 ]; then
+      echo
+      echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
+      echo "  Remove: $RUNTIME volume rm $NAME"
+      echo -n "  stopping $NAME (a checkpoint; up to two minutes) "
+    fi
     "$RUNTIME" stop -t 120 "$CID" >/dev/null 2>&1 || true
     "$RUNTIME" rm -fv "$CID" >/dev/null 2>&1 || true
-    echo "— done"
+    [ "$STARTED" = 1 ] && echo "— done"
   else
     "$RUNTIME" rm -fv "$CID" >/dev/null 2>&1 || true
   fi
@@ -136,15 +143,13 @@ SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 MOUNT_ARGS=()
 VOLUME_NOTE=""
 if [ -n "$KEEP" ]; then
-  # A container of this name still present is one of two things: EXITED, the
-  # shell an interrupted run (no trap ran) left behind, whose data is in the
-  # volume — removed, and the run goes on; or anything else — running, paused,
-  # STOPPING (another invocation's exit checkpointing the database, which
-  # reads as not running), or created (another invocation between its
-  # `create` and `start`; or a shell whose start failed and whose trap never
-  # ran) — refused, since sharing a database would let whichever exits first
-  # stop it under the other, and the created case cannot be told from the
-  # race, so the refusal names the removal for the operator to judge.
+  # A container of this name still present is one of two things: EXITED or
+  # CREATED-and-never-started, the shell an interrupted run left behind, whose
+  # data is in the volume — removed by its ID, and the run goes on; or alive —
+  # running, paused, STOPPING (another invocation's exit checkpointing the
+  # database, which reads as not running) — refused, since sharing a database
+  # would let whichever exits first stop it under the other; the refusal
+  # names the removal for the operator to judge.
   # One inspect, one snapshot: the status and the ID come from the same read,
   # and the removal goes by that ID — a forced removal by name would take
   # whatever holds the name at that instant, another invocation's freshly
@@ -194,6 +199,7 @@ CID="$("$RUNTIME" create --name "$NAME" \
   ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
   "$IMAGE")"
 "$RUNTIME" start "$CID" >/dev/null
+STARTED=1
 
 # A fresh data directory is ready in seconds. A kept one may start into crash
 # recovery (a host that slept, a machine restarted) and replay WAL for minutes

@@ -540,13 +540,16 @@ const LOAD_STATS_KEYS: Record<keyof LoadStats, true> = { scale: true, schema: tr
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
 /**
  * The marker's payload. The scale and build time live in `stats` (the one
- * copy the report reads); `verifiedLedger` is the ledger as it stood when the
- * oracle's premise (every chunk carries its parent's vector) last passed, so
- * a reuse whose ledger differs re-checks; `rewritten` names the migrations
- * that rewrote rows on a reuse — a corpus so marked is refused on every later
- * run, not only the one that found it (review pass).
+ * copy the report reads); `physical` is the four relations' state at the
+ * build and `builtXid` the transaction id then, so a reuse can count rows
+ * written since — exact at any share, blind to a statistics reset; `rewritten`
+ * holds the evidence of a change found on a reuse — a corpus so marked is
+ * refused on every later run, not only the one that found it (review passes).
  */
-type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[]; physical: Physical; rewritten?: string[] };
+type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; physical: Physical; builtXid: number; rewritten?: string[] };
+
+/** A kept table that is not the corpus its marker describes — told apart from a dropped connection or a timeout, which are not the corpus's fault (review pass). */
+class NotTheCorpus extends Error {}
 /**
  * Per relation: rows inserted + updated + deleted so far (the cumulative
  * counters, which autovacuum does not reset but a crash recovery does), the
@@ -595,14 +598,14 @@ async function writeMarker(sql: SQL, marker: Marker): Promise<void> {
     // `scale` is generated from the payload, so the two cannot disagree;
     // `built_at` cannot be (timestamptz input is not immutable) and is a
     // plain copy for a glance from psql. The payload's `stats.confound` is the
-    // build's client-side accumulator; the exact pass recomputes it on every
-    // run and prints that (they agree to three decimals on every run so far).
+    // exact pass's value over the build's queries (the marker is written after
+    // that pass); the load's client-side accumulator was the early abort.
     await tx.unsafe(`CREATE TABLE ${MARKER} (one boolean PRIMARY KEY DEFAULT true CHECK (one), scale bigint GENERATED ALWAYS AS ((corpus->'stats'->>'scale')::bigint) STORED, built_at timestamptz NOT NULL, corpus jsonb NOT NULL)`);
     await tx`INSERT INTO bench_hnsw_corpus (built_at, corpus) VALUES (${marker.stats.builtAt}::timestamptz, ${marker}::jsonb)`;
   });
 }
 
-/** Fields of the marker's payload updated in place (`verifiedLedger` after a re-check, `rewritten` on a refusal). */
+/** Fields of the marker's payload updated in place (`rewritten`, on a refusal). */
 async function amendMarker(sql: SQL, patch: Partial<Marker>): Promise<void> {
   await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${patch}::jsonb`;
 }
@@ -669,19 +672,41 @@ function rowAt(n: number, tiers: Tier[], i: number): Row {
  */
 async function assertKeptCorpus(sql: SQL, n: number, tiers: Tier[], marker: Marker): Promise<void> {
   const [{ c: rows }] = await sql.unsafe(`SELECT count(*)::bigint AS c FROM thoughts`);
-  if (Number(rows) !== n) throw new Error(`the kept corpus holds ${Number(rows).toLocaleString()} thoughts, not ${n.toLocaleString()}`);
+  if (Number(rows) !== n) throw new NotTheCorpus(`the kept corpus holds ${Number(rows).toLocaleString()} thoughts, not ${n.toLocaleString()}`);
   const [{ c: chunks }] = await sql.unsafe(`SELECT count(*)::bigint AS c FROM thought_chunks`);
-  if (Number(chunks) !== marker.stats.chunkRows) throw new Error(`the kept corpus holds ${Number(chunks).toLocaleString()} chunk rows; its marker says ${marker.stats.chunkRows.toLocaleString()}`);
+  if (Number(chunks) !== marker.stats.chunkRows) throw new NotTheCorpus(`the kept corpus holds ${Number(chunks).toLocaleString()} chunk rows; its marker says ${marker.stats.chunkRows.toLocaleString()}`);
   for (const i of [0, n - 1]) {
     const want = rowAt(n, tiers, i);
     const found = await sql`SELECT metadata->'tiers' AS tiers, embedding::text AS v FROM thoughts WHERE metadata @> ${{ doc: i }}::jsonb`;
-    if (found.length !== 1) throw new Error(`row ${i} of the kept corpus: ${found.length} thoughts carry doc ${i}`);
+    if (found.length !== 1) throw new NotTheCorpus(`row ${i} of the kept corpus: ${found.length} thoughts carry doc ${i}`);
     const tiersHeld = found[0].tiers;
-    if (JSON.stringify(tiersHeld) !== JSON.stringify(want.tiers)) throw new Error(`row ${i} of the kept corpus carries tiers ${JSON.stringify(tiersHeld)}; the generator says ${JSON.stringify(want.tiers)}`);
+    if (JSON.stringify(tiersHeld) !== JSON.stringify(want.tiers)) throw new NotTheCorpus(`row ${i} of the kept corpus carries tiers ${JSON.stringify(tiersHeld)}; the generator says ${JSON.stringify(want.tiers)}`);
     const held: number[] = JSON.parse(String(found[0].v));
     const drift = Math.max(...want.v.map((x, k) => Math.abs(x - (held[k] ?? NaN))));
-    if (!(held.length === DIM && drift < 1e-5)) throw new Error(`row ${i} of the kept corpus is not the generator's row ${i} (max component difference ${drift})`);
+    if (!(held.length === DIM && drift < 1e-5)) throw new NotTheCorpus(`row ${i} of the kept corpus is not the generator's row ${i} (max component difference ${drift})`);
   }
+}
+
+/** The current transaction id, as the marker records it at the build. */
+async function currentXid(sql: SQL): Promise<number> {
+  const [{ xid }] = await sql`SELECT pg_current_xact_id()::text::bigint AS xid`;
+  return Number(xid);
+}
+
+/**
+ * Rows of either table written since the build — any row version whose xmin
+ * is newer than the transaction id the marker recorded. Exact at any share
+ * and untouched by a statistics reset, where the counters are not (review
+ * pass): a subset backfill that committed on an earlier, interrupted run and
+ * grew the heap by less than the tolerance is caught here.
+ */
+async function rowsWrittenSince(sql: SQL, xid: number): Promise<string[]> {
+  const out: string[] = [];
+  for (const rel of ["thoughts", "thought_chunks"]) {
+    const [{ c }] = await sql.unsafe(`SELECT count(*)::bigint AS c FROM ${rel} WHERE xmin::text::bigint > $1`, [xid % 4294967296]);
+    if (Number(c) > 0) out.push(`${rel}: ${Number(c).toLocaleString()} rows written since the build`);
+  }
+  return out;
 }
 
 /**
@@ -1216,7 +1241,8 @@ for (const n of SCALES) {
     try {
       await assertKeptCorpus(sql, n, tiers, kept);
     } catch (err) {
-      console.error(`bench-hnsw.ts: ${(err as Error).message}. The kept table is not the corpus its marker describes — a migration applied onto it on an earlier run may have changed rows; remove the kept volume and build again (db/README.md names the command). Nothing was touched.`);
+      if (!(err instanceof NotTheCorpus)) throw err;
+      console.error(`bench-hnsw.ts: ${err.message}. The kept table is not the corpus its marker describes — a migration applied onto it on an earlier run may have changed rows; remove the kept volume and build again (db/README.md names the command). Nothing was touched.`);
       process.exit(1);
     }
     const strangers = await ledgerStrangers(sql);
@@ -1249,7 +1275,7 @@ for (const n of SCALES) {
     // build's figure (review passes). The refusal records the evidence — what
     // moved, not a guess at which file did it — so every later run refuses.
     const physicalNow = await physicalState(sql);
-    const moved = [...new Set([...physicalMoves(kept.physical, physicalNow, "the build"), ...physicalMoves(physicalBefore, physicalNow, "this run's migrator")])];
+    const moved = [...new Set([...physicalMoves(kept.physical, physicalNow, "the build"), ...physicalMoves(physicalBefore, physicalNow, "this run's migrator"), ...(await rowsWrittenSince(sql, kept.builtXid))])];
     if (moved.length > 0) {
       await amendMarker(sql, { rewritten: moved });
       console.error(
@@ -1257,9 +1283,7 @@ for (const n of SCALES) {
       );
       process.exit(1);
     }
-    stats = { ...kept.stats, source: "reused" };
-    matches = new Map(Object.entries(kept.matches));
-    console.log(`  ${n.toLocaleString()} thoughts and ${stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched`);
+    console.log(`  ${n.toLocaleString()} thoughts and ${kept.stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched, none written since the build`);
     console.log(appliedFiles.length ? `  migrations applied onto it this run: ${appliedFiles.join(", ")}` : "  schema already at the tree's; nothing applied");
   } else {
     console.log(`▸ ${n.toLocaleString()} rows — loading${beforeArm ? "" : ` (schema applied whole${UPTO === undefined ? " through migrate.ts" : `, up to ${UPTO}, bare`}; the before arm runs up to ${BEFORE_ARM_MAX.toLocaleString()} rows)`}`);
@@ -1289,20 +1313,13 @@ for (const n of SCALES) {
   for (const note of notes) console.log(`  (${note})`);
   const queries = queriesFor(n);
   // The oracle's premise — every chunk carries its parent's vector — is
-  // checked on a build, and on a reuse whenever the ledger differs from the
-  // one it last passed under: a migration applied onto the table is the one
-  // way a kept chunk vector can change, a check that threw after a file was
-  // recorded must not be skipped by the re-run, and the join over every chunk
-  // row costs a minute at ten million rows (review passes).
+  // checked on a build; on a reuse the fingerprint has just established that
+  // no row of either table was written since the build, which is the only
+  // way a kept chunk vector could have changed, so the minute-long join over
+  // every chunk row is not paid again (review passes).
   if (kept) {
     stats = { ...kept.stats, source: "reused" };
     matches = new Map(Object.entries(kept.matches));
-    const ledger = (await ledgerNames(sql)) ?? [];
-    if (!Bun.deepEquals(ledger, kept.verifiedLedger)) {
-      await chunksCarryParentVectors(sql);
-      await amendMarker(sql, { verifiedLedger: ledger });
-      console.log(`  ledger differs from the one the corpus was last verified under: oracle premise re-checked`);
-    }
   } else {
     process.stdout.write("  inserting         ");
     ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
@@ -1358,7 +1375,7 @@ for (const n of SCALES) {
   // at parse makes this the scale above the before arm's): a throwaway
   // container's marker would serve nothing, and a persistent database reached
   // some other way is not this bench's to mark.
-  if (!kept && KEPT) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, verifiedLedger: (await ledgerNames(sql)) ?? [], physical: await physicalState(sql) });
+  if (!kept && KEPT) await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql) });
 
   // Both HNSW relations are read into the page cache here, on BOTH paths,
   // after the exact oracle and just before the first section that walks
@@ -1406,6 +1423,19 @@ for (const n of SCALES) {
         throw new Error(`session did not pick up the database-level bounds (in force ${JSON.stringify(inForce)}; database has ${JSON.stringify(cfg)})`);
       }
       console.log(`  bounds in force: ${HNSW_BOUNDS.map((b) => `${b}=${inForce[b]}`).join(", ")}`);
+      // The tree's seeds, not just the database's: a kept database carries the
+      // ALTER DATABASE its build's 014 ran, the migrator skips a recorded 014,
+      // and 014's guard leaves a seed in place — so a config-only change to
+      // HNSW_SEEDS would measure under the old bound while section E's header
+      // named the new one (review pass). Refused on either path, since a
+      // fresh schema seeds from the same constants.
+      const stale = HNSW_BOUNDS.filter((b) => String(inForce[b]) !== String((HNSW_SEEDS as Record<string, unknown>)[b]));
+      if (stale.length > 0) {
+        console.error(
+          `bench-hnsw.ts: the database-level bounds in force (${stale.map((b) => `${b}=${inForce[b]}`).join(", ")}) are not this tree's seeds (${stale.map((b) => `${b}=${(HNSW_SEEDS as Record<string, unknown>)[b]}`).join(", ")}); the walk would run under one bound and the tables name another. ${kept ? "Remove the kept volume and build again under this tree, or re-seed the database by hand" : "Reset the database-level settings and run again"}. Nothing was measured.`
+        );
+        process.exit(1);
+      }
       routing = await routingAt(sql, K);
       pgvectorDefaults = await readPgvectorDefaults(sql);
       console.log(`  routing at K=${K}: v_fetch ${routing.vFetch}, exact threshold ${routing.vExact} matching thoughts; pgvector defaults ${HNSW_BOUNDS.map((b) => `${b}=${pgvectorDefaults[b]}`).join(", ")}`);

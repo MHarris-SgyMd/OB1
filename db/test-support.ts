@@ -207,6 +207,14 @@ export async function dropSchema(url: string): Promise<void> {
   assertThrowawayDatabase(url);
   const admin = new SQL({ url, max: 1 });
   try {
+    // A kept bench corpus (SMD-1493) is thirty minutes of build behind a
+    // marker; a suite run under the same OB1_PG_KEEP name would drop it here
+    // with no word. The bench itself never reaches this with a marker present
+    // (it reuses or refuses first), so a marker here means another caller.
+    const [{ kept }] = await admin`SELECT to_regclass('bench_hnsw_corpus') IS NOT NULL AS kept`;
+    if (kept && process.env.OB1_DROP_KEPT_CORPUS !== "1") {
+      throw new Error("this database holds a kept bench-hnsw corpus (bench_hnsw_corpus); a schema reset would drop it. Run this suite without OB1_PG_KEEP, or set OB1_DROP_KEPT_CORPUS=1 to drop the corpus deliberately.");
+    }
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
     // 014 seeds two database-level settings. They are not schema, so a fresh
@@ -386,7 +394,13 @@ export function neverAnswers(): Promise<never> {
  * a few builds that object itself.
  */
 export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn(cmd, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
+  // A child given its own environment gets exactly that: Bun loads the cwd's
+  // .env into a child for every variable the passed environment lacks — which
+  // after a fixture's strip is every OB1_* name, and db/.env is where a
+  // migrator-only flag is documented to live — so `--no-env-file` rides on
+  // every `bun` spawn that passes an env (review passes, reproduced).
+  const argv = opts.env && cmd[0] === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
+  const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
   return { code: await p.exited, out };
 }
@@ -420,11 +434,7 @@ export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "mode
  * as runScript gives them.
  */
 export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string }> {
-  // --no-env-file: Bun loads db/.env into a child for every variable the
-  // passed environment lacks — which after migratorEnv's strip is every
-  // OB1_* name, and db/.env is where a migrator-only flag is documented to
-  // live. A fixture's shell is the one it was given (review pass, reproduced).
-  return runScript(["bun", "--no-env-file", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
+  return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
 }
 
 /** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
