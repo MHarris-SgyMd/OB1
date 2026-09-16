@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { buildDemoState } from "./seed-data.mjs";
 
@@ -132,7 +133,15 @@ async function route(request, response) {
 
 function isAuthorized(request) {
   const provided = request.headers["x-brain-key"];
-  return !accessKey || provided === accessKey;
+  return !accessKey || secretMatches(provided, accessKey);
+}
+
+// Compared timing-safe even in a stub — a stub is what gets copied. Both sides
+// hashed so the digests are one length, then compared byte for byte.
+function secretMatches(presented, expected) {
+  if (!presented || !expected) return false;
+  const digest = (s) => createHash("sha256").update(String(s), "utf8").digest();
+  return timingSafeEqual(digest(presented), digest(expected));
 }
 
 function thoughtsResponse(url) {

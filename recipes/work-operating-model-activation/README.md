@@ -86,6 +86,8 @@ Save it to your credential tracker, then set it in Supabase:
 supabase secrets set DEFAULT_USER_ID=your-generated-uuid
 ```
 
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+
 ### 4. Deploy the MCP server
 
 Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
@@ -95,11 +97,11 @@ Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) gui
 | Function name | `work-operating-model-mcp` |
 | Download path | `recipes/work-operating-model-activation` |
 
-This function uses:
+The guide's Step 2 also downloads `_shared/auth.ts`, which the server imports from `../_shared/auth.ts` (the copy in `recipes/_shared/` is the same file). This function uses:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `MCP_ACCESS_KEY`
+- `MCP_ACCESS_KEYS` — `name:scope:sha256` entries, minted as the guide's Step 3 shows (the older single `MCP_ACCESS_KEY` still works). Give the session a `write` key: `start_operating_model_session`, `save_operating_model_layer` and `generate_operating_model_exports` are registered only for one; a `read` key gets `query_operating_model` alone.
 - `DEFAULT_USER_ID`
 
 ### 5. Connect it to your AI client

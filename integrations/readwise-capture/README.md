@@ -76,13 +76,20 @@ supabase link --project-ref YOUR_PROJECT_REF
 
 Replace `YOUR_PROJECT_REF` with the value from your Supabase dashboard URL: `supabase.com/dashboard/project/THIS_PART`.
 
+> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+
 ### Create the Function
 
 ```bash
 supabase functions new readwise-capture
 ```
 
-Open `supabase/functions/readwise-capture/index.ts` and replace its entire contents with the contents of [index.ts](./index.ts) from this folder.
+Open `supabase/functions/readwise-capture/index.ts` and replace its entire contents with the contents of [index.ts](./index.ts) from this folder. The function imports the access-key module from `../_shared/auth.ts` — this fork's `server-portable/auth.ts`, copied so Supabase bundles it (the same file every server on this fork shares; if `supabase/functions/_shared/auth.ts` is already there from another one, it is identical):
+
+```bash
+mkdir -p supabase/functions/_shared
+cp integrations/_shared/auth.ts supabase/functions/_shared/auth.ts
+```
 
 ### Set Your Secrets
 
@@ -162,7 +169,7 @@ Every new highlight you make across every Readwise-connected source automaticall
 
 Check the Edge Function logs: Supabase Dashboard → Edge Functions → `readwise-capture` → Logs. The most common causes:
 
-- `401 unauthorized` — the `secret` in the webhook payload doesn't match `READWISE_WEBHOOK_SECRET`. Rotate one to match the other and redeploy.
+- `401 unauthorized` — the `secret` in the webhook payload doesn't match `READWISE_WEBHOOK_SECRET`. Rotate one to match the other; secrets are read at runtime, so no redeploy is needed.
 - `500 error` — an OpenRouter or Supabase call failed. Check the log for the specific error.
 
 ### Highlights are being captured but without book title/author
@@ -173,7 +180,7 @@ You can fix existing rows by calling `GET /api/v2/books/{book_id}/` manually and
 
 ### Duplicate highlights in the database
 
-The Edge Function deduplicates on `metadata->>readwise_highlight_id` before inserting. If you see duplicates, confirm you're on the latest version of `index.ts` and have redeployed. Also check that your Readwise webhook isn't configured twice pointing at the same URL.
+The Edge Function deduplicates on `metadata->>readwise_highlight_id` before inserting. If you see duplicates, confirm you're on the latest version of `index.ts` (and of `_shared/auth.ts` beside it) and have redeployed. Also check that your Readwise webhook isn't configured twice pointing at the same URL.
 
 ### `increment_book_highlight_count` RPC not found
 
