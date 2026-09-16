@@ -9334,8 +9334,8 @@ lookup and the `readwise-books` sidecar, now the third the suite applies and
 drops); the bio worker's first run, the classification example, the two
 Python recipes and the two README samples are read by regex there. Per
 file: `readwise-capture` — one call with the label constant the file now
-names, the sidecar on a fresh row, `existed` answered `ok` and the book
-counter still incremented; `consolidation-bio` — the first run embeds the
+names, the sidecar per column where it is NULL, `existed` answered `ok` and
+the book counter still incremented; `consolidation-bio` — the first run embeds the
 profile as the rewrite path does and captures it whole, a concurrent run's
 `existed` row reported as not created and left its columns,
 `computeContentFingerprint` no longer imported; `editorial-policy` — the
@@ -9366,8 +9366,8 @@ outside the rule, said so). The one insert the non-probe list carried as
 shape and the forms a rebase could bring — and ten non-probes: another
 table's insert with a `content` column, the other columns, no column list,
 a metadata-only row, the remedy, prose naming the statement, the
-comprehension the rule cannot see. Fifty-eight probes, forty-one non-probes
-(eight and four from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
+comprehension the rule cannot see. Sixty-one probes, forty-one non-probes
+(eleven and four from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
 entries** — none a bypass a fix here could remove, each a file whose header
 or README says what its rows lack: three deployments whose database is their
 own, built from the guide's shape, where the fork's functions are not —
@@ -9528,6 +9528,32 @@ SMD-1544. A fresh worktree needs `bun install` in `extensions/` before
 `test-writes.ts` (eight MCP assertions fail without the packages); CI
 installs.
 
+**Review pass 4** (the same two lenses; six findings, all LOW or
+informational, the top ones in pass 3's blanker — the stop signal holding).
+The blanker read a backslash-escaped quote inside an `E'…'` string as the
+string's close and reopened one over the target that followed, and read a
+dash pair inside a `"quoted identifier"` as a line comment — two false
+negatives, both theory-grade for the tree (no E-string, no dashed identifier
+near a `thoughts` statement) and both confirmed by running the blanker; an
+E-string's backslash skips its next character and a quoted identifier is
+read whole now, three probes (61/41): the doubled quote, the E-string, the
+dashed identifier, each beside a real target. The 4000-character window is
+named in its comment (the tree's longest statement is under 400). One
+per-file clause above still said "the sidecar on a fresh row" for the
+receiver — pass 2's fix overtook it; said per column. Run for real: the
+per-column heal over PostgREST leaves a hand-set type and fills
+`source_type`, and a repeated PATCH touches nothing; a row another tool
+labelled (`source_type = 'mcp'`) keeps its label and, since the receiver's
+dedupe looks for readwise rows only, is re-sent to the function on every
+delivery — one row throughout, one `update` audit row per delivery — said in
+the README now; the backfill's `finally` under a KeyboardInterrupt writes
+the stored rows' columns and re-raises, under a clean loop with a failing
+first column raises the sidecar's error with the second column unwritten
+(the next run heals both), under a double failure raises the loop's error
+with one warning; the checker's scan is no slower for the per-head slice
+(0.7 s either way); `deno check` on the receiver shows the shim typings
+only. Two runs on one container green.
+
 **Not done here.** SMD-1544 (the shim refuses a JSON-path filter column, so
 `consolidation-bio` cannot run on the fork; with that fixed, bio joins the
 driven set). SMD-1541 (change 69's five servers hold a principal and
@@ -9542,7 +9568,7 @@ thoughts` statements are the fork's fixtures and benches, outside the scan
 as they were for the update rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
-eight hits in eight files before the conversions and PASS after (58 probes,
+eight hits in eight files before the conversions and PASS after (61 probes,
 41 non-probes, each probe caught on its verb's line; seven exceptions, each
 matching its one line); `../db/with-postgres.sh bun test-writes.ts` 157/157
 under podman — the receiver's capture judged column by column, its retry

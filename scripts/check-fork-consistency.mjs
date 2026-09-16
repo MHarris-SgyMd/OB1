@@ -1133,11 +1133,18 @@ function topLevel(block, depth = 1) {
  * it does not open a string.
  */
 function sqlUncommented(sqlText) {
-  let out = "", i = 0, quote = false;
+  let out = "", i = 0, quote = false, escapes = false, ident = false;
   while (i < sqlText.length) {
     const ch = sqlText[i];
-    if (quote) { out += ch === "'" || ch === "\n" ? ch : " "; if (ch === "'") quote = false; i++; continue; }
-    if (ch === "'") { quote = true; out += ch; i++; continue; }
+    if (quote) {
+      // An E'…' string reads a backslash-escaped quote as text (the fourth review pass).
+      if (escapes && ch === "\\") { out += "  "; i += 2; continue; }
+      out += ch === "'" || ch === "\n" ? ch : " "; if (ch === "'") quote = false; i++; continue;
+    }
+    // A "quoted identifier" is a name, read whole: a dash pair inside it is not a comment (the fourth review pass).
+    if (ident) { out += ch; if (ch === '"') ident = false; i++; continue; }
+    if (ch === '"') { ident = true; out += ch; i++; continue; }
+    if (ch === "'") { quote = true; escapes = /[eE]$/.test(out.slice(-1)) && !/\w/.test(out.slice(-2, -1)); out += ch; i++; continue; }
     if (ch === "-" && sqlText[i + 1] === "-") { while (i < sqlText.length && sqlText[i] !== "\n") { out += " "; i++; } continue; }
     if (ch === "/" && sqlText[i + 1] === "*") {
       const end = sqlText.indexOf("*/", i + 2);
@@ -1149,7 +1156,7 @@ function sqlUncommented(sqlText) {
   }
   return out;
 }
-/** The text from `from` on, comments blanked, as far as a statement can reasonably run. */
+/** The text from `from` on, comments blanked, as far as a statement can reasonably run: 4000 characters (the longest in the tree is under 400). */
 const sqlFrom = (text, from) => sqlUncommented(text.slice(from, from + 4000));
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
 const literalCarries = (text, open) => {
@@ -1311,6 +1318,11 @@ const THOUGHT_WRITE_PROBES = [
   "UPDATE thoughts SET summary = 'a -- b', content = $2 WHERE id = $1;",
   'UPDATE thoughts SET metadata = $1 /* where */ , embedding = $2 WHERE id = $3;',
   'INSERT INTO thoughts (metadata /* (note) */, content) VALUES ($1, $2);',
+  // The fourth review pass: a doubled quote, an E-string's escaped quote and a dash pair inside a
+  // quoted identifier, each beside a real target.
+  "UPDATE thoughts SET summary = 'it''s', content = $2 WHERE id = $1;",
+  "UPDATE thoughts SET summary = E'a\\'b', content = $2 WHERE id = $1;",
+  'UPDATE thoughts SET "note--x" = $1, content = $2 WHERE id = $3;',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
