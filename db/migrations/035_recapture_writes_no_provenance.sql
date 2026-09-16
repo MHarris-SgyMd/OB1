@@ -34,7 +34,7 @@
 --   of text that is already there is a dedup: it merges metadata and, with a
 --   vector, moves the vector, label and windows by 021's and 022's rules; it
 --   does not decide what the existing thought derives from or replaces. And
---   the caller is TOLD, not surprised: the return carries `existed`.
+--   the caller is told: the return carries `existed` and the row's pointer.
 --
 -- What
 --   1. The 3-argument form's ON CONFLICT clause no longer sets derived_from or
@@ -56,27 +56,19 @@
 --      by 021/022's rules, and any provenance the envelope named was NOT
 --      written. `supersedes` is the row's pointer after the write — the fresh
 --      row's, or the one the existing row keeps — so a caller told `existed`
---      can say what stands rather than guess (the second review pass drove
---      the capture tool's reply through the server and found it advising an
---      edit that was redundant, replaced a pointer it did not mention, or
---      would be refused; the reply reads this key now). 022's label read —
---      FOR NO KEY UPDATE on the row the text lands on — runs for every
---      capture now, not only with a vector, so the flag is right for a
---      vectorless capture too (one index probe under the fingerprint lock;
---      the chunk DELETE keeps its condition). `existed` means a row HELD THIS
+--      can say what stands rather than guess. 022's label read — FOR NO KEY
+--      UPDATE on the row the text lands on — runs for every capture now, not
+--      only with a vector, so the flag is right for a vectorless capture too
+--      (the chunk DELETE keeps its condition). `existed` means a row HELD THIS
 --      FINGERPRINT WHEN THE LOCKED READ RAN — a writer that sets
 --      content_fingerprint without the fingerprint lock (raw SQL; the class
 --      018, 023 and 033 already exclude) can commit between the read and the
 --      INSERT and make the merge report false; and a legacy row with a NULL
 --      one (from before 003, until 023's backfill reaches it) is not found,
 --      and the capture inserts a twin — 003/023's semantics, unchanged here.
---      013's 4-argument form returns v_result || {"chunks": n}, so the key passes
---      through to both servers; the capture tool tells the caller what
---      stands — the thought already supersedes what was named, currently
---      supersedes another (an edit would replace it), was named as its own
---      predecessor, or holds no pointer and update_thought's `supersedes`
---      records it — and says the tools have no way to set derived_from on an
---      existing thought when that was sent.
+--      013's 4-argument form returns v_result || {"chunks": n}, so both keys
+--      pass through to both servers; what the capture tool's reply says with
+--      them is under Callers.
 --   4. The 2-argument form is carried verbatim from 033 — 005's guard, 008's
 --      actor, content_fingerprint_of, the fingerprint lock, its sentinel — so
 --      this file is the last definer of BOTH inserting forms and preflight's
@@ -132,7 +124,7 @@
 --
 -- What it closes, and what it does not
 --   Closed: the capture path cannot write a supersession loop by any
---   sequence — the residue 033 stated, [33] wrote and SMD-1453 held. A loop
+--   sequence — the residue 033 stated. A loop
 --   now needs a writer outside the two functions (raw SQL). Closed with it:
 --   the ceiling — a capture naming supersedes holds no brain-wide lock, so
 --   such captures parallelise like any other (measured below).
@@ -148,7 +140,7 @@
 --   written (the dedup's own merge runs: metadata, updated_at), and
 --   update_thought, the path the reply names with that condition spelled out,
 --   refuses it by name (SUPERSEDES_NOT_FOUND, WOULD_CYCLE): the caller learns
---   one step later, not never.
+--   one step later.
 --   Not closed, and not this file's: delete_thought outside the lock order
 --   (SMD-1462); the 2-argument form's silence on the envelope's provenance
 --   (PostgREST's two-step fallback drops it, as it has since 025); a walk
@@ -204,8 +196,7 @@
 --   * Privileges: SECURITY INVOKER as before; the 3-argument form still needs
 --     DELETE on thought_chunks (022). No GRANT.
 --   * The return gains two keys, `existed` and `supersedes`; nothing that
---     reads the return breaks on an
---     extra key (both stores read `id`; 013's form appends `chunks`).
+--     reads the return breaks on an extra key.
 --   * 032's COMMENT on review_supersession_proposal said "a capture's
 --     add-if-empty through upsert_thought aside"; 032's file is applied and
 --     hashed by the ledger, so the COMMENT is re-issued here with the aside
