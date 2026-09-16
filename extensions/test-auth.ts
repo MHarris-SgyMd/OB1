@@ -515,6 +515,7 @@ const LIVE: Live[] = [
     .filter((f) => !f.includes("node_modules") && onShim(f) && /^Deno\.serve\(/m.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and calls Deno.serve is started here (${inTree.length}: ${inTree.join(", ")})`);
 }
+const DEADLINE_MS = 30_000;
 for (const live of LIVE) {
   const env: Record<string, string | undefined> = { ...process.env, PORT: "0", NODE_PATH: join(HERE, "node_modules"), ...live.env };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
@@ -528,7 +529,6 @@ for (const live of LIVE) {
   // deadline passed with the child alive and silent.
   const reader = proc.stdout.getReader();
   const exited = proc.exited.then(() => "exited" as const);
-  const DEADLINE_MS = 30_000;
   const deadline = Date.now() + DEADLINE_MS;
   let out = "", port: number | null = null, pending: Promise<ReadableStreamReadResult<Uint8Array>> | null = null, eof = false;
   const parsePort = () => Number(/Listening on http:\/\/[^/:]+:(\d+)\//.exec(out)?.[1] ?? NaN) || null;

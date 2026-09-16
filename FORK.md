@@ -10858,7 +10858,7 @@ and — itself or through the relative imports it evaluates, transitively — us
 a `Deno.` member has the polyfill as its first import statement; no member
 beyond `env.get` and `serve` appears in the file or its imports; no `jsr:`,
 `npm:` or URL specifier remains (`node:` is fine); comments and string
-contents blanked first, line numbers kept; eight probes, three through a
+contents blanked first, line numbers kept; twelve probes, three through a
 dependency, six non-probes, no exceptions. And `test-auth.ts` proves the run:
 every file in the tree that imports the shim and calls `Deno.serve` — a glob,
 so a newly migrated server joins or the guard fails — is started as a child
@@ -10951,7 +10951,7 @@ the other fifteen starts prove. Check 11 widened at the running reviewer's
 probes: a bare `Deno` — aliased (`const D = Deno`), bracketed
 (`Deno["env"]`), destructured — is a use the rule cannot follow and is
 refused as one; a dynamic `import("jsr:…")` is a specifier too; four probes
-and two non-probes added (`globalThis.Deno.env.get`, a relative dynamic
+added and a non-probe widened (`globalThis.Deno.env.get`, a relative dynamic
 import). The codemod, given a `jsr:` types import that was not the first
 import, had swapped it in place — second — and left a second such line
 alone; it puts the polyfill first in every layout now and turns any other
@@ -11027,6 +11027,19 @@ primitive and the shim README carry the count once, and this section's claim
 is the exact one: the servers start, authenticate and answer over the port —
 eighteen of twenty-five tools work end to end, seven wait on SMD-1588.
 
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the test's deadline is one constant for the
+section rather than one per child; the CI step that runs the checker names
+what it checks through check 11 (it stopped at check 8); this section's
+counts of check 11's probes read the arrays as pass 1 left them (twelve,
+three through a dependency, six non-probes; "eight" and "eleven" were the
+implementation's) and pass 1's paragraph says what it added (four probes and
+one widened non-probe, not "two non-probes"). Left as they are, with the
+reason: the migrated files' banner says `node scripts/…` while the codemod's
+header says `bun` — 23 upstream-owned files for a word, and node runs it; the
+extension credential trackers' Supabase lines beside the new Postgres URL
+line — upstream's teaching path.
+
 **Verified:** `bun test-auth.ts` 709/709 (643 before: sixteen starts × four
 assertions, the tree guard, and the stand-in's identity after every import); every one of the sixteen — the five
 extension servers, the sample, `work-operating-model-activation`, the two
@@ -11037,7 +11050,7 @@ read key answers 500 against the refused stub database, past the gate as in
 the in-process section); before the change an unmodified integration under `bun` failed at its
 `jsr:` import and an unmodified extension served only under `bun --preload`
 of the two globals — the two starts probed by hand; `bun scripts/check-fork-consistency.mjs`
-PASS with check 11's eleven probes, and six mutations of the tree each caught
+PASS with check 11's fifteen probes, and six mutations of the tree each caught
 on the right file and line — the runtime line removed, the line moved after
 `hono`, `Deno.exit` in an entry, `Deno.args` in a `_shared/helpers.ts` reached
 through its entry, the `jsr:` line restored beside the polyfill, `npm:hono`
