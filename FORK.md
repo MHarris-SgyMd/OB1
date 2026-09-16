@@ -9103,7 +9103,10 @@ Read down the tables and four things fall out.
   crossed `jit_above_cost` — the function's own custom plan knows the
   parameter's value and pays none of it, which the 1.31 ms call is the proof
   of. The bench now substitutes the evaluated share (`routingAt` returns it),
-  so its next run prices the row as the function does.
+  and a second ten-million-row after pass with that fix priced the row at
+  1.11 / 1.09 / 1.07 ms across the three arms on the 50% filter and
+  0.99 / 1.03 / 1.07 on the empty one, with section B reproducing within the
+  spread (50% 13.3 ms, 10% 42.6, the empty filter 1.33).
 - **The 1% tier is the planner's coin, as before.** At a million rows it was
   served from GIN under the walk branch in the before pass (31 ms, 10 of 10)
   and walked HNSW in the after pass (242 ms, 8.8 of 10); at ten million GIN
