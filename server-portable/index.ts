@@ -1257,10 +1257,13 @@ function buildServer(principal: Principal): McpServer {
 
 // --- Hono App with Auth + CORS ---
 
-// The methods the MCP endpoint serves. One definition: the CORS preflight
-// advertises it and the catch-all's 405 names it in `Allow`, so the two cannot
-// disagree. GET is absent on purpose — the method guard in the catch-all says why.
-const ALLOWED_METHODS = "POST, DELETE, OPTIONS";
+// The methods the MCP endpoint serves. The transport is offered POST only: it is
+// built per request and is sessionless, so there is no server stream for a GET
+// to open and no session for a DELETE to end. One list derives the catch-all's
+// guard, its `Allow` and the CORS preflight's advertisement, so none of the
+// three can drift from the others. The method guard in the catch-all says why.
+const MCP_METHODS: readonly string[] = ["POST"];
+const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -1377,8 +1380,9 @@ app.options("*", (c) => {
 // OAuth discovery is a 404, not an auth challenge. claude.ai fetches
 // /.well-known/oauth-protected-resource before opening a custom connector: 404
 // means "no OAuth here" and it proceeds on the key; anything else — a 401, our
-// 200 + JSON-RPC envelope, or the GET reaching the transport — sends it into a
-// Dynamic Client Registration it cannot complete. Upstream cannot fix this on
+// 200 + JSON-RPC envelope, or the catch-all's 405 (change 73; before it, the
+// GET reached the transport and hung) — sends it into a Dynamic Client
+// Registration it cannot complete. Upstream cannot fix this on
 // Supabase, where the gateway answers the path first (#340); we own the route
 // table. Ordered after the OPTIONS preflight and before the catch-all, so it
 // runs before authenticate() and the agent resolve — the answer is about the
@@ -1399,9 +1403,16 @@ app.all("*", async (c) => {
   // Accept patch below on POST would not have been enough: the SDK client sets
   // `Accept: text/event-stream` on its own GET, and it treats a 405 as "no
   // stream here", which is the answer it wants. HEAD, PUT and PATCH take the
-  // same door. DELETE still reaches the transport, which closes its empty
-  // session and answers 200. FORK.md change 72 (SMD-1259).
-  if (c.req.method !== "POST" && c.req.method !== "DELETE") {
+  // same door, and so does DELETE: the SDK client sends one only to end a
+  // session it was handed an id for (terminateSession() returns before sending
+  // when it holds none), this server strips `mcp-session-id` from every
+  // response, so no client ever sends one here — and a keyed DELETE still cost
+  // the resolve and the build before landing on a transport with nothing to
+  // close. The client accepts 405 from terminateSession() by spec. A keyless
+  // GET or HEAD now gets 405 where it got the 200 JSON-RPC refusal: an HTTP
+  // health check must POST, as the image's HEALTHCHECK does, or use OPTIONS.
+  // FORK.md change 73 (SMD-1259).
+  if (!MCP_METHODS.includes(c.req.method)) {
     return c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS });
   }
 
@@ -1446,8 +1457,8 @@ app.all("*", async (c) => {
   // Fix: Claude Desktop connectors don't send the Accept header that
   // StreamableHTTPTransport requires. Build a patched request if missing.
   // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  // Only POST and DELETE get this far (the method guard above), so the patch
-  // never tells a GET to expect an event stream — that was SMD-1259's mechanism.
+  // Only POST gets this far (the method guard above), so the patch never tells
+  // a GET to expect an event stream — that was SMD-1259's mechanism.
   if (!c.req.header("accept")?.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
     headers.set("Accept", "application/json, text/event-stream");

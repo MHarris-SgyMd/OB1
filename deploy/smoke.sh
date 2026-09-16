@@ -11,8 +11,8 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Check 2 is the one a Supabase Edge Function deployment cannot pass; FORK.md
-# change 42 says why, and why that failure is real.
+# Checks 2 and 3 are the ones a Supabase Edge Function deployment cannot pass;
+# FORK.md changes 42 and 73 say why, and why those failures are real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -91,13 +91,19 @@ done
 # 3. GET at the endpoint is refused at once. The transport is per-request and
 #    sessionless, so it offers no server-initiated stream, and 405 is the answer
 #    the SDK client sends this GET to hear (it treats 405 as "no stream" and
-#    carries on). Before FORK.md change 72 an authenticated GET here was handed
+#    carries on). Before FORK.md change 73 an authenticated GET here was handed
 #    to the transport and held open until the runtime's idle timeout — the
-#    connector URL opened in a browser, or mcp-remote's handshake, hung. A 000
-#    from curl is that hang meeting --max-time.
-code=$(status -H "x-brain-key: $KEY" "$BASE/")
+#    connector URL opened in a browser, or mcp-remote's handshake, hung. Probed
+#    with NO key: the answer comes before authenticate(), so a key proves
+#    nothing, and status() follows redirects, on which curl forwards a custom
+#    header to whatever host comes next. A 200 here is the guard missing (a
+#    keyless GET then gets the JSON-RPC refusal at once; a keyed one would hang,
+#    and under --max-time that hang also reads as 200 — the stream's headers
+#    flush, the body never ends). A Supabase Edge Function fails this check:
+#    upstream's server has no method guard (#424, their PR #425).
+code=$(status "$BASE/")
 [ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (no server stream to offer; the SDK client's expected answer)" \
-                    || bad "GET the endpoint → HTTP $code (expected 405; 000 is the SSE hang — FORK.md change 72)"
+                    || bad "GET the endpoint → HTTP $code (expected 405; 200 is the method guard missing — FORK.md change 73)"
 
 # 4. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
@@ -107,7 +113,7 @@ pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersi
 # 5. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
-# Nine for a write key. update_thought and delete_thought are scope-gated, so a
+# Ten for a write key. update_thought and delete_thought are scope-gated, so a
 # read key would legitimately show seven — this smoke test authenticates as a writer.
 expected="capture_thought,delete_thought,fetch,list_supersession_proposals,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
 [ "$tools" = "$expected" ] && ok "all ten tools exposed" || bad "tool surface is '$tools'"

@@ -60,6 +60,12 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
 followed by `Started server`. `smoke.sh` prints `8 checks: 8 passed, 0 failed`.
 
+An HTTP health check against the server must **POST** (an unauthenticated POST
+answers 200 with a JSON-RPC refusal, which is what the image's `HEALTHCHECK`
+sends) or use **OPTIONS**. `GET /` and `HEAD /` answer 405 since FORK.md change
+73 — a platform-default probe that expects 2xx from GET will mark a healthy server
+down.
+
 ## Why the server runs preflight before serving
 
 The data layer is built lazily on first use. Without a gate, a server with a wrong
@@ -110,11 +116,14 @@ there, for that check to pass.
   bulk load of a few hundred thousand rows. Raise it with `maintenance_work_mem`
   before rebuilding a large index, or build with
   `max_parallel_maintenance_workers = 0` (`db/README.md`, "Caveats").
-- **A Supabase Edge Function passing check 2.** On Supabase the API gateway answers
-  the OAuth discovery path with 401 before the function sees it, so the check
-  fails there — and the failure is real: the claude.ai connector will not open
+- **A Supabase Edge Function passing checks 2 and 3.** On Supabase the API gateway
+  answers the OAuth discovery path with 401 before the function sees it, so check
+  2 fails there — and the failure is real: the claude.ai connector will not open
   against that deployment either (upstream
   [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
+  Check 3 fails too: upstream's `server/index.ts` has no method guard, so a GET
+  answers 200 instead of 405, and with a key it hangs (upstream
+  [#424](https://github.com/NateBJones-Projects/OB1/issues/424); FORK.md change 73).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.

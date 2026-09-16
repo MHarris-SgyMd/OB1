@@ -71,10 +71,11 @@ const probe = async (path: string, init: RequestInit = {}) => {
       status: r.status as number | string,
       cors: corsOk(r),
       allow: r.headers.get("allow"),
+      methods: r.headers.get("access-control-allow-methods"),
       envelope: (await mcpBody(r))?.jsonrpc === "2.0",
     };
   } catch (e) {
-    return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, envelope: false };
+    return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, methods: null, envelope: false };
   }
 };
 
@@ -282,8 +283,9 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // any other 4xx would be an error it reports. Drilled by disabling the guard:
   // every GET row holding a valid key fails as `TimeoutError`; the raw-socket
   // row below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get
-  // the transport's own 405, after auth, with an `Allow` that names GET.
-  const ALLOW = "POST, DELETE, OPTIONS";
+  // the transport's own 405, after auth, with an `Allow` that names GET; the
+  // keyed DELETE gets the transport's 200.
+  const ALLOW = "POST, OPTIONS";
   const rows: [string, string, RequestInit][] = [
     // Every key shape, because the answer is about the method, not the caller:
     // no key never reaches authenticate(), and a right key never reaches the
@@ -296,6 +298,13 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     ["HEAD, right key", `/?key=${KEY}`, { method: "HEAD" }],
     ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
     ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
+    // DELETE too. The SDK client sends one only from terminateSession(), which
+    // returns before sending when it holds no session id, and this server strips
+    // mcp-session-id from every response — so no client sends one here, and a
+    // keyed one used to buy a resolve and a build for a transport with nothing
+    // to close. The client accepts 405 from terminateSession() by spec.
+    ["DELETE, right key", "/", { method: "DELETE", headers: AUTH }],
+    ["DELETE, no key", "/", { method: "DELETE", headers: H }],
     // One of the two shapes SMD-1246's review found falling past the
     // /.well-known/ route to the catch-all: Hono matches paths case-sensitively.
     // It used to hang; it is a GET. The other shape is the raw-socket row below.
@@ -313,8 +322,9 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
   // catch-all and hung. Bun's fetch() collapses `//` to `/` before sending — the
   // row above would have probed the 404 route — so this one writes the request
-  // line itself. The status line is enough: 405 means the guard answered, and a
-  // hang is reported as the timeout marker.
+  // line itself. The status code is enough: 405 means the guard answered, and a
+  // hang is reported as the timeout marker. The reason phrase is Bun's, not
+  // Hono's (Hono sets no statusText), so it is not asserted.
   const rawStatusLine = (line: string) =>
     new Promise<string>((resolve) => {
       let buf = "";
@@ -329,24 +339,15 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
           close() { done(buf.split("\r\n")[0] || "<closed with no status line>"); },
           error() { done("<socket error>"); },
         },
-      });
+      }).catch((e) => done(`<connect failed: ${e instanceof Error ? e.message : String(e)}>`));
     });
   const doubled = await rawStatusLine(`GET //.well-known/oauth-protected-resource?key=${KEY}`);
-  assert(doubled === "HTTP/1.1 405 Method Not Allowed", `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
+  assert(doubled.startsWith("HTTP/1.1 405"), `GET, doubled-slash discovery path with the key, on the wire → 405 (${doubled})`);
 
-  // One definition of the method list: what the preflight advertises is what
-  // the refusal names. Drilled by editing either string.
-  const pre = await fetch(BASE, { method: "OPTIONS" });
-  assert(pre.headers.get("access-control-allow-methods") === ALLOW, "OPTIONS advertises the same list the 405 names");
-
-  // DELETE is the one non-POST method the transport still answers: it closes
-  // the (empty, per-request) session and returns 200 — and completes. The SDK
-  // client sends it from terminateSession() and accepts 200 or 405.
-  const del = await probe("/", { method: "DELETE", headers: AUTH });
-  assert(del.status === 200, `DELETE with the key → 200 (${del.status})`);
-  assert(del.cors, "DELETE: CORS present");
-  const delNoKey = await probe("/", { method: "DELETE", headers: H });
-  assert(delNoKey.status === 200 && delNoKey.envelope, `DELETE without a key → the JSON-RPC refusal, as POST gets (${delNoKey.status})`);
+  // One list derives the guard, its Allow and the preflight's advertisement:
+  // what OPTIONS advertises is what the 405 names. Drilled by editing the list.
+  const pre = await probe("/", { method: "OPTIONS" });
+  assert(pre.status === 200 && pre.methods === ALLOW, `OPTIONS advertises the same list the 405 names (${pre.methods})`);
 
   // The POST path is untouched — [4] through [10] above ran against the same
   // server; a spot check here so this block fails on its own if the guard ever

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-two numbered changes on top of the pin. Seven fix defects found in an
+Seventy-three numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–72 are the numbered `###` sections** further down, which is
+sections. Changes **18–73 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4794,9 +4794,9 @@ got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an M
 request and wrong for this one. With a key — not the connector's shape, its
 discovery GET carries none, but any client that echoes the URL's `?key=` — it
 authenticated, cost an agent-registry resolve, and was handed to
-`StreamableHTTPTransport`, which opened an SSE stream nothing writes to or
-closes: the response never completes (SMD-1259, found by this change's review
-pass). Neither is 404. Nothing exercised the path: no test
+`StreamableHTTPTransport`, which opened an SSE stream nothing wrote to or
+closed: the response never completed (SMD-1259, found by this change's review
+pass; closed by change 73). Neither is 404. Nothing exercised the path: no test
 named `.well-known`, and `deploy/smoke.sh` only ever POSTed to the endpoint.
 Local Claude Code over `x-brain-key` never asks, which is why it stayed
 invisible in development.
@@ -4821,8 +4821,9 @@ check 2 probes the **origin root** — where RFC 9728 puts the document and wher
 claude.ai looks, with the server's path as a suffix when the URL carries one —
 with no key and following redirects, as the SDK client does, and naming the URL
 and code that missed; the base URL must carry a scheme and no query string, or
-the script refuses it rather than derive the wrong origin. It is the
-one check a Supabase deployment cannot pass, and that failure is real.
+the script refuses it rather than derive the wrong origin. It was the
+one check a Supabase deployment cannot pass, and that failure is real; change
+72's check 3 is the second.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
 
@@ -4843,7 +4844,7 @@ found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
 #425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one;
-the method axis is closed by change 72, which answers GET with 405 before
+the method axis is closed by change 73, which answers GET with 405 before
 `authenticate()`. The path axis (a mount point) stays open there too.
 The concrete reason the path axis waits: a mount at `/` makes the connector URL
 the mount point, and a proxy that forwards under an unstripped prefix — the shape
@@ -10344,11 +10345,11 @@ reports the upstream PR gate currently fails on **every** fork-originated PR.
 
 ---
 
-### 72. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
+### 73. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
 
 `server-portable/index.ts`, `server-portable/test-server.ts` ([13]),
-`deploy/smoke.sh` (check 3), `deploy/README.md` (Linear SMD-1259, filed from
-change 42's first review pass; upstream
+`deploy/smoke.sh` (check 3), `deploy/README.md`, `SETUP.md` (Linear SMD-1259,
+filed from change 42's first review pass; upstream
 [#424](https://github.com/NateBJones-Projects/OB1/issues/424)).
 
 **The defect.** `app.all("*")` handled every method. Beneath it the Accept patch
@@ -10370,27 +10371,46 @@ configured with the key, a client echoing `?key=` on GET — could park
 connections at will, and nothing rate-limited it.
 
 **The change.** At the top of the catch-all, before `authenticate()`: a request
-whose method is neither POST nor DELETE gets `405 Method Not Allowed` with
-`Allow: POST, DELETE, OPTIONS` and the CORS headers. That is the Streamable HTTP
+whose method is not POST gets `405 Method Not Allowed` with
+`Allow: POST, OPTIONS` and the CORS headers. That is the Streamable HTTP
 transport's documented answer from a server that offers no server-initiated
 stream. Before auth, so no key shape reaches the agent registry or builds a
 server, and the answer is the same for no key, a wrong key and a revoked one — it
 is about the method, not the caller. HEAD, PUT and PATCH take the same door (the
 transport's own 405 for PUT and PATCH came after auth and named `GET` in its
-`Allow`). DELETE still reaches the transport, which closes its empty session and
-answers 200; the SDK client sends it from `terminateSession()` and accepts 200
-or 405. The method list is one constant: the OPTIONS preflight's
-`Access-Control-Allow-Methods` and the 405's `Allow` read the same string, so
-they cannot disagree. The CORS header thereby loses `GET`, which a browser never
-consults it for — GET is a CORS-safelisted method and is never preflighted.
+`Allow`), and so does DELETE. The first draft kept DELETE on the premise that the
+SDK client sends it from `terminateSession()` and accepts 200 or 405; the review
+pass read the client and found the premise false in the way that matters:
+`terminateSession()` returns before sending anything when it holds no session
+id, the id comes only from an `mcp-session-id` response header, and this server
+strips that header from every response. No client sends DELETE here; a keyed
+one bought a resolve and a server build for a transport with nothing to close.
+The client accepts 405 from `terminateSession()` by spec, so there is nothing
+to keep the door open for. One list — `["POST"]` — derives the guard, the
+405's `Allow` and the OPTIONS preflight's `Access-Control-Allow-Methods`, so the
+three cannot drift; the first draft had the list in a string and the guard in a
+hand-written boolean, which the review named as a value defined twice. The CORS
+header thereby loses `GET` and `DELETE`. That changes nothing for a
+browser-hosted client: a preflight's method check passes a CORS-safelisted
+method (GET, HEAD, POST) whether or not the header lists it, so a preflighted GET
+— one carrying `mcp-protocol-version` or an auth header — still goes out and
+meets the 405.
+
+**A contract change for health checks.** A keyless `GET /` or `HEAD /` used to
+get the 200 JSON-RPC refusal; it now gets 405. A platform-default HTTP probe —
+Kubernetes `httpGet`, a load balancer's target check, an uptime monitor — that
+expects 2xx from GET will mark a healthy server down. The image's `HEALTHCHECK`
+POSTs and is unaffected; `deploy/README.md` now says a probe must POST or use
+OPTIONS. Nothing in the tree GETs the endpoint for liveness (checked: the
+Dockerfile, `compose.yaml`, `smoke.sh`, the workflows).
 
 **What the ticket's smallest fix would have missed.** SMD-1259's second review
 pass offered a method condition on the Accept patch as the minimal fix. Read
 against the SDK client (`@modelcontextprotocol/sdk` 1.24.3,
 `_startOrAuthSse`): the client sets `Accept: text/event-stream` on its own GET,
 so the transport would have opened the stream for it whether or not the patch
-ran. The patch is left as it was, with a comment saying only POST and DELETE now
-reach it. The guard is the fix; gating the patch as well would have been a second
+ran. The patch is left as it was, with a comment saying only POST now reaches
+it. The guard is the fix; gating the patch as well would have been a second
 mechanism with no observable behaviour left to test.
 
 **What the client does with a 405.** Read in the SDK source, not asserted:
@@ -10400,27 +10420,37 @@ expected case that should not trigger an error" — and any other non-2xx is a
 `StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
 client. A live connector has not been seen to do it; see below.
 
-**Verified.** `test-server.ts` [13], 42 assertions against the real server: nine
-fetch rows — GET under no key, a wrong key, the right key in the header and in
-`?key=`, GET carrying the SDK client's own headers, HEAD, PUT, PATCH, and the
-case-variant discovery path — each asserted for 405, an `Allow` naming the
-served methods, CORS, and a body that is not a JSON-RPC envelope; the
-doubled-slash path written as a raw request line over a socket, because Bun's
-`fetch()` collapses `//` to `/` before sending and a fetch row probed the 404
-route instead (found when that row failed); the OPTIONS preflight's method list
-equal to the 405's; DELETE with a key → 200 and without one → the JSON-RPC
-refusal; POST still reaching the transport. Drilled by disabling the guard, 24
-assertions fail: the fetch rows holding a valid GET fail as `TimeoutError`; the
-raw-socket row as a `200 OK` status line (the stream's headers flush at once; it
-is the body that never ends); the rows without a key as 200 with an envelope;
-HEAD, PUT and PATCH by an `Allow` that names GET, from the transport's own 405
-after auth. The suite's 2 s abort on every routing probe stays: it
-is what turns the failure mode this change closes into a red assertion instead of
-a stuck CI job, so it is the test's teeth, not scaffolding to retire.
-`deploy/smoke.sh` check 3 GETs the endpoint with the key and expects 405 — a
-`000` is the hang meeting `--max-time`; the former checks 3–7 are now 4–8.
-`tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
-281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
+**Verified.** `test-server.ts` [13], 47 assertions against the real server:
+eleven fetch rows — GET under no key, a wrong key, the right key in the header
+and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT, PATCH,
+DELETE with and without a key, and the case-variant discovery path — each
+asserted for 405, an `Allow` naming the served methods, CORS, and a body that
+is not a JSON-RPC envelope; the doubled-slash path written as a raw request line
+over a socket, because Bun's `fetch()` collapses `//` to `/` before sending and
+a fetch row probed the 404 route instead (found when that row failed), asserted
+on the status code alone since the reason phrase is Bun's, not Hono's; the
+OPTIONS preflight's method list equal to the 405's, through the same abortable
+probe as every other row; POST still reaching the transport. Drilled by
+disabling the guard, 29 assertions fail: the fetch rows holding a valid
+GET fail as `TimeoutError`; the raw-socket row as a `200 OK` status line (the
+stream's headers flush at once; it is the body that never ends); the rows
+without a key as 200 with an envelope; HEAD, PUT and PATCH by an `Allow` that
+names GET, from the transport's own 405 after auth; the keyed DELETE by the
+transport's 200. The suite's 2 s abort on every routing probe stays: it is what
+turns the failure mode this change closes into a red assertion instead of a
+stuck CI job, so it is the test's teeth, not scaffolding to retire.
+`deploy/smoke.sh` check 3 GETs the endpoint **with no key** and expects 405. No
+key, because the answer comes before `authenticate()` so a key proves nothing,
+and because the script's status helper follows redirects with `-L`, on which
+curl forwards a custom header to whatever host comes next — the first draft sent
+the key, and behind a redirecting front proxy it would have landed in a third
+party's access log. A 200 there is the guard missing; a hang would also read as
+200 under `--max-time`, since the stream's headers flush before the body stalls
+(the first draft said `000`, which curl prints only when no status line arrives
+at all). The former checks 3–7 are now 4–8; `deploy/README.md` and `SETUP.md`
+say eight. `tsc --noEmit` clean; the Workers bundle builds
+(`wrangler deploy --dry-run`, 281 KiB gzipped). The compose stack's smoke run is
+CI's `deploy-stack` job.
 
 **Not verified: a live connector.** The same standing as change 42: a real
 Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
@@ -10432,7 +10462,8 @@ Hono's `notFound` answer `/favicon.ico`, `/robots.txt` and `/health` without a
 resolve — remains the deployment-contract decision change 42 describes.
 `server/index.ts`, the Deno Edge Function upstream deploys, carries the same
 Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
-their fix for it.
+their fix for it. A Supabase deployment therefore fails smoke check 3 as it
+fails check 2, and for as real a reason: with a key, its GET hangs.
 
 Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
