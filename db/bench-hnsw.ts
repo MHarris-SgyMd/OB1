@@ -148,7 +148,7 @@
  * every filter up to about 1% of a ten-million-row table from the GIN index
  * (exact, whatever the bounds say) and walks HNSW only for broad filters,
  * where the walk needs a few hundred tuples and the recall it loses is the
- * index's own at the default ef_search (section A's control: 8.3 / 4.7 / 2.2
+ * index's own at the default ef_search (section A's control: 8.2 / 5.0 / 2.2
  * of 10 unfiltered at 10k / 100k / 1M random rows). The seeded bounds matter
  * in one band — moderately selective filters at around a million rows, where
  * the walk does walk and pgvector's default MEMORY bound cuts it short — and
@@ -183,7 +183,7 @@
  */
 
 import { SQL } from "bun";
-import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, explainPrepared, extractBody, preparedSignature, requireDatabaseUrl, resetSchema, routingAt, seededRandom } from "./test-support.ts";
 import type { Branch } from "./test-support.ts";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, HNSW_BOUNDS, HNSW_SEEDS, parseSetConfig } from "./config.mjs";
 
@@ -342,15 +342,19 @@ function queriesFor(n: number): number[][] {
   return Array.from({ length: Q }, () => unitVector(DIM));
 }
 
-// The skip must equal the draws it stands in for, or the queries are not the
-// published ones: checked once against a thousand real draws before anything
-// loads.
+// The skip must equal the draws a ROW costs, or the queries are not the
+// published ones: checked once, before anything loads, by generating one row
+// the way rowBatches does (the tier coin, then the vector) beside one skip of
+// the budget queriesFor assumes — so a generator that starts caching its
+// second Gaussian, or a row that gains a draw, fails here rather than
+// landing the queries off the stream while every other check still passes.
 {
   const a = seedFor(1);
   const b = seedFor(1);
-  for (let i = 0; i < 1000; i++) a.rnd();
-  b.skip(1000);
-  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip does not reproduce the stream; the queries would not be the published ones");
+  a.rnd();
+  a.unitVector(DIM);
+  b.skip(1 + 2 * DIM);
+  if (a.rnd() !== b.rnd()) throw new Error("seededRandom.skip(1 + 2 * DIM) does not reproduce one row's draws; the queries would not be the published ones");
 }
 
 type Row = { doc: number; v: number[]; tiers: string[] };
@@ -409,6 +413,8 @@ type LoadStats = {
   chunkRows: number;
   chunkS: number;
   buildS: Record<string, number>;
+  /** The non-HNSW indexes rebuilt after the load, and their time together; the set differs by schema. */
+  otherIndexes: string[];
   otherIndexesS: number;
   sizes: Record<string, number>;
   maintenanceMem: string;
@@ -424,8 +430,11 @@ type LoadStats = {
  * generator, the JSON and the confound check run between them on the client
  * and would otherwise scale the "load" with OB1_BENCH_QUERIES. The schema
  * under the load differs between the arms (001–013 or the whole set), which
- * is why the indexes and triggers come off: what remains per row is the heap
- * and the primary key, the same in both. Returns the tier match counts too —
+ * is why the indexes and triggers come off: what remains per row during the
+ * INSERTs is the heap and the primary key, the same in both. The set rebuilt
+ * afterwards is not the same — 023's and 025's three indexes exist only under
+ * the whole schema — so section L names how many "other indexes" its column
+ * timed. Returns the tier match counts too —
  * counted as the rows are generated, so no pass over the table is needed.
  */
 async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries: number[][]): Promise<{ stats: LoadStats; matches: Map<string, number> }> {
@@ -501,13 +510,17 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   await sql.unsafe(`SET log_min_messages = notice`).catch(() => undefined);
   await sql.unsafe(`SET max_parallel_maintenance_workers = ${BUILD_WORKERS}`);
   const buildS: Record<string, number> = {};
+  const otherIndexes: string[] = [];
   let otherIndexesS = 0;
   for (const { name, def } of secondary) {
     const t2 = performance.now();
     await sql.unsafe(def);
     const s = (performance.now() - t2) / 1000;
     if ((HNSW_INDEXES as readonly string[]).includes(name)) buildS[name] = s;
-    else otherIndexesS += s;
+    else {
+      otherIndexes.push(name);
+      otherIndexesS += s;
+    }
   }
   for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`ALTER TABLE ${rel} ENABLE TRIGGER USER`);
   await sql.unsafe(`VACUUM ANALYZE thoughts`);
@@ -519,7 +532,7 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   await sql.unsafe(`RESET log_min_messages`).catch(() => undefined);
 
   return {
-    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS },
+    stats: { scale: n, schema, confound: nearest, insertS, chunkRows: Number(chunkRows), chunkS, buildS, otherIndexes, otherIndexesS, sizes, maintenanceMem, workers: BUILD_WORKERS },
     matches,
   };
 }
@@ -728,7 +741,7 @@ async function withPrepared<T>(
 ): Promise<T> {
   const applied = await applyFunctionSettings(sql, { scope: "session" });
   await sql.unsafe(`SET plan_cache_mode = ${mode}`);
-  await sql.unsafe(`PREPARE ${name}(vector(${DIM}), float, int, jsonb, float, float) AS ${body}`);
+  await sql.unsafe(`PREPARE ${name}${preparedSignature(DIM)} AS ${body}`);
   const result = await run((q, filter) => `EXECUTE ${name}('${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0)`);
   await sql.unsafe(`DEALLOCATE ${name}`);
   await sql.unsafe(`RESET plan_cache_mode`);
@@ -848,7 +861,7 @@ for (const n of SCALES) {
   await chunksCarryParentVectors(sql);
   loads.push(stats);
   console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
-  console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
+  console.log(`  HNSW builds       ${Object.entries(stats.buildS).map(([k, s]) => `${k} ${s.toFixed(0)} s`).join(", ")}, ${stats.otherIndexes.length} other indexes ${stats.otherIndexesS.toFixed(0)} s (maintenance_work_mem ${stats.maintenanceMem}, up to ${stats.workers} workers)`);
 
   // The exact answer for each (tier, query) once — shared by both arms.
   const withCounts = tiers.map((t) => ({ ...t, matches: matches.get(t.key)! }));
@@ -881,13 +894,19 @@ for (const n of SCALES) {
         // 023's apply-time fingerprint backfill UPDATEs every loaded row (none
         // carries a fingerprint), and the column is indexed, so the update is
         // not HOT: every row gets a new heap tuple and a second, identical
-        // entry in the HNSW index beside its dead twin. Left there, half the
-        // scan's ef_search frontier is dead tuples and the published scales'
-        // recall floor is measured on a graph the large scales (schema applied
-        // to an empty table) never have (third review pass). VACUUM removes
-        // the dead entries; ANALYZE refreshes what 023's rewrite moved.
-        await sql.unsafe(`VACUUM ANALYZE thoughts`);
-        await sql.unsafe(`VACUUM ANALYZE thought_chunks`);
+        // entry in the HNSW index beside its dead twin (third review pass). A
+        // plain VACUUM removes the dead entries but leaves the heap at twice
+        // its pages and the graph as the incrementally inserted twins, repaired
+        // — a state the large scales, whose schema is applied to an empty
+        // table, never have (fourth review pass). VACUUM FULL rewrites the
+        // heap and rebuilds every index from scratch, the bulk-built state the
+        // load produced, and the dead-tuple count is asserted rather than
+        // assumed.
+        for (const rel of ["thoughts", "thought_chunks"]) {
+          await sql.unsafe(`VACUUM FULL ANALYZE ${rel}`);
+          const [{ dead }] = await sql.unsafe(`SELECT n_dead_tup::int AS dead FROM pg_stat_user_tables WHERE relname = $1`, [rel]);
+          if (Number(dead) !== 0) throw new Error(`${rel} still has ${dead} dead tuples after VACUUM FULL; the after arm would measure a table the load did not produce`);
+        }
       }
       await reconnect(); // the database-level bounds 014 seeded are read at connect
       const inForce = Object.fromEntries((await sql.unsafe(BOUNDS_IN_FORCE_SQL)).map((r: { name: string; value: string | null }) => [r.name, r.value]));
@@ -1009,12 +1028,12 @@ await sql.close();
 const mb = (b: number) => (b / 1048576).toFixed(0);
 
 console.log("\n### L. The load: insert rate, HNSW build time and relation sizes\n");
-console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together. Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched.\n");
-console.log("| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |");
+console.log("Rows go in as multi-row INSERTs with every secondary index dropped and user triggers disabled (\"schema\" is what the table carried: 001–013 where the before arm runs, the whole set above); only the INSERT round-trips are timed. The indexes are built afterwards with the maintenance_work_mem shown — the two HNSW builds timed each, the others together, with how many there were (the set differs by schema: 023's and 025's three exist only under the whole one). Sizes are pg_table_size (heap + TOAST) and pg_relation_size (index), in MiB. \"workers\" is the cap given to max_parallel_maintenance_workers, not the count launched.\n");
+console.log("| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |");
 console.log("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |");
 for (const l of loads) {
   console.log(
-    `| ${l.scale.toLocaleString()} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} | ${l.maintenanceMem} | ${l.workers} |`
+    `| ${l.scale.toLocaleString()} | ${l.schema} | ${l.insertS.toFixed(0)} | ${Math.round(l.scale / l.insertS).toLocaleString()} | ${l.chunkRows.toLocaleString()} | ${l.chunkS.toFixed(0)} | ${mb(l.sizes.thoughts)} | ${mb(l.sizes.thoughts_embedding_idx)} | ${l.buildS.thoughts_embedding_idx.toFixed(0)} | ${mb(l.sizes.thought_chunks)} | ${mb(l.sizes.thought_chunks_embedding_idx)} | ${l.buildS.thought_chunks_embedding_idx.toFixed(0)} | ${l.otherIndexesS.toFixed(0)} (${l.otherIndexes.length}) | ${l.maintenanceMem} | ${l.workers} |`
   );
 }
 
@@ -1075,7 +1094,7 @@ for (const g of walk) {
 }
 
 console.log(`\n### E. The walk through the function, under the seeded bounds (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${HNSW_SEEDS[b as keyof typeof HNSW_SEEDS]}`).join(", ")}), under pgvector's defaults (${HNSW_BOUNDS.map((b) => `${b.replace("hnsw.", "")}=${pgvectorDefaults[b]}`).join(", ")}), and under the seeded bounds with hnsw.ef_search = ${EF_SEARCH_RAISED}, beside the exact branch with its threshold lifted to the same tier\n`);
-console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of ${Number(HNSW_SEEDS["hnsw.max_scan_tuples"]).toLocaleString()} and pgvector's ${Number(pgvectorDefaults["hnsw.max_scan_tuples"]).toLocaleString()}. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
+console.log(`"walk visits" is the header's arithmetic, v_fetch × N / matching rows (${routing.vFetch} × N / matches): the tuples the walk must pass to fill its candidate budget, against the seeded cap of ${Number(HNSW_SEEDS["hnsw.max_scan_tuples"]).toLocaleString()} and pgvector's ${Number(pgvectorDefaults["hnsw.max_scan_tuples"]).toLocaleString()}. The seeded column is section B's after-arm call for the same tier made again, later in the same session, as the paired control for the other two settings — its median differs from B's by cache warmth, not by anything the function did. The exact column is the exact branch's own statement with v_exact lifted past the tier, under a forced custom plan (the plan the function's medians are), measured only where an exact answer is conceivable (at most ${EXACT_CEILING.toLocaleString()} matching rows).\n`);
 console.log(`| rows | filter matches | matching rows | walk visits | seeded: returned | in exact top-10 | median ms | defaults: returned | in exact top-10 | median ms | ef_search ${EF_SEARCH_RAISED}: returned | in exact top-10 | median ms | exact branch: returned | in exact top-10 | median ms |`);
 console.log("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
 const cell = (r: FilteredResult) => `${r.returned.toFixed(1)} | ${r.overlap.toFixed(1)} | ${r.ms.toFixed(2)}`;

@@ -103,7 +103,13 @@ there, for that check to pass.
 
 ## What this does not cover
 
-- **TLS, backups, resource limits, log shipping.** Reference topology only.
+- **TLS, backups, resource limits, log shipping.** Reference topology only. One
+  limit is set because the stack met it: the postgres service's `shm_size`
+  (`POSTGRES_SHM_SIZE`, 1 GB), since a parallel HNSW index build keeps its whole
+  graph in `/dev/shm` and a container's default 64 MB fails the rebuild after a
+  bulk load of a few hundred thousand rows. Raise it with `maintenance_work_mem`
+  before rebuilding a large index, or build with
+  `max_parallel_maintenance_workers = 0` (`db/README.md`, "Caveats").
 - **A Supabase Edge Function passing check 2.** On Supabase the API gateway answers
   the OAuth discovery path with 401 before the function sees it, so the check
   fails there — and the failure is real: the claude.ai connector will not open

@@ -411,8 +411,24 @@ export async function matchThoughtsOid(sql: SQL): Promise<number> {
   return Number(rows[0].oid);
 }
 
+/**
+ * The deployed match_thoughts' definition and its INPUT argument names, for
+ * the rewriters below. proargnames lists the RETURNS TABLE columns too (mode
+ * 't'), and `id` is a column in every body, so only the IN modes count.
+ */
+async function matchThoughtsDef(sql: SQL): Promise<{ def: string; argNames: string[] }> {
+  const [{ def, argNames }] = await sql.unsafe(
+    `SELECT pg_get_functiondef(p.oid) AS def,
+            COALESCE((SELECT array_agg(a.n ORDER BY a.ord) FROM unnest(p.proargnames, p.proargmodes) WITH ORDINALITY AS a(n, m, ord)
+                      WHERE a.m IS NULL OR a.m IN ('i', 'b', 'v')), p.proargnames) AS "argNames"
+     FROM pg_proc p WHERE p.oid = $1::oid`,
+    [await matchThoughtsOid(sql)]
+  );
+  return { def, argNames: argNames ?? [] };
+}
+
 export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: { overrides?: Record<string, string> } = {}): Promise<string> {
-  const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
+  const { def, argNames } = await matchThoughtsDef(sql);
   let block: string | undefined;
   if (branch === "route") {
     // `SELECT array_agg(s.id) INTO v_ids FROM (...) s;` — minus the INTO.
@@ -445,7 +461,12 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
   const route = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
   if (route && /\bv_ids\b/.test(body)) {
     if (!/^\s*WITH\s/.test(body)) throw new Error("the branch that reads v_ids no longer opens with WITH; the bench's rewrite does not apply");
-    body = body.replace(/^\s*WITH\s/, () => `WITH ob1_ids AS MATERIALIZED (SELECT array_agg(s.id) AS ids ${route[1]}), `);
+    // The routing statement aliases thought_chunks as `k`, as the exact
+    // branch's own chunk probe does; renamed on the way in so a plan reader
+    // attributing nodes by alias (bench-hnsw.ts shapeOf) cannot take the
+    // routing CTE's EXISTS probe for the branch's (fourth review pass).
+    const routeText = route[1].replace(/\bk\b/g, "rk");
+    body = body.replace(/^\s*WITH\s/, () => `WITH ob1_ids AS MATERIALIZED (SELECT array_agg(s.id) AS ids ${routeText}), `);
     body = body.replace(/\bv_ids\b/g, () => `((SELECT ids FROM ob1_ids)::uuid[])`);
   }
   // 020's two parameters are $5 and $6; a body from before 020 (a bench's
@@ -453,6 +474,7 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
   // valid, so every explainer passes six arguments.
   return resolveLocals(body, declaredLocals(def), {
     overrides: opts.overrides,
+    argNames,
     params: {
       query_embedding: `$1::vector(${dim})`,
       match_threshold: "$2::float",
@@ -475,9 +497,12 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
  * exact branch — and the override is substituted where the local was, so
  * nothing downstream is split on a literal. One routine for extractBody and
  * routingAt (third review pass of SMD-1018: two copies had already diverged
- * on overrides and on the leftover check).
+ * on overrides and on the leftover check). `argNames` are the function's own
+ * (pg_proc.proargnames): a parameter the caller's table does not name — a
+ * seventh argument a redefinition adds — is refused here by name, not by the
+ * server after the load with "column does not exist" (fourth review pass).
  */
-function resolveLocals(text: string, locals: Map<string, string>, opts: { overrides?: Record<string, string>; params: Record<string, string> }): string {
+function resolveLocals(text: string, locals: Map<string, string>, opts: { overrides?: Record<string, string>; params: Record<string, string>; argNames: string[] }): string {
   let out = text;
   for (let pass = 0; pass < locals.size + 1; pass++) {
     for (const [name, expr] of locals) out = out.replace(new RegExp(`\\b${name}\\b`, "g"), () => `(${opts.overrides?.[name] ?? expr})`);
@@ -485,19 +510,16 @@ function resolveLocals(text: string, locals: Map<string, string>, opts: { overri
   for (const [name, value] of Object.entries(opts.params)) out = out.replace(new RegExp(`\\b${name}\\b`, "g"), () => value);
   const leftover = /\b(v_\w+)\b/.exec(out);
   if (leftover) throw new Error(`unrewritten local ${leftover[1]} in match_thoughts body`);
+  for (const arg of opts.argNames) {
+    if (!(arg in opts.params) && new RegExp(`\\b${arg}\\b`).test(out)) throw new Error(`match_thoughts parameter ${arg} is read by the extracted text and this rewrite does not name it`);
+  }
   return out;
 }
 
+/** The PREPARE parameter list every explainer declares — match_thoughts' six arguments since 020, in one place. */
+export const preparedSignature = (dim: number) => `(vector(${dim}), float, int, jsonb, float, float)`;
 
-/**
- * Apply match_thoughts' function-level SET clauses to the current transaction,
- * so a statement extracted from its body is planned as the function plans it.
- * proconfig is read as an array and applied through set_config with bound
- * parameters: a joined string split on commas would break the first time a
- * list-valued setting such as `search_path = public, extensions` is added to
- * the function. A plan mode is skipped: the callers exist to show both plans,
- * and a successor that forced one would otherwise hide the other.
- */
+
 /**
  * The DECLARE block's locals, name → expression text: `name  type words  :=
  * expr;` — the type may be several words (`double precision`, `timestamp with
@@ -523,20 +545,38 @@ function declaredLocals(def: string): Map<string, string> {
  * (SMD-1464) moves every consumer at once (SMD-1018 review pass).
  */
 export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number }> {
-  const [{ def }] = await sql.unsafe(`SELECT pg_get_functiondef($1::oid) AS def`, [await matchThoughtsOid(sql)]);
+  const { def, argNames } = await matchThoughtsDef(sql);
   const locals = declaredLocals(def);
   if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
-  // The same substitution the explainers use, with the call's arguments in
-  // place of the parameters; a local that reads a parameter this table does
-  // not name is caught by the leftover check rather than by the server.
+  // The same substitution the explainers use, with the arguments the benches
+  // call with in place of every parameter (the threshold is -1.0 in every
+  // bench call; a local that read it would route by the call's value); a
+  // parameter a redefinition adds is refused by name in resolveLocals.
   const resolve = (name: string) =>
     resolveLocals(`(${name})`, locals, {
-      params: { match_count: `${matchCount}::int`, match_threshold: "0.7::float", recency_weight: "0.0::float", half_life_days: "90.0::float" },
+      argNames,
+      params: {
+        query_embedding: "NULL::vector",
+        match_threshold: "-1.0::float",
+        match_count: `${matchCount}::int`,
+        filter: "'{}'::jsonb",
+        recency_weight: "0.0::float",
+        half_life_days: "90.0::float",
+      },
     });
   const [row] = await sql.unsafe(`SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact`);
   return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact) };
 }
 
+/**
+ * Apply match_thoughts' function-level SET clauses to the current transaction,
+ * so a statement extracted from its body is planned as the function plans it.
+ * proconfig is read as an array and applied through set_config with bound
+ * parameters: a joined string split on commas would break the first time a
+ * list-valued setting such as `search_path = public, extensions` is added to
+ * the function. A plan mode is skipped: the callers exist to show both plans,
+ * and a successor that forced one would otherwise hide the other.
+ */
 export async function applyFunctionSettings(tx: SQL, opts: { scope?: "transaction" | "session" } = {}): Promise<string[]> {
   const entries = await tx.unsafe(`SELECT unnest(proconfig) AS kv FROM pg_proc WHERE oid = $1::oid`, [await matchThoughtsOid(tx)]);
   const applied: string[] = [];
@@ -579,7 +619,7 @@ export async function explainPrepared(
   opts: { body: string; dim: number; args: string; mode: "force_custom_plan" | "force_generic_plan"; warm?: boolean }
 ): Promise<{ text: string; ms: number; buffers: number }> {
   await tx.unsafe(`SET LOCAL plan_cache_mode = ${opts.mode}`);
-  await tx.unsafe(`PREPARE ob1_explain(vector(${opts.dim}), float, int, jsonb, float, float) AS ${opts.body}`);
+  await tx.unsafe(`PREPARE ob1_explain${preparedSignature(opts.dim)} AS ${opts.body}`);
   if (opts.warm) await tx.unsafe(`EXECUTE ob1_explain(${opts.args})`);
   const rows = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, COSTS) EXECUTE ob1_explain(${opts.args})`);
   await tx.unsafe(`DEALLOCATE ob1_explain`);
@@ -636,8 +676,10 @@ export function seededRandom(seed: number): {
 } {
   let a = seed >>> 0;
   const skip = (k: number) => {
-    // a += k * 0x6d2b79f5 (mod 2^32); k may exceed 2^32 at a hundred million rows.
-    a = (a + Math.imul(Number(BigInt(k) % 4294967296n), 0x6d2b79f5)) >>> 0;
+    // a += k * 0x6d2b79f5 (mod 2^32). Math.imul takes k through ToInt32, which
+    // is the reduction mod 2^32 itself; k is exact below 2^53, far past a
+    // hundred million rows' draws.
+    a = (a + Math.imul(k, 0x6d2b79f5)) >>> 0;
   };
   const rnd = () => {
     a = (a + 0x6d2b79f5) >>> 0;

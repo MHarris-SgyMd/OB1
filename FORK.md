@@ -1643,14 +1643,16 @@ memory. The before arm runs at the published scales only; above them the
 question is about the shipped function.
 
 **Three full passes were run, and the tables are the third's — except the
-two published scales, re-measured a fourth time after the third review pass
-found the after arm's index full of dead twins (below).** Latencies on this
-VM run about 1.9× the lines published above for the same tiers (the before
-arm's default path 2.4 ms against 1.26, and the after arm's the same factor
-over its own published line once the twins were gone; the recall columns
-reproduce within 0.5). Between passes the latencies agreed within about 30%
-and the recall figures within 0.3 — with one exception that turned out to be
-the finding: for filters matching roughly half a percent to one percent of
+two published scales, re-measured twice more after the third review pass
+found the after arm's index full of dead twins (below); their rows are the
+last pass's.** Latencies on this VM run two to two and a half times the
+lines published above for the same tiers and vary by about 30% from pass to
+pass (the before arm's default path at 100,000 rows: 2.4 ms in one pass, 3.3
+in the next, against the published 1.26); the after arm's default path
+matches the before arm's within that spread, as it did in the published run,
+and the recall columns reproduce within 0.5. Between passes the recall
+figures agreed within 0.3 — with one exception that turned out to be the
+finding: for filters matching roughly half a percent to one percent of
 the table, the planner's choice between the GIN index and the HNSW walk
 flipped from pass to pass, at a million rows and at ten million, on the same
 rows under a fresh `ANALYZE` each time. Where a cell below has two values,
@@ -1663,8 +1665,11 @@ would otherwise write a row per row at every scale (it is in 001–013, so the
 published run's `thought_audit` held a row per thought where this run's is
 empty; nothing after 014 reads it), and 016's extraction trigger only above
 100,000 rows, since the before arm loads under 001–013 and the whole schema
-is applied above; what remains per row is the heap and the primary key, the
-same under either schema — and only the INSERT round-trips are timed. One
+is applied above; what remains per row during the INSERTs is the heap and the
+primary key, the same under either schema — the set of indexes rebuilt
+afterwards is not, 023's and 025's three existing only under the whole one,
+which is what the "other indexes" column counts — and only the INSERT
+round-trips are timed. One
 more thing the arms did differently, found by the third review pass and
 fixed before the published-scale tables below were re-measured: at the two
 published scales the after arm applies 023 onto the loaded rows, and 023's
@@ -1674,14 +1679,16 @@ identical HNSW entry per row beside a dead twin, which no VACUUM removed, so
 the earlier passes measured the 10,000- and 100,000-row tables on a graph
 half full of dead tuples that the large scales, whose schema is applied to an
 empty table, never had. The after arm now VACUUMs after its migrations, and
-the two scales were re-measured: the recall floor did not move (8.3 and 4.7
-of 10 against 8.3 and 5.0 — the dead entries are skipped, not scored), the
-latencies roughly halved (the default path 2.4 ms against 3.2 at 100,000, the
-50% tier 7.7 against 16.2, the routing count 3.5 against 11), and the after
-arm's cost over the before arm's is back to the published run's few percent.
-The published lines above predate 023, so they never had the twins; the
-"1.2–2×" this section's first draft attributed to the machine was the machine
-and the twins together. The indexes are built afterwards with
+the two scales were re-measured, twice — once after a plain VACUUM, once
+after the VACUUM FULL the code now runs, which rewrites the heap and rebuilds
+every index from scratch, the state the load produced, with the dead-tuple
+count asserted at zero. The recall floor did not move (8.2 and 5.0 of 10
+against 8.3 and 5.0: dead entries are skipped, not scored). What moved, in
+both re-measurements, were the calls that read the GIN bitmap over the table
+— the 50% tier 8.3 ms against 16.2 at 100,000 rows, its routing count 3.0
+against 11 — while the default path and the ceiling moved by less than the
+pass-to-pass spread. The published lines above predate 023, so they never had
+the twins; what separates this VM from them is the machine and the day. The indexes are built afterwards with
 `maintenance_work_mem` sized for the graph. The parallel build keeps the graph
 in dynamic shared memory, which a container gets 64 MB of by default — the
 first attempt failed at a million rows with "could not resize shared memory
@@ -1690,16 +1697,19 @@ segment … No space left on device" — so `with-postgres.sh` now takes
 peaked at 10.0 GB; pgvector's "graph no longer fits" NOTICE never fired) and
 built in nineteen minutes. The bench's section L, as printed (the two large
 runs with `OB1_PG_SHM_SIZE=4g` and `OB1_PG_SHM_SIZE=11g
-OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say):
+OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say; the count in
+the "other indexes" column is the schema's — four under 001–013, seven under
+the whole set — and was added to the printout after the two large runs):
 
-| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MB | thoughts HNSW MB | build s | chunks MB | chunks HNSW MB | build s | other indexes s | maintenance_work_mem | workers |
+| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
-| 10,000 | 001–013 | 0 | 39,918 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 | 256MB | 4 |
-| 100,000 | 001–013 | 2 | 44,554 | 40,000 | 0 | 38 | 54 | 9 | 13 | 11 | 2 | 0 | 256MB | 4 |
-| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 | 977MB | 4 |
-| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 | 9GB | 4 |
+| 10,000 | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
+| 100,000 | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
+| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
+| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
 
-The index is 1.4× its heap at this width and about 540 bytes a row; the build
+The index is 1.4× its heap at this width and about 570 bytes a row (the
+sizes are MiB; the heap is 410 bytes a row); the build
 runs at ~9,000 rows a second in memory. A hundred million rows was not run:
 by these slopes it is a 39 GB heap, a 54 GB index, 23 GB of chunks and their
 index, a graph that wants ~90 GB of `maintenance_work_mem` to build in memory
@@ -1714,12 +1724,12 @@ scored against an exact scan of the whole table, at pgvector's default
 
 | rows | median ms, asked 10 | median ms, asked 500 | in exact top-10 (ef_search 40) | at ef_search 400 | median ms at 400 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 2.18 | 17.0 | 8.3 | 10.0 | 5.7 |
-| 100,000 | 2.41 | 36.3 | 4.7 | 9.4 | 9.8 |
+| 10,000 | 1.82 | 15.3 | 8.2 | 10.0 | 4.7 |
+| 100,000 | 3.25 | 54.8 | 5.0 | 9.5 | 13.4 |
 | 1,000,000 | 6.95 | 181 | 2.2 | 6.8 | 41.7 |
 | 10,000,000 | 17.7 | 224 | 0.5 | 2.9 | 49.0 |
 
-The default path costs 1–3× per decade of rows and is 18 ms at
+The default path costs about 2× per decade of rows and is 18 ms at
 ten million; the ceiling of 500 rows is a quarter of a second (0.7 s and 1.2 s in the two earlier passes — the widest spread in these runs) there. But the
 recall column is the finding: at the default `ef_search` the index returns
 **two of the true ten** at a million random rows and one in twenty at ten
@@ -1786,7 +1796,10 @@ under the seed with `ef_search` raised — the ticket's own verification,
 of the function rather than of a statement extracted from it — beside the
 exact branch's own statement with its floor lifted to cover the same tier.
 The third pass's section E, with the earlier passes' HNSW-walk cells in
-brackets where the plan differed:
+brackets where the plan differed. The seeded column is section B's call for
+the same tier made again later in the same session, as the paired control for
+the other settings; where it reads under B's median, the difference is cache
+warmth:
 
 | rows | filter | matches | "walk visits" by the formula | seeded: in exact top-10 / ms | defaults: in exact top-10 / ms | ef_search 400: in exact top-10 / ms | exact branch, floor lifted: in exact top-10 / ms |
 | ---: | --- | ---: | ---: | --- | --- | --- | --- |
@@ -1859,7 +1872,7 @@ Read across a row and four things fall out.
 *Two costs that do grow with the table, measured.* The routing statement —
 the capped GIN collection every filtered call runs first — builds its whole
 bitmap before the `LIMIT v_exact + 1` can stop anything, and at 50% that is
-1.0 ms at 10,000 rows, 3.5 at 100,000, 27 at a million and 240 at ten
+0.8 ms at 10,000 rows, 3.0 at 100,000, 27 at a million and 240 at ten
 million: about 50 ns a matching row, linear, paid by every broad filtered call
 before the walk starts, and at ten million it is nine tenths of the 50%
 tier's whole latency. The mitigation the twelfth review pass declined for want
@@ -1906,7 +1919,7 @@ review pass, above); whether it comes back is part of SMD-1464.
 
 *Section D at scale.* The walk's own statement forced onto every tier under
 the threshold and the empty filter, where it has next to nothing to find:
-22 ms for ~1,000 matches and 87–103 ms for 90 or fewer at 100,000 rows,
+29 ms for ~1,000 matches and 145–147 ms for 90 or fewer at 100,000 rows,
 395 ms (900 matches), 1,193 ms (99) and 1,065 ms (none) at a million, and
 85–99 ms at ten million — the bounds hold it to about a second whatever the
 table, which is what they are for, and the function never sends those filters
@@ -1929,7 +1942,7 @@ recall floor on real embeddings rather than random vectors, and the
 `ef_search` that follows from it (SMD-1465). SMD-969 asked whether the
 *unfiltered* candidate scan reaches the HNSW index at scale: at 64 dimensions
 it does at every scale here (section A's row counts and the default path's
-slope, 2.2 → 2.4 → 7.0 → 17.7 ms), and at the shipped width change 36
+slope, 1.8 → 3.3 → 7.0 → 17.7 ms), and at the shipped width change 36
 measured it to 100,000 rows, where the answer was no until 019; the shipped
 width at a million rows is 4 GB of vectors a run this bench has not made.
 SMD-958 (change 32) built beside this body and SMD-945 (change 37) redefined
