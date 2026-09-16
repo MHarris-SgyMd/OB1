@@ -1090,7 +1090,11 @@ before anything is dropped: a kept build is never replaced without being
 asked. Measured at ten million
 rows: 37 min 9 s for the run that built the corpus, 7 min 24 s for the one
 that reused it, with identical recall columns; at a million rows, 6 min 49 s
-and 3 min 45 s.
+and 3 min 45 s. With the exact pass's answers kept in the marker (SMD-1562)
+a reuse skips that pass — about five of a reuse's minutes at ten million
+rows alone, most of the seven — and is into section A within three minutes
+of connecting; sections A–E are cell for cell what a reuse that computed
+them prints (FORK.md change 76 has the runs, measured on a shared machine).
 
 ### bench-plan.ts
 

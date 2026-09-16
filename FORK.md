@@ -11625,6 +11625,28 @@ touched files: test-live's own by-hand `OB1_*` strips, which
 as data rather than scraped markdown; and prewarming the metadata GIN on
 both paths so a reused row's first tier queries find it warm.
 
+**Measured at ten million rows**, on the kept volume `hnsw10m`, with the
+caveat that another session's ten-million-row store benchmark held two to
+four of the VM's eight cores throughout, so no wall clock here is change
+72's 7 min 24 s reuse's peer. The build took 56 min. A reuse that met the
+marker as SMD-1493 wrote it — no answers — computed the exact pass and
+extended the marker within about five minutes of connecting, then spent
+52 minutes in sections A–E under that load (56 min 45 s in all). The reuse
+after it took every answer from the marker (`exact oracle reused from the
+marker (all 50 queries)`) and was into section A within three minutes of
+connecting; its arms then took 78 minutes as the neighbour's load rose (81
+min 1 s in all). Sections A, B, D and E of the two runs are identical cell
+for cell, timings aside — the suite's comparison, run over the two reports.
+The marker grew from 2,018 bytes to 208,858 with the one entry: ten keys ×
+fifty queries × ten uuids. What the change removes is the exact pass, and
+under the load it was worth about five minutes of a reuse here; alone, it
+was most of change 72's seven.
+
+Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
+upstream. Reproduce: `./with-postgres.sh bun test-bench-reuse.ts`; or
+`OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh bun bench-hnsw.ts`
+twice, the second run's section L reading `reused` under `source` and
+`reused` under `oracle`.
 
 ## Detached from the fork network
 
