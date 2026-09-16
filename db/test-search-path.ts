@@ -45,6 +45,7 @@ import {
   relocateVectorTo,
   requireDatabaseUrl,
   restoreVectorToPublic,
+  runMigrator,
   runScript,
 } from "./test-support.ts";
 
@@ -58,7 +59,7 @@ const SCHEMA = "ext";
 
 /** migrate.ts as a subprocess, so its real exit code and self-heal log are observed. */
 const migrate = (...extra: string[]) =>
-  runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { cwd: HERE });
+  runMigrator(URL_, undefined, ...extra);
 
 /** preflight.ts as a subprocess, with a coherent SQL configuration so it reaches the direct-connection block. */
 function preflight(extraEnv: Record<string, string | undefined> = {}) {
