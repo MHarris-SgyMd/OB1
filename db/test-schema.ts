@@ -690,37 +690,51 @@ console.log("\n[8d] rows without a vector or chunks do not count towards the wal
   assert(got.rows.every((r) => r.content.startsWith("scoreable")), "…and only those");
 }
 
-// ── 8e. Migration 037 — a sample of the heap before the routing count ────────
+// ── 8e. Migrations 037 and 038 — a sample of the heap before the routing count
 //
 // Every filtered call opened with the capped GIN collection, whose cost is the
 // number of matching rows — 240 ms at 50% of ten million (SMD-1018). 037 reads
 // eight random pages first, on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or
 // more, and skips the collection when the sample puts the filter at ten times
-// the exact threshold on at least eight hits over at least three pages. PGlite
-// holds the shape and what a small table can show: under the floor nothing
-// runs but 014's collection; with the floor lowered to zero the gate runs on
-// every filtered call, cannot skip — condition 1 needs a table past ten times
-// the threshold — and the answers are still exact. The skip itself is
-// db/test-live.ts [5d]'s, on a real server with rows enough to reach it.
+// the exact threshold on at least eight hits over at least three pages; 038
+// draws those eight pages by TID range — one block per probe, eight page reads
+// whatever the heap holds, where 037's TABLESAMPLE SYSTEM decided page by page
+// over the whole heap — and counts the pages it drew, empty ones included.
+// PGlite holds the shape and what a small table can show: under the floor
+// nothing runs but 014's collection; with the floor lowered to zero the gate
+// runs on every filtered call, cannot skip — condition 1 needs a table past
+// ten times the threshold — and the answers are still exact. The skip itself
+// is db/test-live.ts [5d]'s, on a real server with rows enough to reach it.
 
-console.log("\n[8e] Migration 037: the routing count is gated by a sample of the heap — the shape, the floor, and exactness with the gate reached");
+console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a sample of the heap, drawn by TID range — the shape, the floor, and exactness with the gate reached");
 {
   const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
   const src = await shipped();
-  assert(lastDefinerOf("match_thoughts").startsWith("037"), `037 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
-  assert(/TABLESAMPLE SYSTEM \(v_pct\)/.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src),
-    "the shipped body samples the heap with TABLESAMPLE SYSTEM into the three counts the gate reads");
-  assert(new RegExp(`100\\.0 \\* ${ROUTE_SAMPLE_PAGES} / v_pages`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
-    `…with config.mjs's constants substituted: ${ROUTE_SAMPLE_PAGES} pages sampled, no sample under ${ROUTE_ESTIMATE_MIN_PAGES} heap pages`);
+  assert(lastDefinerOf("match_thoughts").startsWith("038"), `038 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
+  const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid\s+AND t\.ctid <\s+\('\(' \|\| b\.blk \+ 1 \|\| ',0\)'\)::tid/;
+  assert(TID_PROBE.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src) && !/TABLESAMPLE/.test(src),
+    "the shipped body samples the heap by TID range — every tuple of one block, half-open at the next — into the three counts the gate reads, and carries no TABLESAMPLE");
+  assert(new RegExp(`floor\\(random\\(\\) \\* v_pages\\)::int AS blk\\s+FROM generate_series\\(1, ${ROUTE_SAMPLE_PAGES}\\)`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
+    `…with config.mjs's constants substituted: ${ROUTE_SAMPLE_PAGES} blocks drawn from the heap's page count, no sample under ${ROUTE_ESTIMATE_MIN_PAGES} heap pages`);
   assert(/v_hits >= 8\s+AND v_hit_pages >= 3\s+AND v_hits \* v_pages >= 10 \* v_exact \* v_pages_seen/.test(src),
     "…and the three conditions as the header states them: eight hits, on three pages, at ten times the threshold");
   assert(/IF NOT v_broad THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
     "…the collection runs only when the gate did not decide, and the exact branch only when the collection ran");
   // The statement itself, not the source around it: the body's comments
-  // mention EXISTS and TABLESAMPLE in the same breath (review pass 1).
-  const sampleStmt = /INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?TABLESAMPLE SYSTEM[\s\S]*?\) s);/.exec(src)?.[1] ?? "";
+  // mention EXISTS and the sample in the same breath (review pass 1).
+  const sampleStmt = /INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src)?.[1] ?? "";
   assert(/embedding IS NOT NULL\) AS hit/.test(sampleStmt) && !/EXISTS/.test(sampleStmt) && !/thought_chunks/.test(sampleStmt),
-    "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — the header says)");
+    "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — 037's header says)");
+  // 038's three load-bearing tokens (its header, Design): DISTINCT blocks so a
+  // block drawn twice is read and counted once; a LEFT join so a page with no
+  // live row still counts among the pages drawn (037 counted only pages that
+  // returned a row, which biased the estimate up on a bloated heap); and the
+  // probe's LIMIT at the 8 KB page's tuple ceiling, which never cuts a page
+  // and keeps the probe a subquery — pulled up into the join, the ctid
+  // bounds are join quals no TID Range path reads, and the plan is a
+  // sequential scan of the heap.
+  assert(/^FROM \(\s*SELECT DISTINCT floor/.test(sampleStmt) && /\) b\s+LEFT JOIN LATERAL \(/.test(sampleStmt) && /LIMIT 291\s+\) p ON true$/.test(sampleStmt),
+    "…the blocks are DISTINCT, the join is LEFT, and the probe carries LIMIT 291 — MaxHeapTuplesPerPage on an 8 KB page");
 
   // 1,000 random rows, 990 of one kind and 10 of another: both filters are
   // under the exact threshold, so both answers must be the exact top-10.
@@ -759,31 +773,60 @@ console.log("\n[8e] Migration 037: the routing count is gated by a sample of the
   // The floor lowered to zero: the gate runs on every filtered call. It cannot
   // skip — condition 1 needs the table at ten times the threshold, and 1,000
   // rows are not — so the collection still runs and the answers hold.
-  const file037 = files.find((f) => f.startsWith("037"))!;
-  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file037), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
-  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "037 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
+  const file038 = files.find((f) => f.startsWith("038"))!;
+  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file038), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
+  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "038 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
   await agree("with the gate reached");
   // The gate's own input on this table, computed as the body computes it: the
   // sample scaled to the heap is under ten times the threshold, which is why
   // the collection ran above — and why the skip needs test-live's table.
   // Five independent draws, each judged by the body's own three conditions:
-  // a draw is random and may reach no page at all (one run here drew none),
-  // and the rule must say "collect" whatever it drew — on 1,000 rows the
-  // scaled estimate can never reach ten times the threshold (second review pass).
+  // the rule must say "collect" whatever it drew — on 1,000 rows the scaled
+  // estimate can never reach ten times the threshold (second review pass) —
+  // and every draw reaches between one and ROUTE_SAMPLE_PAGES distinct pages,
+  // which 037's TABLESAMPLE did not promise (one run there drew none).
+  const sample = (filter: string) => db.query<{ hits: number; hit_pages: number; pages_seen: number }>(
+    `SELECT count(*) FILTER (WHERE p.hit)::int AS hits, count(DISTINCT b.blk) FILTER (WHERE p.hit)::int AS hit_pages, count(DISTINCT b.blk)::int AS pages_seen
+     FROM (SELECT DISTINCT floor(random() * ${pages})::int AS blk FROM generate_series(1, ${ROUTE_SAMPLE_PAGES})) b
+     LEFT JOIN LATERAL (SELECT (t.metadata @> '${filter}' AND t.embedding IS NOT NULL) AS hit FROM thoughts t
+                        WHERE t.ctid >= ('(' || b.blk || ',0)')::tid AND t.ctid < ('(' || b.blk + 1 || ',0)')::tid LIMIT 291) p ON true`);
   const draws: string[] = [];
   let wouldSkip = 0;
+  let pagesInRange = 0;
   for (let i = 0; i < 5; i++) {
-    const [{ hits, hit_pages, pages_seen }] = (await db.query<{ hits: number; hit_pages: number; pages_seen: number }>(
-      `SELECT count(*) FILTER (WHERE s.hit)::int AS hits, count(DISTINCT s.blk) FILTER (WHERE s.hit)::int AS hit_pages, count(DISTINCT s.blk)::int AS pages_seen
-       FROM (SELECT (t.metadata @> '{"kind":"broad"}' AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
-             FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`)).rows;
+    const [{ hits, hit_pages, pages_seen }] = (await sample('{"kind":"broad"}')).rows;
     draws.push(`${hits}/${hit_pages}/${pages_seen}`);
     if (hits >= 8 && hit_pages >= 3 && hits * pages >= 10 * 1000 * pages_seen) wouldSkip++;
+    if (pages_seen >= 1 && pages_seen <= ROUTE_SAMPLE_PAGES && hit_pages <= pages_seen) pagesInRange++;
   }
-  assert(wouldSkip === 0,
-    `five draws of the sample on 1,000 rows (hits/hit pages/pages seen: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here`);
+  assert(wouldSkip === 0 && pagesInRange === 5,
+    `five draws of the sample on 1,000 rows (hits/hit pages/pages drawn: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here, and every draw reached between 1 and ${ROUTE_SAMPLE_PAGES} pages`);
+  // The pages drawn are counted whether or not they hold a row: with the
+  // middle half of the heap deleted and vacuumed (dead tuples gone, the pages
+  // kept), a draw still reports the blocks it drew — 037's count of the pages
+  // that RETURNED a row would fall with the live pages, and its scaled
+  // estimate rise. Five draws over a heap half empty: every one reports at
+  // least three pages drawn — eight draws over ${pages} pages land on two or
+  // fewer distinct pages with probability far under one in a million — while
+  // the hits are a quarter of what a full heap gave (broad rows on the live
+  // pages only), so the rule still says "collect".
+  const [{ lo, hi }] = (await db.query<{ lo: number; hi: number }>(`SELECT (${pages} / 4)::int AS lo, (${pages} * 3 / 4)::int AS hi`)).rows;
+  await db.exec(`DELETE FROM thoughts WHERE ctid >= ('(' || ${lo} || ',0)')::tid AND ctid < ('(' || ${hi} || ',0)')::tid`);
+  await db.exec(`VACUUM thoughts`);
+  const [{ live_pages, heap_pages }] = (await db.query<{ live_pages: number; heap_pages: number }>(
+    `SELECT count(DISTINCT (ctid::text::point)[0])::int AS live_pages, (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS heap_pages FROM thoughts`)).rows;
+  assert(heap_pages === pages && live_pages < pages, `the heap keeps its ${heap_pages} pages after the delete and a plain VACUUM, ${live_pages} of them with a live row`);
+  const sparse: string[] = [];
+  let drawnCounted = 0;
+  for (let i = 0; i < 5; i++) {
+    const [{ hits, hit_pages, pages_seen }] = (await sample('{"kind":"broad"}')).rows;
+    sparse.push(`${hits}/${hit_pages}/${pages_seen}`);
+    if (pages_seen >= 3 && hit_pages <= pages_seen && !(hits >= 8 && hit_pages >= 3 && hits * pages >= 10 * 1000 * pages_seen)) drawnCounted++;
+  }
+  assert(drawnCounted === 5,
+    `on the half-empty heap every draw counts the pages it drew, not the pages that answered (hits/hit pages/pages drawn: ${sparse.join(", ")}), and the rule still says "collect"`);
   const restored = await restoreShipped("match_thoughts");
-  assert(restored.length === 1 && restored[0].startsWith("037") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+  assert(restored.length === 1 && restored[0].startsWith("038") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
     "…and the shipped floor is back for the sections after");
 }
 
@@ -1850,12 +1893,14 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const kwPlan = await plan(`SELECT * FROM search_thoughts_keyword('zylotrope', 25, 0, '{}'::jsonb)`);
   assert(/Function Scan on search_thoughts_keyword\s+\(cost=[^)]*rows=25\b/.test(kwPlan), `…and 25 from search_thoughts_keyword (${kwPlan.split("\n")[0]})`);
 
-  // The candidate scan is 014's, byte for byte, through 019, 020 and 037: the
-  // three RETURN QUERY blocks' CTEs (direct, chunked, best) and the routing
-  // statement. 020 changed each branch's final SELECT and nothing above it;
-  // 037 wrapped the routing statement in the gate's IF (so it is indented two
-  // more spaces — compared with whitespace collapsed) and changed nothing in
-  // it; this holds "carried verbatim" for the part that decides the plan.
+  // The candidate scan is 014's, byte for byte, through 019, 020, 037 and
+  // 038: the three RETURN QUERY blocks' CTEs (direct, chunked, best) and the
+  // routing statement. 020 changed each branch's final SELECT and nothing
+  // above it; 037 wrapped the routing statement in the gate's IF (so it is
+  // indented two more spaces — compared with whitespace collapsed) and
+  // changed nothing in it; 038 changed the gate's sample and nothing in the
+  // collection; this holds "carried verbatim" for the part that decides the
+  // plan.
   // Re-applying 014 gives 014's text to compare against — as a SECOND
   // function, since 014's signature is the 4-argument one 020 dropped.
   const cteBlocks = (src: string) => [...src.matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]);
@@ -1887,12 +1932,12 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
-  // Deliberately pinned, as [20] pinned 019 before 020 landed and 020 before
-  // 037: 019 last defines the keyword function, 037 match_thoughts. A
-  // successor that redefines either fails here on purpose, and the
-  // expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("037"),
-         `019 is the last definer of search_thoughts_keyword and 037 of match_thoughts (${restored.join(", ")})`);
+  // Deliberately pinned, as [20] pinned 019 before 020 landed, 020 before
+  // 037 and 037 before 038: 019 last defines the keyword function, 038
+  // match_thoughts. A successor that redefines either fails here on purpose,
+  // and the expectations move with the clauses it must carry.
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("038"),
+         `019 is the last definer of search_thoughts_keyword and 038 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
