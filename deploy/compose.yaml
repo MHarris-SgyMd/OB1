@@ -39,6 +39,14 @@ services:
   # function instead, where it travels with the schema; its header has the numbers.
   postgres:
     image: pgvector/pgvector:0.8.6-pg16
+    # /dev/shm: a container gets 64 MB, and a parallel HNSW build keeps its
+    # whole graph in dynamic shared memory there, sized by maintenance_work_mem
+    # — so rebuilding the vector index after a bulk load of a real corpus fails
+    # with "could not resize shared memory segment ... No space left on device"
+    # under the default (SMD-1018 met it at a million rows). A tmpfs cap,
+    # backed only as used; raise it with maintenance_work_mem, or build with
+    # max_parallel_maintenance_workers = 0, which uses ordinary backend memory.
+    shm_size: ${POSTGRES_SHM_SIZE:-1g}
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
       POSTGRES_DB: openbrain
