@@ -142,20 +142,6 @@ function buildServer(principal: Principal): McpServer {
   return server;
 }
 
-// One server per key scope, built on first use — a read-scoped principal is
-// handed a server on which the tool was never registered, and neither server
-// is rebuilt per request.
-const servers = new Map<boolean, McpServer>();
-function serverFor(principal: Principal): McpServer {
-  const write = canWrite(principal);
-  let server = servers.get(write);
-  if (!server) {
-    server = buildServer(principal);
-    servers.set(write, server);
-  }
-  return server;
-}
-
 // --- Hono app with auth + CORS ---
 
 const corsHeaders = {
@@ -207,8 +193,18 @@ app.all("*", async (c) => {
     Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
+  // One server per request, connected to this request's transport and dropped
+  // with it — a read-scoped principal is handed a server on which the tool was
+  // never registered. Change 67 cached one server per key scope and
+  // connect()ed it to a fresh transport each request; that crossed concurrent
+  // requests: the SDK's Protocol.connect() overwrites the server's transport,
+  // and _onrequest() captures whichever transport the server holds when the
+  // message arrives, which is after handleRequest() has awaited the body — so
+  // the first of two overlapping requests was answered on the second's
+  // transport and hung. A build is a few microseconds (FORK.md change 76 has
+  // the number); extensions/test-auth.ts fires three at once.
   const transport = new StreamableHTTPTransport();
-  await serverFor(principal).connect(transport);
+  await buildServer(principal).connect(transport);
   return transport.handleRequest(c);
 });
 

@@ -15,10 +15,14 @@
  * they are absent from tools/list and a call names a tool that does not exist;
  * for an HTTP API the routes that write answer 403 before they parse a body;
  * for a worker anything but a dry run answers 403. The webhook receiver's
- * secret has no scope to give and is compared digest to digest. Then the drift
+ * secret has no scope to give and is compared digest to digest. Each MCP
+ * server answers three requests at once each with its own id (SMD-1497,
+ * change 76: a server that outlives the request and is connect()ed to a fresh
+ * transport each time answers on the wrong one). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
- * write does write and each read does not, the key is read through the shared
+ * write does write and each read does not, the server is built per request,
+ * the key is read through the shared
  * module and nowhere else, every `_shared/auth.ts` is byte-for-byte
  * server-portable/auth.ts (a Supabase function is bundled from
  * supabase/functions/, so the module is copied beside the servers rather than
@@ -274,17 +278,37 @@ async function request(s: Server, key: string | null, via: Via, also: Partial<Re
   const [path, own] = init.path.split("?");
   if (own) query.push(own);
   const url = "http://extension.test" + path + (query.length ? `?${query.join("&")}` : "");
-  // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
-  const console_ = { error: console.error, warn: console.warn };
-  console.error = () => {}; console.warn = () => {};
-  let r: Response;
-  try {
-    r = await handler(new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
-  } finally {
-    Object.assign(console, console_);
-  }
-  return parse(r);
+  return answer(handler, new Request(url, { method: init.method, headers, body: init.rawBody ?? (init.body === undefined ? undefined : JSON.stringify(init.body)) }));
 }
+/** One request to one handler, in process, with a deadline. */
+async function answer(handler: Handler, req: Request): Promise<Reply> {
+  // A handler that queries a refused port logs the refusal; the status is the assertion, the log is noise on a green run.
+  hush();
+  // Every request has a deadline: a handler that never answers (SMD-1497's
+  // crossed transports parked one) is reported as a timeout with status 0, not
+  // waited on — and the silencer above is released either way, which a
+  // `finally` on the bare handler promise could not promise.
+  const timeout: Reply = { status: 0, json: null, text: `timed out after ${REQUEST_MS} ms` };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(handler(req)).then(parse),
+      new Promise<Reply>((res) => { timer = setTimeout(() => res(timeout), REQUEST_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    unhush();
+  }
+}
+/** How long an in-process request may take before it is called a hang — a handler answers a listing in single-digit ms here, and a query is refused at once. */
+const REQUEST_MS = 2000;
+// The silencer is counted, not saved and restored per call: two requests in
+// flight at once (the concurrency probe below) would otherwise each save the
+// other's no-op and leave the console dark for the rest of the run.
+const CONSOLE = { error: console.error, warn: console.warn };
+let hushed = 0;
+function hush() { if (hushed++ === 0) { console.error = () => {}; console.warn = () => {}; } }
+function unhush() { if (--hushed === 0) Object.assign(console, CONSOLE); }
 /** A server's answer: its status, its text, and the JSON in it — direct, or the first SSE data line. */
 async function parse(r: Response): Promise<Reply> {
   const text = await r.text();
@@ -348,6 +372,25 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
       "…and its listing is an empty list under a declared tools capability, not a failed method");
   }
 
+  // Three requests at once under one key, each answered with its own id and the
+  // full list (SMD-1497, FORK.md change 76). Any two overlapping requests are
+  // the trigger, not a burst: a server built once and `connect()`ed to a fresh
+  // transport per request has the SDK overwrite its transport on the second
+  // connect and capture it when the first message arrives, so the first
+  // request's answer goes to the second request's transport — the first hangs
+  // (request()'s deadline reports that as status 0, not a slow server) or the
+  // second client reads an answer to a request it never sent. Three of these
+  // servers were that shape on main. Explicit statuses: a `!== 200` would pass
+  // the timeout.
+  {
+    const ids = [11, 12, 13];
+    const answers = await Promise.all(ids.map((id) => call(s, WRITE_KEY, { ...LIST, id })));
+    for (const [i, r] of answers.entries()) {
+      assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === all.join(),
+        `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and every tool (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
+    }
+  }
+
   assert((await call(s, "not-a-key", LIST)).status === 401, "a wrong key is refused with 401");
   assert((await call(s, null, LIST)).status === 401, "no key is refused with 401");
   assert((await call(s, hashKey(WRITE_KEY), LIST)).status === 401,
@@ -365,6 +408,40 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, undefined, undefined);
   assert((await call(s, LEGACY_KEY, LIST)).status === 401, "no keys configured at all refuses everything");
   env(s, KEYS);
+}
+
+// ── The MCP server outside the shared auth path ──────────────────────────────
+//
+// enhanced-mcp keeps its own single-key compare (change 67 left it there, and
+// check 8 passes it), so it is not in SERVERS and none of the claims above are
+// made for it. It was, though, the fourth module-level McpServer connect()ed
+// to a fresh transport on every request — SMD-1497 named three — so the
+// concurrency probe runs against it too, imported the same way, under the one
+// key it reads.
+{
+  const file = "integrations/enhanced-mcp/index.ts";
+  console.log(`\n[${file}]`);
+  process.env.SUPABASE_URL = HTTPS;
+  process.env.MCP_ACCESS_KEY = LEGACY_KEY;
+  const before = served.length;
+  try {
+    await import(join(ROOT, file));
+  } catch (e) {
+    assert(false, `${file} threw at import: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  assert(served.length === before + 1, `${file} imports as deployed and hands Deno.serve one handler`);
+  const handler = served[before];
+  const ids = [11, 12, 13];
+  const answers = await Promise.all(ids.map((id) => answer(handler, new Request("http://extension.test/mcp",
+    { method: "POST", headers: { ...RPC, "x-brain-key": LEGACY_KEY }, body: JSON.stringify({ ...LIST, id }) }))));
+  // The reference list is the first answer that carries one — not answers[0], which under the defect is the timeout.
+  const tools = answers.map(toolsOf).find((t) => t.length > 0) ?? [];
+  assert(tools.length > 0, `its tools/list under the key names its tools (${tools.length})`);
+  for (const [i, r] of answers.entries()) {
+    assert(r.status === 200 && r.json?.id === ids[i] && toolsOf(r).join() === tools.join(),
+      `${ids.length} concurrent tools/list under one key: request ${ids[i]} is answered with its own id and the same tools (${r.status === 0 ? r.text : `${r.status}, id ${r.json?.id ?? "none"}, ${toolsOf(r).length} tools`})`);
+  }
+  delete process.env.MCP_ACCESS_KEY;
 }
 
 // ── The HTTP APIs ────────────────────────────────────────────────────────────
@@ -633,6 +710,13 @@ const blockOf = (text: string, name: string) => {
   return text.slice(at, text.indexOf("\n  );", at));
 };
 const OLD_SPELLINGS = /c\.req\.query\("key"\)|c\.req\.header\("x-access-key"\)|[!=]== ?(?:MCP|AUDITOR)_ACCESS_KEY\b|isAuthorized\(|\bauth\(c\)/;
+/**
+ * No McpServer at module scope and no per-scope cache of one: a server that
+ * outlives the request is connect()ed to a fresh transport each time, and the
+ * SDK answers on whichever transport it holds when the message arrives
+ * (SMD-1497). The after sample's per-session binding is checked in TEXT_ONLY.
+ */
+const builtPerRequest = (text: string) => !/^(?:const|let) \w+ = new McpServer\(/m.test(text) && !/^const servers = new Map</m.test(text);
 
 console.log("\n[the files say what this test assumes]");
 for (const s of SERVERS) {
@@ -657,6 +741,7 @@ for (const s of SERVERS) {
       assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
+    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request — not one built at module scope or cached per scope and connect()ed to a fresh transport each request, which crosses concurrent requests (SMD-1497, change 76)");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -693,6 +778,12 @@ for (const s of SERVERS) {
   const text = readFileSync(join(ROOT, WEBHOOK.file), "utf8");
   assert(text.includes('from "../_shared/auth.ts"') && text.includes("secretMatches(") && !/[!=]== ?READWISE_WEBHOOK_SECRET\b/.test(text),
     `${WEBHOOK.file}: the echoed secret is compared through the module's secretMatches(), digest to digest, and with no operator`);
+}
+{
+  const file = "integrations/enhanced-mcp/index.ts";
+  const text = readFileSync(join(ROOT, file), "utf8");
+  assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
+    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 76)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in
