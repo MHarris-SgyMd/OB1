@@ -166,7 +166,7 @@ same commit.**
 | --- | --- | --- |
 | Bun, locally | `bun index.ts` | Serves on `PORT`, default 8000 |
 | Container | `docker build -t ob1-mcp .` | Alpine + Bun; see `Dockerfile` |
-| Cloudflare Workers | `bun run cf:build` then `wrangler deploy` | ~272 KiB gzipped |
+| Cloudflare Workers | `bun run cf:build` then `wrangler deploy` | ~281 KiB gzipped |
 | Node | `bun run --bun index.ts`, or wrap with `@hono/node-server` | Same shim |
 
 ### 3. Provide configuration
@@ -223,12 +223,12 @@ SMD-1451 is the migrator refusing it).
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 71 — transport, auth, tool surface, OAuth discovery
+bun test-server.ts        # 151 — transport, auth, tool surface, OAuth discovery, the method guard and /health
 bun test-auth.ts          # 43 — scoped, hashed, named keys
 bun run test:local        # 22 — fully local provider, no credential
 bun run test:sql          # 53 — store conformance, real Postgres in a container
 bun run test:e2e          # 59 — the whole server over MCP with no Supabase at all
-bun run cf:build          # ~272 KiB gzipped
+bun run cf:build          # ~281 KiB gzipped
 ```
 
 `test:sql` and `test:e2e` need podman or docker; they use `../db/with-postgres.sh`

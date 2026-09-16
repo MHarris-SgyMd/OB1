@@ -55,6 +55,44 @@ async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
   return line ? JSON.parse(line.slice(6)) : null;
 }
 
+/**
+ * A probe for the routing blocks ([3], [11], [13]) that cannot hang or crash the
+ * suite: one 2 s abort that covers the body read too, a transport error reported
+ * by its own name, and the body parsed by the same mcpBody() as [4]–[10] then
+ * tested for the jsonrpc marker — a JSON body that is not an envelope must not
+ * count. The abort is what turns the failure mode both blocks guard against — a
+ * request handed to a stream the per-request transport never closes (SMD-1259)
+ * — into a red assertion named `TimeoutError` instead of a stuck CI job.
+ */
+const PROBE_TIMEOUT_MS = 2000;
+type Probe = { status: number | string; cors: boolean; allow: string | null; methods: string | null; envelope: boolean };
+const probe = async (path: string, init: RequestInit = {}): Promise<Probe> => {
+  let r: Response;
+  try {
+    r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+  } catch (e) {
+    return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, methods: null, envelope: false };
+  }
+  // The body parse is outside the transport try: a body that starts with `{`
+  // and is not JSON is "not an envelope", not a transport failure that should
+  // hide the status and Allow the server did send.
+  let envelope = false;
+  try {
+    envelope = (await mcpBody(r))?.jsonrpc === "2.0";
+  } catch {
+    /* not JSON → not an envelope */
+  }
+  return { status: r.status, cors: corsOk(r), allow: r.headers.get("allow"), methods: r.headers.get("access-control-allow-methods"), envelope };
+};
+
+/** The per-row refusal triple [11] and [13] share: status, CORS, not an envelope — plus Allow where a 405 must name it. */
+const expectRefusal = (label: string, p: Probe, status: number, allow?: string) => {
+  assert(p.status === status, `${label} → ${status} (${p.status})`);
+  if (allow !== undefined) assert(p.allow === allow, `${label}: Allow names what the endpoint serves (${p.allow})`);
+  assert(p.cors, `${label}: CORS present`);
+  assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
+};
+
 const INIT = JSON.stringify({
   jsonrpc: "2.0",
   id: 1,
@@ -88,10 +126,15 @@ console.log("\n[2] Runtime neutrality");
 
 console.log("\n[3] CORS preflight");
 {
-  const r = await fetch(BASE, { method: "OPTIONS" });
-  assert(r.status === 200, "OPTIONS → 200");
-  assert(corsOk(r), "allow-origin *");
-  assert(r.headers.has("access-control-allow-methods"), "allow-methods present");
+  const p = await probe("", { method: "OPTIONS" });
+  assert(p.status === 200, `OPTIONS → 200 (${p.status})`);
+  assert(p.cors, "allow-origin *");
+  // The exact list, because it is NOT the served list: the endpoint serves POST
+  // only ([13]), but this header says what a browser may send so it can hear
+  // our answer, and a browser-hosted SDK client holding a session id sends
+  // DELETE and accepts the 405. Hiding GET or DELETE here would turn that 405
+  // into a network error. FORK.md change 75.
+  assert(p.methods === "GET, POST, OPTIONS, DELETE", `allow-methods advertises GET and DELETE, so a browser hears the 405 (${p.methods})`);
 }
 
 console.log("\n[4] Auth failure — the real unauthorizedResponse(), not a copy of it");
@@ -136,6 +179,12 @@ console.log("\n[7] initialize");
   const result = b?.result as Record<string, unknown> | undefined;
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
+
+  // The transport wants both Accept tokens on a POST; the patch supplies
+  // whichever is missing. Before change 75 it tested only the SSE token, so
+  // this request reached the transport unpatched and got 406.
+  const sseOnly = await fetch(BASE, { method: "POST", headers: { ...AUTH, Accept: "text/event-stream" }, body: INIT });
+  assert(sseOnly.status === 200 && (await mcpBody(sseOnly))?.result != null, `Accept: text/event-stream alone is patched to both tokens → 200 (${sseOnly.status})`);
 }
 
 console.log("\n[8] Per-request isolation — a fresh McpServer each time");
@@ -195,21 +244,9 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
   // and proceeds on the key only on a 404. FORK.md change 42 has the rest.
   const discovery = "/.well-known/oauth-protected-resource";
 
-  // A probe that cannot hang or crash the suite: one 2 s abort that covers the
-  // body read too (a regressed route hands an authenticated GET to a stream that
-  // never closes — SMD-1259), a transport error reported by its own name, and
-  // the body parsed by the same mcpBody() as [4]–[10] then tested for the
-  // jsonrpc marker — a JSON body that is not an envelope must not count. Three
-  // asserts per row, always executed, so the count is stable green or red.
-  const probe = async (path: string, init: RequestInit = {}) => {
-    try {
-      const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
-      return { status: r.status as number | string, cors: corsOk(r), envelope: (await mcpBody(r))?.jsonrpc === "2.0" };
-    } catch (e) {
-      return { status: e instanceof Error ? e.name : String(e), cors: false, envelope: false };
-    }
-  };
-
+  // Three asserts per row through the shared probe(), always executed, so the
+  // count is stable green or red. A deleted route now lands these GETs on
+  // notFound's 405 ([13]), not a hang — the status assertion still catches it.
   const rows: [string, string, RequestInit, number][] = [
     ["bare document, no key", discovery, {}, 404],
     ["path-suffixed form (the URL Supabase answered 401)", `${discovery}/functions/v1/open-brain-mcp`, {}, 404],
@@ -227,12 +264,7 @@ console.log("\n[11] OAuth discovery is a 404, not an auth challenge (upstream #3
     ["POST", discovery, { method: "POST", headers: AUTH, body: INIT }, 404],
     ["OPTIONS preflight", discovery, { method: "OPTIONS" }, 200],
   ];
-  for (const [label, path, init, expect] of rows) {
-    const p = await probe(path, init);
-    assert(p.status === expect, `${label} → ${expect} (${p.status})`);
-    assert(p.cors, `${label}: CORS present`);
-    assert(!p.envelope, `${label}: body is not a JSON-RPC envelope`);
-  }
+  for (const [label, path, init, expect] of rows) expectRefusal(label, await probe(path, init), expect);
   // The MCP endpoint at / is untouched — [4] through [10] above.
 }
 
@@ -257,6 +289,91 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "0" }) === 0, "0 is honoured (prune everything older than now)");
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "-3" }) === QUERY_LOG.retentionDaysDefault, "a negative falls back to the default");
   assert(queryLogRetentionDays({ OB1_QUERY_LOG_RETENTION_DAYS: "abc" }) === QUERY_LOG.retentionDaysDefault, "a non-number falls back to the default");
+}
+
+console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
+{
+  // The MCP handler is registered for POST only and app.notFound answers
+  // everything else with 405 before authenticate(); FORK.md change 75 has the
+  // mechanism this closes (an authenticated GET opened an SSE stream the
+  // per-request transport never closed). Drilled by registering the handler
+  // with app.all and removing app.notFound — the pre-change shape: every
+  // GET row holding a valid key fails as `TimeoutError`; the raw-socket row
+  // below sees a `200 OK` status line and no end; HEAD, PUT and PATCH get the
+  // transport's own 405, after auth, with an `Allow` that names GET; the keyed
+  // DELETE gets the transport's 200; /health keeps passing (it is its own route).
+  const ALLOW = "POST, OPTIONS";
+  const rows: [string, string, RequestInit][] = [
+    // Every key shape, because the answer is about the method, not the caller:
+    // no key never reaches authenticate(), and a right key never reaches the
+    // agent registry or the transport.
+    ["GET, no key", "/", {}],
+    ["GET, wrong key", "/", { headers: { "x-brain-key": "wrong" } }],
+    ["GET, right key in header", "/", { headers: { "x-brain-key": KEY } }],
+    ["GET, right key in ?key= (the connector URL opened in a browser)", `/?key=${KEY}`, {}],
+    ["GET, the SDK client's own headers", "/", { headers: { "x-brain-key": KEY, Accept: "text/event-stream" } }],
+    ["HEAD, right key", `/?key=${KEY}`, { method: "HEAD" }],
+    ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
+    ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
+    // DELETE too: there is no session here for it to end, and the SDK client
+    // accepts 405 from terminateSession() by spec (change 75 has the rest).
+    ["DELETE, right key", "/", { method: "DELETE", headers: AUTH }],
+    ["DELETE, no key", "/", { method: "DELETE", headers: H }],
+    // One of the two shapes SMD-1246's review found falling past the
+    // /.well-known/ route to the catch-all: Hono matches paths case-sensitively.
+    // It used to hang; it is a GET. The other shape is the raw-socket row below.
+    ["GET, differently-cased discovery path with the key", `/.Well-Known/oauth-protected-resource?key=${KEY}`, {}],
+  ];
+  for (const [label, path, init] of rows) expectRefusal(label, await probe(path, init), 405, ALLOW);
+
+  // The other shape: a base URL with a trailing slash doubles the slash, and
+  // `//.well-known/…` is not `/.well-known/*` to Hono, so it fell to the
+  // catch-all and hung. Bun's fetch() collapses `//` to `/` on the wire — a
+  // fetch row would probe the 404 route — but a Request object keeps it and
+  // worker.fetch hands it to the router as is, which is the routing question
+  // this row asks. The status is read before any body, so under the pre-change
+  // shape this reports the 200 the stream flushes at once, not a hang.
+  const doubled = await worker.fetch(new Request(`${BASE}//.well-known/oauth-protected-resource?key=${KEY}`));
+  assert(doubled.status === 405 && corsOk(doubled), `GET, doubled-slash discovery path with the key → 405 (${doubled.status})`);
+
+  // The CORS preflight still advertises GET and DELETE — asserted in [3], where
+  // the preflight is probed. POST reaching the transport is [7].
+
+  // /health is the probe target for platforms that can only GET and want 2xx:
+  // before authenticate(), so it needs no key and a key changes nothing. The
+  // match rule is the HEALTH_PATH comment in index.ts; these rows pin it.
+  for (const [label, path, init] of [
+    ["GET /health", "/health", {}],
+    ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
+    ["HEAD /health", "/health", { method: "HEAD" }],
+    ["GET /health/ (trailing slash)", "/health/", {}],
+    ["GET /mcp/health (one-segment proxy prefix)", "/mcp/health", {}],
+    ["GET /functions/v1/open-brain-mcp/health (the Supabase-shaped prefix)", "/functions/v1/open-brain-mcp/health", {}],
+  ] as [string, string, RequestInit][]) {
+    const p = await probe(path, init);
+    assert(p.status === 200, `${label} → 200 (${p.status})`);
+    assert(p.cors && !p.envelope, `${label}: CORS present, body is not a JSON-RPC envelope`);
+  }
+  // Route exactness, not a status contract: what a stray GET gets is the
+  // path-axis decision FORK.md change 42 defers (405 today, 404 under a mount).
+  // Either refusal, and nothing else — `!== 200` alone would pass the abort
+  // marker, i.e. a hang, which is the one outcome this whole block exists to
+  // refuse.
+  for (const near of ["/healthz", "/Health", "/health/x", "/a/healthz"]) {
+    const p = await probe(near, {});
+    assert(p.status === 405 || p.status === 404, `GET ${near} is not /health, and does not hang (${p.status})`);
+  }
+  // Under /.well-known/ the discovery route owns the prefix and answers first.
+  assert((await probe("/.well-known/health", {})).status === 404, "GET /.well-known/health → 404 (the discovery route owns that prefix)");
+  // At a health path the refusal's Allow names the health resource's methods:
+  // GET and HEAD from the health route, POST because the MCP handler serves
+  // every path — `POST /health` IS the endpoint.
+  const putHealth = await probe("/health", { method: "PUT" });
+  assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, POST, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, POST, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
+  // With the key, so the 200 is the transport's initialize result and not the
+  // JSON-RPC refusal a keyless POST gets anywhere.
+  const postHealth = await fetch(`${BASE}/health`, { method: "POST", headers: AUTH, body: INIT, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+  assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
 server.stop();
