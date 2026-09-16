@@ -29,14 +29,16 @@
  *
  * ── JSON paths, and the shape of a row (SMD-1544, FORK.md change 72) ─────────
  * PostgREST's JSON-path column — `metadata->>generated_by`, `meta->a->>key` —
- * is accepted as a FILTER or ORDER BY column: rendered `"metadata"->>'key'`,
- * the key a quoted literal, the bound value cast to text, which is the text
- * comparison PostgREST makes. A path ending in `->` (jsonb), an array index
- * (`->0`), and a path in a select list, a payload or a conflict target are
- * refused. Rows come back JSON-shaped as PostgREST's are in the one respect a
- * driven file needed: a timestamp is an ISO string, not Bun's Date. The bio
- * worker was the first shim-migrated file to run against a real database and
- * it hit both — a 500 at its first query, then at its prompt.
+ * is accepted in the comparison filters, `is`, `in`, `match`, an `.or()` term
+ * and `.order()`: rendered `"metadata"->>'key'`, the key a quoted literal, the
+ * bound value cast to text, which is the text comparison PostgREST makes. Not
+ * in `.contains()`, whose operator is jsonb's. A path ending in `->` (jsonb),
+ * an array index (`->0`), and a path in a select list, a payload or a conflict
+ * target are refused. Rows come back JSON-shaped as PostgREST's are in the one
+ * respect a driven file needed: a timestamp is an ISO string, not Bun's Date.
+ * The bio worker is the one shim-migrated file that filters on a JSON path and
+ * the first whose code slices a timestamp; driven, it hit both — a 500 at its
+ * first query, then at its prompt.
  *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
@@ -75,8 +77,10 @@ function ident(name: string, what: string): string {
  * bound parameter means against it depends on the value's JavaScript type
  * (PostgREST reads it as JSON); refused, with `.contains()` named for
  * containment. An array index (`->0`) is not identifier-shaped and falls to
- * ident()'s refusal, as does a path anywhere but a filter or an order: a
- * select list, a payload key, a conflict target. SMD-1544 (FORK.md change
+ * ident()'s refusal, as does a path anywhere but a comparison or an order: a
+ * select list, a payload key, a conflict target, and `.contains()`, whose
+ * operator is jsonb's (the file that wants containment under a key has
+ * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
  * 72): the bio worker's source and profile queries filter on `metadata->>…`,
  * and ident()'s refusal was a 500 at the worker's first query on the fork.
  */
@@ -109,10 +113,17 @@ function column(name: string): { sql: string; text: boolean } {
  * `toISOString()` gives it (`Z`, milliseconds) rather than Postgres's own
  * spelling (`+00:00`, microseconds), which PostgREST would give: both parse,
  * both slice to the same date, and a consumer comparing the spellings had a
- * bug on either client. Everything else stays as Bun returns it — ±Infinity
- * for an infinite timestamp, `Date(NaN)` for a BC date (server-portable/
- * store.ts's `isoTimestamp` knows both), numerics as text — nothing driven
- * has needed more.
+ * bug on either client. The rule is timestamptz-shaped: a `date` or a
+ * `timestamp without time zone` column is a Date to Bun too and arrives as a
+ * `Z` instant (`2026-09-16T00:00:00.000Z` for a date) where PostgREST spells
+ * `2026-09-16` and `2026-09-16T18:39:59.275494` — `.slice(0, 10)` agrees, an
+ * equality against the bare date does not; no shim-migrated file reads one.
+ * Everything else stays as Bun returns it — ±Infinity for an infinite
+ * timestamp, `Date(NaN)` for a BC date over a simple query (a parameterised
+ * one hands a finite extended-year Date, which becomes
+ * `-000043-03-15T00:00:00.000Z`; server-portable/store.ts's `isoTimestamp`
+ * reads every one of these to the same result), numerics as text — nothing
+ * driven has needed more.
  */
 function jsonShaped(row: Record<string, unknown>): Record<string, unknown> {
   let out: Record<string, unknown> | null = null;

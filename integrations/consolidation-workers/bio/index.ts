@@ -17,7 +17,7 @@
 // SMD-1544 (change 72): the source and profile queries filter on JSON paths
 // (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
 // refused — a 500 at the first query on the fork — and renders now; the shim
-// also hands created_at back as the string PostgREST would, which the prompt
+// also hands created_at back as a string, as PostgREST does, which the prompt
 // slices. extensions/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,

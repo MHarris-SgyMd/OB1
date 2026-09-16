@@ -248,32 +248,32 @@ console.log("\n[11] The generated SQL is inspectable");
 }
 
 console.log("\n[12] JSON-path filter columns (SMD-1544)");
-{
+/** A result's rows, the error named first: a regression that resolves as { error } is one counted failure, not a TypeError before the tally. */
+const rowsOf = (r: { data: unknown; error: { message: string } | null }, what: string): Record<string, unknown>[] => {
+  if (r.error) assert(false, `${what}: ${r.error.message}`);
+  return (r.data as Record<string, unknown>[] | null) ?? [];
+};
+const namesOf = (r: { data: unknown; error: { message: string } | null }, what: string) => rowsOf(r, what).map((x) => String(x.name)).join();
+try {
   // Two rows with keys under `meta`; alpha and beta have none of them.
-  const seeded = await db.from("widgets").insert([
+  rowsOf(await db.from("widgets").insert([
     { name: "delta", kind: "gadget", score: 5, meta: { owner: "ann", nested: { level: "deep" }, generated_by: "bot", score: 25 } },
     { name: "epsilon", kind: "gadget", score: 7, meta: { owner: "bob", score: 5 } },
-  ]).select("name");
-  assert(seeded.error === null, `…setup (${seeded.error?.message ?? "ok"})`);
+  ]).select("name"), "setup insert");
 
-  const eq = await db.from("widgets").select("name").eq("meta->>owner", "ann");
-  assert((eq.data as { name: string }[]).map((r) => r.name).join() === "delta", "eq on `col->>key` compares the key's text");
-  const isNull = await db.from("widgets").select("name").is("meta->>generated_by", null);
-  assert((isNull.data as unknown[]).length === 3, `is(null) on a path selects the rows without the key (${(isNull.data as unknown[]).length}) — the bio worker's filter`);
-  const nested = await db.from("widgets").select("name").eq("meta->nested->>level", "deep");
-  assert((nested.data as { name: string }[]).map((r) => r.name).join() === "delta", "`col->a->>b` reaches a nested key");
-  const neq = await db.from("widgets").select("name").neq("meta->>owner", "ann");
-  assert((neq.data as { name: string }[]).map((r) => r.name).join() === "epsilon", "neq on a path leaves out the rows without the key, as SQL and PostgREST do");
-  const gte = await db.from("widgets").select("name").gte("meta->>score", 20);
-  assert((gte.data as unknown[]).length === 2, `a number against a path compares as text — "5" >= "20" — which is PostgREST's comparison for ->>, and not an error (${(gte.data as unknown[]).length})`);
-  const inList = await db.from("widgets").select("name").in("meta->>owner", ["ann", "bob"]);
-  assert((inList.data as unknown[]).length === 2, "in() on a path");
-  const matched = await db.from("widgets").select("name").match({ "meta->>owner": "bob", kind: "gadget" });
-  assert((matched.data as { name: string }[]).map((r) => r.name).join() === "epsilon", "match() takes a path among its keys");
-  const ored = await db.from("widgets").select("name").or("meta->>owner.eq.ann,score.gt.90");
-  assert((ored.data as unknown[]).length === 2, `or() parses a path term — the key's dot-free, so column.op.value still splits (${(ored.data as unknown[]).length})`);
-  const ordered = await db.from("widgets").select("name").order("meta->>owner", { ascending: false, nullsFirst: false });
-  assert((ordered.data as { name: string }[])[0].name === "epsilon", "order() by a path");
+  assert(namesOf(await db.from("widgets").select("name").eq("meta->>owner", "ann"), "eq") === "delta", "eq on `col->>key` compares the key's text");
+  const isNull = rowsOf(await db.from("widgets").select("name").is("meta->>generated_by", null), "is(null)");
+  assert(isNull.length === 3, `is(null) on a path selects the rows without the key (${isNull.length}) — the bio worker's filter`);
+  assert(namesOf(await db.from("widgets").select("name").eq("meta->nested->>level", "deep"), "nested") === "delta", "`col->a->>b` reaches a nested key");
+  assert(namesOf(await db.from("widgets").select("name").neq("meta->>owner", "ann"), "neq") === "epsilon", "neq on a path leaves out the rows without the key, as SQL and PostgREST do");
+  const gte = rowsOf(await db.from("widgets").select("name").gte("meta->>score", 20), "gte with a number");
+  assert(gte.length === 2, `a number against a path compares as text — "5" >= "20" — which is PostgREST's comparison for ->>, and not an error (${gte.length})`);
+  assert(rowsOf(await db.from("widgets").select("name").in("meta->>owner", ["ann", "bob"]), "in").length === 2, "in() on a path");
+  assert(namesOf(await db.from("widgets").select("name").match({ "meta->>owner": "bob", kind: "gadget" }), "match") === "epsilon", "match() takes a path among its keys");
+  const ored = rowsOf(await db.from("widgets").select("name").or("meta->>owner.eq.ann,score.gt.90"), "or");
+  assert(ored.length === 2, `or() parses a path term — the key is dot-free, so column.op.value still splits (${ored.length})`);
+  const ordered = rowsOf(await db.from("widgets").select("name").order("meta->>owner", { ascending: false, nullsFirst: false }), "order");
+  assert(ordered[0]?.name === "epsilon", "order() by a path");
 
   const q = db.from("widgets").select("id").eq("meta->>owner", "ann").is("meta->>generated_by", null).order("meta->>owner");
   const { text, values } = q.toSQL();
@@ -281,7 +281,7 @@ console.log("\n[12] JSON-path filter columns (SMD-1544)");
     `the column is a quoted identifier, the key a quoted literal, the value a parameter cast to text (${text})`);
   assert(values.length === 1 && values[0] === "ann", "…and the value travels as a parameter");
 
-  // Refusals: a path that yields jsonb, a ->> before the end, an array index, an injected key, and a path anywhere but a filter or order.
+  // Refusals: a path that yields jsonb, a ->> before the end, an array index, an injected key, and a path anywhere but a comparison or an order.
   for (const [bad, re, what] of [
     ["meta->owner", /must end in ->>/, "a path ending in -> (jsonb) is refused, naming ->> and .contains()"],
     ["meta->>owner->>x", /must end in ->>/, "a ->> before the end is refused"],
@@ -292,28 +292,31 @@ console.log("\n[12] JSON-path filter columns (SMD-1544)");
     try { await db.from("widgets").select("id").eq(bad, "x"); } catch (e) { msg = (e as Error).message; }
     assert(re.test(msg), `${what} (${msg.slice(0, 60)})`);
   }
-  let sel = "";
-  try { await db.from("widgets").select("meta->>owner"); } catch (e) { sel = (e as Error).message; }
-  assert(/Identifiers must match/.test(sel), "a path in a select list is still refused — not a filter column");
-  let upd = "";
-  try { await db.from("widgets").update({ "meta->>owner": "x" }).eq("name", "delta"); } catch (e) { upd = (e as Error).message; }
-  assert(/Identifiers must match/.test(upd), "a path as a payload key is still refused");
+  const refused = async (run: () => Promise<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
+  assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("meta->>owner"))), "a path in a select list is still refused — not a filter column");
+  assert(/Identifiers must match/.test(await refused(() => db.from("widgets").update({ "meta->>owner": "x" }).eq("name", "delta"))), "a path as a payload key is still refused");
+  assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("id").contains("meta->>owner", {}))), "contains() refuses a path — it is jsonb containment on a column, and text @> jsonb has no operator");
   const survived = await db.from("widgets").select("id", { count: "exact", head: true });
   assert(survived.count === 4, "…and the table still exists");
+} catch (e) {
+  assert(false, `[12] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 console.log("\n[13] Rows are JSON-shaped where PostgREST's are: a timestamp is a string");
-{
+try {
   const one = await db.from("widgets").select("name, created_at").eq("name", "alpha").single();
-  const at = (one.data as unknown as { created_at: unknown }).created_at;
+  const at = (rowsOf({ data: one.data === null ? [] : [one.data], error: one.error }, "single")[0] ?? {}).created_at;
   assert(typeof at === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(at),
     `a timestamptz arrives as an ISO string, as PostgREST's JSON has it — Bun hands back a Date, whose .slice is a 500 in a file written for PostgREST (got ${typeof at} ${String(at)})`);
-  const many = await db.from("widgets").select("created_at").order("id");
-  assert((many.data as { created_at: unknown }[]).every((r) => typeof r.created_at === "string"), "…on every row of a many-row result");
+  const many = rowsOf(await db.from("widgets").select("created_at").order("id"), "many rows");
+  assert(many.length === 4 && many.every((r) => typeof r.created_at === "string"), "…on every row of a many-row result");
   const fn = await db.rpc("widgets_created", { p_kind: "tool" });
-  assert(Array.isArray(fn.data) && (fn.data as { created_at: unknown }[]).length === 2 && (fn.data as { created_at: unknown }[]).every((r) => typeof r.created_at === "string"), "…and on a set-returning function's rows");
-  const nulled = await db.from("widgets").update({ kind: null }).eq("name", "epsilon").select("kind, created_at");
-  assert((nulled.data as { kind: unknown; created_at: unknown }[])[0].kind === null && typeof (nulled.data as { created_at: unknown }[])[0].created_at === "string", "a NULL stays null; only a Date is reshaped");
+  const fnRows = rowsOf(fn, "set-returning rpc");
+  assert(fnRows.length === 2 && fnRows.every((r) => typeof r.created_at === "string"), "…and on a set-returning function's rows");
+  const nulled = rowsOf(await db.from("widgets").update({ kind: null }).eq("name", "epsilon").select("kind, created_at"), "update returning");
+  assert(nulled[0]?.kind === null && typeof nulled[0]?.created_at === "string", "a NULL stays null; only a Date is reshaped");
+} catch (e) {
+  assert(false, `[13] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 await db.close();

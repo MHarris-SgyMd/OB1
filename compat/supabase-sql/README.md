@@ -63,7 +63,7 @@ identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
 | Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` |
-| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in every filter, in `.or()` terms and in `.order()` |
+| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is jsonb containment on a column |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
@@ -71,10 +71,14 @@ inclusive at both ends; `.in([])` selects nothing; `.single()` on zero rows is a
 error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is jsonb
 `@>`; errors resolve as `{ error }` rather than throwing; a JSON path compares
 the key's *text*, so a number against `meta->>score` is a text comparison
-(`"5" >= "20"`), as it is through PostgREST; and a timestamp arrives as an ISO
-string (`toISOString()`'s form), as PostgREST's JSON has it, not as the Date
-Bun hands back — a migrated file's `created_at.slice(0, 10)` works (FORK.md
-change 72, SMD-1544).
+(`"5" >= "20"`), as it is through PostgREST — a numeric comparison on a JSON
+key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
+(`toISOString()`'s form), as PostgREST's JSON has it, not as the Date Bun hands
+back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 72,
+SMD-1544). A `date` or a `timestamp without time zone` column is reshaped the
+same way, into a `Z` instant, where PostgREST would give `2026-09-16` or a
+zone-less datetime; `.slice(0, 10)` agrees, an equality against the bare date
+does not — no migrated file reads one.
 
 ## What is deliberately refused
 
@@ -121,8 +125,9 @@ development — the test caught it.
 - **Most migrated files are not individually tested.** Most need live credentials —
   Gmail, Slack, Readwise. The shim is tested; each migrated file is verified to
   parse, and `extensions/test-writes.ts` drives the writers among them against a
-  real Postgres (the bio worker was the first, and found the two gaps change 72
-  closed). Exercise the ones you actually run before trusting them.
+  real Postgres (the bio worker, the one that filters on a JSON path, found the
+  two gaps change 72 closed). Exercise the ones you actually run before trusting
+  them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.

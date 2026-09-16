@@ -10191,8 +10191,10 @@ literal against a text expression, which is a text comparison, and without
 the cast Bun binds a JavaScript number as an integer and Postgres has no
 `text >= integer` — the probe that decided it. `.eq/.neq/.gt/.gte/.lt/.lte/
 .like/.ilike/.is/.in/.match`, an `.or()` term and `.order()` take the path;
-`ident()` still holds a select list, an insert or update payload key, a
-conflict target, a table, a function and its argument names. Rows from a
+`.contains()` does not (its operator is jsonb's; containment under a key is
+`.contains("meta", { key })`), and `ident()` still holds a select list, an
+insert or update payload key, a conflict target, a table, a function and its
+argument names. Rows from a
 table verb and from `rpc()` pass through `jsonShaped()`: a `Date` with a
 finite time becomes its `toISOString()` string; everything else — the number
 ±Infinity Bun gives an infinite timestamp, `Date(NaN)` for a BC date,
@@ -10200,7 +10202,7 @@ numerics as text — stays as Bun returns it, which `server-portable/store.ts`'s
 `isoTimestamp` already knows. `test-compat.ts` pins both: [12] a path in
 every filter, in `.or()` and `.order()`, a nested `meta->a->>b`, `is(null)`
 selecting the rows without the key, a number comparing as text, the
-generated SQL's shape, and five refusals; [13] a timestamp as a string on a
+generated SQL's shape, and seven refusals; [13] a timestamp as a string on a
 one-row, a many-row and a set-returning function's result, a NULL staying
 null. `test-writes.ts` drives the worker: seven sources planted through the
 function with their enhanced columns set beside it; `POST /?name=Test`
@@ -10214,7 +10216,9 @@ the profile through three path equalities, keeps the profile row itself out
 of its sources, feeds it to the prompt and rewrites it through
 `update_thought`, judged against the oracle edit with 022's planted windows
 gone and a `model-before` label replaced; another subject gets its own row,
-a dry run writes and logs nothing, a name with no sources is 404. The worker
+a dry run writes and logs nothing, a first run whose text a row already
+holds answers that row as not created and leaves its hand-set columns (the
+function's `existed`), a name with no sources is 404. The worker
 leaves the read set: its header names SMD-1544, the per-ticket header guard
 holds it in the driven set for all three tickets, and the eight text guards
 the drive now proves are gone — the Anthropic-only refusal stays read,
@@ -10231,8 +10235,15 @@ Postgres's own (`+00:00`, microseconds) that PostgREST would give: both
 parse, both slice to the same date, and a consumer comparing the spellings
 had a bug on either client; the store's helper normalises both to the
 same result, and its tests say which form the fixture now hands it. Only a
-finite `Date` is reshaped, so the two cases the store's comments describe
-(±Infinity, `Date(NaN)`) reach it as before. The sources are planted through
+finite `Date` is reshaped, so ±Infinity and a simple query's `Date(NaN)` for
+a BC date reach the store as before; a parameterised query's BC date is a
+finite extended-year Date to Bun and becomes `-000043-03-15T00:00:00.000Z`,
+which the helper reads to the same result. The rule is timestamptz-shaped:
+a `date` or a zone-less `timestamp` column arrives as a `Z` instant where
+PostgREST spells `2026-09-16` or a zone-less datetime — `.slice(0, 10)`
+agrees, an equality against the bare date does not, and no shim-migrated
+file reads one; said in the shim and its README rather than implied away.
+The sources are planted through
 `upsert_thought` and a raw update of the enhanced columns, not a raw
 `INSERT`: `test-writes.ts` is check 10's counted exception for one line, its
 `plant()`, and a second insert of content would fail the count. The bio
@@ -10243,15 +10254,48 @@ teardown drops every table a sidecar creates. The comments in `store.ts` and
 `test-store-postgrest.ts` that described the shim handing back a `Date`
 are corrected here rather than left to describe the old behaviour.
 
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with PostgREST v12.2.3 beside the database; nineteen findings,
+one MEDIUM: nine fixed, the rest noted). The first-run `existed` branch —
+a concurrent run's row, or a hand-captured one holding the profile's text —
+lost its text guard to the drive and gained no drive: the stub's next
+profile text is predictable, so the test plants that row typed by hand and
+asserts the worker answers it as not created with its columns kept. The
+shim's header and README said the path works "in every filter" —
+`.contains()` still refuses it, rightly (its operator is jsonb's) — and that
+the bio worker was "the first shim-migrated file to run against a real
+database" (the REST APIs and the receiver have run under this suite since
+change 69); both corrected, a `.contains()` refusal pinned. The `date` and
+zone-less-timestamp shapes and the parameterised BC date are said, above.
+The two headers that called the string "the one PostgREST would" say "as
+PostgREST does". `test-compat.ts` [12] and [13] read a result's error
+before its rows and hold a throw as one counted failure — with the cast
+removed the suite had died in a `TypeError` before its tally. A CI comment
+counted two sidecars. Noted, not fixed: `.is(path, true)` is 42804 on
+either client; whitespace around a path is trimmed here where PostgREST
+would 400; a bound `null` against a path is `= NULL::text`, no rows, as
+PostgREST's `eq.null`; `.in(path, [])` returns `FALSE` before the column is
+read, as before. The running reviewer verified against PostgREST itself
+what the README claims of it: `meta->>score=gte.20` matches `25` and `"5"`
+and not `"100"`; `meta->owner=eq.ann` is 400 `22P02` while `eq."ann"`
+matches — the JSON reading that is the reason the shim refuses a `->`
+ending; `or` and `order` with a path agree.
+
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
 before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
-184/184 under podman (157 before: eight bio text guards gone, the header guard's third ticket and the drive's thirty-four added); with `jsonShaped()`
-removed the bio block fails four assertions — the first `POST` answers 500 at
-the prompt's `.slice` and the run ends there — and with `column()` reduced
-to `ident()` the ticket's own 500 returns at the first query (five); `bun
-test-store-postgrest.ts` 86/86, the store still normalising what the fixture
-hands it; `bun test-auth.ts` 643/643; `bun scripts/check-fork-consistency.mjs`
-PASS; `bun scripts/migrate-to-sql-shim.mjs` triages as before (the shim's
+186/186 under podman (157 before: eight bio text guards gone, the header
+guard's third ticket and the drive added); with `jsonShaped()` removed the
+bio block fails four assertions — the first `POST` answers 500 at the
+prompt's `.slice` and the run ends there — and with `column()` reduced to
+`ident()` the ticket's own 500 returns at the first query (five); the
+running reviewer's mutations each caught by name: the `::text` cast (the
+`gte` pin), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
+one-row, many-row and rpc pins), the worker's `generated_by` filter (five),
+its `subject` equality (three), its actor on either path and its first-run
+sidecar (one each); `bun test-store-postgrest.ts` 86/86, the store still
+normalising what the fixture hands it; `bun test-auth.ts` 643/643; `bun
+scripts/check-fork-consistency.mjs` PASS; the codemod round-trips (24
+reverted, 24 re-applied, the tree clean) and triages as before (the shim's
 new column form changes no file's eligibility — the one nested `.or()`
 stays a blocker). The ticket's verify — `POST /` to the bio worker under
 test-writes' prelude answers 200 with a stored profile; `test-compat.ts`

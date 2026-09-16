@@ -35,8 +35,8 @@
  * (`metadata->>generated_by`, `->>subject` …), which the SQL shim refused, so
  * on the fork the worker answered 500 at its first query and everything
  * changes 69 and 71 gave its write paths was held by the text guards alone.
- * With the shim rendering the path — and handing a timestamp back as the
- * string PostgREST would, which the worker's prompt slices — the worker runs
+ * With the shim rendering the path — and handing a timestamp back as a
+ * string, as PostgREST does, which the worker's prompt slices — the worker runs
  * here on both paths: the sources chosen by the filters, the first profile
  * through the 3-argument upsert_thought, the rewrite through update_thought
  * with the previous profile found through three path equalities and the
@@ -665,6 +665,19 @@ try {
     assert(dry.status === 200 && dry.json?.action === "preview" && dry.json?.thought_id === null && /^Canonical Profile:/.test(String(dry.json?.profile)) && rowsAfter === rowsBefore && logsAfter === logsMid,
       `a dry run previews the profile and writes no row and no log (${dry.status} ${dry.json?.action} ${rowsAfter - rowsBefore} ${logsAfter - logsMid})`);
     assert((await row(id, text2)).content === text2, "…the stored profile untouched");
+
+    // A first run whose text the brain already holds — a concurrent run's row, or a hand-captured one: the function
+    // answers `existed`, and the worker reports that row as not created and leaves its columns. The stub's next
+    // profile text is predictable, so the row is planted first, typed by hand.
+    const held = `Canonical Profile: Test is a reader of the Stoics (run ${bioPrompts.length + 1}).`;
+    const heldId = await note(held, { type: "idea", importance: 2 });
+    await note("Third annotates the margins.", { type: "person_note" });
+    const third = await send(h, "POST", "/?name=Third");
+    const [heldRow] = await sql`SELECT type, importance, metadata FROM thoughts WHERE id = ${heldId}`;
+    assert(third.status === 200 && third.json?.action === "updated" && third.json?.previous_profile_existed === false && third.json?.thought_id === heldId,
+      `a first run whose text a row already holds answers that row's id as updated, not created (${third.status} ${third.json?.action} ${third.json?.thought_id === heldId})`);
+    assert(heldRow.type === "idea" && Number(heldRow.importance) === 2 && heldRow.metadata.generated_by === "consolidation-bio" && heldRow.metadata.subject === "Third",
+      `…leaving its hand-set columns, the profile's metadata merged by the function (${heldRow.type} ${heldRow.importance} ${heldRow.metadata.subject})`);
   }
   const none = await send(h, "POST", "/?name=Nobody");
   assert(none.status === 404 && /No source thoughts/.test(String(none.json?.error)), `a name with no sources is 404 (${none.status})`);
