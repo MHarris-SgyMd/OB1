@@ -1263,6 +1263,9 @@ function buildServer(principal: Principal): McpServer {
 // and names the 405's `Allow`, so the two cannot drift. FORK.md change 74.
 const MCP_METHODS = ["POST"];
 const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
+// A health path serves GET and HEAD (the route below) AND the MCP methods, since
+// the MCP handler is registered at every path. Derived from the same list.
+const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"].join(", ");
 
 // The CORS list is a different question — what a browser may send so it can
 // hear our answer — so it keeps GET and DELETE: a browser-hosted SDK client
@@ -1304,9 +1307,9 @@ const REVOKED_MESSAGE =
 
 /**
  * Read the request body as text without consuming the original request's
- * body stream for downstream handlers. Returns null on read failure. Only the
- * methods in MCP_METHODS reach the callers (the route table answers the rest
- * with 405), so there is no bodyless-method branch here.
+ * body stream for downstream handlers. Returns null on read failure. No
+ * bodyless-method branch: `req.text()` on a request without a body resolves to
+ * "", and extractJsonRpcId("") is null, so the method never mattered here.
  */
 async function readBodyText(req: Request): Promise<string | null> {
   try {
@@ -1398,18 +1401,24 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
 // process is serving and nothing else. Readiness — is the database reachable —
 // is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
-// HEAD probe gets a bodiless 200. Matched as the last path segment, under any
+// HEAD probe gets a bodiless 200. Matched as the last path segment under any
 // prefix a proxy leaves on the request (`/mcp/health`,
-// `/functions/v1/open-brain-mcp/health`) and with or without a trailing slash —
+// `/functions/v1/open-brain-mcp/health`), with at most one trailing slash —
 // deploy/README.md anticipates an unstripped prefix, and a probe aimed at
-// `<base>/health` must not 405 there. Tested against the path rather than
-// written as a route pattern: a `{.+}` parameter is unsupported by Hono's
-// RegExpRouter, so SmartRouter falls back to the TrieRouter, which on 4.9.2
-// miscounts a prefix of three or more segments — `/:prefix{.+}/health` matched
-// `/a/b/health` and not `/functions/v1/open-brain-mcp/health`. The name is
-// exact after percent-decoding: /healthz and /Health are not it. Anything else
-// falls through to notFound's 405. POST /health is the MCP endpoint, as POST at
-// every path is. FORK.md change 74.
+// `<base>/health` must not 405 there. The breadth ("health under anything") is
+// a stand-in for a base-path setting the server does not have; a mount (the
+// path-axis decision change 42 defers) would match `${base}/health` exactly.
+// The name is exact after Hono's decodeURI (`/he%61lth` is it; /healthz and
+// /Health are not; an encoded slash `%2F` stays encoded and is not a slash; an
+// empty segment `//health` passes). Tested against the path rather than
+// written as a route pattern because on Hono 4.9.2 a `:param` route that shares
+// the root with a static route (`/.well-known/*` here) makes the RegExpRouter
+// throw UnsupportedPathError at registration, SmartRouter then falls back to
+// the TrieRouter, and the TrieRouter miscounts a `{.+}` prefix of three or more
+// segments — so `/:prefix{.+}/health` matched `/a/b/health` and not
+// `/functions/v1/open-brain-mcp/health`. Anything else falls through to
+// notFound's 405. POST /health is the MCP endpoint, as POST at every path is.
+// FORK.md change 74.
 const HEALTH_PATH = /(^|\/)health\/?$/;
 app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
 
@@ -1465,8 +1474,12 @@ app.on(MCP_METHODS, "*", async (c) => {
   // StreamableHTTPTransport requires. Build a patched request if missing.
   // See: https://github.com/NateBJones-Projects/OB1/issues/33
   // Only MCP_METHODS reach this handler, so the patch never tells a GET to
-  // expect an event stream — that was SMD-1259's mechanism.
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
+  // expect an event stream — that was SMD-1259's mechanism. The transport
+  // requires BOTH tokens on a POST (406 otherwise), so the patch fires when
+  // either is missing; it used to test only the SSE token, and a POST carrying
+  // `Accept: text/event-stream` alone paid the resolve and the build for a 406.
+  const accept = c.req.header("accept") ?? "";
+  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
     headers.set("Accept", "application/json, text/event-stream");
     const patched = new Request(c.req.raw.url, {
@@ -1498,12 +1511,12 @@ app.on(MCP_METHODS, "*", async (c) => {
 // the 200 JSON-RPC refusal, so a platform probe uses /health above. Hono's
 // notFound rather than a trailing app.all("*"), so a route registered later is
 // not silently shadowed by dispatch order. `Allow` names the target resource's
-// methods (RFC 9110 §10.2.1): at a health path that is GET and HEAD, not POST.
-// FORK.md change 74.
+// methods (RFC 9110 §10.2.1): at a health path, GET and HEAD beside the MCP
+// methods. FORK.md change 74.
 app.notFound((c) =>
   c.text("Method Not Allowed", 405, {
     ...corsHeaders,
-    Allow: HEALTH_PATH.test(c.req.path) ? "GET, HEAD, OPTIONS" : ALLOWED_METHODS,
+    Allow: HEALTH_PATH.test(c.req.path) ? HEALTH_ALLOWED_METHODS : ALLOWED_METHODS,
   }),
 );
 

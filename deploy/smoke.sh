@@ -11,8 +11,8 @@
 # Exit 0 if the deployment is serving correctly, 1 otherwise. Read-only: it never
 # captures a thought, so it is safe against production.
 #
-# Checks 2 and 3 are the ones a Supabase Edge Function deployment cannot pass;
-# FORK.md changes 42 and 74 say why, and why those failures are real.
+# Checks 2, 3 and 4 are the ones a Supabase Edge Function deployment cannot
+# pass; FORK.md changes 42 and 74 say why, and why those failures are real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -92,29 +92,31 @@ done
 [ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
                || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
 
-# 3. GET at the endpoint is 405, and GET /health is 200. The MCP endpoint serves
-#    POST only (FORK.md change 74: before it, a keyed GET hung on an SSE stream
-#    the per-request transport never closed), and /health is the target for a
-#    platform probe that can only GET. Both probed with NO key: both answers
-#    come before authenticate(), and status() follows redirects, on which curl
-#    forwards a custom header to whatever host comes next. A 200 from the
-#    endpoint is the method guard missing — or a front proxy answering GET /
-#    itself. /health is matched under any path prefix the proxy leaves on, so
-#    "$BASE/health" is right whether or not the proxy strips. A Supabase Edge
-#    Function fails this check: upstream's server has no method guard (#424,
-#    their PR #425). One tally for the pair, so the count stays one per check.
-code=$(status "$BASE/"); hc=$(status "$BASE/health"); miss=""
-[ "$code" = "405" ] || miss="GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server)"
-[ "$hc" = "200" ]   || miss="${miss:+$miss; }GET /health → HTTP $hc (expected 200: route GET /health to the server as you route POST)"
-[ -z "$miss" ] && ok "GET the endpoint → HTTP 405 (POST only), GET /health → HTTP 200 (the liveness target for GET-only probes)" \
-               || bad "$miss; FORK.md change 74"
+# 3. GET at the endpoint is 405: it serves POST only (FORK.md change 74; before
+#    it, a keyed GET hung on an SSE stream the per-request transport never
+#    closed). Probed with NO key — the answer comes before authenticate(), and
+#    status() follows redirects, on which curl forwards a custom header to
+#    whatever host comes next. A 200 is the method guard missing, or a front
+#    proxy answering GET / itself. A Supabase Edge Function fails here:
+#    upstream's server has no method guard (#424, their PR #425).
+code=$(status "$BASE/")
+[ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (POST only; the SDK client's expected answer to its stream probe)" \
+                    || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 74)"
 
-# 4. Protocol handshake.
+# 4. GET /health is 200: the liveness target for a platform probe that can only
+#    GET. "$BASE/health" is right whether or not the proxy strips its prefix;
+#    the match rule is the HEALTH_PATH comment in server-portable/index.ts. No
+#    key, for the same reasons as check 3. Upstream's server has no such route.
+code=$(status "$BASE/health")
+[ "$code" = "200" ] && ok "GET /health → HTTP 200 (the liveness target for GET-only probes)" \
+                    || bad "GET /health → HTTP $code (expected 200: route GET /health to the server as you route POST; FORK.md change 74)"
+
+# 5. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   | unwrap | python3 -c 'import sys,json;print(json.load(sys.stdin).get("result",{}).get("protocolVersion",""))' 2>/dev/null)
 [ -n "$pv" ] && ok "initialize (protocol $pv)" || bad "initialize returned no protocolVersion"
 
-# 5. The full documented tool surface.
+# 6. The full documented tool surface.
 tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   | unwrap | python3 -c 'import sys,json;print(",".join(sorted(t["name"] for t in json.load(sys.stdin)["result"]["tools"])))' 2>/dev/null)
 # Ten for a write key. capture_thought, update_thought and delete_thought are
@@ -123,7 +125,7 @@ tools=$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
 expected="capture_thought,delete_thought,fetch,list_supersession_proposals,list_thoughts,search,search_thoughts,search_thoughts_keyword,thought_stats,update_thought"
 [ "$tools" = "$expected" ] && ok "all ten tools exposed" || bad "tool surface is '$tools'"
 
-# 6. A read that actually reaches the database. This is the check that catches a
+# 7. A read that actually reaches the database. This is the check that catches a
 #    server which starts, answers the handshake, and has no working data layer.
 stats=$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' \
   | unwrap | python3 -c 'import sys,json;d=json.load(sys.stdin);r=d.get("result",{});print(("ERROR: " if r.get("isError") else "")+r.get("content",[{}])[0].get("text",""))' 2>/dev/null | head -1)
@@ -133,12 +135,12 @@ case "$stats" in
   *)                   bad "thought_stats returned nothing usable" ;;
 esac
 
-# 7. A filtered read, which exercises a different query path.
+# 8. A filtered read, which exercises a different query path.
 listed=$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_thoughts","arguments":{"limit":1}}}' \
   | unwrap | python3 -c 'import sys,json;r=json.load(sys.stdin).get("result",{});print(("ERROR" if r.get("isError") else "OK"))' 2>/dev/null)
 [ "$listed" = "OK" ] && ok "list_thoughts served" || bad "list_thoughts errored"
 
-# 8. Keyword search, which is the only read path that touches migration 012 and
+# 9. Keyword search, which is the only read path that touches migration 012 and
 #    the pg_trgm extension. It needs no embedding provider — the smoke stack has
 #    no real OPENROUTER_API_KEY — so unlike search_thoughts it can run here. A
 #    needle that cannot plausibly be in a fresh brain: zero hits is the pass, an

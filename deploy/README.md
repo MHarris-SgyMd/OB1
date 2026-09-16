@@ -58,18 +58,16 @@ http://localhost:8000/?key=<MCP_ACCESS_KEY>
 
 `migrate` exits 0 having applied every migration under `db/migrations/` (it needs no `bun install` —
 `migrate.ts` imports only Bun and `node:` built-ins). `server` logs `preflight OK`
-followed by `Started server`. `smoke.sh` prints `8 checks: 8 passed, 0 failed`.
+followed by `Started server`. `smoke.sh` prints `9 checks: 9 passed, 0 failed`.
 
-Point an HTTP liveness probe at **`GET <base>/health`** (200, no key). It is
-matched under whatever path prefix a proxy leaves on the request and with or
-without a trailing slash, so the URL you configure outside the proxy is the one
-to use; the name itself is exact after percent-decoding (`/healthz` is not it).
-The MCP endpoint serves
-POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 74, so a
-platform-default probe aimed at `/` marks a healthy server down. The image's own
-`HEALTHCHECK` POSTs to the endpoint instead, which also proves the MCP path
-serves; either is fine. Opening the connector URL in a browser shows
-`Method Not Allowed`, which is expected.
+Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) — the URL
+you configure outside the proxy is the one to use; the exact match rule is the
+`HEALTH_PATH` comment in `server-portable/index.ts` (FORK.md change 74). The MCP
+endpoint serves POST only: `GET /` and `HEAD /` answer 405, so a platform-default
+probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK`
+POSTs to the endpoint instead, which also proves the MCP path serves; either is
+fine. Opening the connector URL in a browser shows `Method Not Allowed`, which is
+expected.
 
 ## Why the server runs preflight before serving
 
@@ -121,14 +119,15 @@ there, for that check to pass.
   bulk load of a few hundred thousand rows. Raise it with `maintenance_work_mem`
   before rebuilding a large index, or build with
   `max_parallel_maintenance_workers = 0` (`db/README.md`, "Caveats").
-- **A Supabase Edge Function passing checks 2 and 3.** On Supabase the API gateway
+- **A Supabase Edge Function passing checks 2, 3 and 4.** On Supabase the API gateway
   answers the OAuth discovery path with 401 before the function sees it, so check
   2 fails there — and the failure is real: the claude.ai connector will not open
   against that deployment either (upstream
   [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
-  Check 3 fails too: upstream's `server/index.ts` has no method guard, so a GET
-  answers 200 instead of 405, and with a key it hangs (upstream
-  [#424](https://github.com/NateBJones-Projects/OB1/issues/424); FORK.md change 74).
+  Checks 3 and 4 fail too: upstream's `server/index.ts` has no method guard, so
+  a GET answers 200 instead of 405 — with a key it hangs (upstream
+  [#424](https://github.com/NateBJones-Projects/OB1/issues/424)) — and it has no
+  `/health` route (FORK.md change 74).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.

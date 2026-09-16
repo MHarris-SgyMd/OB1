@@ -11051,19 +11051,30 @@ got the 405 — the very outcome the route was added to prevent — and so did
 `health` as its last segment, optional trailing slash, and calls `next()`
 otherwise (which lands on the 405). A route pattern was tried first —
 `/:prefix{.+}/health` — and in `test-server.ts` matched `/mcp/health` and
-`/a/b/health` but not `/functions/v1/open-brain-mcp/health`. The third pass
-blamed the RegExpRouter; the fourth pass drove Hono 4.9.2's routers directly and
-corrected the mechanism: the RegExpRouter refuses a `{.+}` parameter outright
-(`UnsupportedPathError`), SmartRouter therefore falls back to the TrieRouter,
-and the TrieRouter miscounts a prefix of three or more segments (its segment
-counter matches one slash where it should match all). A scratch app I built
-gave yet another depth — which is the point: the pattern's reach depends on
-router internals, and testing the path does not. The name stays exact after
-percent-decoding: `/healthz`, `/Health` and `/health/x` are not it;
-`/he%61lth` is. `POST /health` is the MCP endpoint, as POST at every path is,
-and a PUT or DELETE at a health path gets its 405 with
-`Allow: GET, HEAD, OPTIONS`, the health resource's methods, not the
-endpoint's. The
+`/a/b/health` but not `/functions/v1/open-brain-mcp/health`. Three passes
+stated three mechanisms for that, and the fifth is the one driven directly
+against the project's Hono 4.9.2 with each router named: the RegExpRouter
+accepts `/:prefix{.+}/health` on its own and matches four segments; what makes
+it throw `UnsupportedPathError` at registration is a `:param` route sharing the
+root node with a static route — `/.well-known/*` here, or a plain `/health` —
+regex or no regex; SmartRouter then falls back to the TrieRouter, and the
+TrieRouter miscounts a `{.+}` prefix of three or more segments (its segment
+counter matches one slash where it should match all). The scratch apps that
+"matched every depth" in passes 3 and 4 were loading Hono 4.13.8 from Bun's
+global cache, not the project's 4.9.2 — a scratch file outside the package
+resolves `hono` elsewhere. The lesson holds either way: the pattern's reach
+depends on router internals and on which Hono answers, and testing the path
+depends on neither. The name is exact after Hono's decodeURI: `/healthz`,
+`/Health` and `/health/x` are not it; `/he%61lth` is; an encoded slash `%2F`
+stays encoded and is not a slash, so `/health%2F` and `/health//` are refused
+while `/health/` and `//health` pass — one trailing slash, and an empty segment
+is tolerated. The breadth — `health` under any prefix — stands in for a
+base-path setting the server does not have; the mount change 42 defers would
+match `${base}/health` exactly and should narrow it. `POST /health` is the MCP
+endpoint, as POST at every path is, and a PUT or DELETE at a health path gets
+its 405 with `Allow: GET, HEAD, POST, OPTIONS` — the health resource's methods,
+which include the endpoint's, derived from the same list (the fourth pass wrote
+`GET, HEAD, OPTIONS` and contradicted its own sentence about POST). The
 image's `HEALTHCHECK` keeps POSTing to the endpoint, which also proves the MCP
 path serves; `deploy/README.md` points platform probes at `<base>/health` and
 says a browser opening the connector URL sees `Method Not Allowed`, which is
@@ -11087,7 +11098,7 @@ expected case that should not trigger an error" — and any other non-2xx is a
 `StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
 client. A live connector has not been seen to do it; see below.
 
-**Verified.** `test-server.ts` [13], 62 assertions against the real
+**Verified.** `test-server.ts` [13], 63 assertions against the real
 server: eleven fetch rows — GET under no key, a wrong key, the right key in the
 header and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT,
 PATCH, DELETE with and without a key, and the case-variant discovery path — each
@@ -11104,11 +11115,17 @@ under the Supabase-shaped three-segment prefix; `/healthz`, `/Health`,
 contract, since what a stray GET gets is the deferred path-axis decision, but
 one of the two refusals and nothing else, because the third pass's `!== 200`
 would have passed the abort marker, which is a hang, the one outcome the block
-exists to refuse (the fourth pass reproduced it with a wrapped `fetch`); and
-`PUT /health` → 405 with `Allow: GET, HEAD, OPTIONS`. The exact CORS method
-list lives in [3], where the preflight is now probed through the same abortable
-helper; POST reaching the transport is [7]. Drilled by restoring the pre-change shape — the handler on
-`app.all` and the `notFound` removed — 34 of 148 assertions fail: the
+exists to refuse (the fourth pass reproduced it with a wrapped `fetch`);
+`PUT /health` → 405 with `Allow: GET, HEAD, POST, OPTIONS`, and `POST /health`
+→ the endpoint. The exact CORS method list lives in [3], where the preflight is
+now probed through the same abortable helper, whose body parse sits outside the
+transport try so a non-JSON body reports the status the server sent rather than
+`SyntaxError`; POST reaching the transport is [7], which also sends
+`Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
+whichever of the two tokens the transport requires is missing, where it used to
+test only the SSE token and let that POST through to a 406 after paying the
+resolve and the build. Drilled by restoring the pre-change shape — the handler on
+`app.all` and the `notFound` removed — 34 of 150 assertions fail: the
 fetch rows holding a valid GET fail as `TimeoutError`; the raw-socket row as a
 `200 OK` status line (the stream's headers flush at once; it is the body that
 never ends); the rows without a key as 200 with an envelope; HEAD, PUT and PATCH
@@ -11118,13 +11135,11 @@ the 200 refusal; `/health` keeps passing, being its own route. The
 suite's 2 s abort on every routing probe stays: it is what turns the failure
 mode this change closes into a red assertion instead of a stuck CI job, so it is
 the test's teeth, not scaffolding to retire. `deploy/smoke.sh` check 3 GETs the
-endpoint and expects 405, then GETs `<base>/health` and expects 200 — right
-whether or not the proxy strips its prefix, by the path test above — as one tally,
-so the summary still counts one per numbered check (the second pass's two
-tallies made a green run print nine of eight), and on failure names only the
-probe that missed, each with its own remedy, in check 2's accumulator shape
-(the third pass's single line printed both remedies under a value that had
-passed). Both **with no key**. No key, because both answers come before `authenticate()` so a key proves
+endpoint and expects 405; check 4 GETs `<base>/health` and expects 200 — right
+whether or not the proxy strips its prefix, by the path test above. Two checks,
+because they are two contracts with two remedies (the fourth pass bundled them
+into one tally to keep the count at eight, a constraint it had itself dissolved
+by moving the count literal into one file). Both **with no key**. No key, because both answers come before `authenticate()` so a key proves
 nothing, and because the script's status helper follows redirects with `-L`, on
 which curl forwards a custom header to whatever host comes next — the first
 draft sent the key, and behind a redirecting front proxy it would have landed in
@@ -11135,14 +11150,15 @@ body stalls (the first draft said `000`, which curl prints only when no status
 line arrives at all). Check 2's comment now says why a keyless discovery probe
 suffices — the route answers before auth whether or not the key rides along —
 rather than the false claim that the connector sends none. The former checks
-3–7 are now 4–8. The literal count lives in `deploy/README.md` alone;
+3–7 are now 5–9. The literal count lives in `deploy/README.md` alone;
 `SETUP.md` says every check passes and points there, so the next check is one
 edit, not two and a stale copy (this change bumped seven to eight by hand in
 two files before the fourth pass noticed). `SETUP.md`'s tool counts (ten for a
 write key, seven for a read key; three tools gated, not two) are corrected
 where they contradicted each other eight lines apart, and
 `server-portable/README.md`'s suite count and bundle size, stale since [11]
-landed, now match the run.
+landed, now match the run, and are the only copies of either number —
+`SETUP.md` and the known-issues entry below point there.
 `tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
 281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
 
@@ -11158,8 +11174,9 @@ it. Today those stray paths get the 405 like any other GET, which is a complete
 answer if not the most descriptive one.
 `server/index.ts`, the Deno Edge Function upstream deploys, carries the same
 Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
-their fix for it. A Supabase deployment therefore fails smoke check 3 as it
-fails check 2, and for as real a reason: with a key, its GET hangs.
+their fix for it. A Supabase deployment therefore fails smoke checks 3 and 4 as
+it fails check 2, and for as real a reason: with a key, its GET hangs, and it
+has no `/health`.
 
 Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
@@ -11193,7 +11210,8 @@ Deliberate. Recorded so nobody assumes they were missed.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
-  target is verified with the real bundler (272 KiB gzipped) and CI rebuilds it on
+  target is verified with the real bundler (`server-portable/README.md` has the
+  size) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
 - **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and

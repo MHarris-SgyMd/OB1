@@ -64,19 +64,24 @@ async function mcpBody(r: Response): Promise<Record<string, unknown> | null> {
  * request handed to a stream the per-request transport never closes (SMD-1259)
  * — into a red assertion named `TimeoutError` instead of a stuck CI job.
  */
-const probe = async (path: string, init: RequestInit = {}) => {
+type Probe = { status: number | string; cors: boolean; allow: string | null; methods: string | null; envelope: boolean };
+const probe = async (path: string, init: RequestInit = {}): Promise<Probe> => {
+  let r: Response;
   try {
-    const r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
-    return {
-      status: r.status as number | string,
-      cors: corsOk(r),
-      allow: r.headers.get("allow"),
-      methods: r.headers.get("access-control-allow-methods"),
-      envelope: (await mcpBody(r))?.jsonrpc === "2.0",
-    };
+    r = await fetch(`${BASE}${path}`, { ...init, signal: AbortSignal.timeout(2000) });
   } catch (e) {
     return { status: e instanceof Error ? e.name : String(e), cors: false, allow: null, methods: null, envelope: false };
   }
+  // The body parse is outside the transport try: a body that starts with `{`
+  // and is not JSON is "not an envelope", not a transport failure that should
+  // hide the status and Allow the server did send.
+  let envelope = false;
+  try {
+    envelope = (await mcpBody(r))?.jsonrpc === "2.0";
+  } catch {
+    /* not JSON → not an envelope */
+  }
+  return { status: r.status, cors: corsOk(r), allow: r.headers.get("allow"), methods: r.headers.get("access-control-allow-methods"), envelope };
 };
 
 const INIT = JSON.stringify({
@@ -165,6 +170,12 @@ console.log("\n[7] initialize");
   const result = b?.result as Record<string, unknown> | undefined;
   assert(result?.protocolVersion != null, "protocolVersion returned");
   assert(result?.capabilities != null, "capabilities returned");
+
+  // The transport wants both Accept tokens on a POST; the patch supplies
+  // whichever is missing. Before change 74 it tested only the SSE token, so
+  // this request reached the transport unpatched and got 406.
+  const sseOnly = await fetch(BASE, { method: "POST", headers: { ...AUTH, Accept: "text/event-stream" }, body: INIT });
+  assert(sseOnly.status === 200 && (await mcpBody(sseOnly))?.result != null, `Accept: text/event-stream alone is patched to both tokens → 200 (${sseOnly.status})`);
 }
 
 console.log("\n[8] Per-request isolation — a fresh McpServer each time");
@@ -349,12 +360,9 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   // The CORS preflight still advertises GET and DELETE — asserted in [3], where
   // the preflight is probed. POST reaching the transport is [7].
 
-  // /health is the probe target for platforms that can only GET and want 2xx
-  // (Kubernetes httpGet, load-balancer target checks): its own route, before
-  // authenticate(), so it needs no key and a key changes nothing. HEAD is routed
-  // as GET by Hono. Matched under any path prefix a proxy leaves on the request
-  // and with or without a trailing slash, because a probe is configured from
-  // the outside of the proxy; the name itself is exact.
+  // /health is the probe target for platforms that can only GET and want 2xx:
+  // before authenticate(), so it needs no key and a key changes nothing. The
+  // match rule is the HEALTH_PATH comment in index.ts; these rows pin it.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
     ["GET /health with a key in the URL", `/health?key=${KEY}`, {}],
@@ -376,10 +384,13 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     const p = await probe(near, {});
     assert(p.status === 405 || p.status === 404, `GET ${near} is not /health, and does not hang (${p.status})`);
   }
-  // At a health path the refusal's Allow names the health resource's methods,
-  // not the MCP endpoint's.
+  // At a health path the refusal's Allow names the health resource's methods:
+  // GET and HEAD from the health route, POST because the MCP handler serves
+  // every path — `POST /health` IS the endpoint.
   const putHealth = await probe("/health", { method: "PUT" });
-  assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
+  assert(putHealth.status === 405 && putHealth.allow === "GET, HEAD, POST, OPTIONS", `PUT /health → 405 with Allow: GET, HEAD, POST, OPTIONS (${putHealth.status}, ${putHealth.allow})`);
+  const postHealth = await probe("/health", { method: "POST", headers: H, body: INIT });
+  assert(postHealth.status === 200 && postHealth.envelope, `POST /health is the MCP endpoint (${postHealth.status})`);
 }
 
 server.stop();
