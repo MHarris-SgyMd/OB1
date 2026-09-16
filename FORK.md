@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-five numbered changes on top of the pin. Seven fix defects found in an
+Sixty-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–65 are the numbered `###` sections** further down, which is
+sections. Changes **18–66 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -8237,19 +8237,24 @@ nothing reads as a corpus (the oracle's premise — every chunk carries its
 parent's vector — is checked on the build, before the marker, and not on a
 reuse, where that join over every chunk row would cost a minute at ten million
 rows to guard against nothing the tree can do to a kept table). The next run at
-that scale finds the marker and, in this order, (1) reads the ledger against
-the tree and refuses a name the ledger records that no file carries — a corpus
-migrated from another branch, which the runner would not notice; (2) runs
-`migrate.ts --dry-run` and refuses on its `DRIFTED` before anything runs — a
-plain run reports a recorded file edited since, but only after applying every
-pending file around it, which on a kept corpus would land a migration and then
-say "nothing was measured" — then `migrate.ts` itself, so a migration added
-since the build is **applied onto the corpus** (as onto a real brain that size,
-which is the measurement wanted), the files it recorded read back from the
-ledger rather than scraped from its output; (3) counts both tables against the
-marker and regenerates the corpus's first and last rows from the seed,
+that scale finds the marker and, in this order, (1) counts both tables against
+the marker and regenerates the corpus's first and last rows from the seed,
 comparing the tiers exactly and the vectors to float32 — a generator change or
-a foreign table cannot pass as the corpus; then skips to the oracle. Section L
+a foreign table cannot pass as the corpus, and is refused before the migrator
+walks it; (2) reads the ledger against the tree and refuses a name the ledger
+records that no file carries — a corpus migrated from another branch, which the
+runner would not notice; (3) runs `migrate.ts --dry-run` and refuses on its
+`DRIFTED` before anything runs — a plain run reports a recorded file edited
+since, but only after applying every pending file around it, which on a kept
+corpus would land a migration and then say "nothing was measured" — then
+`migrate.ts` itself, so a migration added since the build is **applied onto
+the corpus** (as onto a real brain that size, which is the measurement wanted),
+the files it recorded read back from the ledger rather than scraped from its
+output, and both tables `VACUUM ANALYZE`d when anything was; (4) checks this
+run's queries against the rows through the index (the build's confound covered
+the build's queries) and re-checks the oracle's premise whenever the ledger
+differs from the one the marker says it last passed under; then skips to the
+oracle. Section L
 gains a `source` column — `loaded`, or `reused (built <when>)` with the build's
 own numbers — and the run says which it did, what it counted and which files it
 applied, so a report never silently mixes a fresh build's load line with a
@@ -8336,6 +8341,39 @@ itself should check drift and strangers before applying anything, which would
 retire both the bench's dry run and `ledgerStrangers` — is SMD-1504's. Cut
 for space: caching the exact oracle's answers in the marker (the bulk of a
 reuse's remaining minutes at ten million rows), not measured.
+
+**Third pass.** The stop signal — the previous pass's additions as the top
+findings — fired at the second pass and again here, and the shape of the
+findings said why: three rules for which scale a kept database holds, keyed
+three ways (the marker, the environment, the per-scale marker), and an
+ownership rule in the script keyed by a flag and a name. Both became one
+invariant. In the script the container is *created* and *started* as two
+steps and cleanup touches only the ID `create` returned, never the name — the
+flag went, and with it the case where an invocation that lost a name race
+stopped the other's container through the name fallback; a namesake in any
+state but exited is refused with the removal named, since `created` is either
+another invocation between its two steps or a shell whose start failed, and
+the two cannot be told apart from outside; the data-directory mount is read
+from the image's `PGDATA` (`/var/lib/postgresql/<major>/docker` from the pg18
+images, where a mount at the old path would keep an empty volume); the
+interrupt trap is disarmed before the stop so a Ctrl-C during the checkpoint
+cannot skip the removal and the hint, which now prints before the stop. In
+the bench, under `OB1_PG_KEEP` a run is exactly one scale above the before
+arm's, judged where the list is parsed — a descending list had built the
+large corpus and then replaced it "by design", a small-scale-only run had
+kept a volume nothing would reuse, a duplicated scale had reused a marker
+written seconds earlier; the marker is written in one transaction (a table
+with no row read as "no corpus" and would have let a small-scale run drop what
+it stood over); the marker records the ledger the oracle's premise last passed
+under, so a check that threw after a file was recorded is not skipped by the
+re-run; a reuse that applied files `VACUUM ANALYZE`s both tables, since a
+migration of 023's kind leaves a dead index entry per row and the build's
+statistics; and this run's queries are confound-checked through the index,
+since a build with three queries said nothing about a reuse with fifty. The
+header's count and the check order in two paragraphs were brought up to the
+code. Cut for space: caching the exact oracle in the marker; `migrationFiles()`
+shared across the seven directory listings; the marker's `scale`/`builtAt`
+held twice.
 
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh

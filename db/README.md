@@ -1032,23 +1032,24 @@ and a scale above 100,000 rows is kept: once the load and every build have
 finished the bench writes a marker row (`bench_hnsw_corpus` — the scale, the
 parameters that shape the rows, the tier counts, section L's numbers), and the
 next run at that scale finds it and reuses the corpus instead of rebuilding
-it. What vouches for the rows is checked, not assumed: the migrator's ledger
-against the tree (the whole-schema arm is applied through `migrate.ts` for
-this), then `migrate.ts --dry-run` and `migrate.ts` again — a migration added
-since the build is applied onto the corpus, a file edited since is refused on
-the dry run's `DRIFTED` before anything runs, a recorded name the tree has no
-file for is refused — then both row counts and the corpus's first and last
-rows regenerated from the seed and compared. Section L's `source` column says
-`loaded` or `reused (built …)` per scale, and the run prints what it counted
-and which files it applied. A kept database holds one corpus: a run asking for
-any scale other than the one an earlier run kept is refused up front, before
-anything is dropped (run the small scales without `OB1_PG_KEEP`, or under
-another name); a run over several scales keeps the last one above 100,000
-rows, and is refused up front if a small scale comes after it, since that
-would drop the corpus and keep nothing. The published scales are never kept —
-the before arm needs 001–013 under the rows, and a build that size is seconds.
-Measured at a million rows: 6 min 49 s for the run that built the corpus,
-3 min 45 s for the one that reused it.
+it. What vouches for the rows is checked, not assumed: both row counts and the
+corpus's first and last rows regenerated from the seed and compared, first;
+then the migrator's ledger against the tree (the whole-schema arm is applied
+through `migrate.ts` for this) — a recorded name the tree has no file for is
+refused; then `migrate.ts --dry-run` and `migrate.ts` — a file edited since
+the build is refused on the dry run's `DRIFTED` before anything runs, a
+migration added since is applied onto the corpus and both tables are `VACUUM
+ANALYZE`d; then this run's queries are checked against the rows through the
+index. Section L's `source` column says `loaded` or `reused (built …)` per
+scale, and the run prints what it counted and which files it applied. Under
+`OB1_PG_KEEP` a run is exactly one scale above 100,000 rows, refused otherwise
+before a container is asked for: a kept database holds one corpus, and the
+published scales are never kept — the before arm needs 001–013 under the rows,
+and a build that size is seconds — so run the small scales, or several
+scales, without it. A kept database holding another scale than the one asked
+for is refused up front, before anything is dropped. Measured at a million
+rows: 6 min 49 s for the run that built the corpus, 3 min 45 s for the one
+that reused it.
 
 ### bench-plan.ts
 

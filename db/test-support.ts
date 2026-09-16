@@ -408,8 +408,9 @@ export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "mode
 
 /**
  * `migrate.ts` against a URL, from a shell `migratorEnv` built, with any of its
- * flags: the one spawn test-upgrade, test-live and bench-hnsw used to spell
- * each for themselves. Exit code and combined output, as runScript gives them.
+ * flags — for bench-hnsw's kept corpus and test-upgrade's plain runs; the other
+ * suites still spell the spawn for themselves. Exit code and combined output,
+ * as runScript gives them.
  */
 export function runMigrator(url: string, env: Record<string, string>, ...flags: string[]): Promise<{ code: number; out: string }> {
   return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { env, cwd: HERE });
