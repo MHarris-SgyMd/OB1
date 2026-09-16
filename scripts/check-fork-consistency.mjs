@@ -29,6 +29,14 @@
  *      equality operator — inline or through an identifier bound from the read
  *      — in the same files as 7, with counted per-file exceptions for the
  *      vendored files a ticket holds (none today)
+ *   9. a committed eval fixture carries no thought content — ids, vectors and
+ *      the searcher's own queries only (SMD-1295)
+ *  10. a vendored file never writes a thought's content or vector around the
+ *      functions that own them — no PostgREST `.update(`/`.upsert(` on
+ *      `thoughts` whose payload carries `content` or `embedding`, inline or
+ *      through an object the file fills, and no SQL `UPDATE thoughts … SET`
+ *      of either column — in the same files as 7, with counted per-file
+ *      exceptions for a file whose README says it bypasses them (none today)
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -979,6 +987,308 @@ function checkCredentialCompares() {
   }
 }
 
+// ── 10: a thought's content or vector is written only through the functions ──
+//
+// SMD-1228. Three integrations named in FORK.md changes 38 and 40 updated a
+// thought's `content` or `embedding` with a raw PostgREST `.update(…)` on
+// `thoughts` rather than through `update_thought` — and the audit for this
+// check found nine files with eleven such statements: the two MCP servers
+// (`update-thought-mcp`, `enhanced-mcp`), three HTTP APIs
+// (`agent-memory-api`, `open-brain-rest`, `rest-api`), a worker
+// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`), a
+// recipe's paste-in snippet (`provenance-chains`) and a README's sample
+// (`telegram-capture`). Every rule the fork put into the
+// writers is bypassed by such a statement: 003/018's fingerprint is left
+// describing the old text (018's `fingerprint_held_by` report exists for the
+// row it leaves), 021's label is left describing the old vector, 022's chunk
+// rows of the old vector stay under the new one, and 008's actor is not set.
+// FORK.md change 69 routed every one through `update_thought` (edits) or the
+// 3-argument `upsert_thought` (captures, the vector and its label in one
+// call); this is what keeps the next rebase from bringing one back.
+//
+// The rule is the MECHANISM: a PostgREST table verb that replaces columns —
+// `.update(` or `.upsert(` — on `thoughts` (`.from("thoughts")`, either
+// quote, or Python's `.table("thoughts")`, whitespace and line breaks
+// allowed before the verb), whose payload carries a `content` or `embedding`
+// key: an object literal (quoted, bare or computed key, the shorthand
+// `{ embedding }`, an array of literals for an upsert, an `Object.assign(…)`
+// of literals), or an identifier the file binds to one (`const update = {
+// embedding, … }`, `Object.assign(patch, { … })`, `updates.content = …`,
+// `patch["embedding"] = …`, anywhere in the file) — a key, not a value
+// (`summary: content` is not one), at the literal's top level (`{ metadata: {
+// content } }` is a metadata write); a row type on the client and a line
+// comment before the verb do not hide it; and the SQL form, `UPDATE [ONLY]
+// thoughts … SET` — `public.`, quoted identifiers and an alias allowed — with
+// `content =` or `embedding =` in the SET list before its WHERE, or either
+// name in the tuple form `SET (…) = (…)`. Word-bounded:
+// `content_fingerprint =` and `embedding_model =` are other columns (023's
+// backfill and the fingerprint recipe's are theirs to write). In every
+// non-binary, non-ignored file under the seven category directories and
+// docs/, prose included — a README's code block is what the next integration
+// is copied from. Not in the rule, and said so: `.insert(` (a fresh row around
+// the functions is a different defect — no fingerprint, no label, and 016's
+// trigger does not fill them — held separately), a metadata-only update
+// (nothing it leaves stale), a REST `PATCH …/rest/v1/thoughts` built by hand
+// (none in the tree), a payload spread from another object (`{ ...updates }`),
+// a payload that arrives as a function's return value or parameter, a builder
+// split across statements (`const q = supabase.from("thoughts"); q.update(…)`),
+// a table name held in a variable, a payload behind a type assertion or a
+// conditional (`.update(<any>p)`, `.update(cond ? { content } : {})`), a
+// two-hop `Object.assign({}, a, b)` of bound names, Python's
+// `dict(content=…)`, and an `.rpc("update_thought", …)`, which is the remedy
+// — the dataflow cases need what this rule does not have, and a miss there
+// is what the second half of the audit, extensions/test-writes.ts, is for.
+// Exceptions are per
+// file and COUNTED, as checks 6–8's are: a file that deliberately writes
+// around the functions is listed with the reason and the line count, and its
+// README must say what it leaves stale; one fixed drops out as stale, one
+// added fails. The list is empty.
+/** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
+const THOUGHTS_TABLE = String.raw`\.(?:from|from_|table)(?:<[^>\n]*>)?\s*\(\s*["'\x60]thoughts["'\x60]\s*\)`;
+/** What may sit between the table and its verb: whitespace, line and block comments. */
+const GAP = String.raw`(?:\s|//[^\n]*|/\*[\s\S]*?\*/)*`;
+/**
+ * A `content` or `embedding` KEY of an object literal: `content:`, `"embedding":`,
+ * `["content"]:`, the shorthand `{ embedding }` / `content,`. A key follows `{`
+ * or `,`; a name after `:` is a value (`summary: content`), not a key. Tested
+ * on a literal's top level only — see topLevel() — so `{ metadata: { content } }`
+ * is a metadata write.
+ */
+const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["'\x60]?(?:content|embedding)["'\x60]?|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?::|,|\})/;
+/**
+ * Walk the characters of `text` from `open`, calling `visit(ch, i, inString)` for every character;
+ * a `"`, `'` or backtick run is a string (escapes honoured), so a brace inside
+ * one is not structure — `{ note: "}", content }` closes where the code says.
+ */
+function walkChars(text, open, visit) {
+  let quote = null;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === "\\") { visit(ch, i, true); visit(text[++i] ?? "", i, true); continue; }
+      if (ch === quote) quote = null;
+      visit(ch, i, true);
+    } else {
+      if (ch === '"' || ch === "'" || ch === "\x60") quote = ch;
+      if (visit(ch, i, false) === false) return;
+    }
+  }
+}
+/** The brace- or bracket-balanced block that opens at `text[open]`, or null when it never closes. */
+function blockAt(text, open) {
+  let depth = 0, end = -1;
+  walkChars(text, open, (ch, i, inString) => {
+    if (inString) return;
+    if (ch === "{" || ch === "[") depth++;
+    else if ((ch === "}" || ch === "]") && --depth === 0) { end = i; return false; }
+  });
+  return end < 0 ? null : text.slice(open, end + 1);
+}
+/**
+ * `block` with everything nested deeper than `depth` blanked — an object's own
+ * keys at 1, an array's elements' keys at 2. A `[` that follows `{` or `,` is a
+ * computed key (`{ ["content"]: x }`), not a nested value, and stays at its depth.
+ */
+function topLevel(block, depth = 1) {
+  let d = 0, out = "", last = "";
+  const nests = [];
+  walkChars(block, 0, (ch, _i, inString) => {
+    if (!inString && (ch === "{" || ch === "[")) {
+      const nest = ch === "{" || !(last === "{" || last === ",");
+      nests.push(nest);
+      if (nest) d++;
+      out += d <= depth ? ch : " ";
+    } else if (!inString && (ch === "}" || ch === "]")) {
+      out += d <= depth ? ch : " ";
+      if (nests.pop() !== false) d--;
+    } else out += d <= depth ? ch : " ";
+    if (!/\s/.test(ch)) last = ch;
+  });
+  return out;
+}
+/** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
+const literalCarries = (text, open) => {
+  const block = blockAt(text, open);
+  return block !== null && PAYLOAD_KEY.test(topLevel(block, text[open] === "[" ? 2 : 1));
+};
+
+/**
+ * The 1-based lines of `text` that write a thought's content or vector around
+ * the functions, by the rule above. Bindings are collected over the whole text
+ * first, so a payload may be filled above or below the verb that sends it — and
+ * a name bound to such a payload is one for the WHOLE file, as check 8's bound
+ * credential is: scope in regex over unparsed text is not a thing, and a hit on
+ * a second, cleaner send of the same name is answered with a rename.
+ */
+function thoughtWritesAroundIn(text) {
+  const lineOf = (i) => text.slice(0, i).split("\n").length;
+  const lines = new Set();
+  // Identifiers bound to a payload with either key: `x = { … content … }` or
+  // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.content = …`,
+  // `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
+  const payloads = new Set();
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*([{[])`, "g"))) {
+    if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
+  }
+  for (const m of text.matchAll(new RegExp(String.raw`Object\.assign\(\s*(${IDENT})\s*,\s*\{`, "g"))) {
+    if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
+  }
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})!?(?:\.(?:content|embedding)|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?:\?\?|\|\||\+)?=(?![=>])`, "g"))) {
+    payloads.add(m[1]);
+  }
+  // The verb (a type argument allowed): its first argument a literal, a bound
+  // name, or an `Object.assign(…)` whose own literals — not the ones nested in
+  // them — are read.
+  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
+    const verbAt = m.index + m[0].lastIndexOf("." + m[1]);
+    let hit = false;
+    if (m[2]) hit = literalCarries(text, m.index + m[0].length - 1);
+    else if (m[3]) hit = payloads.has(m[3]);
+    else {
+      // The assign's argument list, parens read as brackets so blockAt() spans it; each `{` at its top level is a literal it merges.
+      const parens = text.replace(/[()]/g, (c) => (c === "(" ? "[" : "]"));
+      const args = blockAt(parens, m.index + m[0].length - 1) ?? "";
+      let d = 0;
+      walkChars(args, 0, (ch, i, inString) => {
+        if (inString) return;
+        if (ch === "{" && d === 1 && literalCarries(args, i)) hit = true;
+        if (ch === "{" || ch === "[") d++;
+        else if (ch === "}" || ch === "]") d--;
+      });
+    }
+    if (hit) lines.add(lineOf(verbAt));
+  }
+  // SQL: `UPDATE [ONLY] [public.]thoughts [[AS] alias] SET <list>` up to WHERE/RETURNING/;, identifiers
+  // quoted or not — the list naming either column as an assignment target, or the tuple form `SET (a, b) = …`.
+  for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/gi)) {
+    const list = m[1];
+    const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
+    // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
+    if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
+  }
+  return [...lines].sort((a, b) => a - b);
+}
+
+/** Texts the rule must catch — the nine files' eleven statements, one probe each, and the forms a rebase could bring. */
+const THOUGHT_WRITE_PROBES = [
+  // update-thought-mcp: a payload filled by property assignment, sent by name, verb on its own line.
+  'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',
+  // enhanced-mcp: a literal over several lines, with the file\'s own fingerprint beside the content.
+  'const { error: updateError } = await supabase\n  .from("thoughts")\n  .update({\n    content,\n    content_fingerprint: fingerprint,\n    embedding,\n    type: extracted.type,\n    updated_at: new Date().toISOString(),\n  })\n  .eq("id", id);',
+  // agent-memory-api and repo-learning-coach: the vector alone, after a 2-argument upsert.
+  'if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);',
+  "const { error: embeddingError } = await supabase\n  .from('thoughts')\n  .update({ embedding })\n  .eq('id', thoughtId)",
+  // open-brain-rest: a literal bound to a name, then sent.
+  'const update = {\n  embedding,\n  metadata,\n  type,\n  status,\n};\nconst { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);',
+  'const update: Record<string, unknown> = { metadata };\nif (parsed.data.content !== undefined) {\n  update.content = parsed.data.content;\n  update.embedding = await getEmbedding(parsed.data.content);\n}\nconst { error } = await supabase.from("thoughts").update(update).eq("id", id);',
+  // rest-api: a typed record bound with the content, the vector added when it came.
+  'const updates: Record<string, unknown> = { content, updated_at: new Date().toISOString() };\nif (embedding) updates.embedding = embedding;\nconst { error: updateErr } = await supabase.from("thoughts").update(updates).eq("id", id);',
+  'const columnUpdates: Record<string, unknown> = { metadata: existingMetadata };\nif (enriched.embedding) columnUpdates.embedding = enriched.embedding;\nawait supabase.from("thoughts").update(columnUpdates).eq("id", thoughtId);',
+  // consolidation-bio: the profile rewrite, a literal over several lines with the text first.
+  'const { error: updateError } = await supabase\n  .from("thoughts")\n  .update({\n    content: profileContent,\n    type: "person_note",\n    importance: 5,\n    metadata: profileMetadata,\n    updated_at: now,\n  })\n  .eq("id", existingId);',
+  // provenance-chains: a patch that starts as the vector and grows.
+  'const patch: Record<string, unknown> = { embedding };\nif (supersedes) patch.supersedes = supersedes;\nconst { error: patchError } = await supabase\n  .from("thoughts")\n  .update(patch)\n  .eq("id", thoughtId);',
+  // telegram-capture\'s sample: content and vector in one literal.
+  'const { error } = await supabase\n  .from("thoughts")\n  .update({\n    content: messageText,\n    embedding,\n    metadata: { ...metadata, edited: true },\n  })\n  .eq("id", existing[0].id);',
+  // The forms a rebase could bring: quoted keys, a bracket assignment, upsert, Python, SQL with an alias, SQL over lines.
+  'await supabase.from("thoughts").update({ "embedding": vec }).eq("id", id);',
+  'patch["content"] = text;\nawait supabase.from("thoughts").update(patch).eq("id", id);',
+  "await supabase.from('thoughts').upsert({ id, content, embedding });",
+  'supabase.table("thoughts").update({"content": content, "embedding": embedding}).eq("id", thought_id).execute()',
+  'UPDATE thoughts SET content = $2, embedding = $3, updated_at = now() WHERE id = $1;',
+  'UPDATE public.thoughts t\nSET embedding = e.vec,\n    updated_at = now()\nFROM embeddings e\nWHERE t.id = e.thought_id;',
+  'UPDATE thoughts AS t SET content = trim(t.content) WHERE t.content <> trim(t.content);',
+  // The first review pass's escapes: a row type on the client, a comment before the verb,
+  // Object.assign into a bound name and inline, an array payload bound or inline, a computed
+  // key, Python's from_, UPDATE ONLY, quoted identifiers, the tuple form.
+  'await supabase.from<Thought>("thoughts").update({ content, embedding }).eq("id", id);',
+  'await supabase\n  .from("thoughts") // the row\n  .update({ content })\n  .eq("id", id);',
+  'const patch: Record<string, unknown> = {};\nObject.assign(patch, { embedding });\nawait supabase.from("thoughts").update(patch).eq("id", id);',
+  'await supabase.from("thoughts").update(Object.assign({}, base, { content })).eq("id", id);',
+  'const rows = [{ id, content, embedding }];\nawait supabase.from("thoughts").upsert(rows, { onConflict: "id" });',
+  'await supabase.from("thoughts").upsert([{ id, content }]);',
+  'await supabase.from("thoughts").update({ ["content"]: text }).eq("id", id);',
+  "supabase.from_('thoughts').update({'content': content}).eq('id', thought_id).execute()",
+  'UPDATE ONLY thoughts SET embedding = $2 WHERE id = $1;',
+  'UPDATE "public"."thoughts" SET "content" = $2 WHERE "id" = $1;',
+  'UPDATE thoughts SET (content, embedding) = ($2, $3) WHERE id = $1;',
+  // The second review pass's escapes: a type argument on the verb, a block comment before it, a
+  // space before the table's paren, a string value with an unbalanced brace before the key, a
+  // backtick key, a backtick bracket assignment, an upsert chain (its line is the verb's).
+  'await supabase.from("thoughts").update<Thought>({ content }).eq("id", id);',
+  'await supabase\n  .from("thoughts")\n  /* the row */\n  .update({ content })\n  .eq("id", id);',
+  'await supabase.from ("thoughts").update({ embedding }).eq("id", id);',
+  'await supabase.from("thoughts").update({ note: "}", content }).eq("id", id);',
+  'await supabase.from("thoughts").update({ [`embedding`]: vec }).eq("id", id);',
+  'const p: Record<string, unknown> = {};\np[`content`] = text;\nawait supabase.from("thoughts").update(p).eq("id", id);',
+];
+/** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
+const THOUGHT_WRITE_NON_PROBES = [
+  'const { data, error } = await supabase.rpc("update_thought", { p_id: id, p_content: content, p_embedding: embedding, p_embedding_model: EMBEDDING_MODEL });',
+  'await supabase.rpc("upsert_thought", { p_content: content, p_payload: { metadata, embedding_model: model }, p_embedding: embedding });',
+  'await supabase.from("thoughts").update({ metadata: updatedMeta }).eq("id", survivorId);',
+  'await supabase.from("thoughts").update({ status: "new", status_updated_at: new Date().toISOString() }).eq("id", id);',
+  'const sidecar = { type: extracted.type, sensitivity_tier: resolvedTier, importance: 3 };\nawait supabase.from("thoughts").update(sidecar).eq("id", id);',
+  'const { data } = await supabase.from("thoughts").select("id, content, embedding, metadata").eq("id", id).single();',
+  'await supabase.from("thoughts").insert({ content, embedding, metadata });',
+  'await supabase.from("thought_chunks").update({ content: window }).eq("id", chunkId);',
+  'await supabase.from("agent_memories").update({ content: row.content, summary }).eq("id", id);',
+  'const updates: Record<string, unknown> = {};\nupdates.type = sanitizeType(String(body.type));\nawait supabase.from("thoughts").update(updates).eq("id", id);',
+  'UPDATE thoughts\nSET content_fingerprint = encode(sha256(convert_to(lower(trim(content)), \'UTF8\')), \'hex\')\nWHERE content_fingerprint IS NULL;',
+  'UPDATE thoughts SET embedding_model = NULL WHERE embedding IS NULL;',
+  "UPDATE thoughts SET metadata = metadata || '{\"source\": \"mcp\"}'::jsonb WHERE metadata->>'source' IS NULL;",
+  "UPDATE public.thoughts\nSET type = metadata->>'type'\nWHERE type IS NULL AND metadata->>'type' IS NOT NULL;",
+  'UPDATE public.thoughts t\nSET supersedes = NULL\nFROM public.thought_edges te\nWHERE te.to_thought_id = t.id;',
+  'UPDATE thoughts SET updated_at = now() WHERE id = $1 RETURNING content, embedding;',
+  'a raw UPDATE of the vector around them is the operator\'s, as 021 says',
+  'the hasher: createHash("sha256").update(content).digest("hex")',
+  'const { error } = await supabase.from("thoughts").update({ ...updates }).eq("id", id);',
+  // The first review pass's false positives: a bare name as a VALUE, a nested object, an
+  // assignment whose right side is the column.
+  'await supabase.from("thoughts").update({ summary: content }).eq("id", id);',
+  'const sidecar = { type: t, note: embedding };\nawait supabase.from("thoughts").update(sidecar).eq("id", id);',
+  'await supabase.from("thoughts").update({ metadata: { content: "x", embedding: null } }).eq("id", id);',
+  'UPDATE thoughts SET summary = content, reviewed = true WHERE id = $1;',
+  "UPDATE thoughts SET metadata = jsonb_set(metadata, '{content}', to_jsonb(summary)) WHERE id = $1;",
+  'UPDATE thoughts SET metadata = metadata || jsonb_build_object(\'embedding\', 1) WHERE id = $1;',
+  // The second review pass's false positives: a column compared inside a CASE in the SET list, a
+  // nested object inside an inline Object.assign.
+  "UPDATE thoughts SET summary = CASE WHEN content = 'x' THEN 'y' ELSE summary END WHERE id = $1;",
+  'await supabase.from("thoughts").update(Object.assign({}, base, { metadata: { content: "x" } })).eq("id", id);',
+];
+const THOUGHT_WRITE_EXCEPTIONS = new Map([]);
+
+function checkThoughtWritesAround() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const probe of THOUGHT_WRITE_PROBES) {
+    // Caught on exactly one line, and that line is the verb's (or the UPDATE's): the second review
+    // pass found an upsert chain reported on the line before its verb, which a count alone passed.
+    const got = thoughtWritesAroundIn(probe);
+    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert)\b/.test(l) || /\bUPDATE\s+(?:ONLY\s+)?"?(?:public|thoughts)\b/i.test(l)) + 1;
+    if (got.length !== 1 || got[0] !== verbLine) fail(SELF, `thought-write rule no longer catches its probe on its verb's line ${verbLine} (caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
+  }
+  for (const text of THOUGHT_WRITE_NON_PROBES) {
+    if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);
+  }
+  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture through the 3-argument upsert_thought with embedding_model in the payload (FORK.md change 69, SMD-1228) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what it leaves stale";
+  const counts = new Map();
+  for (const file of textFilesUnder(SCANNED_ROOTS)) {
+    const rel = relOf(file);
+    const hits = thoughtWritesAroundIn(readFileSync(file, "utf8"));
+    if (hits.length === 0) continue;
+    counts.set(rel, hits.length);
+    if (!THOUGHT_WRITE_EXCEPTIONS.has(rel)) for (const line of hits) fail(`${rel}:${line}`, MSG);
+  }
+  for (const [rel, { why, lines }] of THOUGHT_WRITE_EXCEPTIONS) {
+    const seen = counts.get(rel) ?? 0;
+    if (seen !== lines) {
+      fail(rel, seen === 0
+        ? `listed as a thought-write exception (${why}) but matches nothing — remove it from THOUGHT_WRITE_EXCEPTIONS`
+        : `thought-write exception (${why}) covers ${lines} line(s) but ${seen} match — a new write beside the documented one, or the exception's count is stale`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -992,6 +1302,7 @@ await checkMigrationNumbers();
 checkShellHazards(dirs);
 checkCoreFunctions();
 checkCredentialCompares();
+checkThoughtWritesAround();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

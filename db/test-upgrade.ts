@@ -452,14 +452,17 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ledger, so a plain run attempts only 030 — 031 (renew_claims, SMD-1023),
   // 032 (the provenance envelope, SMD-1323), 033 (the capture's fingerprint
   // lock, SMD-1043), 034 (the opt-in query log, SMD-1295), 035 (a
-  // re-capture writes no provenance, SMD-1453) and 037 (the routing count's
-  // gate, SMD-1463) stay recorded and are never tried. 030 is the right one
-  // to make pending because its prerequisites — 015 and 021's embedding_model
-  // column — are exactly what a through-020 schema lacks, so it fails by name
-  // rather than with a bare error. The window guard trips whenever a
-  // migration lands past 030, to force this note to be re-read (034 was
-  // checked; it needs only 001/010, both present; 035 needs 016, 025, 032 and
-  // 033, all recorded; 037 redefines 020's match_thoughts, present here).
+  // re-capture writes no provenance, SMD-1453), 036 (delete_thought's lock
+  // order, SMD-1462) and 037 (the routing count's gate, SMD-1463) stay
+  // recorded and are never tried. 030 is the right one to make pending
+  // because its prerequisites — 015 and 021's embedding_model column — are
+  // exactly what a through-020 schema lacks, so it fails by name rather than
+  // with a bare error. The window guard trips whenever a migration lands past
+  // 030, to force this note to be re-read (034 needs only 001/010; 035 needs
+  // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
+  // body and 029's supersession lock; 037 redefines 020's match_thoughts —
+  // all recorded in a through-035 schema, so none becomes the plain-run
+  // failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 8, `030 is among the last eight migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
