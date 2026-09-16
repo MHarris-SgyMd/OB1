@@ -3632,14 +3632,14 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   // so a body reading `make_interval(hours => p_keep_days)` — 30 hours keeps
   // a 2-hour-old row, 0 wipes — passed every prune line here (SMD-1515). One
   // row each side of the 30-day edge, half a day out: 30.5 days goes, 29.5
-  // stays. Half a day, not a day: rows at 31 and 29 days let a 31- or 29-day
-  // window through whenever the INSERT and the prune shared a now() (the
-  // 31-day row's logged_at equals a 31-day bound, and `<` keeps it), which
-  // under PGlite's millisecond clock is most runs — in this ticket's review a
-  // 31-day default slipped 2 of 3 runs and a 29-day default 3 of 3, the two
-  // statements sharing a now() in 32 of 40 probes and one ms apart in the
-  // rest. Twelve hours dwarf that and a DST hour both; the hours body deletes
-  // both rows, a weeks body neither.
+  // stays. Half a day, not a day: rows at 31 and 29 days sit exactly on a
+  // 31- or 29-day bound whenever the INSERT and the prune share a now(), and
+  // one ms under it when they do not, so the tick decides those mutants — a
+  // 29-day default slips on the shared tick (its row equals the bound, and
+  // `<` keeps it), a 31-day default on the drift (its row falls under the
+  // bound and goes); this ticket's first review pass saw the first slip 3 of
+  // 3 runs and the second 2 of 3. Twelve hours dwarf the tick and a DST hour
+  // both; the hours body deletes both rows, a weeks body neither.
   await db.exec(`
     INSERT INTO query_log (kind, tool, query, logged_at) VALUES
       ('search', 'search_thoughts', 'half a day past the window', now() - interval '30 days 12 hours'),
@@ -3648,7 +3648,8 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   const leftByDefault = (await db.query<{ q: string }>(`SELECT query AS q FROM query_log`)).rows.map((r) => r.q);
   assert(deletedByDefault === 1 && leftByDefault.length === 1 && leftByDefault[0] === "half a day inside the window",
     `prune_query_log()'s default window is 30 days: the 30.5-day row goes, the 29.5-day row stays (deleted ${deletedByDefault}, left: ${leftByDefault.join(", ") || "none"})`);
-  // Both by name, whatever the prune did, so the keep below is judged alone.
+  // Both by name, whatever the prune did, so the same-transaction keep below
+  // (left === 1) is judged alone.
   await db.exec(`DELETE FROM query_log WHERE query IN ('half a day past the window', 'half a day inside the window')`);
   // The same now(), on purpose: a row logged in the prune's own transaction is
   // kept — the strict bound the COMMENT states ("older than now()"). now() is
