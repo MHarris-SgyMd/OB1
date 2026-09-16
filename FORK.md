@@ -10286,13 +10286,13 @@ and not `"100"`; `meta->owner=eq.ann` is 400 `22P02` while `eq."ann"`
 matches — the JSON reading that is the reason the shim refuses a `->`
 ending; `or` and `order` with a path agree.
 
-**Review pass 2** (the same two reviewers; ten findings, none above LOW
-in the code, one MEDIUM about the merge). The stop signal: the top findings
+**Review pass 2** (the same two reviewers; sixteen findings, none above
+LOW in the code, one MEDIUM about the merge). The stop signal: the top findings
 were pass 1's own residue — the Mechanism paragraph still said "every
 filter" after the header and README had been corrected, its BC-date clause
 had not been brought in line with the Decisions sentence pass 1 added, and
 the Verified paragraph credited pass 1's runner with a named failure that
-only this pass's error-first read produces; all three corrected above, and
+only pass 1's error-first read produces; all three corrected above, and
 the runner re-ran the mutation (three named failures, a tally). The README's
 Safety paragraph, left with one unwrapped line, says now that a number or a
 null in an `.in()` list against a path compares as text where a plain text
@@ -10302,10 +10302,32 @@ when the early return is removed, moved after the sidecar, or reported as
 created, and when the predicted text is off by one run; `rowsOf` cannot
 pass vacuously (no `.length === 0` pin in [12]/[13]) — measured
 `jsonShaped()`'s cost (above), and found that the four shim-migrated
-extensions parse the timestamps they read (`new Date(row.x)`), none holding
-a `Date` instance. The MEDIUM is not in this branch: `origin/main` has taken
+extensions parse (`new Date(row.x)`) or pass through the timestamps they
+read, none holding a `Date` instance. The MEDIUM is not in this branch:
+`origin/main` has taken
 FORK change 72 for SMD-1493 while this was in review, so this section is 73
 at the merge, renumbered with the pattern change 71 used.
+
+**Review pass 3** (the same two reviewers; eleven findings, all LOW or
+INFO, none in the code — the stop signal held). Pass 2's paragraph had
+counted one reviewer's findings and said "this pass's error-first read" of
+a read that is pass 1's, twice; corrected. The README's Caveats gain the
+one behaviour change every migrated file sees — a timestamp is a string —
+where a maintainer looks for differences from supabase-js, and the limit
+that a key with a non-ASCII letter or a `$` is refused where PostgREST
+accepts it; the Not-done-here list names `.contains()` with a path. The
+runner rehearsed the merge: `origin/main` conflicts in FORK.md alone (its
+ten changed files meet this branch's ten there only), and on the merged
+tree — main's FORK, this branch's code, main's `test-support.ts` and
+`with-postgres.sh` under every suite — `test-compat` 84, `test-writes`
+186, `test-store-postgrest` 86, `test-auth` 643, `db/test-upgrade.ts`
+178, `db/test-schema.ts` 869, the checker PASS; it re-measured the two
+mutants below (four, five), confirmed a Date-free row is returned as the
+same object, that a keyword key (`meta->>select`) renders as a literal and
+works, and that `.order()` with `nullsFirst` and `.range()` compose with a
+path filter. The renumber the merge owes is counted: this branch's
+mentions of the number in eight files, one of them line-wrapped in the
+shim's header, and one sentence in this section that must not be touched.
 
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
 before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
@@ -10317,7 +10339,7 @@ prompt's `.slice` and the run ends there — and with `column()` reduced to
 re-measured after pass 1, the later assertions skipping inside their
 `if`; the two running reviewers' mutations each caught by name: the `::text`
 cast (three, the `gte` pins and the SQL's shape — pass 1's runner saw the
-`TypeError` this pass's error-first read replaced, pass 2's the tally),
+`TypeError` pass 1's error-first read replaced, pass 2's the tally),
 `column()` reduced to `ident()` in the shim suite (one counted `[12] threw`,
 no crash), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
 one-row, many-row and rpc pins), the worker's `generated_by` filter (five),
@@ -10335,7 +10357,9 @@ suite.
 **Not done here.** SMD-1480 (deployability: the worker still imports the
 Bun-only shim and reads `Deno.env`; it runs under `test-writes.ts`'s stand-in,
 not under `supabase functions deploy`). A path ending in `->`, an array
-index, and a path in a select list stay refused until a file needs one. The
+index, a key with a non-ASCII letter or a `$` (PostgREST takes both), a path
+in a select list, and `.contains()` with a path (containment under a key is
+`.contains("meta", { key })`) stay refused until a file needs one. The
 other shapes a PostgREST consumer might read differently — numerics as text,
 `int8` — are left as Bun gives them; nothing driven has needed more.
 `metadata-norm`'s `metadata->>confidence` term would parse now, and its
