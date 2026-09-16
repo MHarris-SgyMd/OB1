@@ -1032,10 +1032,13 @@ function checkCredentialCompares() {
 // (none in the tree), a payload spread from another object (`{ ...updates }`),
 // a payload that arrives as a function's return value or parameter, a builder
 // split across statements (`const q = supabase.from("thoughts"); q.update(…)`),
-// a table name held in a variable, Python's `dict(content=…)`, and an
-// `.rpc("update_thought", …)`, which is the remedy — the first four need
-// dataflow this rule does not have, and a miss there is what the second half
-// of the audit, extensions/test-writes.ts, is for. Exceptions are per
+// a table name held in a variable, a payload behind a type assertion or a
+// conditional (`.update(<any>p)`, `.update(cond ? { content } : {})`), a
+// two-hop `Object.assign({}, a, b)` of bound names, Python's
+// `dict(content=…)`, and an `.rpc("update_thought", …)`, which is the remedy
+// — the dataflow cases need what this rule does not have, and a miss there
+// is what the second half of the audit, extensions/test-writes.ts, is for.
+// Exceptions are per
 // file and COUNTED, as checks 6–8's are: a file that deliberately writes
 // around the functions is listed with the reason and the line count, and its
 // README must say what it leaves stale; one fixed drops out as stale, one
@@ -1051,7 +1054,7 @@ const GAP = String.raw`(?:\s|//[^\n]*|/\*[\s\S]*?\*/)*`;
  * on a literal's top level only — see topLevel() — so `{ metadata: { content } }`
  * is a metadata write.
  */
-const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["'\x60]?(?:content|embedding)["'\x60]?|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?::|,|\}|$)/;
+const PAYLOAD_KEY = /(?:^|[{,])\s*(?:["'\x60]?(?:content|embedding)["'\x60]?|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?::|,|\})/;
 /**
  * Walk the characters of `text` from `open`, calling `visit(ch, i, inString)` for every character;
  * a `"`, `'` or backtick run is a string (escapes honoured), so a brace inside

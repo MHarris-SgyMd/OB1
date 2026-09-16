@@ -194,7 +194,7 @@ function buildServer(principal: Principal): McpServer {
               ? `Thought not found: ${id}`
               : reason === "STALE_READ"
                 ? `STALE_READ: thought has been modified since ${if_unchanged_since}. ` +
-                  `Current updated_at: ${result.current_updated_at}. Re-fetch and retry.`
+                  `Current updated_at: ${result.current_updated_at ?? "unknown (the row moved as this edit was written)"}. Re-fetch and retry.`
                 : reason === "DUPLICATE_CONTENT"
                   ? `DUPLICATE_CONTENT: another thought already holds this exact text; edit that one, or delete it first.`
                   : `update_thought refused: ${reason}`;

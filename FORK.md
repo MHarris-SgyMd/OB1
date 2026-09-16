@@ -9137,6 +9137,16 @@ changed: the width and label paragraph above, which the second reading pass
 found unsaid; a string value carrying `, content:` still reads as a key (the
 rule reads prose by design); `+=` on a payload property is bound now.
 
+**Boyscout.** What the passes cut for space, in the files this change
+touched, no behaviour changed: check 10's key rule loses a dead alternative
+(a literal's block always ends in its bracket, so a key is never last) and
+its "outside the rule" list names the type-asserted, conditional and two-hop
+payloads the second running pass found; `update-thought-mcp`'s `STALE_READ`
+message says "unknown" rather than `undefined` when the row moved between
+the function's check and its write (033's post-UPDATE return carries no
+timestamp); this section's Verified paragraph is rewrapped and names the
+third Deno check.
+
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
 10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
 a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
@@ -9150,9 +9160,10 @@ the rule.
 eleven hits in nine files before the conversions and PASS after, exception
 list empty (35 probes, 27 non-probes, each probe caught on its verb's line);
 `../db/with-postgres.sh bun test-writes.ts` 110/110 under podman, twice on
-one container and after an aborted run; `bun
-test-auth.ts` 643/643 on the converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
-for `enhanced-mcp` and `agent-memory-api`, the two that resolve under Deno;
+one container and after an aborted run; `bun test-auth.ts` 643/643 on the
+converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
+for `enhanced-mcp`, `agent-memory-api` and `consolidation-workers/metadata-norm`
+(the edited helpers' other importer), the three that resolve under Deno;
 every shim-migrated file still parses. The ticket's verify — the check fails
 on the files today and passes after; an edit through each leaves
 `content_fingerprint`, `embedding_model` and `thought_chunks` as
