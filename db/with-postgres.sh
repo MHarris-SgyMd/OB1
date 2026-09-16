@@ -8,12 +8,31 @@
 # is what this project's authors run. The container is named distinctly and removed
 # on exit, so it will not collide with or outlive anything else you have running.
 #
+#   OB1_PG_KEEP=<name> ./with-postgres.sh bun bench-hnsw.ts
+#
+# keeps the database instead: the container's data directory is a NAMED volume,
+# ob1-pg-keep-<name>, which the removal on exit leaves in place (`rm -v` removes
+# anonymous volumes only, on both runtimes). Running again with the same
+# OB1_PG_KEEP starts a fresh container on that volume — the image, shared memory
+# and port given now apply, as on any run — and hands the command the same
+# database, which is how bench-hnsw.ts reuses a ten-million-row corpus it built
+# on an earlier pass instead of spending half an hour rebuilding it (SMD-1493).
+# The container is named after <name> too, so a second invocation under a name
+# whose database is in use is refused rather than sharing it. What was kept is
+# the operator's to remove, and the exit line prints the command. Without the
+# variable nothing survives a run, as before.
+#
 # In CI this script is not used: GitHub Actions provides the database as a service
 # container and sets DATABASE_URL directly.
 set -euo pipefail
 
 IMAGE="${OB1_PG_IMAGE:-pgvector/pgvector:0.8.6-pg16}"
-NAME="ob1-test-pg-$$"
+KEEP="${OB1_PG_KEEP:-}"
+if [ -n "$KEEP" ] && ! [[ "$KEEP" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "OB1_PG_KEEP must be a name (letters, digits, '_', '.', '-'), got: $KEEP" >&2
+  exit 2
+fi
+if [ -n "$KEEP" ]; then NAME="ob1-pg-keep-$KEEP"; else NAME="ob1-test-pg-$$"; fi
 # Pick a free port rather than a fixed one: a leftover container from an
 # interrupted run would otherwise fail every later run with "address already in
 # use", and two suites cannot run at once.
@@ -47,8 +66,69 @@ fi
 # alone leaves an anonymous volume behind every run — 776 of them, 79 GB, had
 # accumulated on one machine before the podman VM ran out of disk mid-bench
 # (SMD-945 review pass). Both runtimes take -v.
-cleanup() { "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true; }
-trap cleanup EXIT INT TERM
+#
+# Under OB1_PG_KEEP the same removal runs after a `stop` with time for Postgres
+# to checkpoint a large database cleanly (the runtimes' default of 10 s would
+# SIGKILL it into crash recovery on the next start); the named volume is not an
+# anonymous one, so `rm -v` leaves it, and the exit line says how to remove it.
+# Only the container THIS invocation created is touched, and only by the ID
+# `create` returned — never by name: under OB1_PG_KEEP the name is shared
+# across invocations, so a refusal below must not stop the container another
+# owns, and a removal by name could take a container another invocation
+# created after ours went. The container is created and started as two steps
+# so the ID is known even when the start fails (a port taken between the pick
+# and the bind): a created-but-never-started container still holds an
+# anonymous volume without OB1_PG_KEEP — the leak the -v is for. A `create`
+# that fails leaves nothing, and nothing is cleaned. The removal hint names
+# the runtime as this script found it: `/opt/podman/bin/podman` is chosen
+# exactly when `podman` is not on PATH, so its basename would not paste.
+# Seconds a kept container gets to checkpoint on stop, here and on the
+# container itself (an operator's own `stop` then checkpoints as cleanly).
+STOP_TIMEOUT=120
+CID=""
+STARTED=0
+# Remove a container and its anonymous volumes, by ID or by name; a failure
+# (already gone) is not an error anywhere this is called.
+discard() { "$RUNTIME" rm -fv "$1" >/dev/null 2>&1 || true; }
+cleanup() {
+  # A Ctrl-C during the stop below must not abort the removal and the hint:
+  # ignored, not reset — the default disposition would let a second Ctrl-C
+  # kill the runtime client and the shell with it, mid-stop.
+  trap '' INT TERM
+  if [ -z "$CID" ]; then
+    # No ID reached the shell. Under OB1_PG_KEEP the name may be another
+    # invocation's and nothing is touched; otherwise the per-process name is
+    # ours alone, and a `create` the runtime finished after an interrupt cut
+    # the substitution short would leave a container and its anonymous volume.
+    [ -n "$KEEP" ] || discard "$NAME"
+    return 0
+  fi
+  if [ -n "$KEEP" ]; then
+    # The hint only for a container that started: a start that failed (the
+    # port taken between the pick and the bind; a namesake removed under it)
+    # kept nothing Postgres wrote, and the volume may be empty or another
+    # invocation's.
+    if [ "$STARTED" = 1 ]; then
+      echo
+      echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
+      echo "  Remove: $RUNTIME volume rm $NAME"
+      echo -n "  stopping $NAME (a checkpoint; up to $STOP_TIMEOUT s) "
+    fi
+    "$RUNTIME" stop -t "$STOP_TIMEOUT" "$CID" >/dev/null 2>&1 || true
+    discard "$CID"
+    [ "$STARTED" = 1 ] && echo "— done"
+  else
+    discard "$CID"
+  fi
+}
+trap cleanup EXIT
+# Until the command runs there is no child to see a signal, so an interrupt
+# here ends the script through the EXIT trap — once, with the signal's status
+# (a trap that also ran cleanup would run it twice on bash 3.2). While the
+# command runs the trap changes (below) so that the command, which sees the
+# terminal's signal itself, decides the outcome.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # /dev/shm: both runtimes give a container 64 MB, and Postgres puts its dynamic
 # shared memory there — a parallel HNSW build keeps the whole graph in it, sized
@@ -66,28 +146,107 @@ trap cleanup EXIT INT TERM
 # ordinary backend memory and needs no /dev/shm at all.
 SHM_SIZE="${OB1_PG_SHM_SIZE:-1g}"
 
-echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE"
-"$RUNTIME" run -d --name "$NAME" \
+MOUNT_ARGS=()
+VOLUME_NOTE=""
+if [ -n "$KEEP" ]; then
+  # A container of this name still present is one of two things: EXITED or
+  # CREATED-and-never-started, the shell an interrupted run left behind, whose
+  # data is in the volume — removed by its ID, and the run goes on; or alive —
+  # running, paused, STOPPING (another invocation's exit checkpointing the
+  # database, which reads as not running) — refused, since sharing a database
+  # would let whichever exits first stop it under the other; the refusal
+  # names the removal for the operator to judge.
+  # One inspect, one snapshot: the status and the ID come from the same read,
+  # and the removal goes by that ID — a forced removal by name would take
+  # whatever holds the name at that instant, another invocation's freshly
+  # created container included. A name that vanished between the two reads
+  # (another invocation's removal) is no container at all, and `create`
+  # decides who has the name.
+  STALE="$("$RUNTIME" container inspect -f '{{.State.Status}} {{.Id}}' "$NAME" 2>/dev/null || true)"
+  if [ -n "$STALE" ]; then
+    STATUS="${STALE%% *}"
+    case "$STATUS" in
+      # Exited, or created and never started — the latter an interrupt that
+      # landed between the runtime accepting `create` and the ID reaching the
+      # shell (tens of milliseconds, reproduced), which cleanup could not
+      # know about and every later run would refuse for ever. Another
+      # invocation between its own two steps looks the same for about as
+      # long; it loses its start with a clear error and nothing else, the
+      # volume being shared and untouched. Removed by the inspected ID.
+      exited|stopped|dead|created) discard "${STALE#* }" ;;
+      *)
+        echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -fv $NAME" >&2
+        exit 2
+        ;;
+    esac
+  fi
+  # The data directory is PINNED, not discovered: PGDATA is set on the
+  # container to the path the volume is mounted at, which the official
+  # entrypoint honours on every major (the pg18 images moved their default to
+  # /var/lib/postgresql/<major>/docker under a VOLUME at /var/lib/postgresql;
+  # that one becomes an anonymous volume the removal takes). A discovered path
+  # needs a default when the image names none, and a wrong default would keep
+  # an empty volume while the corpus went into the anonymous one.
+  PGDATA_PATH=/var/lib/postgresql/data
+  MOUNT_ARGS=(-e "PGDATA=$PGDATA_PATH" -v "$NAME:$PGDATA_PATH")
+  # The stop timeout the exit uses, on the container too, so an operator's own
+  # `stop` checkpoints as cleanly. Only here: podman's `rm -f` honours it, and
+  # a throwaway container should go at once, as before.
+  MOUNT_ARGS+=(--stop-timeout "$STOP_TIMEOUT")
+  if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; KEPT_VOLUME_EXISTS=1; else VOLUME_NOTE=", new volume $NAME kept"; KEPT_VOLUME_EXISTS=0; fi
+fi
+
+echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
+CID="$("$RUNTIME" create --name "$NAME" \
   -e POSTGRES_PASSWORD="$PASSWORD" \
   -e POSTGRES_DB="$DB" \
   -p "$PORT:5432" \
   --shm-size "$SHM_SIZE" \
-  "$IMAGE" >/dev/null
+  ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
+  "$IMAGE")"
+"$RUNTIME" start "$CID" >/dev/null
+STARTED=1
 
+# A fresh data directory is ready in seconds. A kept one may start into crash
+# recovery (a host that slept, a machine restarted) and replay WAL for minutes
+# at ten million rows, during which pg_isready reports it as starting; giving
+# up at a minute would stop it mid-replay and the next run would start over.
+# A container that has EXITED — a kept data directory this image cannot open,
+# a bad parameter — is not waited for at all: its logs say why, at once.
+# The long wait is for a kept data directory that already exists (WAL to
+# replay); a new one initialises in seconds and gets the ordinary minute.
+if [ -n "$KEEP" ] && [ "${KEPT_VOLUME_EXISTS:-0}" = 1 ]; then READY_TRIES=1800; else READY_TRIES=60; fi
+# Readiness is TCP readiness: over the unix socket, pg_isready is answered for
+# a moment by the entrypoint's initdb-time temporary server (listening on no
+# TCP address) before the real one is up, and a client that connected in that
+# window failed; under OB1_PG_KEEP the exit that followed stopped the
+# container mid-initialisation and left a volume the entrypoint then treated
+# as initialised (review pass, reproduced at ~200 ms).
+ready() { "$RUNTIME" exec "$CID" pg_isready -h 127.0.0.1 -U postgres -d "$DB" >/dev/null 2>&1; }
 echo -n "▸ waiting for readiness "
-for _ in $(seq 1 60); do
-  if "$RUNTIME" exec "$NAME" pg_isready -U postgres -d "$DB" >/dev/null 2>&1; then
+for _ in $(seq 1 "$READY_TRIES"); do
+  if ready; then
     echo "— ready"
+    break
+  fi
+  # Not ready. Whether the container is still running is asked of the runtime
+  # on every miss — a non-running container's exec fails with 125 on podman
+  # but 1 on docker, the same code pg_isready gives for "starting", so the
+  # exit code cannot tell them apart — and only an explicit "false" ends the
+  # wait: a failed inspect (a transient runtime error) prints nothing and must
+  # not read as an exit, or one bad call would stop a thirty-minute recovery.
+  if [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null || true)" = "false" ]; then
+    echo " — the container exited"
     break
   fi
   echo -n "."
   sleep 1
 done
 
-if ! "$RUNTIME" exec "$NAME" pg_isready -U postgres -d "$DB" >/dev/null 2>&1; then
+if ! ready; then
   echo >&2
   echo "Postgres did not become ready. Container logs:" >&2
-  "$RUNTIME" logs "$NAME" 2>&1 | tail -20 >&2
+  "$RUNTIME" logs "$CID" 2>&1 | tail -20 >&2
   exit 1
 fi
 
@@ -95,4 +254,11 @@ export DATABASE_URL="postgres://postgres:$PASSWORD@127.0.0.1:$PORT/$DB"
 echo "▸ DATABASE_URL=$DATABASE_URL"
 echo
 
+# The command's own status is the script's. Its INT and TERM are the
+# command's to handle (a psql cancelling one query and going on; a bench dying
+# of Ctrl-C and exiting 130 by itself), so the wrapper's trap is now a no-op
+# body — not an empty string, which a child would inherit as "ignore" and
+# never see the signal (review pass, reproduced) — and `set -e` carries a
+# failing command's status out through the EXIT trap.
+trap ':' INT TERM
 "$@"
