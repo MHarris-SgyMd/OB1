@@ -30,7 +30,7 @@
  * assertion whose message names the mechanism, and the guard is updated with
  * the file — the cost of holding behaviour this suite cannot drive.
  *
- * SMD-1544 (FORK.md change 72) moved the bio worker from the read set to the
+ * SMD-1544 (FORK.md change 73) moved the bio worker from the read set to the
  * driven one. Its source and profile queries filter on JSON paths
  * (`metadata->>generated_by`, `->>subject` …), which the SQL shim refused, so
  * on the fork the worker answered 500 at its first query and everything

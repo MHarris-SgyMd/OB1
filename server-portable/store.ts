@@ -110,7 +110,7 @@ export type ThoughtHybridMatch = {
  * returns a JSON string in Postgres's own spelling —
  * `2026-09-14T16:27:09.123456+00:00`, or `infinity`; and `compat/supabase-sql`
  * under the PostgREST store's tests, which hands back a finite Date as its
- * `toISOString` string since FORK.md change 72 (SMD-1544), gives the string
+ * `toISOString` string since FORK.md change 73 (SMD-1544), gives the string
  * form in JS's spelling. Nothing else may format a timestamp: a `String()` on the Date
  * gave a locale string once, and a bare cast gave each caller its client's
  * shape (SMD-1040; FORK.md §52 has the history).

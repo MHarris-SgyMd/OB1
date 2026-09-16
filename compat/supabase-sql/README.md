@@ -74,7 +74,7 @@ the key's *text*, so a number against `meta->>score` is a text comparison
 (`"5" >= "20"`), as it is through PostgREST — a numeric comparison on a JSON
 key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
 (`toISOString()`'s form), as PostgREST's JSON has it, not as the Date Bun hands
-back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 72,
+back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 73,
 SMD-1544). A `date` or a `timestamp without time zone` column is reshaped the
 same way, into a `Z` instant, where PostgREST would give `2026-09-16` or a
 zone-less datetime; `.slice(0, 10)` agrees, an equality against the bare date
@@ -128,13 +128,13 @@ development — the test caught it.
   Gmail, Slack, Readwise. The shim is tested; each migrated file is verified to
   parse, and `extensions/test-writes.ts` drives the writers among them against a
   real Postgres (the bio worker, the one that filters on a JSON path, found the
-  two gaps change 72 closed). Exercise the ones you actually run before trusting
+  two gaps change 73 closed). Exercise the ones you actually run before trusting
   them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.
 - **Timestamps are strings.** A `Date` Bun hands back is rendered as its ISO
-  string, as PostgREST's JSON has it (FORK.md change 72); a consumer that wants a
+  string, as PostgREST's JSON has it (FORK.md change 73); a consumer that wants a
   `Date` does `new Date(row.x)`, as the shim-migrated extensions already do.
 - **JSON-path keys are identifier-shaped.** `meta->>café` and `meta->>a$b` are
   refused here; PostgREST accepts both. Nothing in the tree uses such a key.

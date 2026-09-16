@@ -161,7 +161,7 @@ console.log("\n[3] matchThoughts finds a thought by a CHUNK, through the RPC");
          "similarity and score arrive as finite numbers, not NaN from a missing column");
 
   // The fixture hands the store an ISO string in JS's spelling (the shim renders
-  // Bun's Date so, since FORK.md change 72); real PostgREST hands it Postgres's
+  // Bun's Date so, since FORK.md change 73); real PostgREST hands it Postgres's
   // own JSON spelling, which no suite here can produce; the SQL store a Date.
   // Feed the helper all three, plus the spellings of an infinite timestamp on
   // each client (see [3d]).

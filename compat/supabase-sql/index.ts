@@ -27,7 +27,7 @@
  * Also unsupported, because nothing in the repo uses them: `.auth`, `.storage`,
  * `.channel`, `.functions.invoke`.
  *
- * ── JSON paths, and the shape of a row (SMD-1544, FORK.md change 72) ─────────
+ * ── JSON paths, and the shape of a row (SMD-1544, FORK.md change 73) ─────────
  * PostgREST's JSON-path column — `metadata->>generated_by`, `meta->a->>key` —
  * is accepted in the comparison filters, `is`, `in`, `match`, an `.or()` term
  * and `.order()`: rendered `"metadata"->>'key'`, the key a quoted literal, the
@@ -81,7 +81,7 @@ function ident(name: string, what: string): string {
  * select list, a payload key, a conflict target, and `.contains()`, whose
  * operator is jsonb's (the file that wants containment under a key has
  * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
- * 72): the bio worker's source and profile queries filter on `metadata->>…`,
+ * 73): the bio worker's source and profile queries filter on `metadata->>…`,
  * and ident()'s refusal was a 500 at the worker's first query on the fork.
  */
 const JSON_PATH = /^([A-Za-z_][A-Za-z0-9_]*)((?:->>?[A-Za-z_][A-Za-z0-9_]*)+)$/;
