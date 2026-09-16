@@ -2,8 +2,15 @@
 """
 Open Brain — Local Ollama Embeddings
 
-Generates embeddings locally via Ollama and inserts thoughts into Supabase.
+Generates embeddings locally via Ollama and stores thoughts in Supabase.
 No OpenRouter or cloud API key required for the embedding step.
+
+ob1-fork (SMD-1524): each thought is stored through the database's
+upsert_thought — POST /rest/v1/rpc/upsert_thought, the 3-argument form — which
+writes the text, its content fingerprint (003), the vector and the vector's
+model label (021) in one statement; a POST to the table left the fingerprint
+and the label NULL. FORK.md change 71; scripts/check-fork-consistency.mjs
+check 10 holds it.
 
 Usage:
     echo "My thought" | python embed-local.py
@@ -21,7 +28,7 @@ Options:
     --model NAME           Ollama embedding model (default: nomic-embed-text)
     --ollama-url URL       Ollama base URL (default: http://localhost:11434)
     --source LABEL         Source label for metadata (default: ollama-local)
-    --dry-run              Generate embeddings but don't insert into Supabase
+    --dry-run              Generate embeddings but don't store them in Supabase
     --verbose              Print each thought and embedding dimension
     --batch-size N         Thoughts per Ollama embed request (default: 1)
 
@@ -117,34 +124,47 @@ def generate_embedding(text, model, ollama_url):
 # ─── Supabase Ingestion ──────────────────────────────────────────────────────
 
 
-def ingest_thought(content, embedding, metadata_dict):
-    """Insert a thought into Supabase with the provided embedding."""
+def ingest_thought(content, embedding, metadata_dict, model):
+    """Store a thought through the database's upsert_thought (FORK.md change 71).
+
+    The 3-argument form writes the text, its content fingerprint, the vector
+    and the vector's model label in one statement. The label is the Ollama
+    model's name as OB1_EMBEDDING_MODEL spells it, so a re-embed pass
+    (db/reembed.ts) knows which rows are at its target and which are not. A
+    text the brain already holds comes back `existed`: its metadata is merged
+    and its vector replaced, not a second row.
+    """
     resp = http_post(
-        f"{SUPABASE_URL}/rest/v1/thoughts",
+        f"{SUPABASE_URL}/rest/v1/rpc/upsert_thought",
         headers={
             "Content-Type": "application/json",
             "apikey": SUPABASE_SERVICE_ROLE_KEY,
             "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            "Prefer": "return=minimal",
         },
         body={
-            "content": content,
-            "embedding": embedding,
-            "metadata": metadata_dict,
+            "p_content": content,
+            "p_payload": {"metadata": metadata_dict, "embedding_model": model},
+            "p_embedding": embedding,
         },
     )
 
     if not resp:
         return {"ok": False, "error": "No response from Supabase"}
 
-    if resp.status_code not in (200, 201):
+    if resp.status_code != 200:
         try:
             error_detail = resp.json()
         except ValueError:
             error_detail = resp.text
         return {"ok": False, "error": f"HTTP {resp.status_code}: {error_detail}"}
 
-    return {"ok": True}
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {"ok": True, "existed": bool(data.get("existed")), "id": data.get("id")}
 
 
 # ─── Input Parsing ────────────────────────────────────────────────────────────
@@ -198,7 +218,7 @@ def read_thoughts_from_stdin():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate local embeddings via Ollama and insert into Open Brain",
+        description="Generate local embeddings via Ollama and store the thoughts in Open Brain",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -213,7 +233,7 @@ Examples:
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help=f"Ollama embedding model (default: {DEFAULT_MODEL})")
     parser.add_argument("--ollama-url", type=str, default=None, help=f"Ollama base URL (default: {OLLAMA_BASE_URL})")
     parser.add_argument("--source", type=str, default="ollama-local", help="Source label for metadata (default: ollama-local)")
-    parser.add_argument("--dry-run", action="store_true", help="Generate embeddings but don't insert into Supabase")
+    parser.add_argument("--dry-run", action="store_true", help="Generate embeddings but don't store them in Supabase")
     parser.add_argument("--verbose", action="store_true", help="Print each thought and embedding info")
     parser.add_argument("--batch-size", type=int, default=1, help="Thoughts per request (default: 1)")
     return parser.parse_args()
@@ -282,12 +302,13 @@ def main():
     if args.model in KNOWN_DIMENSIONS and KNOWN_DIMENSIONS[args.model] != 1536:
         print(f"\n  NOTE: {args.model} produces {KNOWN_DIMENSIONS[args.model]}-dim embeddings.")
         print(f"  The default Open Brain schema uses vector(1536).")
-        print(f"  Adjust your schema to match: ALTER TABLE thoughts ALTER COLUMN embedding TYPE vector({KNOWN_DIMENSIONS[args.model]});")
+        print(f"  On this fork the width is db/config.mjs's: build the brain with OB1_EMBEDDING_MODEL={args.model} (see the README).")
     print()
 
     # Process
     embedded = 0
     ingested = 0
+    already_present = 0
     errors = 0
 
     for i, thought in enumerate(thoughts, 1):
@@ -310,7 +331,9 @@ def main():
             print(f"   -> OK (dry run)")
             continue
 
-        # Build metadata
+        # Build metadata. `embedding_model` here is the recipe's own key, kept
+        # for readers of metadata; the row's label is the embedding_model
+        # COLUMN, written by upsert_thought from the payload (021).
         metadata = {
             "source": thought.get("source") or args.source,
             "embedding_model": args.model,
@@ -320,10 +343,14 @@ def main():
             metadata.update(thought["metadata"])
 
         # Ingest
-        result = ingest_thought(content, embedding, metadata)
+        result = ingest_thought(content, embedding, metadata, args.model)
         if result.get("ok"):
-            ingested += 1
-            print(f"   -> Ingested")
+            if result.get("existed"):
+                already_present += 1
+                print(f"   -> Already present (metadata merged, vector replaced)")
+            else:
+                ingested += 1
+                print(f"   -> Ingested")
         else:
             errors += 1
             print(f"   -> ERROR: {result.get('error', 'unknown')}")
@@ -338,6 +365,8 @@ def main():
     print(f"  Embedded:  {embedded}")
     if not args.dry_run:
         print(f"  Ingested:  {ingested}")
+        if already_present:
+            print(f"  Present:   {already_present} (text already held; metadata merged, vector replaced)")
     print(f"  Errors:    {errors}")
     print(f"  API cost:  $0.00 (local)")
     print("-" * 50)

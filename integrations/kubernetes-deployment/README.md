@@ -16,6 +16,8 @@
 
 This integration provides Kubernetes manifests and a modified MCP server that connects directly to PostgreSQL instead of Supabase. Your thoughts database, embeddings, and MCP endpoint all run on your own cluster. The MCP HTTP endpoint is served via Kubernetes Ingress, making it a remote endpoint accessible by URL from any MCP client.
 
+> **On this fork (FORK.md change 71, SMD-1524):** the database this deployment runs is its own, built by `k8s/init.sql` from the guide's shape — none of this fork's migrations or functions are in it. `capture_thought` therefore writes `thoughts` with a raw INSERT, and its rows have no content fingerprint (no dedup by text), no model label and no audit actor. To run a fork-shaped brain in the cluster instead, apply [`db/migrations/`](../../db/README.md) to the Postgres pod in place of `init.sql` and route the capture through `upsert_thought`; until then the file is a counted exception in `scripts/check-fork-consistency.mjs` check 10.
+
 ## Prerequisites
 
 - Working Kubernetes cluster (tested on K3s v1.31, works with any K8s distribution)
