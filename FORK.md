@@ -409,13 +409,14 @@ one write lands first.
 
 - *Capture atomicity.* Postgres is the source of truth and commits first; the
   vector write follows and is retried to completion (an outbox row in the same
-  Postgres transaction, drained by a worker, is the standard shape). Between the
-  two, a reader can fetch the thought by id and keyword-match it, but the vector
-  search cannot yet return it. Accepted gap: vector visibility lags row
-  visibility by the drain interval; the row is never orphaned because the outbox
-  row shares its transaction. The reverse orphan — a vector for a row that rolled
-  back — cannot occur, because the vector write is keyed off a committed outbox
-  row.
+  Postgres transaction, drained by a worker in per-thought order — or carrying
+  the row's version so a stale write loses to a newer one — is the standard
+  shape). Between the two, a reader can fetch the thought by id and
+  keyword-match it, but the vector search cannot yet return it. Accepted gap:
+  vector visibility lags row visibility by the drain interval; the row is
+  never orphaned because the outbox row shares its transaction. The reverse
+  orphan — a vector for a row that rolled back — cannot occur, because the
+  vector write is keyed off a committed outbox row.
 - *`updateThought` / `deleteThought`.* A content edit re-embeds and must
   overwrite the external vector; a delete must remove it. In Postgres today
   the chunk vectors are `ON DELETE CASCADE` (migration 007) — a foreign key
@@ -425,8 +426,12 @@ one write lands first.
   same outbox drains deletes and re-embeds; and because content is always read
   from Postgres — in the two-store shape the vector store returns ids and
   Postgres resolves the rows — a stale vector id resolves to no row and drops
-  the hit rather than returning wrong content. The reader is never lied to,
-  only under-served until the drain catches up.
+  the hit rather than returning wrong content. The one way a vector outlives
+  its row for good is a delete overtaken by a lagging re-embed of the same id
+  — which is exactly what the per-thought ordering above rules out; without it
+  the orphan can hold a top-k slot that resolves to nothing, so the query
+  returns short (the bounded shape change 28 already accepts), never wrong.
+  The reader is never lied to, only under-served until the drain catches up.
 - *Bulk re-embed (SMD-946).* A model change rebuilds every vector. Against an
   external index this is an index rebuild in the second store, not just an
   `UPDATE` — and `preflight` (SMD-1024), which reads claim counts to know a
