@@ -384,10 +384,13 @@ moves.** A second store would own the vector-search reads and the vector writes,
 nothing else:
 
 - **Moves:** `matchThoughts` (the top-k vector scan, including the metadata
-  filter migration 014 pushed *into* the scan), the vector arm of `hybridThoughts`
-  (migration 017), and the vector writes inside `captureThought`, `updateThought`
-  and `deleteThought` — the `embedding` on the row and the per-window vectors in
-  `thought_chunks` (migration 007).
+  filter migration 014 pushed *into* the scan), the vector arm of
+  `hybridThoughts` (migration 017), and the vector writes inside
+  `captureThought`, `updateThought` and `deleteThought` — the `embedding` on
+  the row and the per-window vectors in `thought_chunks` (migration 007).
+  Moving the vector arm out also moves 017's fusion out of SQL: what is one
+  statement over one snapshot today becomes an external vector query merged
+  with the Postgres keyword arm in application code.
 - **Stays in Postgres:** `keywordThoughts` (a match over `thoughts.content`,
   migration 012), `getThought` / `listThoughts` / `countThoughts` /
   `statsSummary` / `pageThoughtMeta`, `resolveAgent` and the work-claim tables
@@ -396,10 +399,10 @@ nothing else:
   (the query log, SMD-1295, migration 034), and every non-vector table:
   `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
 
-The split is the point: the store holds one column of one table plus one child
-table, and everything that makes a thought *usable* — its text, its history, its
-provenance, its ACL, its filters — stays in the engine that already serves them
-in one snapshot.
+The split is the point: the store holds one column of one table plus the
+vectors of one child table, and everything that makes a thought *usable* — its
+text, its history, its provenance, its ACL, its filters — stays in the engine
+that already serves them in one snapshot.
 
 **Consistency — every case, with a handling or an owned gap.** Today a capture is
 one transaction: `upsert_thought` writes the row and replaces its chunks
@@ -468,6 +471,14 @@ reports at least one of:
 3. an **index build time** for a re-embed so much worse in pgvector that a model
    change is impractical — the SMD-946 rebuild turning from a background pass
    into a window.
+
+What is pre-registered here is the three dimensions and their direction, not a
+mood. The magnitudes — how many recall points count as "material", the latency
+multiple, the build-time ceiling — are pinned to SMD-1037's *baseline* (pgvector's
+own recall and latency at each tier and size) and fixed before its comparator
+numbers are read, so "material" is a delta against a number set in advance, never
+a judgment reached once the comparator's result is in view. That is the whole
+point of writing this before the measurement.
 
 And, written down before the numbers so it cannot be argued away after: what does
 **not** justify a second store —
