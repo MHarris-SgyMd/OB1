@@ -9434,7 +9434,8 @@ one probe and one non-probe added (50/37). The bio guards in the test
 matched one spelling of the call; they hold the three arguments in any
 order, and the header says the guards are spelling-sensitive by design. Not
 fixed, and said: `computeContentFingerprint` in the workers' helpers has no
-importer left (boyscout); check 10 catches a column-listed `INSERT INTO
+importer left outside the helpers (the boyscout found they call it
+themselves — it stays); check 10 catches a column-listed `INSERT INTO
 thoughts (content)` in a comment or README sentence, by design. Run for
 real: the shim and PostgREST both resolve `{p_content, p_payload}` to the
 2-argument form and `{…, p_embedding: null}` to the 3-argument one, the
@@ -9553,6 +9554,16 @@ first column raises the sidecar's error with the second column unwritten
 with one warning; the checker's scan is no slower for the per-head slice
 (0.7 s either way); `deno check` on the receiver shows the shim typings
 only. Two runs on one container green.
+
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the Ollama recipe's usage text, `--dry-run`
+help and README still said "insert" for what is a store through the
+function; the readwise backfill's README opening and one troubleshooting
+heading the same; the test's sidecar comment counted two files where there
+are three; the probe list's doc comment named the updates alone. The
+`computeContentFingerprint` pass 1 marked for removal is called by the
+helpers file itself (the workers' shared copy computes a fingerprint for its
+own structured-capture path), so it stays; the pass-1 note above says so.
 
 **Not done here.** SMD-1544 (the shim refuses a JSON-path filter column, so
 `consolidation-bio` cannot run on the fork; with that fixed, bio joins the

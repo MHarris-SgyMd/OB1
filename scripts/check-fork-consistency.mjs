@@ -1233,7 +1233,7 @@ function thoughtWritesAroundIn(text) {
   return [...lines].sort((a, b) => a - b);
 }
 
-/** Texts the rule must catch — the nine files' eleven statements, one probe each, and the forms a rebase could bring. */
+/** Texts the rule must catch — the nine files' eleven updates and the eight files' inserts, one probe each, the forms a rebase could bring, and the review passes' escapes. */
 const THOUGHT_WRITE_PROBES = [
   // update-thought-mcp: a payload filled by property assignment, sent by name, verb on its own line.
   'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',

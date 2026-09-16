@@ -6,7 +6,7 @@
 
 ## What It Does
 
-One-shot backfill of your Readwise highlight history into Open Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and inserts each highlight as a thought with `source_type = 'readwise'`.
+One-shot backfill of your Readwise highlight history into Open Brain. The script pages through Readwise's `/api/v2/export/` endpoint, upserts each book into the `readwise_books` cache table, batch-embeds highlight text via OpenRouter, and stores each highlight as a thought with `source_type = 'readwise'`.
 
 Idempotent: re-running it after new highlights arrive will skip everything already present (dedup by `readwise_highlight_id`) and import only the delta.
 
@@ -224,7 +224,7 @@ You didn't export one of the required env vars. All four are required. The scrip
 
 Your access token is wrong or rotated. Visit [readwise.io/access_token](https://readwise.io/access_token) and copy the current value.
 
-### Supabase insert fails with `relation "readwise_books" does not exist`
+### Supabase write fails with `relation "readwise_books" does not exist`
 
 You haven't applied the [readwise-books schema](../../schemas/readwise-books/) yet. Run `schema.sql` from that folder in your Supabase SQL Editor, then retry.
 

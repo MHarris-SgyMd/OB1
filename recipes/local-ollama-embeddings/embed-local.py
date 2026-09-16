@@ -28,7 +28,7 @@ Options:
     --model NAME           Ollama embedding model (default: nomic-embed-text)
     --ollama-url URL       Ollama base URL (default: http://localhost:11434)
     --source LABEL         Source label for metadata (default: ollama-local)
-    --dry-run              Generate embeddings but don't insert into Supabase
+    --dry-run              Generate embeddings but don't store them in Supabase
     --verbose              Print each thought and embedding dimension
     --batch-size N         Thoughts per Ollama embed request (default: 1)
 
@@ -218,7 +218,7 @@ def read_thoughts_from_stdin():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate local embeddings via Ollama and insert into Open Brain",
+        description="Generate local embeddings via Ollama and store the thoughts in Open Brain",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -233,7 +233,7 @@ Examples:
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help=f"Ollama embedding model (default: {DEFAULT_MODEL})")
     parser.add_argument("--ollama-url", type=str, default=None, help=f"Ollama base URL (default: {OLLAMA_BASE_URL})")
     parser.add_argument("--source", type=str, default="ollama-local", help="Source label for metadata (default: ollama-local)")
-    parser.add_argument("--dry-run", action="store_true", help="Generate embeddings but don't insert into Supabase")
+    parser.add_argument("--dry-run", action="store_true", help="Generate embeddings but don't store them in Supabase")
     parser.add_argument("--verbose", action="store_true", help="Print each thought and embedding info")
     parser.add_argument("--batch-size", type=int, default=1, help="Thoughts per request (default: 1)")
     return parser.parse_args()

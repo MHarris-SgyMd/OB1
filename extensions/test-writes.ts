@@ -86,7 +86,7 @@ await resetSchema(URL_, { dim: DIM, model: MODEL });
 const sql = new SQL({ url: URL_, max: 2 });
 
 const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/schema.sql", "schemas/readwise-books/schema.sql"];
-// Both GRANT to Supabase's roles, which plain Postgres lacks; the sidecar's own header says to create them.
+// All three GRANT to Supabase's roles, which plain Postgres lacks; the sidecars' own headers say to create them.
 for (const role of ["authenticated", "service_role", "anon"]) {
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
 }
