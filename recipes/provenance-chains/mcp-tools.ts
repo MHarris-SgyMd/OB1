@@ -16,6 +16,11 @@
 //   - `supabase`        createClient<...>(…, service_role_key)
 //   - `z`               imported from "npm:zod@3"
 //   - `getEmbedding`    (Tool 3 only) canonical index.ts helper — text → vector
+//   - `EMBEDDING_MODEL` (Tool 3 only) the model getEmbedding calls, as
+//                        OB1_EMBEDDING_MODEL spells it — the label migration
+//                        021 writes beside the vector (this fork's server/index.ts
+//                        defines it; an older copy hard-codes the model name in
+//                        getEmbedding, so lift it into a constant)
 //   - `extractMetadata` (Tool 3 only) canonical index.ts helper — text → metadata
 //
 // Tool 3 (capture_derived_thought) is a WRITE tool and is deliberately a
@@ -433,8 +438,31 @@ server.registerTool(
       const rawRefs = Array.isArray(raw.derived_from)
         ? (raw.derived_from as unknown[]).map((r) => String(r).trim())
         : [];
-      const derivedFrom = rawRefs.filter((r) => UUID_RE.test(r));
+      const wellFormed = rawRefs.filter((r) => UUID_RE.test(r));
       const unresolvedRefs = rawRefs.filter((r) => !UUID_RE.test(r));
+
+      // A well-formed UUID that names no thought — a parent deleted since, a
+      // ref copied from another brain — is unresolved too: upsert_thought
+      // validates the envelope's derived_from (db/migrations/032's
+      // validate_derived_from) and refuses the WHOLE capture for a ghost,
+      // where the raw update this tool used to make wrote the dangling
+      // pointer without a check. One read, then the partition.
+      let derivedFrom: string[] = [];
+      if (wellFormed.length) {
+        const { data: parents, error: parentsError } = await supabase
+          .from("thoughts")
+          .select("id")
+          .in("id", wellFormed);
+        if (parentsError) {
+          return {
+            content: [{ type: "text", text: `Failed to resolve derived_from: ${parentsError.message}` }],
+            isError: true,
+          };
+        }
+        const present = new Set(((parents ?? []) as { id: string }[]).map((p) => String(p.id)));
+        derivedFrom = wellFormed.filter((r) => present.has(r));
+        unresolvedRefs.push(...wellFormed.filter((r) => !present.has(r)));
+      }
 
       // Defaults: when parents are present but layer/method were omitted, fill
       // in the CHECK-valid values so the caller doesn't have to. z.enum already
@@ -473,11 +501,30 @@ server.registerTool(
         };
       }
 
-      // Step 2: upsert content + metadata. upsert_thought returns the row id
-      // and, on a fingerprint conflict, merges the incoming metadata.
+      // Step 2: one call — content, vector, metadata and the core provenance
+      // columns through the 3-argument upsert_thought (db/migrations/004,
+      // last redefined by 035): the fingerprint lands with the text, the label
+      // with the vector (021), a re-capture replaces the previous vector's
+      // chunk rows (022), and `derived_from` / `supersedes` ride the envelope
+      // (025), validated there — a ref that is not a thought's UUID, or names
+      // no thought, is refused, which the partition above keeps out. On a
+      // re-capture of existing text the function leaves that row's pointers
+      // as they are (035): a capture never rewrites provenance, and the
+      // mirror in metadata still merges in. This used to be the 2-argument
+      // form and a raw update of the vector and pointers after it, which left
+      // embedding_model NULL and the old chunk rows in place (SMD-1228).
       const { data: upsertResult, error: upsertError } = await supabase.rpc(
         "upsert_thought",
-        { p_content: content, p_payload: { metadata } },
+        {
+          p_content: content,
+          p_payload: {
+            metadata,
+            embedding_model: EMBEDDING_MODEL,
+            ...(derivedFrom.length ? { derived_from: derivedFrom } : {}),
+            ...(supersedes ? { supersedes } : {}),
+          },
+          p_embedding: embedding,
+        },
       );
       if (upsertError) {
         return {
@@ -493,31 +540,33 @@ server.registerTool(
         };
       }
 
-      // Step 3: one UPDATE for the embedding AND the top-level provenance
-      // columns upsert_thought ignored. On a re-capture this overwrites the
-      // columns with the new values, which is intended.
-      const patch: Record<string, unknown> = { embedding };
-      if (derivedFrom.length) patch.derived_from = derivedFrom;
+      // Step 3: this recipe's own two columns, which the core function does
+      // not know — a raw update that carries neither content nor vector, so
+      // nothing it writes goes stale. On a re-capture these are overwritten
+      // with the new values, which is intended.
+      const patch: Record<string, unknown> = {};
       if (layer) patch.derivation_layer = layer;
       if (method) patch.derivation_method = method;
-      if (supersedes) patch.supersedes = supersedes;
 
-      const { error: patchError } = await supabase
-        .from("thoughts")
-        .update(patch)
-        .eq("id", thoughtId);
-      if (patchError) {
-        // The thought IS saved; only the provenance/embedding write failed.
-        // Surface it explicitly rather than pretending success.
-        return {
-          content: [{
-            type: "text",
-            text:
-              `Captured thought ${thoughtId}, but failed to write provenance/embedding: ` +
-              `${patchError.message}`,
-          }],
-          isError: true,
-        };
+      if (Object.keys(patch).length) {
+        const { error: patchError } = await supabase
+          .from("thoughts")
+          .update(patch)
+          .eq("id", thoughtId);
+        if (patchError) {
+          // The thought IS saved, with its vector and core provenance; only
+          // the layer/method write failed. Surface it explicitly rather than
+          // pretending success.
+          return {
+            content: [{
+              type: "text",
+              text:
+                `Captured thought ${thoughtId}, but failed to write derivation_layer/derivation_method: ` +
+                `${patchError.message}`,
+            }],
+            isError: true,
+          };
+        }
       }
 
       // Confirmation.

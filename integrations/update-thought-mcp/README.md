@@ -16,6 +16,8 @@ The tool supports three arguments:
 - `metadata_patch` — shallow-merged into the existing `metadata` JSONB. Keys not present in the patch are left alone.
 - `if_unchanged_since` — optional ISO 8601 timestamp. When supplied, the update is rejected with `STALE_READ` if the stored `updated_at` has advanced past that reference. Omit for last-write-wins behaviour (backward compatible).
 
+On this fork the tool is one call to the database's `update_thought` (`db/migrations/033`), not a read followed by a raw update of the row. That is what keeps the thought whole: the content fingerprint follows the text (so the next capture of the same text is recognised as a duplicate, `db/migrations/003` and `018`), the model label follows the vector (`021`, what preflight and the re-embed read), the previous vector's chunk rows go (`022`), the patch is shallow-merged into `metadata` inside the function, and `if_unchanged_since` is decided under the row's lock rather than against a read a moment earlier. Two more answers come from the function: `DUPLICATE_CONTENT`, when the new text is already another thought's (edit that one instead), and a note when another row holds a stale fingerprint for the text. FORK.md change 69 (SMD-1228); `extensions/test-writes.ts` drives the tool against Postgres and compares the row with one `update_thought` edited directly. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
+
 Why it matters: once more than one agent writes to the same Open Brain (Claude Desktop, Codex, a background worker, etc.), last-write-wins silently drops concurrent edits. Optimistic concurrency is the cheapest fix — pass the `updated_at` you read, and the server rejects the write if something changed in between.
 
 ## Prerequisites
@@ -132,7 +134,10 @@ Solution: Make sure the `?key=` parameter in your connector URL is the **key** w
 Solution: This appears only when a caller passes `content`. Set the secret (`supabase secrets set OPENROUTER_API_KEY=...`) and re-deploy. Updates that only pass `metadata_patch` work without an embedding provider.
 
 **Issue: Updates always succeed even though I expected `STALE_READ`**
-Solution: `if_unchanged_since` is optional. Confirm you are actually passing it, and that the timestamp you read was the thought's `updated_at` (not `created_at`). The default `update_updated_at` trigger from the getting-started guide keeps `updated_at` current on every write.
+Solution: `if_unchanged_since` is optional. Confirm you are actually passing it, and that the timestamp you read was the thought's `updated_at` (not `created_at`). `update_thought` compares at millisecond precision, which is what a JavaScript `Date` carries, so passing back exactly what you read passes; `updated_at` moves on every write through the function.
+
+**Issue: `DUPLICATE_CONTENT: another thought already holds this exact text`**
+Solution: The new content normalises to text another thought already holds (`db/migrations/003`'s rule: whitespace collapsed, case folded). Edit that thought, or delete it first — two rows with one fingerprint is what the rule exists to prevent.
 
 ## Attribution
 

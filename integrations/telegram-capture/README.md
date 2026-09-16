@@ -16,7 +16,7 @@
 
 ## What It Does
 
-Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place.
+Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
 
 ---
 
@@ -127,6 +127,8 @@ const TELEGRAM_WEBHOOK_SECRET = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
 const UPDATE_ON_EDIT = Deno.env.get("UPDATE_ON_EDIT") === "true";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// The label written beside every vector (021): the model as OB1_EMBEDDING_MODEL spells it.
+const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Whether the secret Telegram echoes is the configured one, compared timing-safe:
@@ -146,7 +148,7 @@ async function getEmbedding(text: string): Promise<number[]> {
       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model: "openai/text-embedding-3-small", input: text }),
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
   });
   const d = await r.json();
   return d.data[0].embedding;
@@ -248,24 +250,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
           getEmbedding(messageText),
           extractMetadata(messageText),
         ]);
-        const { error } = await supabase
-          .from("thoughts")
-          .update({
-            content: messageText,
-            embedding,
-            metadata: {
-              ...metadata,
-              source: "telegram",
-              telegram_chat_id: chatId,
-              telegram_message_id: messageId,
-              edited: true,
-            },
-          })
-          .eq("id", existing[0].id);
+        // Through update_thought (db/migrations/033), not a raw update of the
+        // row: the fingerprint follows the text, the model label follows the
+        // vector, the previous vector's chunk rows go, and the patch is merged
+        // into metadata under the row's lock.
+        const { data, error } = await supabase.rpc("update_thought", {
+          p_id: existing[0].id,
+          p_content: messageText,
+          p_metadata_patch: {
+            ...metadata,
+            source: "telegram",
+            telegram_chat_id: chatId,
+            telegram_message_id: messageId,
+            edited: true,
+          },
+          p_embedding: embedding,
+          p_embedding_model: EMBEDDING_MODEL,
+        });
 
-        if (error) {
-          console.error("Supabase update error:", error);
-          await replyInTelegram(chatId, messageId, `Failed to update: ${error.message}`);
+        if (error || data?.ok !== true) {
+          const reason = error?.message ?? String(data?.error ?? "refused");
+          console.error("update_thought error:", reason);
+          await replyInTelegram(chatId, messageId, `Failed to update: ${reason}`);
           return new Response("error", { status: 500 });
         }
         await replyInTelegram(chatId, messageId, buildConfirmation(metadata, "Updated as"));
@@ -350,7 +356,7 @@ supabase secrets set \
 supabase secrets set UPDATE_ON_EDIT=true
 ```
 
-When set, editing a captured Telegram message re-runs embedding and metadata extraction and updates the row in place rather than creating a duplicate.
+When set, editing a captured Telegram message re-runs embedding and metadata extraction and rewrites the thought through `update_thought` rather than creating a duplicate.
 
 ✅ **Done when:** `supabase secrets list` shows all four required keys *and* you still have the hex value from 4a saved somewhere you can copy from.
 

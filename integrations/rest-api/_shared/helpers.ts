@@ -149,6 +149,19 @@ export async function embedText(text: string): Promise<number[]> {
   throw new Error("No embedding API key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY.");
 }
 
+/**
+ * The label migration 021 writes beside a vector embedText() produced: the
+ * model as OB1_EMBEDDING_MODEL spells it — OpenRouter's name when that key is
+ * configured (embedText's first choice), else OpenAI's under the same
+ * `openai/` prefix, so one model has one label whichever path served it.
+ * Keep in step with embedText's provider order (FORK.md change 69).
+ */
+export function embeddingModelUsed(): string {
+  if (Deno.env.get("OPENROUTER_API_KEY")) return Deno.env.get("OPENROUTER_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
+  const model = Deno.env.get("OPENAI_EMBEDDING_MODEL") ?? "text-embedding-3-small";
+  return model.includes("/") ? model : `openai/${model}`;
+}
+
 // ── Metadata extraction ────────────────────────────────────────────────────
 
 type MetadataProvider = "openrouter" | "openai" | "anthropic";
