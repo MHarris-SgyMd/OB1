@@ -6,10 +6,10 @@
  * code that is mostly community recipes, and it would fork every one of them away
  * from upstream permanently.
  *
- * But the API surface they use is small and closed — about twenty methods, and
- * measurably so: `.from .select .insert .update .upsert .delete .rpc`, ten
- * filters, and five modifiers. That is shimmable. With this module a file migrates
- * by changing one line:
+ * But the API surface they use is small and closed — under thirty methods, and
+ * measurably so: `.from .select .insert .update .upsert .delete .rpc`, thirteen
+ * filters, and seven modifiers (the README tables them). That is shimmable. With
+ * this module a file migrates by changing one line:
  *
  *     - import { createClient } from "@supabase/supabase-js";
  *     + import { createClient } from "../../compat/supabase-sql/index.ts";
@@ -19,13 +19,26 @@
  *
  * ── What is deliberately NOT supported ───────────────────────────────────────
  * PostgREST resource embedding — `.select("*, other_table(*)")` — needs foreign
- * key introspection to become a join. Three of the 54 files use it. Rather than
+ * key introspection to become a join. Four of the 54 files use it. Rather than
  * guess and return subtly wrong rows, those selects throw with a message saying
  * so. Silently mishandling a join is exactly the failure class this migration has
  * been removing.
  *
  * Also unsupported, because nothing in the repo uses them: `.auth`, `.storage`,
  * `.channel`, `.functions.invoke`.
+ *
+ * ── JSON paths, and the shape of a row (SMD-1544, FORK.md change 73) ─────────
+ * PostgREST's JSON-path column — `metadata->>generated_by`, `meta->a->>key` —
+ * is accepted in the comparison filters, `is`, `in`, `match`, an `.or()` term
+ * and `.order()`: rendered `"metadata"->>'key'`, the key a quoted literal, the
+ * bound value cast to text, which is the text comparison PostgREST makes. Not
+ * in `.contains()`, whose operator is jsonb's. A path ending in `->` (jsonb),
+ * an array index (`->0`), and a path in a select list, a payload or a conflict
+ * target are refused. Rows come back JSON-shaped as PostgREST's are in the one
+ * respect a driven file needed: a timestamp is an ISO string, not Bun's Date.
+ * The bio worker is the one shim-migrated file that filters on a JSON path and
+ * the first whose code slices a timestamp; driven, it hit both — a 500 at its
+ * first query, then at its prompt.
  *
  * ── Error convention ─────────────────────────────────────────────────────────
  * supabase-js resolves with `{ data, error }` and does not throw. This matches
@@ -48,6 +61,76 @@ function ident(name: string, what: string): string {
     );
   }
   return `"${trimmed}"`;
+}
+
+/**
+ * A filter or ORDER BY column: a plain identifier, or PostgREST's JSON path —
+ * `metadata->>generated_by`, `meta->nested->>level` — rendered with the column
+ * quoted as an identifier and each key as a string literal
+ * (`"metadata"->>'generated_by'`). A key is identifier-shaped, so nothing in
+ * it needs escaping; it is quoted anyway. The path must end in `->>`, whose
+ * result is text: the caller's bound value is then cast to text, which is the
+ * comparison PostgREST makes (it renders the value as an unknown literal
+ * against a text expression — `->>'score' >= '20'` is a text comparison there
+ * too), and without the cast Bun binds a number as an integer and Postgres
+ * has no `text >= integer`. A path ending in `->` yields jsonb, and what a
+ * bound parameter means against it depends on the value's JavaScript type
+ * (PostgREST reads it as JSON); refused, with `.contains()` named for
+ * containment. An array index (`->0`) is not identifier-shaped and falls to
+ * ident()'s refusal, as does a path anywhere but a comparison or an order: a
+ * select list, a payload key, a conflict target, and `.contains()`, whose
+ * operator is jsonb's (the file that wants containment under a key has
+ * `.contains("meta", { key: … })`). SMD-1544 (FORK.md change
+ * 73): the bio worker's source and profile queries filter on `metadata->>…`,
+ * and ident()'s refusal was a 500 at the worker's first query on the fork.
+ */
+const JSON_PATH = /^([A-Za-z_][A-Za-z0-9_]*)((?:->>?[A-Za-z_][A-Za-z0-9_]*)+)$/;
+
+function column(name: string): { sql: string; text: boolean } {
+  const trimmed = name.trim();
+  const m = JSON_PATH.exec(trimmed);
+  if (!m) return { sql: ident(trimmed, "column"), text: false };
+  const segments = m[2].match(/->>?[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+  const last = segments[segments.length - 1];
+  if (!last.startsWith("->>") || segments.slice(0, -1).some((s) => s.startsWith("->>"))) {
+    throw new Error(
+      `compat/supabase-sql: refusing to interpolate column "${name}". A JSON path must end in ->> ` +
+        `(the key's text): a path ending in -> yields jsonb, and what a bound value means against it ` +
+        `depends on the value's JavaScript type. Use ->> to compare the text, or .contains() for containment.`
+    );
+  }
+  return {
+    sql: `"${m[1]}"` + segments.map((s) => (s.startsWith("->>") ? `->>'${s.slice(3)}'` : `->'${s.slice(2)}'`)).join(""),
+    text: true,
+  };
+}
+
+/**
+ * PostgREST answers JSON, so a timestamp reaches a supabase-js caller as a
+ * string; Bun.sql hands back a Date. A migrated file written for PostgREST
+ * slices the string (`created_at.slice(0, 10)`, the bio worker's prompt), and
+ * a Date's `.slice` is a 500. A Date with a finite time is rendered as
+ * `toISOString()` gives it (`Z`, milliseconds) rather than Postgres's own
+ * spelling (`+00:00`, microseconds), which PostgREST would give: both parse,
+ * both slice to the same date, and a consumer comparing the spellings had a
+ * bug on either client. The rule is timestamptz-shaped: a `date` or a
+ * `timestamp without time zone` column is a Date to Bun too and arrives as a
+ * `Z` instant (`2026-09-16T00:00:00.000Z` for a date) where PostgREST spells
+ * `2026-09-16` and `2026-09-16T18:39:59.275494` — `.slice(0, 10)` agrees, an
+ * equality against the bare date does not; no shim-migrated file reads one.
+ * Everything else stays as Bun returns it — ±Infinity for an infinite
+ * timestamp, `Date(NaN)` for a BC date over a simple query (a parameterised
+ * one hands a finite extended-year Date, which becomes
+ * `-000043-03-15T00:00:00.000Z`; server-portable/store.ts's `isoTimestamp`
+ * reads every one of these to the same result), numerics as text — nothing
+ * driven has needed more.
+ */
+function jsonShaped(row: Record<string, unknown>): Record<string, unknown> {
+  let out: Record<string, unknown> | null = null;
+  for (const [k, v] of Object.entries(row)) {
+    if (v instanceof Date && Number.isFinite(v.getTime())) (out ??= { ...row })[k] = v.toISOString();
+  }
+  return out ?? row;
 }
 
 /** `"id, content, metadata"` → `"id", "content", "metadata"`. Rejects embeds. */
@@ -152,7 +235,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   // ── filters ────────────────────────────────────────────────────────────────
 
   private cmp(col: string, operator: string, value: unknown): this {
-    this.filters.push({ sql: `${ident(col, "column")} ${operator} ?`, values: [value] });
+    const c = column(col);
+    this.filters.push({ sql: `${c.sql} ${operator} ${c.text ? "?::text" : "?"}`, values: [value] });
     return this;
   }
 
@@ -168,17 +252,19 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   is(c: string, v: null | boolean): this {
     // `IS` takes a literal, not a parameter.
     const lit = v === null ? "NULL" : v ? "TRUE" : "FALSE";
-    this.filters.push({ sql: `${ident(c, "column")} IS ${lit}`, values: [] });
+    this.filters.push({ sql: `${column(c).sql} IS ${lit}`, values: [] });
     return this;
   }
 
   in(c: string, values: unknown[]): this {
     if (values.length === 0) {
-      this.filters.push({ sql: "FALSE", values: [] }); // matches PostgREST: in.() selects nothing
+      // Matches PostgREST: in.() selects nothing. The column is not read, so an unrenderable one is not refused here.
+      this.filters.push({ sql: "FALSE", values: [] });
       return this;
     }
+    const col = column(c);
     this.filters.push({
-      sql: `${ident(c, "column")} IN (${values.map(() => "?").join(", ")})`,
+      sql: `${col.sql} IN (${values.map(() => (col.text ? "?::text" : "?")).join(", ")})`,
       values: [...values],
     });
     return this;
@@ -228,19 +314,19 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       if (firstDot < 1 || secondDot < 0) {
         throw new Error(`compat/supabase-sql: or() term "${term}" is not column.operator.value`);
       }
-      const col = ident(term.slice(0, firstDot), "column");
+      const col = column(term.slice(0, firstDot));
       const op = term.slice(firstDot + 1, secondDot);
       const value = term.slice(secondDot + 1);
 
       if (op === "is") {
         const lit = value === "null" ? "NULL" : value === "true" ? "TRUE" : value === "false" ? "FALSE" : null;
         if (lit === null) throw new Error(`compat/supabase-sql: or() "is.${value}" must be null, true or false`);
-        return `${col} IS ${lit}`;
+        return `${col.sql} IS ${lit}`;
       }
       const sqlOp = ops[op];
       if (!sqlOp) throw new Error(`compat/supabase-sql: or() operator "${op}" is not supported`);
       values.push(value);
-      return `${col} ${sqlOp} ?`;
+      return `${col.sql} ${sqlOp} ${col.text ? "?::text" : "?"}`;
     });
 
     this.filters.push({ sql: `(${terms.join(" OR ")})`, values });
@@ -258,7 +344,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   order(col: string, opts?: { ascending?: boolean; nullsFirst?: boolean }): this {
     const dir = opts?.ascending === false ? "DESC" : "ASC";
     const nulls = opts?.nullsFirst === undefined ? "" : opts.nullsFirst ? " NULLS FIRST" : " NULLS LAST";
-    this.orderBy.push(`${ident(col, "column")} ${dir}${nulls}`);
+    this.orderBy.push(`${column(col).sql} ${dir}${nulls}`);
     return this;
   }
 
@@ -367,7 +453,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     ({ text, values } = this.build());
 
     try {
-      const rows = (await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[];
+      const rows = ((await this.sql.unsafe(text, values as never[])) as unknown as Record<string, unknown>[]).map(jsonShaped);
 
       if (this.headOnly && this.wantCount) {
         return { data: null, error: null, count: Number(rows[0]?.__count ?? 0) };
@@ -452,7 +538,7 @@ export class SupabaseSqlClient {
         const numeric = Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "number");
         return numeric ? JSON.stringify(v) : v;
       });
-      const rows = (await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[];
+      const rows = ((await this.sql.unsafe(`SELECT * FROM ${call}`, values as never[])) as unknown as Record<string, unknown>[]).map(jsonShaped);
 
       // A set-returning function yields rows; a scalar one yields a single column
       // holding the value. PostgREST makes the same distinction.
