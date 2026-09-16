@@ -3959,7 +3959,7 @@ console.log("\n[36] Migration 036: delete_thought and review_supersession_propos
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[35] bench-hnsw's oracle cache: what of a marker's entry a run may trust (SMD-1562, bench-oracle.ts)");
+console.log("\n[37] bench-hnsw's oracle cache: what of a marker's entry a run may trust (SMD-1562, bench-oracle.ts)");
 {
   // A pure function of the entry: the container suite drives the bench's
   // reads and writes; the guards are held here, in milliseconds, with the

@@ -78,11 +78,14 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
   });
 }
 class Interrupted extends Error {}
+/** A failure already in the tally, thrown to stop the runs after it; the catch prints its output and counts nothing more. */
+class Stopped extends Error {}
 
 /**
  * One bench run against this database, told it is kept, Q queries, expected
- * to exit as given: any other exit stops the suite with the run's output (a
- * tallied failure), rather than letting later runs cascade `null`s from it.
+ * to exit as given: any other exit is one tallied failure that stops the
+ * suite with the run's output, rather than letting later runs cascade
+ * `null`s from it.
  */
 async function bench(q: number, expect = 0): Promise<{ code: number; out: string }> {
   if (interrupted !== null) throw new Interrupted();
@@ -91,7 +94,7 @@ async function bench(q: number, expect = 0): Promise<{ code: number; out: string
   const r = await runScript(["bun", "bench-hnsw.ts"], { cwd: HERE, env: { ...env, DATABASE_URL: URL_, OB1_PG_KEEP: "test-reuse", OB1_BENCH_SCALES: String(SCALE), OB1_BENCH_QUERIES: String(q) } });
   if (interrupted !== null) throw new Interrupted();
   assert(r.code === expect, `the run exits ${expect} (exit ${r.code})`);
-  if (r.code !== expect) throw new Error(`the bench exited ${r.code}, not ${expect}:\n${r.out}`);
+  if (r.code !== expect) throw new Stopped(`the bench exited ${r.code}, not ${expect}:\n${r.out}`);
   return r;
 }
 
@@ -183,8 +186,10 @@ try {
   // bound to a text parameter arrives comma-joined, not as an array literal.
   const key = await entryKey();
   const ids = ["oracle", key, "answers", "whole table", "0", "ids"].join("/");
+  // The last id becomes a copy of the first: the same length at any K, so
+  // only the distinctness guard can be what rejects it.
   await sql.unsafe(
-    `UPDATE ${BENCH_MARKER} SET corpus = jsonb_set(corpus, string_to_array($1, '/'), (corpus #> string_to_array($1, '/')) - 9 || jsonb_build_array(corpus #> string_to_array($2, '/')))`,
+    `UPDATE ${BENCH_MARKER} SET corpus = jsonb_set(corpus, string_to_array($1, '/'), (corpus #> string_to_array($1, '/')) - -1 || jsonb_build_array(corpus #> string_to_array($2, '/')))`,
     [ids, `${ids}/0`]
   );
   const r3b = await bench(3);
@@ -217,7 +222,8 @@ try {
 } catch (err) {
   // A throw is a failure with a tally, not a stack trace in place of one —
   // the stack kept, since the next run is three minutes of exact passes.
-  if (!(err instanceof Interrupted)) assert(false, `the suite stopped: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  if (err instanceof Stopped) console.log(`  ${err.message}`);
+  else if (!(err instanceof Interrupted)) assert(false, `the suite stopped: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
 } finally {
   // Proven absent when the suite started, so the marker here is the suite's own.
   await sql.unsafe(`DROP TABLE IF EXISTS ${BENCH_MARKER}`);

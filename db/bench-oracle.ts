@@ -8,9 +8,32 @@
  * the statement, the shape's key, the plan check, the reads and writes.
  */
 
-/** One query's exact answer: the top-K ids in distance order, and the nearest row's cosine. */
+/** One query's exact answer: the top-K ids in distance order, and the nearest row's cosine (−1 where nothing matched). */
 export type OracleAnswer = { ids: string[]; top: number };
-/** One entry of the marker's oracle map: the map's key is the shape, so the entry carries only the queries' digests and the answers per key, one per query. */
+/**
+ * One entry of the marker's oracle map: for each tier key and for the whole
+ * table, one answer per query — the exact top-K ids in distance order and
+ * the nearest row's cosine (the whole table's is the confound). At ten
+ * million rows the exact pass is most of a reuse's minutes — some 450 full
+ * scans — and its answers are a pure function of the rows, the queries, K
+ * and the oracle's statement, the same on every reuse. What they are a
+ * function of is named by value. The map's key (`oracleShapeOn` in the
+ * bench) is a digest of the oracle's statement (K inside it), the filter's
+ * form, how a vector is rendered, how an answer is derived from the rows,
+ * the server's distance kernel, and the first query's digest — so a tree,
+ * a server or a stream that differs in any of them writes an entry of its
+ * own beside this one rather than over it (a kept volume outlives branches;
+ * review passes). The entry carries `queries`, a digest of each query's
+ * literal as the server parsed it, in order: the stream's first queries are
+ * a prefix of any longer run's, so a run asking fewer takes the answers
+ * whose digests match its own — the leading ones, all of them where the
+ * stream is unchanged — and a run asking more computes the rest and extends
+ * its entry. Valid exactly while the rows are: the cache rides inside the
+ * marker whose physical fingerprint a reuse judges first, and a corpus that
+ * changed is refused before this is read. A marker without an entry for
+ * this key, or whose digests stop matching, is computed for and extended,
+ * not refused — the answers are derivable, the build is not.
+ */
 export type OracleCache = { queries: string[]; answers: Record<string, OracleAnswer[]> };
 
 /** A short digest for the cache — of a query's literal, of the statement's forms, of the server's kernel probe. */

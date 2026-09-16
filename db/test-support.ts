@@ -149,6 +149,9 @@ export function substitute(sql: string, opts: SchemaOptions): string {
   );
 }
 
+/** The deliberate overrides of the loopback rule below, named once so a suite that spawns another checked script can pass them on. */
+export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
+
 /**
  * Refuse to drop a database that is not obviously a throwaway.
  *
@@ -177,8 +180,6 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * to mean. `OB1_EVAL_ALLOW_REMOTE_DB=1`, the name the eval-local copy used, is
  * honoured too so a shell profile that set it keeps working.
  */
-/** The deliberate overrides of the loopback rule, named once so a suite that spawns another checked script can pass them on. */
-export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
 export function assertThrowawayDatabase(url: string): void {
   if (REMOTE_DB_FLAGS.some((flag) => process.env[flag] === "1")) return;
   let host: string | null = null;

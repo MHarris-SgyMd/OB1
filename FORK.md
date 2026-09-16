@@ -197,7 +197,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
 db/test-bench-reuse.ts           # change 74 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
-db/bench-oracle.ts               # change 74 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [35])
+db/bench-oracle.ts               # change 74 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -10844,20 +10844,23 @@ uuids, under 200 KB of jsonb.
 **Held to the computation (`db/test-bench-reuse.ts`, new).** The claim that
 matters is that what a reuse takes from the marker is what it would have
 computed, and two builds cannot test it — the parallel HNSW build gives two
-graphs, and two recall figures — so the suite runs the bench six times
+graphs, and two recall figures — so the suite runs the bench eight times
 against one database at 150,000 rows (the smallest kept scale) and compares
 on one index: a build with five queries; a reuse with three (all the
 marker's); the marker's answers removed, as a marker from before this change
 has none, and three again (computed, the marker extended) — sections A, B, D
-and E equal the previous run's, timings aside, and the confound agrees; six
-(three from the marker, three computed, the marker extended to six); six
-again (all the marker's, the tables as the run that extended it); then the
-corpus marked `rewritten` as a refused reuse leaves it, and a run refused
-before the oracle is consulted. It runs under `with-postgres.sh` like every
+and E equal the previous run's, timings aside, and the confound agrees; one
+whole-table answer given a duplicated id, and three again (the entry
+discarded, computed, written back whole); the entry's second query digest
+changed, and three again (one from the marker, two computed); six (three
+from the marker, three computed, the marker extended to six); six again (all
+the marker's, the tables as the run that extended it); then the corpus
+marked `rewritten` as a refused reuse leaves it, and a run refused before
+the oracle is consulted. It runs under `with-postgres.sh` like every
 suite and tells only the bench it spawns that the database is kept — to the
 bench, "kept" is the variable and the marker row, and the volume is the
 wrapper's concern, held by change 72 — so the throwaway container is the kept
-database for the six runs and nothing outlives the suite; it drops its
+database for the runs and nothing outlives the suite; it drops its
 marker table on the way out and takes about three minutes, which is why it
 is in neither CI nor `ci-parity.sh`. A mutant that takes the *last* answers
 the marker holds instead of the first fails exactly the equality.
@@ -11010,7 +11013,7 @@ malformed entry had read as `had none` again, so it counts what it held.
 The guards themselves had been mutant-blind under two twenty-second
 container runs — five of seven clauses could go and the suite would pass —
 and the bench is a script that connects at import, so the pure part moved
-to `db/bench-oracle.ts` and `test-schema.ts` [35] drives it in milliseconds
+to `db/bench-oracle.ts` and `test-schema.ts` [37] drives it in milliseconds
 with the mechanism removed a clause at a time. Then: a run that exits other
 than expected stops the suite with its output rather than cascading nulls
 through the runs after it; the marker's DML reads the table's name from the
@@ -11018,6 +11021,31 @@ one constant; the remote-database flags are named once beside the guard
 that honours them; and this section's lead names the kernel probe and not
 the settings. Two passes had opened with the previous pass's fixes as the
 top findings, which is where the loop stops.
+
+**Seventh pass, at the user's call.** The key named the statement and the
+kernel but not how `oracle()` turns the rows into what is stored (the
+nearest row's `1 − d`, the ids in row order, `−1` for none), so a tree that
+derived an answer differently would have read earlier entries as its own;
+an ANSWER_FORM tag is one more element of the shape. The plan check's
+`Index Scan` match also matched a `Bitmap Index Scan` line — the exact
+bitmap over the GIN the comment beside it excludes — harmless on the
+whole-table form it reads today and wrong the day the check reaches a
+filtered form; a `Bitmap` prefix is excluded. The first query's digest joins
+the key, so a tree whose query stream differs (an edit to the draws that
+leaves the rows alone, which the regenerated rows do not catch) is another
+entry beside the others rather than a write over them, and the write-back
+that shortens an entry is left only for a stream that changed after its
+first query. Then: the planted duplicate is the last id copied from the
+first, the same length at any K, where `- 9` had spelled K = 10 and would
+have let the length guard reject it before the distinctness guard was
+reached; a run that exits other than expected is one tallied failure, not
+two; the PGlite case is [37] (two blocks had carried [35]); the README's
+expected outcome says the tally the suite prints; the lead counts eight
+runs and names the two planted ones; the marker's binding comment names
+`unsafe`'s parameter array, where the tagged template it described is gone;
+`markerAnswers` is called as the total function [37] proves it to be, with
+no ternary in front of it; and the 25-line JSDoc the extraction left behind
+is the entry's, in its module.
 
 ## Detached from the fork network
 

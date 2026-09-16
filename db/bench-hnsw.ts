@@ -551,32 +551,9 @@ const MARKER_FORMAT = 2;
 /** Every field section L reads, named once: a marker missing one is refused before the run, not a TypeError in the report after it. The compiler keeps this list whole when LoadStats grows. */
 const LOAD_STATS_KEYS: Record<keyof LoadStats, true> = { scale: true, schema: true, confound: true, insertS: true, chunkRows: true, chunkS: true, buildS: true, otherIndexes: true, otherIndexesS: true, sizes: true, maintenanceMem: true, workers: true, builtAt: true, source: true };
 type CorpusParams = { format: number; dim: number; tiers: { key: string; share: number }[]; chunkedShare: number; chunksPer: number };
-/**
- * The exact pass's answers, kept in the marker (SMD-1562): for each tier key
- * and for the whole table, one answer per query — the exact top-K ids in
- * distance order and the nearest row's cosine (the whole table's is the
- * confound). At ten million rows the pass is most of a reuse's minutes —
- * some 450 full scans — and its answers are a pure function of the rows, the
- * queries, K and the oracle's statement, the same on every reuse. What they
- * are a function of is named by value: the marker's `oracle` is a map keyed
- * by shape (`oracleShapeOn`) — a digest of the oracle's statement (K inside
- * it), the filter's form, how a vector is rendered, and the server's
- * distance kernel — so a tree or a server that differs in any of them writes
- * an entry of its own beside this one rather than over it (a kept volume
- * outlives branches; review passes); and each entry carries `queries`, a
- * digest of each query's literal as the server parsed it, in order. The
- * stream's first queries are a prefix of any longer run's, so a run asking
- * fewer takes the answers whose digests match its own queries — the leading
- * ones, all of them where the stream is unchanged — and a run asking more
- * computes the rest and extends its entry. Valid exactly while the rows are:
- * the cache rides inside the marker whose physical fingerprint a reuse
- * judges first, and a corpus that changed is refused before this is read. A
- * marker without an entry for this shape, or whose digests stop matching,
- * is computed for and extended, not refused — the answers are derivable, the
- * build is not (review passes).
- */
-// OracleAnswer, OracleCache, digestOf and markerAnswers live in
-// bench-oracle.ts, the pure part, which test-schema.ts drives.
+// The exact pass's answers, kept in the marker (SMD-1562) — what an entry
+// holds and what of it a run may trust — are bench-oracle.ts's (the pure
+// part, which test-schema.ts drives); the map's key is `oracleShapeOn`'s.
 /**
  * The marker's payload. The scale and build time live in `stats` (the one
  * copy the report reads); `physical` is the four relations' state at the
@@ -608,9 +585,10 @@ const corpusParams = (tiers: Tier[]): CorpusParams => ({ format: MARKER_FORMAT, 
 /** A build time for a console line or a table cell: one spelling, from the ISO stamp `stats` carries. */
 const when = (iso: string) => iso.slice(0, 16).replace("T", " ");
 
-// The jsonb values below are bound as OBJECTS through the tagged template: a
-// JSON string handed to a `$n::jsonb` parameter is JSON-encoded once more by
-// the driver and lands as a jsonb *string*, which `@>` never matches and a
+// The jsonb values below are bound as OBJECTS, in `unsafe`'s parameter array
+// (the table's name is interpolated, so a tagged template is not available):
+// a JSON string handed to a `$n::jsonb` parameter is JSON-encoded once more
+// by the driver and lands as a jsonb *string*, which `@>` never matches and a
 // reader has to parse twice. Comparisons of what comes back use
 // Bun.deepEquals: jsonb hands an object back with its keys in its own order,
 // so a text compare of a round trip is not a compare of the value.
@@ -1021,14 +999,17 @@ const oracleStatement = (vector: string, filter: string | null) => `
 /**
  * What an answer IS, by value, on the client's side: a digest of the
  * oracle's statement in both filter forms and the tier filter's form as
- * rendered over placeholders, and a probe of how a vector is rendered into
- * the literal (the per-query digests are of that literal, so two trees that
- * render differently must not share an entry — review pass). The planner
- * settings are not in it: they decide the plan, `assertOracleExact` holds
- * the plan, and a reordered SET LOCAL should not cost a recomputation
- * (review pass). `oracleShapeOn` adds the server's side.
+ * rendered over placeholders, a probe of how a vector is rendered into the
+ * literal (the per-query digests are of that literal, so two trees that
+ * render differently must not share an entry), and ANSWER_FORM, how
+ * `oracle()` derives what is stored from the rows (review passes). The
+ * planner settings are not in it: they decide the plan, `assertOracleExact`
+ * holds the plan, and a reordered SET LOCAL should not cost a recomputation.
+ * `oracleShapeOn` adds the server's side and the stream's.
  */
-const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleStatement("<vector>", null), tierFilter("<key>"), lit([0.1, -1 / 3, 1e-7, 2])]);
+/** How `oracle()` turns the rows into an answer; an edit to that derivation must change this tag, or an earlier tree's entries read as this one's. */
+const ANSWER_FORM = "ids: id per row in row order; top: 1 - d of the first row, -1 where none";
+const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleStatement("<vector>", null), tierFilter("<key>"), lit([0.1, -1 / 3, 1e-7, 2]), ANSWER_FORM]);
 /**
  * The key of this tree's entry in the marker's oracle map, on THIS server:
  * ORACLE_SHAPE with a probe of the distance kernel — the cosine pgvector
@@ -1037,12 +1018,16 @@ const ORACLE_SHAPE = digestOf([oracleStatement("<vector>", "<filter>"), oracleSt
  * pinned image TAG does not fix and `extversion` does not show; a rank-K
  * near-tie resolved differently is a stale id trusted as exact, so a
  * server whose kernel rounds differently gets an entry of its own (review
- * pass). An edit to any input — a tie-break, another operator, another
- * containment shape, another kernel — is another key: every kept answer
- * under the old key stays for the tree that wrote it, and this tree
- * computes its own (a hand-bumped number was the first draft; review passes).
+ * pass) — and with the first query's digest, so a tree whose query stream
+ * differs (an edit to the draws that leaves the rows alone, which the
+ * regenerated rows do not catch) is another entry rather than a write over
+ * this one (review pass). An edit to any input — a tie-break, another
+ * operator, another containment shape, another kernel, another stream — is
+ * another key: every kept answer under the old key stays for the tree that
+ * wrote it, and this tree computes its own (a hand-bumped number was the
+ * first draft; review passes).
  */
-async function oracleShapeOn(sql: SQL): Promise<string> {
+async function oracleShapeOn(sql: SQL, firstQuery: string): Promise<string> {
   const a = lit(Array.from({ length: DIM }, (_, i) => Math.sin(i + 1)));
   const b = lit(Array.from({ length: DIM }, (_, i) => Math.cos(3 * i + 1) / (i + 2)));
   // Rendered under a pinned extra_float_digits: the text of a float8 is the
@@ -1053,7 +1038,7 @@ async function oracleShapeOn(sql: SQL): Promise<string> {
     const [row] = await tx.unsafe(`SELECT ('${a}'::vector <=> '${b}'::vector)::text AS d`);
     return String(row.d);
   });
-  return digestOf([ORACLE_SHAPE, d]);
+  return digestOf([ORACLE_SHAPE, d, firstQuery]);
 }
 /**
  * The plan the exact scan gets on THIS server, once per scale before any
@@ -1076,7 +1061,7 @@ async function assertOracleExact(sql: SQL): Promise<void> {
   // fires now only on an edit in this tree or a planner that learned a new
   // path; a refusal with its reason, like every other gate before a
   // measurement (review passes).
-  const viaIndex = plan.find((line) => /\bIndex (Only )?Scan\b/.test(line));
+  const viaIndex = plan.find((line) => /(?<!Bitmap )\bIndex (Only )?Scan\b/.test(line));
   if (viaIndex) {
     console.error(`\nbench-hnsw.ts: the exact pass would read an index on this server (${viaIndex.trim()}), so its answers would not be exact: the statement, its settings or the planner no longer keep the sequential scan. Nothing was measured.`);
     process.exit(1);
@@ -1485,11 +1470,12 @@ for (const n of SCALES) {
   // once as the three lines it is rendered as: the run line, section L's
   // `oracle` column and the confound's note; where the answers went is the
   // marker lines' to say (review passes).
-  const shape = await oracleShapeOn(sql);
+  const shape = await oracleShapeOn(sql, digests[0]);
   // An exact answer holds K ids, or every matching row where fewer match
   // (the load inserts no NULL vector, and the fingerprint says no row moved).
+  // markerAnswers is total: no marker, no map, no entry all answer for nothing.
   const exactSize = (key: string) => Math.min(K, key === WHOLE_TABLE ? n : matches.get(key)!);
-  const { have, had, taken } = kept ? markerAnswers(kept.oracle?.[shape], keys, digests, exactSize) : { have: 0, had: 0, taken: {} as Record<string, OracleAnswer[]> };
+  const { have, had, taken } = markerAnswers(kept?.oracle?.[shape], keys, digests, exactSize);
   const note =
     have === Q
       ? { column: "reused", run: `reused from the marker (${had === Q ? `all ${Q} queries` : `the first ${Q} of the ${had} it keeps`})`, confound: " (all of them the marker's)" }
@@ -1500,7 +1486,7 @@ for (const n of SCALES) {
   if (have < Q) await assertOracleExact(sql);
   const answers: Record<string, OracleAnswer[]> = {};
   for (const key of keys) {
-    const rows: OracleAnswer[] = [...(taken[key] ?? [])];
+    const rows: OracleAnswer[] = [...taken[key]];
     for (const q of queries.slice(have)) rows.push(await oracle(sql, q, key === WHOLE_TABLE ? null : tierFilter(key)));
     answers[key] = rows;
     if (have < Q) process.stdout.write(".");
@@ -1528,9 +1514,10 @@ for (const n of SCALES) {
   // tree's entry in the marker's oracle map, where it answered for fewer of
   // this run's queries than it asked, is replaced by what this run holds —
   // the answers it took plus the ones it computed — which is a shorter entry
-  // where the stream changed and this run asked fewer; an entry that
-  // answered for every query is left as it is, however many more it holds;
-  // other shapes' entries are never touched.
+  // only where the stream changed after its first query (the first is in
+  // the key) and this run asked fewer; an entry that answered for every
+  // query is left as it is, however many more it holds; other keys' entries
+  // are never touched.
   const oracleRecord: OracleCache = { queries: digests, answers };
   if (!kept && KEPT) {
     await writeMarker(sql, { params, matches: Object.fromEntries(matches), stats, physical: await physicalState(sql), builtXid: await currentXid(sql), oracle: { [shape]: oracleRecord } });
