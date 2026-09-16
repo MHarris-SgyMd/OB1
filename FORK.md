@@ -455,8 +455,11 @@ reports at least one of:
    materially below the comparator where a real deployment filters, not in the
    abstract;
 2. a **latency gap** (p95) at a row count **within a stated multiple of the
-   largest real deployment** — a crossover we can reach, not one at 10M rows if
-   no corpus approaches 10M;
+   largest real deployment** — a crossover a real corpus reaches, not a
+   synthetic-bench extreme (SMD-1018 seeds to 10M) no deployment approaches —
+   and measured end to end: in the two-store shape every vector read is an
+   external ANN query *plus* a Postgres resolve of the returned ids to rows, so
+   the store's own scan time is not the number that decides it;
 3. an **index build time** for a re-embed so much worse in pgvector that a model
    change is impractical — the SMD-946 rebuild turning from a background pass
    into a window.
@@ -477,12 +480,15 @@ And, written down before the numbers so it cannot be argued away after: what doe
 **The Postgres-internal ladder comes first.** Before a second engine, the same
 question is asked of a different index in the *same* engine, where none of the
 consistency cost above applies: pgvectorscale's StreamingDiskANN in place of
-HNSW; partitioning `thoughts` / `thought_chunks` by agent or by month so a scan
-touches less; a covering index over the filter columns so the filtered path
-(SMD-968) reads fewer heap pages (SMD-1463 is already on this rung). SMD-1037
-measures one in-engine comparator alongside the external one precisely to place
-the crossover on this ladder — a second store wins only where the in-engine rungs
-have run out, not merely where HNSW-in-Postgres loses to DiskANN-anywhere.
+HNSW; partitioning `thoughts` / `thought_chunks` by agent or by month so a
+scan touches less; a covering index over the filter columns so the filtered
+path (SMD-968) reads fewer heap pages. The fork is already on this ladder:
+SMD-1463 (in flight) gates 014's GIN routing count behind a match estimate,
+cutting the filtered path's per-call cost at ten million rows before any
+second engine is weighed. SMD-1037 measures one in-engine comparator alongside
+the external one precisely to place the crossover on this ladder — a second
+store wins only where the in-engine rungs have run out, not merely where
+HNSW-in-Postgres loses to DiskANN-anywhere.
 
 **Guardrails in view.** A second store must not drop the `thoughts.embedding`
 column: the SQL/PostgREST fallback and every migration that reads it depend on it
