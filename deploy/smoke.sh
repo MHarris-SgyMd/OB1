@@ -12,7 +12,7 @@
 # captures a thought, so it is safe against production.
 #
 # Checks 2 and 3 are the ones a Supabase Edge Function deployment cannot pass;
-# FORK.md changes 42 and 73 say why, and why those failures are real.
+# FORK.md changes 42 and 74 say why, and why those failures are real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -93,7 +93,7 @@ done
                || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
 
 # 3. GET at the endpoint is 405, and GET /health is 200. The MCP endpoint serves
-#    POST only (FORK.md change 73: before it, a keyed GET hung on an SSE stream
+#    POST only (FORK.md change 74: before it, a keyed GET hung on an SSE stream
 #    the per-request transport never closed), and /health is the target for a
 #    platform probe that can only GET. Both probed with NO key: both answers
 #    come before authenticate(), and status() follows redirects, on which curl
@@ -107,7 +107,7 @@ code=$(status "$BASE/"); hc=$(status "$BASE/health")
 if [ "$code" = "405" ] && [ "$hc" = "200" ]; then
   ok "GET the endpoint → HTTP 405 (POST only), GET /health → HTTP 200 (the liveness target for GET-only probes)"
 else
-  bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server), GET /health → HTTP $hc (expected 200); FORK.md change 73"
+  bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server), GET /health → HTTP $hc (expected 200); FORK.md change 74"
 fi
 
 # 4. Protocol handshake.

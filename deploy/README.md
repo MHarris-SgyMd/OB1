@@ -64,7 +64,7 @@ Point an HTTP liveness probe at **`GET <base>/health`** (200, no key). It is
 matched under whatever path prefix a proxy leaves on the request and with or
 without a trailing slash, so the URL you configure outside the proxy is the one
 to use; the name itself is exact (`/healthz` is not it). The MCP endpoint serves
-POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 73, so a
+POST only: `GET /` and `HEAD /` answer 405 since FORK.md change 74, so a
 platform-default probe aimed at `/` marks a healthy server down. The image's own
 `HEALTHCHECK` POSTs to the endpoint instead, which also proves the MCP path
 serves; either is fine. Opening the connector URL in a browser shows
@@ -127,7 +127,7 @@ there, for that check to pass.
   [#340](https://github.com/NateBJones-Projects/OB1/issues/340); FORK.md change 42).
   Check 3 fails too: upstream's `server/index.ts` has no method guard, so a GET
   answers 200 instead of 405, and with a key it hangs (upstream
-  [#424](https://github.com/NateBJones-Projects/OB1/issues/424); FORK.md change 73).
+  [#424](https://github.com/NateBJones-Projects/OB1/issues/424); FORK.md change 74).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
   cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.

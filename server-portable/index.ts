@@ -1260,7 +1260,7 @@ function buildServer(principal: Principal): McpServer {
 // The methods the MCP endpoint serves. The transport is offered POST only: it is
 // built per request and is sessionless, so there is no server stream for a GET
 // to open and no session for a DELETE to end. One list registers the handler
-// and names the 405's `Allow`, so the two cannot drift. FORK.md change 73.
+// and names the 405's `Allow`, so the two cannot drift. FORK.md change 74.
 const MCP_METHODS = ["POST"];
 const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
 
@@ -1382,7 +1382,7 @@ app.options("*", (c) => {
 // OAuth discovery is a 404, not an auth challenge. claude.ai fetches
 // /.well-known/oauth-protected-resource before opening a custom connector: 404
 // means "no OAuth here" and it proceeds on the key; anything else — a 401, our
-// 200 + JSON-RPC envelope, or the catch-all's 405 (change 73; before it, the
+// 200 + JSON-RPC envelope, or the catch-all's 405 (change 74; before it, the
 // GET reached the transport and hung) — sends it into a Dynamic Client
 // Registration it cannot complete. Upstream cannot fix this on
 // Supabase, where the gateway answers the path first (#340); we own the route
@@ -1407,19 +1407,19 @@ app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 // parameter spanning segments: the RegExpRouter the app lands on matched three
 // segments and not four. The name is exact: /healthz and /Health are not it.
 // Anything else falls through to notFound's 405. POST /health is the MCP
-// endpoint, as POST at every path is. FORK.md change 73.
+// endpoint, as POST at every path is. FORK.md change 74.
 const HEALTH_PATH = /(^|\/)health\/?$/;
 app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
 
 // The MCP endpoint, registered for MCP_METHODS only. The transport is built per
 // request and is sessionless, so a GET has no server stream to open: before
-// change 73 an authenticated GET cost an agent-registry resolve and a server
+// change 74 an authenticated GET cost an agent-registry resolve and a server
 // build, then reached the transport, which opened an SSE stream nothing wrote
 // to — pinged every 30 s, closed only by the client or by Bun's idle reset —
 // from a browser opening the connector URL or any client echoing `?key=` on GET
 // (upstream #424). The SDK client sets `Accept: text/event-stream` on its own
 // GET, so gating the Accept patch below would not have been enough; it treats
-// the 405 the trailing route gives as "no stream here". FORK.md change 73.
+// the 405 the trailing route gives as "no stream here". FORK.md change 74.
 app.on(MCP_METHODS, "*", async (c) => {
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
@@ -1495,7 +1495,7 @@ app.on(MCP_METHODS, "*", async (c) => {
 // where GET, HEAD, PUT, PATCH and DELETE land; a keyless GET or HEAD used to get
 // the 200 JSON-RPC refusal, so a platform probe uses /health above. Hono's
 // notFound rather than a trailing app.all("*"), so a route registered later is
-// not silently shadowed by dispatch order. FORK.md change 73.
+// not silently shadowed by dispatch order. FORK.md change 74.
 app.notFound((c) => c.text("Method Not Allowed", 405, { ...corsHeaders, Allow: ALLOWED_METHODS }));
 
 export default {

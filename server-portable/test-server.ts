@@ -119,7 +119,7 @@ console.log("\n[3] CORS preflight");
   // only ([13]), but this header says what a browser may send so it can hear
   // our answer, and a browser-hosted SDK client holding a session id sends
   // DELETE and accepts the 405. Hiding GET or DELETE here would turn that 405
-  // into a network error. FORK.md change 73.
+  // into a network error. FORK.md change 74.
   assert(r.headers.get("access-control-allow-methods") === "GET, POST, OPTIONS, DELETE", "allow-methods advertises GET and DELETE, so a browser hears the 405");
 }
 
@@ -279,7 +279,7 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
 console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
 {
   // The MCP handler is registered for POST only and a trailing route answers
-  // everything else with 405 before authenticate(); FORK.md change 73 has the
+  // everything else with 405 before authenticate(); FORK.md change 74 has the
   // mechanism this closes (an authenticated GET opened an SSE stream the
   // per-request transport never closed). Drilled by registering the handler
   // with app.all and dropping the trailing route — the pre-change shape: every
@@ -301,7 +301,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
     ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
     // DELETE too: there is no session here for it to end, and the SDK client
-    // accepts 405 from terminateSession() by spec (change 73 has the rest).
+    // accepts 405 from terminateSession() by spec (change 74 has the rest).
     ["DELETE, right key", "/", { method: "DELETE", headers: AUTH }],
     ["DELETE, no key", "/", { method: "DELETE", headers: H }],
     // One of the two shapes SMD-1246's review found falling past the
