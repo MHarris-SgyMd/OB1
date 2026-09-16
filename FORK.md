@@ -358,6 +358,143 @@ Three points for a 15x latency increase and a footgun is not a default. The
 harnesses stay (`evals/eval-cascade.ts`), so a corpus that behaves differently can
 re-derive it. Full numbers in `evals/README.md`.
 
+### A second vector store beside Postgres: the shape, and the bar it would have to clear
+
+Every retrieval change since the pin has been made inside Postgres — the filter
+pushed into the scan (SMD-968, migration 014), the keyword arm (migration 012),
+contextual chunks (migration 007), hybrid ranking (SMD-958, migration 017),
+GraphRAG measured and declined (change 31). The single transactional store was
+argued for and never weighed against the alternative it rules out: a dedicated
+vector database — Qdrant, Weaviate, LanceDB, or pgvectorscale's DiskANN inside
+this same Postgres — holding the vectors while Postgres keeps the rows. Change
+11's "swappable data layer" swaps *how* the server reaches Postgres (SQL or
+PostgREST); it does not swap *what* holds the vectors. This section writes that
+alternative down.
+
+It is written **before** SMD-1037's numbers exist, on purpose. SMD-1037 measures
+pgvector against a dedicated store and a different in-engine index on this
+corpus; SMD-1038 (this section) fixes, in advance, the shape a second store would
+take here and the bar its numbers would have to clear — so the decision is made
+against a design and a pre-registered threshold rather than under the pull of one
+benchmark. It is not "not built" — that verdict is SMD-1037's to reach; it is the
+contract SMD-1037's result is read against.
+
+**The seam is `ThoughtStore` (`server-portable/store.ts`), and only some of it
+moves.** A second store would own the vector-search reads and the vector writes,
+nothing else:
+
+- **Moves:** `matchThoughts` (the top-k vector scan, including the metadata
+  filter migration 014 pushed *into* the scan), the vector arm of `hybridThoughts`
+  (migration 017), and the vector writes inside `captureThought`, `updateThought`
+  and `deleteThought` — the `embedding` on the row and the per-window vectors in
+  `thought_chunks` (migration 007).
+- **Stays in Postgres:** `keywordThoughts` (a match over `thoughts.content`,
+  migration 012), `getThought` / `listThoughts` / `countThoughts` /
+  `statsSummary` / `pageThoughtMeta`, `resolveAgent` and the work-claim tables
+  (SMD-946), `traceProvenance` / `findDerivatives` / `supersededAmong` /
+  `listSupersessionProposals` (migrations 025/029), `logSearch` / `logAction`
+  (the query log, SMD-1295, migration 034), and every non-vector table:
+  `thought_audit`, `thought_work_claims`, the entity tables, `ob1_config`.
+
+The split is the point: the store holds one column of one table plus one child
+table, and everything that makes a thought *usable* — its text, its history, its
+provenance, its ACL, its filters — stays in the engine that already serves them
+in one snapshot.
+
+**Consistency — every case, with a handling or an owned gap.** Today a capture is
+one transaction: `upsert_thought` writes the row and replaces its chunks
+together (SMD-1175, migration 022), so a reader never sees a thought
+without its vector or a vector without its thought. Split across two stores,
+one write lands first.
+
+- *Capture atomicity.* Postgres is the source of truth and commits first; the
+  vector write follows and is retried to completion (an outbox row in the same
+  Postgres transaction, drained by a worker, is the standard shape). Between the
+  two, a reader can fetch the thought by id and keyword-match it, but the vector
+  search cannot yet return it. Accepted gap: vector visibility lags row
+  visibility by the drain interval; the row is never orphaned because the outbox
+  row shares its transaction. The reverse orphan — a vector for a row that rolled
+  back — cannot occur, because the vector write is keyed off a committed outbox
+  row.
+- *`updateThought` / `deleteThought`.* A content edit re-embeds and must overwrite
+  the external vector; a delete must remove it. In Postgres today the chunk
+  vectors are `ON DELETE CASCADE` (migration 007) — a foreign key does this for
+  free. A second store has no such key: the delete becomes a second,
+  non-transactional call, and a crash between them leaves a vector whose row is
+  gone (a search hit
+  that resolves to nothing). Handling: the same outbox drains deletes and
+  re-embeds; `getThought` already resolves every hit by id, so a stale vector
+  surfaces as a dropped hit, not as wrong content — the reader is never lied to,
+  only under-served until the drain catches up.
+- *Bulk re-embed (SMD-946).* A model change rebuilds every vector. Against an
+  external index this is an index rebuild in the second store, not just an
+  `UPDATE` — and `preflight` (SMD-1024), which reads claim counts to know a
+  re-embed is unfinished, would have to check the *two* stores agree: same vector
+  count, same `embedding_model`. A store whose index build time is a large
+  multiple of the `UPDATE` makes a model change a maintenance window rather than
+  a background pass — which is itself one of the adoption-bar failure modes below.
+- *Metadata filters.* This is the migration-014 hazard restated. Filters live in
+  Postgres columns; a second store must either mirror them as payload (and now
+  two systems must agree on every metadata write) or apply them after its vector
+  LIMIT — which is *exactly* the post-LIMIT filter that silently lost recall and
+  cost this fork migration 014. Any second store that filters after the fact
+  reintroduces the bug migration 014 fixed; only a store that filters *inside* its
+  scan, with the payload kept in sync on every write, is admissible.
+- *Cloudflare Workers.* Workers reach Postgres through PostgREST today
+  (`store-postgrest.ts`). A second store means a second client and a second set
+  of credentials in the Worker, and the atomicity story above has to hold across
+  a network the Worker does not control. Accepted cost: the Worker path carries
+  two backends or does not get the second store at all.
+
+**The bar, in SMD-1037's own terms.** A second store is added only if SMD-1037
+reports at least one of:
+
+1. a **recall gap against exact** at a filter tier the product actually uses
+   (SMD-1037 measures 36% down to 0.7%) — pgvector materially below the
+   comparator where a real deployment filters, not in the abstract;
+2. a **latency gap** (p95) at a row count **within a stated multiple of the
+   largest real deployment** — a crossover we can reach, not one at 10M rows if
+   no corpus approaches 10M;
+3. an **index build time** for a re-embed so much worse in pgvector that a model
+   change is impractical — the SMD-946 rebuild turning from a background pass
+   into a window.
+
+And, written down before the numbers so it cannot be argued away after: what does
+**not** justify a second store —
+
+- an **unfiltered-only** win. Almost every vendor benchmark is unfiltered top-k;
+  this product filters. A win that appears only without a filter is measuring a
+  query the product rarely runs.
+- a win at a **row count no deployment approaches**. If the crossover is past the
+  largest corpus in sight, it is a future ticket, not a present one.
+- a win that **disappears once the hybrid round trip is counted**. In Postgres a
+  hybrid query is one statement over one snapshot; across two stores it is two
+  round trips and a merge (SMD-1037 counts these). A vector-only win that a
+  two-store hybrid gives back at the merge is not a win.
+
+**The Postgres-internal ladder comes first.** Before a second engine, the same
+question is asked of a different index in the *same* engine, where none of the
+consistency cost above applies: pgvectorscale's StreamingDiskANN in place of
+HNSW; partitioning `thoughts` / `thought_chunks` by agent or by month so a scan
+touches less; a covering index over the filter columns so the filtered path
+(SMD-968) reads fewer heap pages (SMD-1463 is already on this rung). SMD-1037
+measures one in-engine comparator alongside the external one precisely to place
+the crossover on this ladder — a second store wins only where the in-engine rungs
+have run out, not merely where HNSW-in-Postgres loses to DiskANN-anywhere.
+
+**Guardrails in view.** A second store must not drop the `thoughts.embedding`
+column: the SQL/PostgREST fallback and every migration that reads it depend on it
+staying, and it remains the source of truth a rebuild re-derives the external
+index from. Candidate stores carry different licences (Qdrant Apache-2.0,
+Weaviate BSD-3, LanceDB Apache-2.0, pgvectorscale PostgreSQL-licensed); the
+fork's FSL-1.1-MIT terms stay in view when one is named, and an in-engine index
+avoids the question entirely.
+
+SMD-1037 measures. This section decides what the measurement is allowed to
+change: nothing, unless a bar above is cleared, and then only as a scoped
+implementation issue with its own tests and rollback — never by dropping the
+column the rest of the fork stands on.
+
 ### The recurring defect in this fork: a value defined twice
 
 Worth naming, because it has now caused five separate failures and every one
