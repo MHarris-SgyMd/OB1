@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`131 assertions: 131 passed, 0 failed` and `PASS`. A migrated file behaves
+`144 assertions: 144 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the five extension servers
 on the shim against their own schemas — the migrated files this shim is judged by.
@@ -219,7 +219,7 @@ development — the test caught it.
   against their own schemas (change 74's review had found seven of twenty-nine
   failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
   four embedded selects the codemod's blocker regex let through — and driving
-  every argument branch found two more; change 75 closed them all). Exercise
+  every argument branch found two more; change 76 closed them all). Exercise
   the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column

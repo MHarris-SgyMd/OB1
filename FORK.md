@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-five numbered changes on top of the pin. Seven fix defects found in an
+Seventy-six numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–75 are the numbered `###` sections** further down, which is
+sections. Changes **18–76 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -179,7 +179,7 @@ evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
-scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 75 (the embed blockers are the shim's refusals; agent-memory-api kept)
+scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 76 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
@@ -195,10 +195,10 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
-compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 75 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
+compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 76 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
-extensions/test-tools.ts         # change 75 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
+extensions/test-tools.ts         # change 76 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11027,7 +11027,7 @@ failing tools above the Connect step (household-knowledge's all ran), the
 primitive and the shim README carry the count once, and this section's claim
 is the exact one: the servers start, authenticate and answer over the port —
 eighteen of twenty-five tools work end to end, seven wait on SMD-1588 (done in
-change 75, which also found the count was twenty-nine: the shared meal-planning
+change 76, which also found the count was twenty-nine: the shared meal-planning
 server's four had not been counted).
 
 **Boyscout.** The passes' cut-for-space tidy-ups in the files this change
@@ -11087,7 +11087,7 @@ convenience rather than the files' only runtime — is the suite.
 class, the codemod's embed blocker (a space or an alias before the
 parenthesis), the one-hop embed or an honest refusal for the three servers
 already on the shim, and a drive of every extension tool against Postgres —
-seven of twenty-five fail today, named in the READMEs (done in change 75). Deno deployability of a shim-importing file: the shim is
+seven of twenty-five fail today, named in the READMEs (done in change 76). Deno deployability of a shim-importing file: the shim is
 Bun's `SQL`, and a Deno-capable shim would be a second client to hold equal
 to the first — the files that must deploy to Supabase stay on supabase-js
 (`family-calendar`, `job-hunt`, `ob-graph`, `agent-memory-api`,
@@ -11175,7 +11175,7 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 
 Then update the pin table at the top of this file.
 
-### 75. The SQL shim reads the catalog — arrays bound by their column's type, `.not()`, one hop of resource embedding, an `Error` for an error, one pool per URL — and `test-tools.ts` drives all twenty-nine extension tools against Postgres (SMD-1588)
+### 76. The SQL shim reads the catalog — arrays bound by their column's type, `.not()`, one hop of resource embedding, an `Error` for an error, one pool per URL — and `test-tools.ts` drives all twenty-nine extension tools against Postgres (SMD-1588)
 
 `compat/supabase-sql/index.ts`, `compat/supabase-sql/test-compat.ts`,
 `compat/supabase-sql/README.md`; `scripts/migrate-to-sql-shim.mjs`;
@@ -11217,8 +11217,10 @@ process, cached by connection URL (the servers make a client per request): a
 table's column types with their category (`pg_attribute` joined to `pg_type`),
 its foreign keys in both directions with their column lists (`pg_constraint`
 with `conkey`/`confkey` unnested in order), and each overload of a function's
-IN-argument names and types (`pg_proc`, `proargmodes` separating a `RETURNS
-TABLE` function's OUT columns from its arguments). From that: a JS array in a
+IN-argument names, types and type categories (`pg_proc`; `proargmodes` keeps
+a `RETURNS TABLE` function's OUT columns out of the name list — they follow
+the IN arguments in `proargnames`, so the filter matters only to a caller
+naming one). From that: a JS array in a
 payload becomes a Postgres array literal — elements double-quoted, `\` and `"`
 escaped, `NULL` for null, nested arrays recursively, an object its JSON — bound
 with a cast to the declared type (`$2::text[]`); a `vector` column or argument
@@ -11289,9 +11291,9 @@ extension file that imports the shim is among the five. The count is
 twenty-nine, not the twenty-five the ticket, change 74 and the READMEs said:
 the four `index.ts` files carry twenty-five and the shared meal-planning
 server four more, one of which (`view_meal_plan`) was already among the seven
-failing. The suite's last section reads `pg_stat_activity` and holds the
-connection count at twelve or fewer — the shared pool's ten and its own two —
-after eighty-odd requests that each built a client. It runs last in the
+failing. The section before the drift guard reads `pg_stat_activity` and
+holds the connection count at twenty or fewer — a handful against 84 — after
+eighty-odd requests that each built a client. The suite runs last in the
 data-layer job, after `test-writes.ts`.
 
 **Decisions.** *Introspection, not shape:* the ticket's sketch said "decide by
@@ -11303,7 +11305,8 @@ and `toSQL()` becoming a promise (two call sites, both in `test-compat.ts`).
 left four tools broken or forked three vendored files away from upstream to
 rewrite their selects, which is the outcome fix 13 exists to avoid. What is
 not one hop is refused at the call with the hint form named, and the codemod
-refuses the same set. *The pool is in scope:* it is a shim change, it was found
+refuses the two refusals a regex can see (a nested embed, a hint); whether a
+relation has one foreign key or two is the catalog's to say, at the first call. *The pool is in scope:* it is a shim change, it was found
 by the ticket's own drive, and a server that dies after ninety-five calls does
 not serve its tools; the fix is a map and a counter. *`vector(N)` columns
 too:* the vector rule matches `format_type`'s typmod form, so a number array
@@ -11330,8 +11333,10 @@ twice leaves the other's open. `../db/with-postgres.sh bun test-tools.ts`
 114/114 — 29 tools, every argument branch, the drift guard, the connection
 count. Six mutations of the shim, each restored from saved text: `.not()`
 removed → 5 named failures in the tool suite (the two tools' `.not is not a
-function`), 1 in compat; the array literal removed → 25 and 17 (`malformed
-array literal: "quick,vegetarian"`, `""`); embedding refused → 20 and 2; the
+function`), 1 in compat; the array literal removed → 50 and 17 (`malformed
+array literal: "quick,vegetarian"`, `""`; the first run read 25 because a
+null body threw past the tally — every `.body` read is optional now);
+embedding refused → 20 and 2; the
 error a plain object → 2 and 4 (`[object Object]` in both tools' text); `cs`
 removed → 6 (compat aborted at `[4]`'s `.contains()`, which throws outside a
 try — the tool suite carried the tally); `cs` always jsonb → 4 and 4
@@ -11356,18 +11361,81 @@ serves every embed whatever the spacing or alias, `test-compat.ts` pins
 why not here). A second hop of embedding, `!inner`, a named foreign key, an
 embed in a `RETURNING` list, a filter on an embedded column
 (`.neq("thoughts.sensitivity_tier", …)`, `enhanced-mcp`) — refused, with the
-files that use them still blocked by the codemod. `.or()` with a quoted value
-containing a comma (PostgREST's quoting) — nothing in the tree has one. The
-catalog's cache has no invalidation but the process's life, as PostgREST's has
-none but a reload; a schema change under a running server is not seen. A
-`date` column still arrives as a `Z` instant from the base row (change 73's
-rule) while the same column inside an embed arrives as `2026-09-20` — both are
-what each path's source gives, and `crm_get_follow_ups`'s string comparison
-against a bare date reads both correctly. `test-compat.ts`'s `[4]` block has no
-try, so a refusal thrown inside it ends the run without a tally (seen under
-the `cs` mutant); the tool suite's blocks and `[12]`–`[17]` do. The two
+files that use them still blocked by the codemod. `.or()` with PostgREST's
+double-quoted value form. A column DROPPED under a running server, or one
+whose type changes, is not seen until the process restarts (a column added is
+— pass 1); PostgREST's cache has none but a reload either. A `timestamp
+without time zone` column still arrives as a `Z` instant (change 73's rule;
+the `date` case is closed — pass 1). `text[]`-typed `uuid[]` columns arrive as
+Postgres's literal text (`{…}`), `int[]` as a list (pass 1) — no migrated file
+reads either. VARIADIC arguments cannot be called by name in Postgres, so
+`.rpc()` cannot reach one; nothing in the tree is variadic. `test-compat.ts`'s
+`[4]` block has no try, so a refusal thrown inside it ends the run without a
+tally (seen under the `cs` mutant); the tool suite's blocks and `[12]`–`[18]`
+do. Pre-existing divergences the review found and this change leaves, filed
+as one ticket: `count: "exact"` without `head` answers the page size;
+`.single()` with several rows returns the first; `head: true` without a count
+streams every row; upsert's default conflict target is the payload's first
+key and its EXCLUDED filter reads the target unsplit; `.rpc()` collapses any
+one-row, one-column result to a scalar. The two
 extensions still on supabase-js (`family-calendar`, `job-hunt`) are not driven
 — they do not run on the fork's shim, and their PostgREST is Supabase's.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree; twenty-five items between them, sixteen taken, seven filed,
+two declined). The running reviewer reproduced every tally, drove
+`home-maintenance` for real over HTTP (the embed an object on the wire), ran
+nine more mutations — four survived: the memo (performance only, +25% on the
+tool suite without it), the `::type` cast (pinned by its spelling in `[15]`,
+redundant to Postgres in the driven paths), the `proargmodes` filter (matters
+only to a caller naming an OUT column), the literal's quote escaping in the
+tool suite alone (compat's `[15]` catches it) — and probed twenty edge shapes.
+Taken: a `date` column arrived as a `Z` instant from the base row while the
+same column inside an embed arrived as `2026-09-20`, and five tools read one
+(`week_start`, `follow_up_date` …) — `jsonShaped` has the column map now and
+gives the bare date; the comparison filters and `.in()` bypassed `bound()`, so
+`.eq("tags", ["ai"])` still hit the `String()` bug — routed through it; an
+EMPTY catalog answer was memoised for the process's life (a server that took
+one request before its `schema.sql` was applied bound every array raw until
+restarted) — an empty map is not kept, a named column the map lacks re-reads
+the table (`ALTER TABLE … ADD COLUMN` under a running server), and `close()`
+drops the URL's store with its pool; foreign keys were matched by bare
+`relname`, so a same-named table behind the visible one on the search path
+could be counted and then joined as the visible one — the read is restricted
+to `pg_table_is_visible`; `.or()` split on every comma, and four tools
+interpolate user text into their expression (`search_recipes` an ingredient
+into a `cs` value, `search_household_items` a query into four ILIKE terms) —
+a comma inside brackets, braces or quotes now stays with its value, and a
+term the split still breaks resolves as `{ error }` with PostgREST's
+`PGRST100`, reaching the tool's own error handling instead of throwing past
+it; `not in []` rendered `TRUE`, which kept NULL rows PostgREST's
+`NOT (x = ANY('{}'))` drops — `IS NOT NULL`; `bound()` tested `endsWith("[]")`
+where `cs` tested the type category — a domain over `text[]` took different
+branches — both read the category, the rpc read carries categories too; a
+one-to-one (unique referencing column) rendered as a list where PostgREST
+gives the row or null — `pg_index` decides; a self-referencing table by name
+was refused as "more than one foreign key" (one constraint counted from both
+sides) — refused as itself, naming the column form; an embed on a missing
+table threw about foreign keys where the same select without it resolved
+`42P01` — the embed is left out so the database reports the table; an `int[]`
+column came back as Bun's `Int32Array` (`{"0":1}` in JSON) — a list; the
+tool suite's "90 days on" expectation was the client's millisecond sum where
+the trigger's interval is calendar arithmetic in the database's zone (an hour
+off across a DST edge under `America/Los_Angeles`) — the database's own sum;
+the connection bound had no headroom (Bun opens the pool eagerly to `max`, so
+12 was the arithmetic) — twenty, the teeth being 84; the READMEs name
+`OB1_PG_POOL` and what ten per server costs; and the doc claims corrected
+above (the codemod's "same set", the `date` sentence, twenty-five, "last
+section"). Filed: the pre-existing divergences listed under Not done here.
+Declined: widening `Result.error` to `PostgrestError | null` (a typing change
+for consumers, boyscout territory); a `uuid[]` literal parser (nothing reads
+one). Pins: `[4]` the broken term as `{ error }`; `[13]` the bare date;
+`[14]` `not in []` against a NULL kind; `[15]` `.eq()` and `.in()` with arrays,
+commas inside `cs` values, `int[]`; `[17]` one-to-one, self-reference by name
+and by column, the missing table; `[18]` a late table and a late column; the
+tool suite: `week_start` bare, a comma in an ingredient and in a household
+query, `follow_up_date` equal to the bare date. `test-compat.ts` 144/144 (131
+after the change, 84 before); `test-tools.ts` 117/117.
 
 **Upstream status:** not applicable — the shim, the codemod and the suite are
 fork-only, and the five servers' own text is untouched (the embeds, the

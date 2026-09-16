@@ -68,7 +68,7 @@
  * columns and indexes the enhanced sidecar adds to `thoughts`, stay until the
  * next suite's reset drops the table — nothing a later suite reads.
  *
- * A limit of the fixture that change 75 (SMD-1588) removed, said here for the
+ * A limit of the fixture that change 76 (SMD-1588) removed, said here for the
  * record: until then the SQL shim handed a JS number array to a `vector`
  * column as Bun's `String()` of it, so a vendored write that regressed to a
  * raw `.update({ embedding })` with a `number[]` failed at the shim ("invalid

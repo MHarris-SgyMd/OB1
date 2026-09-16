@@ -3,7 +3,7 @@
  * test-tools.ts — every tool of the five extension servers on the SQL shim
  * answers against a real Postgres carrying the extensions' own schemas.
  *
- * SMD-1588 (FORK.md change 75). Fix 13 moved these servers onto
+ * SMD-1588 (FORK.md change 76). Fix 13 moved these servers onto
  * compat/supabase-sql by changing one import line and never drove them; change
  * 74's review did, and seven of their tools failed on the shim itself — no
  * `.not()`, four embedded selects the codemod's blocker regex had let through,
@@ -172,6 +172,8 @@ try {
   assert(ok(byQuery) && byQuery.body?.count === 1 && byQuery.body?.items?.[0]?.name === "Living Room Paint", `search_household_items by query — the .or() across four columns (${failure(byQuery) || byQuery.body?.count})`);
   const byFilters = await c("search_household_items", { category: "appl", location: "kitch" });
   assert(ok(byFilters) && byFilters.body?.count === 1 && byFilters.body?.items?.[0]?.name === "Dishwasher", "…by category and location, ILIKE both");
+  const comma = await c("search_household_items", { query: "Sea, Salt" });
+  assert(!ok(comma) && comma.body?.success === false && /not column\.operator\.value/.test(failure(comma)), `…a query with a comma splits the .or() expression as it would through PostgREST (400), and reaches the tool's own error handling — its { success: false, error } body — rather than throwing past it (${failure(comma).slice(0, 80)})`);
   const none = await c("search_household_items", { query: "nothing-of-the-kind" });
   assert(ok(none) && none.body?.count === 0 && eqJson(none.body?.items, []), "…and none is an empty list");
   const all = await c("search_household_items", {});
@@ -216,7 +218,10 @@ try {
   const hvacDone = isoDaysFromNow(-10);
   const logged = await c("log_maintenance", { task_id: hvac.body?.task.id, completed_at: hvacDone, performed_by: "self", cost: 45.5, notes: "changed the filter", next_action: "check the coil" });
   assert(ok(logged) && UUID.test(logged.body?.log?.id) && logged.body?.log?.cost === "45.50", `log_maintenance stores the log (${failure(logged) || JSON.stringify(logged.body?.log?.cost)})`);
-  assert(logged.body?.updated_task?.last_completed === hvacDone && logged.body?.updated_task?.next_due === new Date(Date.parse(hvacDone) + 90 * 86_400_000).toISOString(),
+  // The trigger adds an interval, which is calendar arithmetic in the database's time zone (a DST edge inside the
+  // ninety days is an hour off the client's millisecond sum): the expectation is the database's own answer.
+  const [{ due }] = await sql`SELECT (${hvacDone}::timestamptz + interval '90 days') AS due`;
+  assert(logged.body?.updated_task?.last_completed === hvacDone && logged.body?.updated_task?.next_due === (due as Date).toISOString(),
     `…and reads the task the trigger moved: last_completed is the log's time, next_due 90 days on (${logged.body?.updated_task?.next_due})`);
   const gutterDone = isoDaysFromNow(-4);
   const loggedOnce = await c("log_maintenance", { task_id: gutter.body?.task.id, completed_at: gutterDone, performed_by: "Ann the Plumber" });
@@ -278,6 +283,8 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(!byNoTag.isError && byNoTag.body?.length === 0, "…a tag no recipe has finds none");
   const byIngredient = await c("search_recipes", { ingredient: "olive oil" });
   assert(!byIngredient.isError && byIngredient.body?.length === 2, `…by ingredient — .or("ingredients.cs.[…]") is jsonb containment on the array of objects (${byIngredient.isError ? byIngredient.toolText.slice(0, 60) : byIngredient.body?.length})`);
+  const commaIngredient = await c("search_recipes", { ingredient: "olive oil, extra virgin" });
+  assert(!commaIngredient.isError && Array.isArray(commaIngredient.body) && commaIngredient.body.length === 0, `…an ingredient with a comma is a value, not two .or() terms, and finds none (${commaIngredient.isError ? commaIngredient.toolText.slice(0, 80) : commaIngredient.body?.length})`);
   const byOneIngredient = await c("search_recipes", { ingredient: "lettuce" });
   assert(!byOneIngredient.isError && byOneIngredient.body?.length === 1 && byOneIngredient.body[0]?.name === "Green salad", "…and one where one recipe has it");
 
@@ -305,6 +312,7 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(eqJson(week.body?.[0]?.recipes, { name: "Pasta al limone", cuisine: "italian", prep_time_minutes: 10, cook_time_minutes: 20 }),
     `…each recipe meal carries its recipe as an object of the four named columns, keyed by the alias (${JSON.stringify(week.body?.[0]?.recipes)})`);
   assert(week.body?.[2]?.recipes === null && week.body?.[2]?.custom_meal === "leftovers", "…and a custom meal's recipe is null");
+  assert(week.body?.[0]?.week_start === WEEK, `…the week_start date column is the bare date PostgREST gives (${week.body?.[0]?.week_start})`);
   const emptyWeek = await c("get_meal_plan", { week_start: "2020-01-06" });
   assert(!emptyWeek.isError && eqJson(emptyWeek.body, []), "an unplanned week is an empty list");
 
@@ -404,7 +412,7 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(unlinked) && unlinked.body?.opportunity?.contact_id === null && unlinked.body?.opportunity?.stage === "identified", "…and one with no contact, stage defaulted");
 
   const bobDue = await c("crm_update_contact", { contact_id: ids.bob, follow_up_date: dateDaysFromNow(2), tags: ["ops"], title: "Foreman" });
-  assert(ok(bobDue) && eqJson(bobDue.body?.contact?.tags, ["ops"]) && bobDue.body?.contact?.title === "Foreman" && String(bobDue.body?.contact?.follow_up_date).startsWith(dateDaysFromNow(2)),
+  assert(ok(bobDue) && eqJson(bobDue.body?.contact?.tags, ["ops"]) && bobDue.body?.contact?.title === "Foreman" && bobDue.body?.contact?.follow_up_date === dateDaysFromNow(2),
     `crm_update_contact replaces tags and sets a follow-up (${failure(bobDue) || JSON.stringify(bobDue.body?.contact?.tags)})`);
   const cyDue = await c("crm_update_contact", { contact_id: ids.cy, follow_up_date: dateDaysFromNow(-2) });
   assert(ok(cyDue), "…a follow-up already past");
@@ -458,7 +466,10 @@ console.log("\n[the servers' clients share one pool]");
 {
   const [{ n }] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`;
   const requests = [...driven.values()].reduce((a, set) => a + set.size, 0);
-  assert(Number(n) <= 12, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees at most the shared pool's ten connections plus this suite's two (${n}; 84 held before change 75, against a default limit of 100)`);
+  // The shared pool is ten wide and this suite's own two more; Bun opens a pool's connections lazily (one or two are
+  // in use after a serial run), and a backend from an earlier step of the CI job may not have been reaped yet — so
+  // the bound is a fifth of the limit, not the arithmetic: 84 were held before change 76, against a default of 100.
+  assert(Number(n) <= 20, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees a handful of connections, not one per request (${n}; 84 held before change 76, against a default limit of 100)`);
 }
 
 console.log("\n[every tool each server registers is driven here]");
