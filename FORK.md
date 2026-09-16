@@ -8968,35 +8968,59 @@ enrich passes the row's own text back — an unchanged edit, which 018 never
 refuses — so the new vector takes its label and the previous vector's windows
 go; an edit whose embedding call failed leaves the row without a vector and
 without a label, not with the old vector under the new text — 021's rule,
-and what the raw update used to leave — and the enrich route refills it.
-`consolidation-bio`: the profile's text through `update_thought` with no
-vector, which the profile row has never had. `repo-learning-coach` and the
-provenance snippet: the 3-argument form. The Telegram sample: the edit branch
-through `update_thought`, the model a named constant.
+and what the raw update used to leave — answers `embedding_updated: false`
+with a message naming the enrich route, which refills it.
+`consolidation-bio`: the profile's text and a vector the worker now makes
+for it (its `_shared/helpers.ts` had `embedText`; the label helper joined
+it) through `update_thought` — the profile is searchable, and a vector
+`db/reembed.ts` gave the row between runs is replaced, not blanked; an
+embedding failure fails the run and the previous profile stands.
+`repo-learning-coach` and the provenance snippet: the 3-argument form; the
+snippet resolves each well-formed `derived_from` ref against `thoughts`
+first, because the function refuses a whole capture for a ref that names no
+thought (032's `validate_derived_from`) where the raw update wrote the ghost
+pointer unchecked — a deleted parent is `unresolved_refs` now, and the
+capture lands. The Telegram sample: the edit branch through `update_thought`,
+the model a named constant. The enhanced columns are written for a FRESH row
+only: a re-capture of stored text leaves them, since both `_shared` files'
+tier rule is escalation-only and a hand-set importance is the owner's — as
+the function leaves that row's pointers (change 66).
 
 **Check 10.** The mechanism, not the nine files' spelling: a PostgREST table
 verb that replaces columns — `.update(` or `.upsert(` — on `thoughts`
 (`.from("thoughts")` in either quote, Python's `.table("thoughts")`, line
 breaks allowed before the verb) whose payload carries a `content` or
-`embedding` key — an object literal, quoted or bare or the shorthand
-`{ embedding }`, or an identifier the file binds to one anywhere (`const
-update = { embedding, … }`, `updates.content = …`, `patch["embedding"] = …`,
-the braces walked) — and the SQL form, `UPDATE thoughts … SET` with either
-column in the SET list before its WHERE, `public.` and an alias allowed.
-Word-bounded: `content_fingerprint =` and `embedding_model =` are other
-columns. In every non-binary, non-ignored file under the seven category
-directories and `docs/`, prose included. Outside the rule, and said so: an
-`.insert(` (a fresh row around the functions — no fingerprint, no label — is
-a different defect, SMD-1524), a metadata-only update, a payload spread from
-another object, a hand-built REST `PATCH` (none in the tree), and the remedy
-itself. Seventeen probes — one per statement the audit found, in its own
-shape, plus the forms a rebase could bring — and nineteen non-probes run on
-every invocation through the scan's own function; exceptions are per file and
-counted, as checks 6–8's are, for a file whose README says it bypasses the
-functions and what it leaves stale; the list is empty. The checker's header
-now also names check 9 (change 65's fixture redaction), which it had not.
+`embedding` KEY — an object literal (quoted, bare or computed key, the
+shorthand `{ embedding }`, an array of literals for an upsert, an
+`Object.assign(…)` of literals), or an identifier the file binds to one
+anywhere (`const update = { embedding, … }`, `Object.assign(patch, { … })`,
+`updates.content = …`, `patch["embedding"] = …`, the block walked); a key,
+not a value (`summary: content` is not one), at the literal's top level
+(`{ metadata: { content } }` is a metadata write); a row type on the client
+and a line comment before the verb do not hide it — and the SQL form,
+`UPDATE [ONLY] thoughts … SET` with either column assigned in the SET list
+before its WHERE, or named in the tuple form `SET (…) = (…)`, `public.`,
+quoted identifiers and an alias allowed. Word-bounded: `content_fingerprint
+=` and `embedding_model =` are other columns. In every non-binary,
+non-ignored file under the seven category directories and `docs/`, prose
+included. Outside the rule, and said so: an `.insert(` (a fresh row around
+the functions — no fingerprint, no label — is a different defect, SMD-1524),
+a metadata-only update, a payload spread from another object, one that
+arrives as a function's return value or parameter, a builder split across
+statements, a table name held in a variable, Python's `dict(content=…)`, a
+hand-built REST `PATCH` (none in the tree), and the remedy itself — the
+dataflow cases are what the test is for. Twenty-nine probes — one per
+statement the audit found, in its own shape, plus the forms a rebase could
+bring and the first review pass's escapes — and twenty-five non-probes run
+on every invocation through the scan's own function; exceptions are per file
+and counted, as checks 6–8's are, for a file whose README says it bypasses
+the functions and what it leaves stale; the list is empty. A name bound to a
+payload is one for the whole file, as check 8's bound credential is, and a
+hit on a second, cleaner send of the same name is answered with a rename.
+The checker's header now also names check 9 (change 65's fixture
+redaction), which it had not.
 
-**The test.** `extensions/test-writes.ts` (99 assertions), in the required
+**The test.** `extensions/test-writes.ts` (107 assertions), in the required
 "SQL data layer against real Postgres" job, last: each writer that can run is
 imported as deployed — the stand-in for Deno's two globals and the loader for
 Deno's specifiers from `test-auth.ts`, plus one rewrite, `@supabase/supabase-js`
@@ -9005,8 +9029,12 @@ PostgREST calls as SQL against the same throwaway database — with the model
 provider stubbed to a unit vector keyed off the text. The database is the
 fork's migrations plus the two sidecars the writers assume,
 `schemas/enhanced-thoughts` and `schemas/agent-memory`, applied as shipped
-(Supabase's three roles created first, as the sidecar's header says) and
-dropped again at the end, because CI shares one Postgres across the job. For
+(Supabase's three roles created first, as the sidecar's header says), their
+tables and functions dropped before the apply and again at the end whether
+or not the run finished, because CI shares one Postgres across the job (the
+roles, and the columns and indexes the enhanced sidecar adds to `thoughts`,
+stay until the next suite's reset drops the table — nothing a later suite
+reads; `db/ci-parity.sh` runs this suite in the same seat). For
 each edit a row is planted as an older write left it — text, fingerprint, a
 vector under its own label, two chunk rows of that vector — the writer edits
 it, and the row is judged column by column and against a twin `update_thought`
@@ -9016,10 +9044,20 @@ work. Also driven: `update-thought-mcp`'s `STALE_READ`, `NOT_FOUND` and
 `DUPLICATE_CONTENT`, and a metadata-only edit leaving vector, label and
 fingerprint alone; `enhanced-mcp`'s and `rest-api`'s captures returning a UUID
 id rather than throwing; `rest-api`'s enrich relabelling and clearing planted
-windows; the enhanced columns landing beside each call. The snippet, the
-sample and the worker are read, not run — a paste-in with free variables, a
-README, and a run that needs an LLM pass over person notes — and a guard holds
-the set of `.ts` files naming this change equal to the set driven or read.
+windows; a `rest-api` edit while the embeddings endpoint answers 500 leaving
+the new text with no vector and no label and answering `embedding_updated:
+false`, then the next edit re-embedding; a re-capture through `rest-api` and
+`open-brain-rest` answering the same id as updated and leaving a hand-set
+tier and importance; the enhanced columns landing beside each fresh capture.
+The snippet, the sample and the worker are read, not run — a paste-in with
+free variables, a README, and a run that needs an LLM pass over person notes
+— and a guard holds the set of `.ts` files naming this change equal to the
+set driven or read. One limit, stated in the file: the SQL shim binds a JS
+number array as a Postgres array literal, so a regression to a raw `.update({
+embedding })` with a `number[]` fails at the shim rather than at the column
+assertions — loudly, not where the labels say — where PostgREST would coerce
+it and the assertions would name the stale columns (they do for the vector
+spelled as text).
 
 **Decisions.** Updates, not inserts: the ticket's rule and the carry-forward
 comment named the update, and an insert leaves nothing *stale* — it leaves
@@ -9028,11 +9066,38 @@ the widening of check 10 they need. The enhanced columns stay a raw update
 beside the function rather than a payload key: the function never read them,
 and adding them would put a vendored schema's columns into a core function.
 `rest-api`'s failed-embedding edit blanks the vector rather than keeping the
-old one — the function's rule, stated in its README. `enhanced-mcp`'s read
-tools keep their integer ids (SMD-1525): the ticket was about writes. The
-top-level `type`/`importance`/… keys those two files put in `p_payload` are
-dropped, since the fork's function ignored them and the sidecar update
-carries them now.
+old one — the function's rule, stated in its README and in the response.
+`enhanced-mcp`'s read tools keep their integer ids (SMD-1525): the ticket was
+about writes. The top-level `type`/`importance`/… keys those two files put in
+`p_payload` are dropped, since the fork's function ignored them and the
+sidecar update carries them now. `update-thought-mcp` embeds before the
+function can answer `NOT_FOUND`, where its old read refused first: one
+provider call per misaddressed edit, not worth a read the function repeats.
+
+**Review pass 1, triaged.** Two reviewers, one reading and one running
+(mutating the converted files back and the rule's spellings, two runs on one
+container, real PostgREST against the schema). Fixed: `consolidation-bio`
+rewrote the profile with no vector, which would have blanked the one a
+re-embed pass gave the row every run (HIGH); `rest-api`'s edit answered a
+bare 200 when the embedding call failed and the row had lost its vector; the
+provenance snippet's envelope made a ghost `derived_from` ref refuse the whole
+capture, and its comment said the opposite; the three captures' sidecar
+update ran on a re-capture too, downgrading a stored tier; the rule matched
+`content` as a value and inside a nested object, and missed a row type on the
+client, a comment before the verb, `Object.assign`, array payloads, a
+computed key, `UPDATE ONLY`, quoted identifiers and the tuple form; the test
+aborted without its teardown on a failed capture, and the orphaned
+`agent_memories` row made the next run's write-back short-circuit on its
+idempotency key; `db/ci-parity.sh` did not run the suite; the probe list
+lacked the worker's statement and miscounted the files. Not fixed, and said
+where: the shim's table verbs bind a `number[]` as an array literal
+(pre-existing; every vendored `.insert({ embedding })` through the shim has
+it — carried to SMD-1524); a name bound to a payload is one for the whole
+file (check 8's stance); the embed-before-`NOT_FOUND` cost. Run for real:
+PostgREST resolves `{p_content, p_payload, p_embedding}` to the 3-argument
+form, a JSON `null` vector included, and 013's 4-argument form is never a
+candidate; a stale `p_if_unchanged_since` answers `STALE_READ`; the vector
+inside the 2-argument payload stores no vector (#379, reproduced).
 
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
 10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
@@ -9045,9 +9110,9 @@ the rule.
 
 **Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
 eleven hits in nine files before the conversions and PASS after, exception
-list empty (17 probes, 19 non-probes); `../db/with-postgres.sh bun
-test-writes.ts` 99/99 under podman; `bun test-auth.ts` 643/643 on the
-converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
+list empty (29 probes, 25 non-probes); `../db/with-postgres.sh bun
+test-writes.ts` 107/107 under podman, twice on one container; `bun
+test-auth.ts` 643/643 on the converted files; `deno check --node-modules-dir=none` clean under Deno 2.9.6
 for `enhanced-mcp` and `agent-memory-api`, the two that resolve under Deno;
 every shim-migrated file still parses. The ticket's verify — the check fails
 on the files today and passes after; an edit through each leaves

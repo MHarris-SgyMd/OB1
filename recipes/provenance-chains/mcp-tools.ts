@@ -438,8 +438,31 @@ server.registerTool(
       const rawRefs = Array.isArray(raw.derived_from)
         ? (raw.derived_from as unknown[]).map((r) => String(r).trim())
         : [];
-      const derivedFrom = rawRefs.filter((r) => UUID_RE.test(r));
+      const wellFormed = rawRefs.filter((r) => UUID_RE.test(r));
       const unresolvedRefs = rawRefs.filter((r) => !UUID_RE.test(r));
+
+      // A well-formed UUID that names no thought — a parent deleted since, a
+      // ref copied from another brain — is unresolved too: upsert_thought
+      // validates the envelope's derived_from (db/migrations/032's
+      // validate_derived_from) and refuses the WHOLE capture for a ghost,
+      // where the raw update this tool used to make wrote the dangling
+      // pointer without a check. One read, then the partition.
+      let derivedFrom: string[] = [];
+      if (wellFormed.length) {
+        const { data: parents, error: parentsError } = await supabase
+          .from("thoughts")
+          .select("id")
+          .in("id", wellFormed);
+        if (parentsError) {
+          return {
+            content: [{ type: "text", text: `Failed to resolve derived_from: ${parentsError.message}` }],
+            isError: true,
+          };
+        }
+        const present = new Set(((parents ?? []) as { id: string }[]).map((p) => String(p.id)));
+        derivedFrom = wellFormed.filter((r) => present.has(r));
+        unresolvedRefs.push(...wellFormed.filter((r) => !present.has(r)));
+      }
 
       // Defaults: when parents are present but layer/method were omitted, fill
       // in the CHECK-valid values so the caller doesn't have to. z.enum already
@@ -483,8 +506,8 @@ server.registerTool(
       // last redefined by 035): the fingerprint lands with the text, the label
       // with the vector (021), a re-capture replaces the previous vector's
       // chunk rows (022), and `derived_from` / `supersedes` ride the envelope
-      // (025), validated there — a ref that is not a thought's UUID is
-      // refused, which the partition above already keeps out. On a
+      // (025), validated there — a ref that is not a thought's UUID, or names
+      // no thought, is refused, which the partition above keeps out. On a
       // re-capture of existing text the function leaves that row's pointers
       // as they are (035): a capture never rewrites provenance, and the
       // mirror in metadata still merges in. This used to be the 2-argument

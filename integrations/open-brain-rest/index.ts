@@ -436,6 +436,7 @@ async function createThought(body: z.infer<typeof captureSchema>) {
 
   const thoughtId = String(upsert.data?.id || "");
   if (!thoughtId) throw new Error("upsert_thought did not return an id");
+  const existed = upsert.data?.existed === true;
 
   const status = body.status !== undefined
     ? body.status
@@ -444,7 +445,10 @@ async function createThought(body: z.infer<typeof captureSchema>) {
       : null;
 
   // The enhanced-thoughts columns the function does not know: a raw update
-  // that carries neither content nor vector, so nothing it writes goes stale.
+  // that carries neither content nor vector, so nothing it writes goes stale
+  // — for a fresh row. A re-capture of existing text leaves them as they are
+  // (a hand-set tier or importance is the owner's; PUT /thought/:id changes
+  // them), as the function leaves that row's pointers (db/migrations/035).
   const update = {
     type,
     source_type: sourceType,
@@ -455,16 +459,18 @@ async function createThought(body: z.infer<typeof captureSchema>) {
     status_updated_at: status ? new Date().toISOString() : null,
   };
 
-  const { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);
-  if (error) throw new Error(error.message);
+  if (!existed) {
+    const { error } = await supabase.from("thoughts").update(update).eq("id", thoughtId);
+    if (error) throw new Error(error.message);
+  }
 
   return {
     thought_id: thoughtId,
-    action: "created_or_updated",
+    action: existed ? "updated" : "created",
     type,
     sensitivity_tier: update.sensitivity_tier,
     content_fingerprint: String(upsert.data?.fingerprint || ""),
-    message: "Thought captured",
+    message: existed ? "Thought already captured; its vector and metadata refreshed" : "Thought captured",
   };
 }
 

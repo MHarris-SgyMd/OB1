@@ -498,12 +498,18 @@ async function handleCapture(req: Request): Promise<Response> {
   const result = extractThoughtId(data);
   if (!result) throw new Error("upsert_thought returned no result");
 
-  const { error: sidecarErr } = await supabase.from("thoughts").update({
-    type: prepared.type, sensitivity_tier: prepared.sensitivity_tier,
-    importance: prepared.importance, quality_score: prepared.quality_score,
-    source_type: prepared.source_type,
-  }).eq("id", result.id);
-  if (sidecarErr) throw new Error(`capture stored thought #${result.id} but the enhanced columns failed: ${sidecarErr.message}`);
+  // For a fresh row only: a re-capture of existing text leaves the enhanced
+  // columns as they are — this file's tier rule is escalation-only (see
+  // handleUpdateThought), a hand-set importance is the owner's, and the
+  // function leaves that row's pointers the same way (db/migrations/035).
+  if (result.action === "inserted") {
+    const { error: sidecarErr } = await supabase.from("thoughts").update({
+      type: prepared.type, sensitivity_tier: prepared.sensitivity_tier,
+      importance: prepared.importance, quality_score: prepared.quality_score,
+      source_type: prepared.source_type,
+    }).eq("id", result.id);
+    if (sidecarErr) throw new Error(`capture stored thought #${result.id} but the enhanced columns failed: ${sidecarErr.message}`);
+  }
 
   return json({
     thought_id: result.id, action: result.action, type: prepared.type,
@@ -608,14 +614,20 @@ async function handleUpdateThought(id: string, req: Request): Promise<Response> 
     const { error: updateErr } = await supabase.from("thoughts").update(updates).eq("id", id);
     if (updateErr) throw new Error(`update failed: ${updateErr.message}`);
   }
+  // Say so when the row was left without a vector: a 200 that silently
+  // removed the thought from semantic search is the failure mode the first
+  // review pass named.
+  const embedded = embedding !== null;
   return json({
     id,
     action: "updated",
     sensitivity_tier: resolvedTier,
     sensitivity_tier_changed: tierChanged,
-    message: tierChanged
+    embedding_updated: embedded,
+    message: (tierChanged
       ? `Thought #${id} updated (sensitivity ${existingTier} -> ${resolvedTier})`
-      : `Thought #${id} updated`,
+      : `Thought #${id} updated`) +
+      (embedded ? "" : " — the embedding call failed, so the thought has no vector until PATCH /thought/:id/enrich?fill=embedding"),
   });
 }
 

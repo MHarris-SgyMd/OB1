@@ -6,8 +6,8 @@
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
 // ob1-fork (SMD-1228): a thought's content and vector are written through the
 // functions that own them — update_thought for an edit, the 3-argument
-// upsert_thought for a capture — so the fingerprint (003/018) follows the text
-// (this worker embeds nothing; the profile row has no vector), and the actor
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
@@ -46,6 +46,8 @@ import {
   asString,
   asInteger,
   computeContentFingerprint,
+  embedText,
+  embeddingModelUsed,
 } from "../_shared/helpers.ts";
 import {
   CLASSIFIER_MODEL_OPENROUTER,
@@ -421,17 +423,23 @@ async function upsertProfile(
   };
 
   if (existingId) {
-    // The text through update_thought (db/migrations/033), so its fingerprint
-    // follows it (003/018) and the actor reaches the audit (008); the patch is
-    // shallow-merged into metadata, and every key here is rewritten each run.
-    // No vector: this worker embeds nothing, and a content edit without one
-    // leaves the row unembedded and unlabelled (021), which the profile row
-    // has been since its insert. A raw update of `content` left the
-    // fingerprint describing the previous profile.
+    // The text and its vector through update_thought (db/migrations/033), so
+    // the fingerprint follows the text (003/018), the label the vector (021),
+    // and the actor reaches the audit (008); the patch is shallow-merged into
+    // metadata, and every key here is rewritten each run. The vector is made
+    // here: a content edit WITHOUT one sets the row's vector and label NULL —
+    // and a db/reembed.ts pass gives this row a vector between runs, so an
+    // unembedded rewrite would un-embed the profile every night (the first
+    // review pass). A raw update of `content` left the fingerprint describing
+    // the previous profile, and the vector describing it too. An embedding
+    // failure fails the run — the previous profile stands, whole.
+    const embedding = await embedText(profileContent);
     const { data, error: updateError } = await supabase.rpc("update_thought", {
       p_id: existingId,
       p_content: profileContent,
       p_metadata_patch: profileMetadata,
+      p_embedding: embedding,
+      p_embedding_model: embeddingModelUsed(),
     });
     if (updateError) {
       throw new Error(`Failed to update existing profile (id=${existingId}): ${updateError.message}`);

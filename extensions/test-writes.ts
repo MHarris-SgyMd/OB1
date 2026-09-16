@@ -26,8 +26,21 @@
  * The database is the fork's migrations plus two vendored sidecars the
  * writers assume: schemas/enhanced-thoughts (the columns the APIs write
  * beside the function — type, importance, sensitivity_tier …) and
- * schemas/agent-memory (the write-back's own tables). Both are dropped again
- * at the end, because CI shares one Postgres across the job's suites.
+ * schemas/agent-memory (the write-back's own tables). Their tables and
+ * functions are dropped before they are applied and again at the end, whether
+ * or not the run finished (an aborted run's orphaned agent_memories row made
+ * the next run's write-back short-circuit on its idempotency key), because CI
+ * shares one Postgres across the job; the three Supabase roles, and the
+ * columns and indexes the enhanced sidecar adds to `thoughts`, stay until the
+ * next suite's reset drops the table — nothing a later suite reads.
+ *
+ * One limit of the fixture, said here: the SQL shim binds a JS number array
+ * as a Postgres array literal, so a vendored write that regressed to a raw
+ * `.update({ embedding })` with a `number[]` fails at the shim ("invalid input
+ * syntax for type vector"), before this suite's column assertions — loudly,
+ * but not where the labels say. Over real PostgREST that raw write would
+ * succeed and the assertions would name the stale columns; with the vector
+ * as text (`[…]`, update-thought-mcp's old spelling) they do here too.
  *
  *   ../db/with-postgres.sh bun test-writes.ts
  */
@@ -57,8 +70,7 @@ const SIDECARS = ["schemas/enhanced-thoughts/schema.sql", "schemas/agent-memory/
 for (const role of ["authenticated", "service_role", "anon"]) {
   await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} NOLOGIN; END IF; END $r$`);
 }
-for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
-/** What the sidecars created and the shared reset does not know: dropped at the end. */
+/** What the sidecars create and the shared reset does not know: dropped before they are applied and at the end. */
 async function dropSidecars() {
   for (const file of SIDECARS) {
     const text = readFileSync(join(ROOT, file), "utf8");
@@ -66,6 +78,8 @@ async function dropSidecars() {
     for (const m of text.matchAll(/CREATE OR REPLACE FUNCTION (?:public\.)?(\w+)\s*\(/g)) await sql.unsafe(`DROP FUNCTION IF EXISTS public.${m[1]} CASCADE`);
   }
 }
+await dropSidecars(); // an earlier run that aborted left its tables (CREATE TABLE IF NOT EXISTS keeps their rows)
+for (const file of SIDECARS) await sql.unsafe(readFileSync(join(ROOT, file), "utf8"));
 
 // ── The model provider, stubbed ──────────────────────────────────────────────
 
@@ -77,11 +91,16 @@ function unit(text: string): number[] {
 }
 const vec = (v: number[]) => `[${v.join(",")}]`;
 const STUB_METADATA = { type: "idea", summary: "stubbed", topics: ["stubbed"], tags: [], people: [], action_items: [], dates_mentioned: [], confidence: 0.9 };
+/** When set, the embeddings endpoint answers 500 — the provider outage a writer must survive visibly. */
+let embeddingsDown = false;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (!/openrouter\.ai|api\.openai\.com/.test(url)) throw new Error(`test-writes.ts: a writer reached ${url}; only the model provider is stubbed`);
   const body = JSON.parse(String(init?.body ?? "{}"));
-  if (url.endsWith("/embeddings")) return Response.json({ data: [{ embedding: unit(String(body.input)) }] });
+  if (url.endsWith("/embeddings")) {
+    if (embeddingsDown) return new Response("stub: embeddings down", { status: 500 });
+    return Response.json({ data: [{ embedding: unit(String(body.input)) }] });
+  }
   return Response.json({ choices: [{ message: { content: JSON.stringify(STUB_METADATA) } }] });
 }) as typeof fetch;
 
@@ -221,8 +240,11 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(r.fp_set && r.fp_ok, `${label}: content_fingerprint is the text's (003)`);
   assert(r.has_vec && r.at_axis === true, `${label}: the vector is stored — the 2-argument form never took one`);
   assert(r.embedding_model === MODEL, `${label}: embedding_model is the model that made it (021) — the raw update after the 2-argument form left NULL (got ${r.embedding_model})`);
-  assert(r.chunks === 0, `${label}: no chunk rows (none were made)`);
+  assert(r.chunks === 0, `${label}: no chunk rows (the writer made none; nothing here plants any under a capture)`);
 }
+
+// Everything below runs inside one try so the sidecars are dropped however it ends.
+try {
 
 // ── integrations/update-thought-mcp ──────────────────────────────────────────
 
@@ -278,11 +300,12 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(!c.isError && /^Captured new thought #/.test(c.toolText) && UUID.test(String(c.structured?.thought_id)) && c.structured?.action === "inserted",
     `brain_capture_thought reads the fork's return — a UUID id, inserted — instead of throwing after the write (${c.toolText.slice(0, 60)})`);
   const cid = String(c.structured?.thought_id);
-  const cr = await row(cid, captured);
-  judgeCapture("enhanced-mcp capture", cr, captured);
-  assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
-  const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
-  assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
+  if (UUID.test(cid)) {
+    judgeCapture("enhanced-mcp capture", await row(cid, captured), captured);
+    assert(typeof c.structured?.content_fingerprint === "string" && c.structured.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
+    const [cside] = await sql`SELECT type, source_type FROM thoughts WHERE id = ${cid}`;
+    assert(cside.type === "idea" && cside.source_type === "mcp", "the enhanced-thoughts columns follow the capture");
+  }
 }
 
 // ── integrations/agent-memory-api ────────────────────────────────────────────
@@ -316,9 +339,17 @@ function judgeCapture(label: string, r: Row, text: string) {
   const c = await send(h, "POST", "/capture", { content: captured, importance: 4 });
   assert(c.status === 200 && UUID.test(String(c.json?.thought_id)), `POST /capture answers the thought's id (${c.status} ${JSON.stringify(c.json).slice(0, 80)})`);
   const cid = String(c.json?.thought_id);
-  judgeCapture("open-brain-rest capture", await row(cid, captured), captured);
-  const [cside] = await sql`SELECT type, source_type, importance FROM thoughts WHERE id = ${cid}`;
-  assert(cside.type === "idea" && cside.source_type === "dashboard" && Number(cside.importance) === 4, "the enhanced-thoughts columns follow the capture, without content or vector");
+  if (UUID.test(cid)) {
+    judgeCapture("open-brain-rest capture", await row(cid, captured), captured);
+    const [cside] = await sql`SELECT type, source_type, importance FROM thoughts WHERE id = ${cid}`;
+    assert(cside.type === "idea" && cside.source_type === "dashboard" && Number(cside.importance) === 4, "the enhanced-thoughts columns follow the capture, without content or vector");
+    // A re-capture of the same text: the function refreshes vector and metadata; the enhanced columns are the owner's.
+    await sql`UPDATE thoughts SET sensitivity_tier = 'personal', importance = 6 WHERE id = ${cid}`;
+    const again = await send(h, "POST", "/capture", { content: captured, importance: 1 });
+    const [kept] = await sql`SELECT sensitivity_tier, importance FROM thoughts WHERE id = ${cid}`;
+    assert(again.status === 200 && again.json?.thought_id === cid && again.json?.action === "updated", `a re-capture answers the same id as updated (${again.status} ${again.json?.action})`);
+    assert(kept.sensitivity_tier === "personal" && Number(kept.importance) === 6, "…and leaves a hand-set tier and importance as they were — a fresh row's columns only");
+  }
 
   const id = await plant("open-brain-rest");
   const text = "the text after the edit, through open-brain-rest";
@@ -347,8 +378,15 @@ function judgeCapture(label: string, r: Row, text: string) {
   assert(c.status === 200 && UUID.test(String(c.json?.thought_id)) && c.json?.action === "inserted",
     `POST /capture reads the fork's return — a UUID id, inserted — instead of throwing after the write (${c.status} ${JSON.stringify(c.json).slice(0, 80)})`);
   const cid = String(c.json?.thought_id);
-  judgeCapture("rest-api capture", await row(cid, captured), captured);
-  assert(typeof c.json?.content_fingerprint === "string" && c.json.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
+  if (UUID.test(cid)) {
+    judgeCapture("rest-api capture", await row(cid, captured), captured);
+    assert(typeof c.json?.content_fingerprint === "string" && c.json.content_fingerprint.length === 64, "…and reports the fingerprint the function computed");
+    await sql`UPDATE thoughts SET sensitivity_tier = 'personal' WHERE id = ${cid}`;
+    const again = await send(h, "POST", "/capture", { content: captured });
+    const [kept] = await sql`SELECT sensitivity_tier FROM thoughts WHERE id = ${cid}`;
+    assert(again.status === 200 && again.json?.thought_id === cid && again.json?.action === "updated" && kept.sensitivity_tier === "personal",
+      `a re-capture answers the same id as updated and leaves a hand-set tier — escalation-only holds for captures too (${again.status} ${again.json?.action} ${kept.sensitivity_tier})`);
+  }
 
   const id = await plant("rest-api");
   const text = "the text after the edit, through rest-api";
@@ -357,6 +395,19 @@ function judgeCapture(label: string, r: Row, text: string) {
   judgeEdit("rest-api", await row(id, text), await oracle("rest-api", text), text);
   const [side] = await sql`SELECT importance FROM thoughts WHERE id = ${id}`;
   assert(Number(side.importance) === 5, "the enhanced-thoughts column is written beside it");
+
+  // The provider is down during an edit: the function is told no vector, so the
+  // row has none — 021's rule, not the old vector under the new text — and the
+  // response says so instead of a bare 200.
+  embeddingsDown = true;
+  const down = await send(h, "PUT", `/thought/${id}`, { content: `${text}, edited while the provider was down` });
+  embeddingsDown = false;
+  const unembedded = await row(id, text);
+  assert(down.status === 200 && down.json?.embedding_updated === false && /no vector until PATCH/.test(String(down.json?.message)),
+    `a PUT whose embedding call failed answers 200 with embedding_updated: false and says how to refill (${down.status} ${JSON.stringify(down.json).slice(0, 90)})`);
+  assert(!unembedded.has_vec && unembedded.embedding_model === null && unembedded.fp_ok && unembedded.content.endsWith("provider was down"),
+    "…and the row holds the new text and fingerprint with no vector and no label — not the previous vector");
+  assert((await send(h, "PUT", `/thought/${id}`, { content: text })).json?.embedding_updated === true, "the next PUT, provider back, re-embeds and says so");
 
   // Enrich: the same text, a new vector — an unchanged edit that relabels and replaces the windows.
   await plantWindows(id);
@@ -392,6 +443,8 @@ const spells = (rel: string, re: RegExp, what: string) => assert(re.test(readFil
 // A paste-in snippet with free variables; a README's sample; a worker whose run needs an LLM pass over person notes.
 spells("recipes/provenance-chains/mcp-tools.ts", /"upsert_thought",\s*\{\s*p_content: content,\s*p_payload: \{[^}]*embedding_model: EMBEDDING_MODEL/s, "captures content, vector and label in one 3-argument upsert_thought");
 spells("recipes/provenance-chains/mcp-tools.ts", /p_embedding: embedding,/, "…passing the vector as p_embedding");
+spells("recipes/provenance-chains/mcp-tools.ts", /\.select\("id"\)\s*\.in\("id", wellFormed\)/s, "…and resolves each well-formed ref before the call, so a ghost parent is unresolved, not a refusal");
+spells("integrations/consolidation-workers/bio/index.ts", /p_embedding: embedding,\s*p_embedding_model: embeddingModelUsed\(\),/s, "…with the vector it embedded and its label, so a re-embedded profile is replaced, not blanked");
 spells("integrations/telegram-capture/README.md", /rpc\("update_thought", \{\s*p_id: existing\[0\]\.id,\s*p_content: messageText,/s, "'s sample edits through update_thought");
 spells("integrations/telegram-capture/README.md", /p_embedding_model: EMBEDDING_MODEL,/, "…with the label beside the vector");
 spells("integrations/consolidation-workers/bio/index.ts", /rpc\("update_thought", \{\s*p_id: existingId,\s*p_content: profileContent,/s, " rewrites the profile through update_thought");
@@ -407,6 +460,8 @@ const TEXT_ONLY = ["integrations/consolidation-workers/bio/index.ts", "recipes/p
     "scripts/check-fork-consistency.mjs check 10 holds the text of every file: no raw write of content or vector on thoughts");
 }
 
-await dropSidecars();
-await sql.close();
+} finally {
+  await dropSidecars();
+  await sql.close();
+}
 report();

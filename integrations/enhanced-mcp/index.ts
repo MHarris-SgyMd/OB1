@@ -729,18 +729,25 @@ server.registerTool(
       const action = result?.action ?? (result?.existed ? "updated" : "inserted");
       const contentFingerprint = result?.fingerprint ?? result?.content_fingerprint;
 
-      const { error: sidecarError } = await supabase
-        .from("thoughts")
-        .update({
-          type: prepared.type,
-          sensitivity_tier: prepared.sensitivity_tier,
-          importance: prepared.importance,
-          quality_score: prepared.quality_score,
-          source_type: prepared.source_type,
-        })
-        .eq("id", thoughtId);
-      if (sidecarError) {
-        throw new Error(`upsert_thought succeeded but the enhanced columns failed: ${sidecarError.message}`);
+      // For a fresh row only: a re-capture of existing text leaves the
+      // enhanced columns as they are — this file's tier rule is
+      // escalation-only (see update_thought above), a hand-set importance is
+      // the owner's, and the function leaves that row's pointers the same way
+      // (db/migrations/035).
+      if (action === "inserted") {
+        const { error: sidecarError } = await supabase
+          .from("thoughts")
+          .update({
+            type: prepared.type,
+            sensitivity_tier: prepared.sensitivity_tier,
+            importance: prepared.importance,
+            quality_score: prepared.quality_score,
+            source_type: prepared.source_type,
+          })
+          .eq("id", thoughtId);
+        if (sidecarError) {
+          throw new Error(`upsert_thought succeeded but the enhanced columns failed: ${sidecarError.message}`);
+        }
       }
 
       return toolSuccess(
