@@ -423,7 +423,6 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // suite's width and model (test-support's migratorEnv); the bare apply above
   // pinned the same chunk-context default, so the two halves of the fixture
   // agree. reembed.ts --status takes the same shell.
-  const env = MIGRATOR_ENV;
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
 
@@ -462,7 +461,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env, cwd: HERE });
+  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
@@ -486,16 +485,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // Refused before BEGIN, nothing written. A shell configured differently from
   // the brain: 006 would re-record ob1_config from it.
-  const otherShell = await runMigrator(URL_, { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
+  const otherShell = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
   assert(otherShell.code === 2 && /refusing --reapply: ob1_config records embedding_model = stub-embed and this shell would re-record it as other-embed/.test(otherShell.out),
          `a shell whose model differs from the record is refused — 006 would re-record it (exit ${otherShell.code})`);
   assert((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0].value === OPTS.model && (await column()) === 0, "…and nothing was written");
-  const otherDry = await runMigrator(URL_, { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply", "--dry-run");
+  const otherDry = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply", "--dry-run");
   assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out) && !/would re-apply every migration/.test(otherDry.out),
          `…and --dry-run from that shell says it would refuse, the same judgement, with no banner for a run that never begins (exit ${otherDry.code})`);
   // The width is the column's, judged before BEGIN in both modes — 006 would
   // refuse it inside the transaction, after a dry run had said green.
-  const otherWidth = await runMigrator(URL_, { ...env, OB1_EMBEDDING_DIM: "9" }, "--reapply", "--dry-run");
+  const otherWidth = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_DIM: "9" }, "--reapply", "--dry-run");
   assert(otherWidth.code === 2 && /would refuse --reapply: thoughts\.embedding is vector\(8\) and this shell says OB1_EMBEDDING_DIM=9/.test(otherWidth.out) && /Set OB1_EMBEDDING_DIM=8/.test(otherWidth.out),
          `a shell whose width differs from the column is refused before BEGIN, dry run included (exit ${otherWidth.code})`);
   // The two rows 021's block labels from and 030 leaves: an acceptance under a

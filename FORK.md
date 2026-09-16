@@ -1875,12 +1875,12 @@ OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say; the count in
 the "other indexes" column is the schema's — four under 001–013, seven under
 the whole set — and was added to the printout after the two large runs):
 
-| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
-| 10,000 | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
-| 100,000 | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
-| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
-| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
+| rows | source | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 10,000 | loaded | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
+| 100,000 | loaded | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
+| 1,000,000 | loaded | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
+| 10,000,000 | loaded | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
 
 The index is 1.4× its heap at this width and about 570 bytes a row (the
 sizes are MiB; the heap is 410 bytes a row); the build
@@ -10192,6 +10192,19 @@ is rethrown rather than blamed on the corpus; the script's comment says what
 its `created` arm does and the kept hint prints only for a container that
 started; the marker's `stats.confound` is documented as the exact pass's
 value; the reuse assigns its stats once.
+
+**Boyscout, while the files were open** (what the passes cut for space, no
+behaviour change): the script's stop timeout is one constant where it had
+been spelled three ways; test-upgrade's [7] reads `MIGRATOR_ENV` where an
+alias of it stood; the marker constant says why its name is spelled out in the
+tagged templates; two comments that narrated which review run found what say
+the fact instead; change 28's section L table gained the `source` column the
+bench now prints, every row `loaded`; the README's thirty-minute wait is said
+to be a kept volume's that already exists. Left as they were, being either
+behaviour or beyond the touched files: caching the exact oracle's answers in
+the marker (the bulk of a reuse's remaining minutes at ten million rows), and
+test-live's own stripped-shell spawns for the re-embed worker and preflight,
+which predate this change.
 
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh

@@ -82,6 +82,9 @@ fi
 # that fails leaves nothing, and nothing is cleaned. The removal hint names
 # the runtime as this script found it: `/opt/podman/bin/podman` is chosen
 # exactly when `podman` is not on PATH, so its basename would not paste.
+# Seconds a kept container gets to checkpoint on stop, here and on the
+# container itself (an operator's own `stop` then checkpoints as cleanly).
+STOP_TIMEOUT=120
 CID=""
 STARTED=0
 cleanup() {
@@ -106,9 +109,9 @@ cleanup() {
       echo
       echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
       echo "  Remove: $RUNTIME volume rm $NAME"
-      echo -n "  stopping $NAME (a checkpoint; up to two minutes) "
+      echo -n "  stopping $NAME (a checkpoint; up to $STOP_TIMEOUT s) "
     fi
-    "$RUNTIME" stop -t 120 "$CID" >/dev/null 2>&1 || true
+    "$RUNTIME" stop -t "$STOP_TIMEOUT" "$CID" >/dev/null 2>&1 || true
     "$RUNTIME" rm -fv "$CID" >/dev/null 2>&1 || true
     [ "$STARTED" = 1 ] && echo "— done"
   else
@@ -186,7 +189,7 @@ if [ -n "$KEEP" ]; then
   # The stop timeout the exit uses, on the container too, so an operator's own
   # `stop` checkpoints as cleanly. Only here: podman's `rm -f` honours it, and
   # a throwaway container should go at once, as before.
-  MOUNT_ARGS+=(--stop-timeout 120)
+  MOUNT_ARGS+=(--stop-timeout "$STOP_TIMEOUT")
   if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; KEPT_VOLUME_EXISTS=1; else VOLUME_NOTE=", new volume $NAME kept"; KEPT_VOLUME_EXISTS=0; fi
 fi
 

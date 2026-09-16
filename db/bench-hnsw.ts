@@ -525,6 +525,7 @@ type LoadStats = {
 // a run asking for another scale is refused rather than replacing thirty
 // minutes of build without being asked (a corpus this run built itself is
 // this run's to replace: a run over several scales keeps the last).
+/** The marker table. Spelled out again in the tagged templates below: an interpolated `${MARKER}` there would bind as a parameter, not an identifier. */
 const MARKER = "bench_hnsw_corpus";
 /**
  * Bumped when the marker's MEANING changes — a new key in `matches`, a
@@ -570,9 +571,9 @@ const when = (iso: string) => iso.slice(0, 16).replace("T", " ");
 // The jsonb values below are bound as OBJECTS through the tagged template: a
 // JSON string handed to a `$n::jsonb` parameter is JSON-encoded once more by
 // the driver and lands as a jsonb *string*, which `@>` never matches and a
-// reader has to parse twice (the first reuse run found it). Comparisons of
-// what comes back use Bun.deepEquals: jsonb hands an object back with its keys
-// in its own order (the second reuse run rebuilt on a text compare).
+// reader has to parse twice. Comparisons of what comes back use
+// Bun.deepEquals: jsonb hands an object back with its keys in its own order,
+// so a text compare of a round trip is not a compare of the value.
 async function readMarker(sql: SQL): Promise<Marker | null> {
   const [{ has }] = await sql`SELECT to_regclass(${MARKER}) IS NOT NULL AS has`;
   if (!has) return null;

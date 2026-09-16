@@ -1241,7 +1241,7 @@ removed as always); a later run under the same name starts a fresh container
 on that volume — the image, `/dev/shm` and port given then apply — and hands
 the command the same database. The container carries the name too, so a
 second invocation while one is running under it is refused rather than sharing
-the database, and the readiness wait is thirty minutes rather than one, since a
+the database, and for a kept volume that already exists the readiness wait is thirty minutes rather than one, since a
 kept data directory may start into crash recovery. `bench-hnsw.ts` uses it to
 reuse a loaded corpus across passes (SMD-1493). Only `bench-hnsw.ts` should
 run under a kept name: any suite's schema reset refuses a database holding a
