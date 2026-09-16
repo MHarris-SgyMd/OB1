@@ -9178,6 +9178,34 @@ chunk-context default as it pins the trigram one, so a fixture applied bare
 and through the migrator agree on what 013 records; test-upgrade's [7] no
 longer describes a refusal the migrator does not make.
 
+**Eighth pass.** The fingerprint compared against the build alone had one
+blind spot the reviewer built: after a crash recovery resets the statistics
+(the ten-million-row counters read zero), a full-table rewrite lands them back
+on the build's figure and the files are unchanged, so nothing moved. The
+comparison is now made twice — against the build, for what earlier runs did,
+and against this run's own read before the migrator, for what this run's
+files did — and the refusal records the evidence (what moved, since when)
+rather than this run's file list, which had blamed whichever file happened to
+run last for a rewrite an earlier, interrupted migrator committed. The
+prewarm runs on both paths: the oracle streams the heap some five hundred
+times, so at ten million rows a freshly built index is no warmer than a
+reused one by section A, and the per-query warm pass — which had made
+section A a repeat-query figure — went. In the script, an interrupt is noted
+and the command's own exit status stands (the trap had replaced a clean exit
+with 130 whenever a signal reached the wrapper, a psql cancel included); a
+container created and never started — an interrupt inside the tens of
+milliseconds between `create` and the ID reaching the shell, reproduced — is
+removed by its inspected ID instead of refusing that name for ever; a new
+kept volume gets the ordinary one-minute wait, the thirty minutes being for a
+data directory with WAL to replay; the refusal's pasted removal is `rm -fv`.
+Smaller: the relation names come from one list (`HNSW_INDEXES`), bound as an
+array; `scale` is a generated column of the payload; readMarker's shape check
+carries the kept-scale rule, so the loop's reuse test is one term; the
+build's confound stays the accumulator's, said so; test-schema pins the
+chunk-context default too. The denylist copies left in test-live,
+test-search-path and measure-1288 predate this change and are on the boyscout
+list.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

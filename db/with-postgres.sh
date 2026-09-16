@@ -109,9 +109,15 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# An interrupt exits through the EXIT trap once, rather than running cleanup
-# for the signal and again for the exit (bash 3.2 does both).
-trap 'exit 130' INT TERM
+# An interrupt is noted, not acted on: the command below sees the signal
+# itself (a psql cancelling a query, a bench exiting on Ctrl-C), the script
+# exits once through the EXIT trap with the command's own status — or the
+# signal's, where the command did not survive it — rather than running
+# cleanup for the signal and again for the exit (bash 3.2 does both) or
+# replacing a clean exit with 130 (review pass, reproduced).
+INTERRUPTED=""
+trap 'INTERRUPTED=130' INT
+trap 'INTERRUPTED=143' TERM
 
 # /dev/shm: both runtimes give a container 64 MB, and Postgres puts its dynamic
 # shared memory there — a parallel HNSW build keeps the whole graph in it, sized
@@ -152,8 +158,18 @@ if [ -n "$KEEP" ]; then
     STATUS="${STALE%% *}"
     case "$STATUS" in
       exited|stopped|dead) "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true ;;
+      created)
+        # Created and never started: an interrupt that landed between the
+        # runtime accepting `create` and the ID reaching the shell (tens of
+        # milliseconds, reproduced) left a shell cleanup could not know about,
+        # and every later run would refuse it for ever. Another invocation
+        # between its own two steps looks the same for about as long; it
+        # loses its start with a clear error and nothing else, the volume
+        # being shared and untouched. Removed by the inspected ID.
+        "$RUNTIME" rm -fv "${STALE#* }" >/dev/null 2>&1 || true
+        ;;
       *)
-        echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database, or a run left it without starting it. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -f $NAME" >&2
+        echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -fv $NAME" >&2
         exit 2
         ;;
     esac
@@ -171,7 +187,7 @@ if [ -n "$KEEP" ]; then
   # `stop` checkpoints as cleanly. Only here: podman's `rm -f` honours it, and
   # a throwaway container should go at once, as before.
   MOUNT_ARGS+=(--stop-timeout 120)
-  if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; else VOLUME_NOTE=", new volume $NAME kept"; fi
+  if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME"; KEPT_VOLUME_EXISTS=1; else VOLUME_NOTE=", new volume $NAME kept"; KEPT_VOLUME_EXISTS=0; fi
 fi
 
 echo "▸ starting $IMAGE as $NAME on :$PORT (via $(basename "$RUNTIME")), /dev/shm $SHM_SIZE$VOLUME_NOTE"
@@ -190,7 +206,9 @@ CID="$("$RUNTIME" create --name "$NAME" \
 # up at a minute would stop it mid-replay and the next run would start over.
 # A container that has EXITED — a kept data directory this image cannot open,
 # a bad parameter — is not waited for at all: its logs say why, at once.
-if [ -n "$KEEP" ]; then READY_TRIES=1800; else READY_TRIES=60; fi
+# The long wait is for a kept data directory that already exists (WAL to
+# replay); a new one initialises in seconds and gets the ordinary minute.
+if [ -n "$KEEP" ] && [ "${KEPT_VOLUME_EXISTS:-0}" = 1 ]; then READY_TRIES=1800; else READY_TRIES=60; fi
 # Readiness is TCP readiness: over the unix socket, pg_isready is answered for
 # a moment by the entrypoint's initdb-time temporary server (listening on no
 # TCP address) before the real one is up, and a client that connected in that
@@ -229,4 +247,9 @@ export DATABASE_URL="postgres://postgres:$PASSWORD@127.0.0.1:$PORT/$DB"
 echo "▸ DATABASE_URL=$DATABASE_URL"
 echo
 
-"$@"
+# The command's own status is the script's; a signal that reached the wrapper
+# while the command ran is reported only where the command did not survive it.
+STATUS=0
+"$@" || STATUS=$?
+if [ "$STATUS" != 0 ] && [ -n "$INTERRUPTED" ]; then STATUS="$INTERRUPTED"; fi
+exit "$STATUS"

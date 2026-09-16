@@ -213,9 +213,9 @@ const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
 // latencies in section A and the chunk side of section C's plans (where the
 // planner's own choice at 64 dimensions was a seq scan above 200 candidates)
 // are now the deployed function's and may differ from the published lines.
-// And since SMD-1493 an untimed pass over the default call precedes section
-// A on both paths, so its median at K is a warm-cache figure where the
-// published one followed the build's cache as it happened to be.
+// And since SMD-1493 both HNSW relations are read into the page cache before
+// section A on both paths (pg_prewarm), where the published run's cache was
+// whatever the build and the oracle had left.
 const SCALES = [...new Set((process.env.OB1_BENCH_SCALES ?? "10000,100000").split(",").map((s) => Number(s.trim())))];
 if (SCALES.some((n) => !Number.isInteger(n) || n <= 0)) {
   // Validated up front like Q: a fraction would pass every step until the
@@ -434,10 +434,7 @@ class Confound {
       if (dot > this.max) this.max = dot;
     }
   }
-  assert(): number {
-    return Confound.check(this.max);
-  }
-  /** The one threshold, for the build's accumulated maximum and a reuse's exact pass alike. */
+  /** The one threshold, for the build's accumulated maximum and the exact pass alike. */
   static check(max: number): number {
     if (max > 0.99) {
       throw new Error(`a query vector coincides with a stored row (cosine ${max.toFixed(4)}); the generator is not random enough to measure with`);
@@ -521,7 +518,7 @@ type CorpusParams = { format: number; dim: number; tiers: { key: string; share: 
 type Marker = { params: CorpusParams; matches: Record<string, number>; stats: LoadStats; verifiedLedger: string[]; physical: Physical; rewritten?: string[] };
 /** Per relation: rows inserted + updated + deleted so far (the cumulative counters, which autovacuum does not reset) and the file the relation lives in (which DML never changes and a rewrite always does). */
 type Physical = Record<string, { tuples: number; file: number }>;
-const PHYSICAL_RELATIONS = ["thoughts", "thought_chunks", "thoughts_embedding_idx", "thought_chunks_embedding_idx"];
+const PHYSICAL_RELATIONS: readonly string[] = ["thoughts", "thought_chunks", ...HNSW_INDEXES];
 
 const corpusParams = (tiers: Tier[]): CorpusParams => ({ format: MARKER_FORMAT, dim: DIM, tiers: tiers.map((t) => ({ key: t.key, share: t.share })), chunkedShare: CHUNKED_SHARE, chunksPer: CHUNKS_PER });
 /** A build time for a console line or a table cell: one spelling, from the ISO stamp `stats` carries. */
@@ -537,10 +534,10 @@ async function readMarker(sql: SQL): Promise<Marker | null> {
   const [{ has }] = await sql`SELECT to_regclass(${MARKER}) IS NOT NULL AS has`;
   if (!has) return null;
   try {
-    const [row] = await sql`SELECT scale, corpus FROM bench_hnsw_corpus`;
+    const [row] = await sql`SELECT corpus FROM bench_hnsw_corpus`;
     if (!row) return null;
     const corpus = row.corpus as Marker;
-    const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && corpus.physical && Number(row.scale) === corpus.stats.scale;
+    const shaped = corpus && typeof corpus === "object" && corpus.params && corpus.stats && corpus.physical && corpus.stats.scale > BEFORE_ARM_MAX;
     if (!shaped) throw new Error("its row is not the shape this bench writes");
     const missing = Object.keys(LOAD_STATS_KEYS).filter((k) => !(k in corpus.stats));
     if (missing.length) throw new Error(`its stats lack ${missing.join(", ")}`);
@@ -555,8 +552,13 @@ async function readMarker(sql: SQL): Promise<Marker | null> {
 /** One transaction: a marker table with no row would read as "no corpus" and let a later run drop what it stands over. The columns are for a glance from psql; the payload is the record. */
 async function writeMarker(sql: SQL, marker: Marker): Promise<void> {
   await sql.begin(async (tx: SQL) => {
-    await tx.unsafe(`CREATE TABLE ${MARKER} (one boolean PRIMARY KEY DEFAULT true CHECK (one), scale bigint NOT NULL, built_at timestamptz NOT NULL, corpus jsonb NOT NULL)`);
-    await tx`INSERT INTO bench_hnsw_corpus (scale, built_at, corpus) VALUES (${marker.stats.scale}, ${marker.stats.builtAt}::timestamptz, ${marker}::jsonb)`;
+    // `scale` is generated from the payload, so the two cannot disagree;
+    // `built_at` cannot be (timestamptz input is not immutable) and is a
+    // plain copy for a glance from psql. The payload's `stats.confound` is the
+    // build's client-side accumulator; the exact pass recomputes it on every
+    // run and prints that (they agree to three decimals on every run so far).
+    await tx.unsafe(`CREATE TABLE ${MARKER} (one boolean PRIMARY KEY DEFAULT true CHECK (one), scale bigint GENERATED ALWAYS AS ((corpus->'stats'->>'scale')::bigint) STORED, built_at timestamptz NOT NULL, corpus jsonb NOT NULL)`);
+    await tx`INSERT INTO bench_hnsw_corpus (built_at, corpus) VALUES (${marker.stats.builtAt}::timestamptz, ${marker}::jsonb)`;
   });
 }
 
@@ -570,7 +572,7 @@ async function physicalState(sql: SQL): Promise<Physical> {
   const rows = await sql.unsafe(`
     SELECT c.relname, c.relfilenode::bigint AS file, COALESCE(s.n_tup_ins + s.n_tup_upd + s.n_tup_del, 0)::bigint AS tuples
     FROM pg_class c LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-    WHERE c.relname IN (${PHYSICAL_RELATIONS.map((r) => `'${r}'`).join(", ")}) AND c.relnamespace = 'public'::regnamespace`);
+    WHERE c.relname = ANY($1) AND c.relnamespace = 'public'::regnamespace`, [sql.array([...PHYSICAL_RELATIONS], "TEXT")]);
   return Object.fromEntries(rows.map((r: { relname: string; file: string | number; tuples: string | number }) => [r.relname, { tuples: Number(r.tuples), file: Number(r.file) }]));
 }
 
@@ -579,18 +581,18 @@ async function physicalState(sql: SQL): Promise<Physical> {
  * is a statistics reset (a crash-recovered data directory), not a rewrite —
  * said, not refused, since the files still vouch for the heap and the graphs.
  */
-function physicalMoves(built: Physical, now: Physical): string[] {
+function physicalMoves(since: Physical, now: Physical, sinceWhat: string): string[] {
   const out: string[] = [];
   for (const rel of PHYSICAL_RELATIONS) {
-    const b = built[rel];
+    const b = since[rel];
     const c = now[rel];
     if (!b || !c) {
-      out.push(`${rel}: ${!c ? "gone" : "not recorded at the build"}`);
+      out.push(`${rel}: ${!c ? "gone" : `not recorded at ${sinceWhat}`}`);
       continue;
     }
-    if (c.file !== b.file) out.push(`${rel}: rewritten into another file`);
-    else if (c.tuples > b.tuples) out.push(`${rel}: ${(c.tuples - b.tuples).toLocaleString()} rows inserted, updated or deleted`);
-    else if (c.tuples < b.tuples) console.log(`  (${rel}: its row counters are below the build's — reset by a crash recovery, not a rewrite; the file is the build's)`);
+    if (c.file !== b.file) out.push(`${rel}: rewritten into another file since ${sinceWhat}`);
+    else if (c.tuples > b.tuples) out.push(`${rel}: ${(c.tuples - b.tuples).toLocaleString()} rows inserted, updated or deleted since ${sinceWhat}`);
+    else if (c.tuples < b.tuples) console.log(`  (${rel}: its row counters are below ${sinceWhat}'s — reset by a crash recovery; the file is the same, and DML this run applies is judged against this run's own read)`);
   }
   return out;
 }
@@ -599,7 +601,7 @@ function physicalMoves(built: Physical, now: Physical): string[] {
 async function prewarm(sql: SQL): Promise<boolean> {
   try {
     await sql.unsafe(`CREATE EXTENSION IF NOT EXISTS pg_prewarm`);
-    for (const rel of ["thoughts_embedding_idx", "thought_chunks_embedding_idx"]) await sql.unsafe(`SELECT pg_prewarm($1::regclass, 'read')`, [rel]);
+    for (const rel of HNSW_INDEXES) await sql.unsafe(`SELECT pg_prewarm($1::regclass, 'read')`, [rel]);
     return true;
   } catch {
     return false;
@@ -729,7 +731,7 @@ async function load(sql: SQL, n: number, schema: string, tiers: Tier[], queries:
   const insertS = insertMs / 1000;
   // Refuse before the builds, not after them: a repeating generator should
   // cost the load, not the load plus twenty minutes of index.
-  const nearest = confound.assert();
+  const nearest = Confound.check(confound.max);
 
   // Chunk rows for a share of thoughts, carrying the parent's own vector: the
   // point is that the chunk CTE has rows to scan and the merge has duplicates
@@ -797,11 +799,6 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.len
 const ASKS = [10, 20, 50, 100, 200, 500];
 
 async function unfiltered(sql: SQL, queries: number[][], wants: Set<string>[]): Promise<{ counts: Record<number, string>; ms10: number; msMax: number; overlap: number; ms10Raised: number; overlapRaised: number }> {
-  // One untimed pass over the default call first — the query vectors' own
-  // neighbourhoods, which the oracle before this section (index scan off)
-  // never touched; the wider walks are served by the pg_prewarm a reuse runs
-  // on both HNSW relations, so the two paths time the same cache.
-  for (const q of queries) await sql.unsafe(`SELECT id FROM match_thoughts('${lit(q)}'::vector, -1.0, ${K}, '{}'::jsonb)`);
   const counts: Record<number, string> = {};
   for (const count of ASKS) {
     let min = Infinity;
@@ -1132,7 +1129,7 @@ const kept = await readMarker(sql);
   // kept build is never dropped without being asked (review passes).
   if (kept && kept.rewritten) {
     console.error(
-      `bench-hnsw.ts: the kept ${kept.stats.scale.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) had its rows or files changed by migrations applied onto it on an earlier run (${kept.rewritten.join(", ")}); its heap and HNSW graphs are not the build's, and it was refused then.\n` +
+      `bench-hnsw.ts: the kept ${kept.stats.scale.toLocaleString()}-row corpus (built ${when(kept.stats.builtAt)}) had its tables changed by migrations applied onto it on an earlier run (${kept.rewritten.join("; ")}); its heap and HNSW graphs are not the build's, and it was refused then.\n` +
         `  Remove the kept volume and build again under the new schema (db/README.md names the command). Nothing was touched.`
     );
     process.exit(2);
@@ -1152,9 +1149,9 @@ for (const n of SCALES) {
   const { tiers, notes } = tiersAt(n);
   const params = corpusParams(tiers);
 
-  // A kept corpus is this scale's (the block above refused every other
-  // case), and above the before arm's scales it is reused.
-  const reuse = kept !== null && !beforeArm;
+  // A kept corpus is this scale's, above the before arm's (the block above
+  // and readMarker's shape refused every other case), and is reused.
+  const reuse = kept !== null;
 
   let stats!: LoadStats;
   let matches!: Map<string, number>;
@@ -1181,6 +1178,7 @@ for (const n of SCALES) {
       process.exit(1);
     }
     // migrate.ts onto the corpus: pending files applied, a drifted file refused first.
+    const physicalBefore = await physicalState(sql);
     appliedFiles = await migrateWhole(sql, "kept");
     await reconnect();
     // The tables' physical state against the BUILD's, recorded in the marker:
@@ -1191,16 +1189,20 @@ for (const n of SCALES) {
     // neither is the bulk-built state the marker's sizes describe and the
     // published tables measure (SMD-1018's fourth pass judged a plain VACUUM
     // insufficient for exactly this, and a VACUUM FULL at ten million rows is
-    // the rebuild the reuse exists to avoid). Judged against the build rather
-    // than against this run's own first read, so a migrator that committed a
-    // rewriting file and failed on the next, or a statistics flush that landed
-    // after the read, is caught by the run after (review passes). The
-    // refusal is recorded in the marker first, so every later run refuses too.
-    const moved = physicalMoves(kept!.physical, await physicalState(sql));
+    // the rebuild the reuse exists to avoid). Judged twice: against the
+    // BUILD, so a migrator that committed a rewriting file and failed on the
+    // next, or a statistics flush that landed after the read, is caught by
+    // the run after; and against this run's own read before the migrator,
+    // so DML this run applied is caught even where the counters had been
+    // reset by a crash recovery and a full rewrite landed them back on the
+    // build's figure (review passes). The refusal records the evidence — what
+    // moved, not a guess at which file did it — so every later run refuses.
+    const physicalNow = await physicalState(sql);
+    const moved = [...new Set([...physicalMoves(kept!.physical, physicalNow, "the build"), ...physicalMoves(physicalBefore, physicalNow, "this run's migrator")])];
     if (moved.length > 0) {
-      await amendMarker(sql, { rewritten: [...(kept!.rewritten ?? []), ...(appliedFiles.length ? appliedFiles : ["(files applied on an earlier, interrupted run)"])] });
+      await amendMarker(sql, { rewritten: moved });
       console.error(
-        `bench-hnsw.ts: the kept corpus's tables have changed since the build (${moved.join("; ")}); its heap and HNSW graphs are no longer the bulk-built ones the marker describes, so measuring it would not be measuring the build. The marker now says so, and every later run under this name refuses too. Remove the kept volume and build again under the new schema (db/README.md names the command).`
+        `bench-hnsw.ts: the kept corpus's tables have changed (${moved.join("; ")}); its heap and HNSW graphs are no longer the bulk-built ones the marker describes, so measuring it would not be measuring the build. The marker now says so, and every later run under this name refuses too. Remove the kept volume and build again under the new schema (db/README.md names the command).`
       );
       process.exit(1);
     }
@@ -1297,13 +1299,14 @@ for (const n of SCALES) {
   }
   console.log(" done");
 
-  // A reused index is cold in a fresh container where a freshly built one is
-  // warm. Both HNSW relations are read into the page cache here, after the
-  // exact oracle (which streams the heap and would evict what was read
-  // before it) and just before the first section that walks them, so the
-  // walks in A–E time the same cache on both paths. Best effort: pg_prewarm
-  // ships with the image, and its absence is said (review passes).
-  if (reuse) {
+  // Both HNSW relations are read into the page cache here, on BOTH paths,
+  // after the exact oracle and just before the first section that walks
+  // them: the oracle streams the whole heap some five hundred times, so at
+  // ten million rows a freshly built index is no warmer than a reused one by
+  // now, and what each path's walks find in the cache is made the same by
+  // construction rather than assumed (review passes). Best effort: pg_prewarm
+  // ships with the image, and its absence is said.
+  {
     const warmed = await prewarm(sql);
     console.log(warmed ? `  HNSW indexes read into the page cache (pg_prewarm)` : `  (pg_prewarm unavailable; the first walks may read a cold index)`);
   }

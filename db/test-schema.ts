@@ -74,8 +74,10 @@ function subst(sql: string, trgm = DEFAULT_TRGM_INDEX): string {
   return substituteMigration(
     sql,
     // backfillLimit pinned: the shell's OB1_BACKFILL_LIMIT must not change what
-    // this suite applies ([24] asks for a batch by passing it explicitly).
-    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm, backfillLimit: null })
+    // this suite applies ([24] asks for a batch by passing it explicitly);
+    // chunkContext pinned for the same reason — [13] asserts the default 013
+    // records, and a shell's OB1_CHUNK_CONTEXT must not be what it recorded.
+    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: null })
   );
 }
 
