@@ -8,7 +8,7 @@
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
-// reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
+// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
@@ -560,7 +560,7 @@ Deno.serve(async (req) => {
   if (!OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
     return json({ error: "No LLM API keys configured" }, 503);
   }
-  // The profile is embedded on every rewrite (FORK.md change 68), and
+  // The profile is embedded on every rewrite (FORK.md change 69), and
   // embedText() knows OpenRouter and OpenAI only: an Anthropic-only
   // configuration can synthesise the profile and then cannot store it.
   // Refused here, before the LLM call is paid for.

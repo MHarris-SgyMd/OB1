@@ -8,7 +8,7 @@
 // functions that own them — update_thought for an edit, the 3-argument
 // upsert_thought for a capture — so the fingerprint (003/018), the model label
 // (021) and the chunk rows (022) follow the text and vector, and the actor
-// reaches the audit (008). FORK.md change 68; extensions/test-writes.ts drives it
+// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 /**
  * rest-api — REST API gateway for Open Brain.

@@ -16,7 +16,7 @@
 
 ## What It Does
 
-Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 68). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
+Runs a Supabase Edge Function as a Telegram bot webhook. Every text message sent to the configured chat becomes a `thoughts` row with an embedding (`openai/text-embedding-3-small`) and LLM-extracted metadata (people, topics, action items, dates, type). The bot replies in-thread with a confirmation so you know capture succeeded. Optional `UPDATE_ON_EDIT` support re-embeds edited messages in place — through the database's `update_thought`, so the content fingerprint, the model label and the chunk rows follow the edit (FORK.md change 69). Both paths make 1536-wide `openai/text-embedding-3-small` vectors, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is 1024).
 
 ---
 

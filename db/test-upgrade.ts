@@ -457,10 +457,12 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // prerequisites — 015 and 021's embedding_model column — are exactly what a
   // through-020 schema lacks, so it fails by name rather than with a bare error.
   // The window guard trips whenever a migration lands past 030, to force this
-  // note to be re-read (034 was checked; it needs only 001/010, both present;
-  // 035 needs 016, 025, 032 and 033, all recorded).
+  // note to be re-read (034 needs only 001/010; 035 needs 016, 025, 032 and 033;
+  // 036 redefines delete_thought and needs only 009's body and 029's supersession
+  // lock — all recorded in a through-035 schema, so none becomes the plain-run
+  // failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 6, `030 is among the last six migrations (${last})`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 7, `030 is among the last seven migrations (${last})`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

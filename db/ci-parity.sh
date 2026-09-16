@@ -52,7 +52,7 @@ main() {
   run server-portable    test-embedding-dimensions.ts
   run server-portable    test-preflight.ts
   run compat/supabase-sql test-compat.ts
-  # The vendored writers of a thought's content or vector (change 68), as
+  # The vendored writers of a thought's content or vector (change 69), as
   # CI's data-layer job runs them — last, since the suite applies two vendored
   # sidecar schemas to the shared database and drops them after. Its
   # dependencies are extensions/'s pinned install.

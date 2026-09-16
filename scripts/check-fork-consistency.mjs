@@ -1002,7 +1002,7 @@ function checkCredentialCompares() {
 // describing the old text (018's `fingerprint_held_by` report exists for the
 // row it leaves), 021's label is left describing the old vector, 022's chunk
 // rows of the old vector stay under the new one, and 008's actor is not set.
-// FORK.md change 68 routed every one through `update_thought` (edits) or the
+// FORK.md change 69 routed every one through `update_thought` (edits) or the
 // 3-argument `upsert_thought` (captures, the vector and its label in one
 // call); this is what keeps the next rebase from bringing one back.
 //
@@ -1270,7 +1270,7 @@ function checkThoughtWritesAround() {
   for (const text of THOUGHT_WRITE_NON_PROBES) {
     if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture through the 3-argument upsert_thought with embedding_model in the payload (FORK.md change 68, SMD-1228) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what it leaves stale";
+  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture through the 3-argument upsert_thought with embedding_model in the payload (FORK.md change 69, SMD-1228) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what it leaves stale";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);

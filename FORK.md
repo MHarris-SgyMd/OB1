@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Sixty-eight numbered changes on top of the pin. Seven fix defects found in an
+Sixty-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–68 are the numbered `###` sections** further down, which is
+sections. Changes **18–69 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -192,8 +192,8 @@ recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — th
 recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same)
 integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
-<9 vendored files>               # change 68 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
-extensions/test-writes.ts        # change 68 (new file — every vendored writer driven against Postgres, its row against update_thought's)
+<9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
+extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -3835,7 +3835,7 @@ update-delete 39 (before the pass below).
 3-argument `upsert_thought`, which predate this change (SMD-1175) — done in
 change 40; the community integrations `update-thought-mcp` and `enhanced-mcp`, which write
 content and vector with a raw update around `update_thought` and so leave a
-stale label as they leave a stale fingerprint — done in change 68, with seven
+stale label as they leave a stale fingerprint — done in change 69, with seven
 more files the check found. A label for the rows no finished pass
 vouches for — there is no fact to backfill from; the first pass over them
 labels them, and says how many before it runs. `--accept-failed` and
@@ -8217,12 +8217,16 @@ keys both rows share — the acting agent (010) and the returned id, within a
 window — a NULL agent its own bucket, not a wildcard. `prune_query_log(p_keep_days)`
 is the retention window (default 30, `OB1_QUERY_LOG_RETENTION_DAYS`; the DELETE
 always bounded by `logged_at`), part of this version because the log is personal
-data at rest — every query typed. `db/config.mjs`'s `QUERY_LOG` is the one
-spelling of the flag, names, tool sets and retention, read by the server,
-preflight and the tests; a `querylog` grant group (query_log `INSERT`, since 034)
-means a self-hosted role that runs `--grant` can turn the flag on and have it
-work — documented, but not enforced, since preflight cannot read a server env
-flag and the log is off by default.
+data at rest — every query typed. The bound is strict: a row logged in the
+prune's own transaction shares its `now()` and stays, and `test-schema` [34]
+asserts that with insert and prune in one transaction (SMD-1498 — the section
+had assumed each statement's `now()` is later than the last's, which PGlite's
+millisecond clock does not promise, and its wipe assertion flaked once).
+`db/config.mjs`'s `QUERY_LOG` is the one spelling of the flag, names, tool sets
+and retention, read by the server, preflight and the tests; a `querylog` grant
+group (query_log `INSERT`, since 034) means a self-hosted role that runs
+`--grant` can turn the flag on and have it work — documented, but not enforced,
+since preflight cannot read a server env flag and the log is off by default.
 
 **Export → replay → gate (`evals/`).** `export-queries.ts` reads the log and
 writes a fixture of query text and ids (`query`, `relevant` = the touched ids,
@@ -8861,7 +8865,7 @@ servers' write tools beside the extensions' (six copies follow); the test's
 Deno stand-in and postgres stub lines are wrapped.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
-(integrations writing around `update_thought`) — done in change 68. SMD-1480 holds the
+(integrations writing around `update_thought`) — done in change 69. SMD-1480 holds the
 deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
@@ -8880,8 +8884,85 @@ nothing.
 **Upstream status:** not applicable — the compares are upstream's; the module
 they now use is this fork's.
 
+### 68. delete_thought joins the writers' lock order, closing a deadlock between an accept and a delete of the superseded thought (SMD-1462)
 
-### 68. The vendored writers of a thought's content and vector go through the functions that own them — nine files off a raw update of `thoughts`: edits through `update_thought`, captures through the 3-argument `upsert_thought`, the enhanced columns beside them, and check 10 holds it (SMD-1228)
+Change 63 (SMD-1043, migration 033) put every writer of `thoughts.supersedes`
+on one lock order — the supersession advisory lock
+`hashtext('ob1:supersession-review')`, then the fingerprint lock, then the row —
+and its second review pass named the one writer left outside it: `delete_thought`
+(migration 009). The function took no advisory lock. Its `DELETE` holds the
+thought's row, and change 54's (SMD-1294, migration 029) `ON DELETE CASCADE` from
+`thoughts` onto `supersession_proposals` reaches every proposal that names the
+row and waits to remove it.
+
+**The cycle, both shipped functions.** `review_supersession_proposal(P, 'accept')`
+locks the proposal row `P` `FOR UPDATE`, takes the supersession lock, locks the
+superseding thought `S` `FOR NO KEY UPDATE`, then writes `S.supersedes = Z`
+through `update_thought`, whose FK check (`thoughts_supersedes_fkey`, change 25 /
+migration 025) takes `KEY SHARE` on the superseded thought `Z`. Meanwhile
+`delete_thought(Z)` holds `Z` and, through the cascade, waits on `P`; the review
+holds `P` and waits on `KEY SHARE` of `Z`. 033's pass reproduced it 23 times in
+40 against a real server, the delete the `40P01` victim each time — pre-existing
+since 029/032, and 033's header and change 62 stated it as the residue outside
+the order rather than claiming the order was universal.
+
+**The fix (migration 036) — two changes, and running it proved both are
+needed.** `delete_thought` takes
+`pg_advisory_xact_lock(hashtext('ob1:supersession-review'))` before its `DELETE`
+— the identical key the review, `update_thought` and `upsert_thought` take, one
+hash entry, transaction-scoped, taken unconditionally because the function cannot
+know whether a proposal names the row before it is gone. The ticket proposed that
+alone and warned that reordering the review's proposal-row lock "is not enough on
+its own". The live race (`db/test-live.ts` [6g]) showed the delete-side lock is
+not enough on its own either: with only `delete_thought` fixed it deadlocked 10
+of 40 during the build, because `review_supersession_proposal` locks the proposal
+row `P` **before** it reaches the advisory lock (029/032), so a delete holding the
+lock waits on `P` through the cascade while a review holding `P` waits on the lock
+— the same cycle, one row along. (The shipped [6g] guards the reorder through its
+no-deadlock arm rather than reproducing that intermediate state.) So the second change: `review_supersession_proposal` takes the
+advisory lock **before** it locks `P`, for accept and reject alike. Now a delete
+and a review contend on the lock first, and whichever wins runs to commit — the
+review writing its pointer, or the delete removing `Z` and cascading `P` — before
+the other touches a row. Forty tries, no `40P01`. Both bodies are otherwise 009's
+and 032's verbatim (the review keeps its two `update_thought` calls and its
+no-UPDATE, no-walk shape); both signatures are unchanged, so the stores and tools
+call them as before.
+
+**The 23503 the same lock closes.** 033's probe found a second, smaller thing: a
+supersedes target deleted between `update_thought`'s existence walk (the plain
+`SELECT` that answers `SUPERSEDES_NOT_FOUND`) and its `UPDATE` (where the FK
+fires) surfaced as a raw `23503 thoughts_supersedes_fkey`, not the
+`SUPERSEDES_NOT_FOUND` its COMMENT promises "for a target deleted in the instant".
+The delete-side lock closes that window from the same edge: `update_thought`
+holds the supersession lock across **both** its walk and its `UPDATE` whenever
+`supersedes` is named (033), and `delete_thought` now contends on it, so a
+through-the-functions delete cannot slip between the two. Update-first: the walk
+sees `Z`, the `UPDATE` takes `KEY SHARE` on a `Z` still there, and the delete's
+`ON DELETE SET NULL` (025's FK) clears the pointer afterwards. Delete-first: the
+walk, under a fresh `READ COMMITTED` snapshot, finds `Z` gone and returns
+`SUPERSEDES_NOT_FOUND`. Either way, no 23503 — the COMMENT's promise is honoured,
+not tightened, so `update_thought`'s 280-line body stays 033's byte for byte. A
+raw `DELETE FROM thoughts` around the function takes no advisory lock and could
+still race the walk into a 23503, exactly as a raw content `UPDATE` around
+`update_thought` escapes the fingerprint lock (033's header): the order is a
+contract among the shipped functions.
+
+No runtime, store or preflight change — two SQL functions redefined, each
+carrying its prior body with only the lock relocated. The `delete_thought(uuid,
+jsonb)` COMMENT names the new lock. `db/test-live.ts` [6g] races forty accepts
+against forty deletes: the pre-036 lockless delete (009's body by hand) deadlocks,
+the shipped pair does not and its cascade still removes the proposal; [6h] races
+`update_thought` naming supersedes against a delete of that target forty times and
+sees never a raw 23503, always `SUPERSEDES_NOT_FOUND` or a clean write.
+`db/test-schema.ts` [36] pins 036 as the last definer of both functions and each
+lock before its contended row.
+
+Upstream status: **not applicable** — the deadlock is between two fork functions
+(029/032's supersession review and 009's delete) that upstream does not have.
+**Unfiled** upstream. Reproduce: `./with-postgres.sh bun db/test-live.ts` and
+read [6g]/[6h].
+
+### 69. The vendored writers of a thought's content and vector go through the functions that own them — nine files off a raw update of `thoughts`: edits through `update_thought`, captures through the 3-argument `upsert_thought`, the enhanced columns beside them, and check 10 holds it (SMD-1228)
 
 `integrations/update-thought-mcp/index.ts`, `integrations/enhanced-mcp/index.ts`
 (and its `_shared/helpers.ts`), `integrations/agent-memory-api/index.ts`,
@@ -9176,6 +9257,7 @@ return-shape half against its own tree; the two files that misread the
 return here read both shapes now.
 
 
+
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
@@ -9253,7 +9335,7 @@ best, under this repository's name, in a repo whose stated differentiator is
 that the core is tested and the auth path is hardened. The rule (SMD-1251,
 change 51): **we audit the tree once and hold the delta**, and a standing check
 carries the audit so a rebase cannot quietly undo it. Four rules are audited
-today. Writes around the functions (SMD-1228, change 68): check 10 fails the
+today. Writes around the functions (SMD-1228, change 69): check 10 fails the
 build on a PostgREST `.update(`/`.upsert(` on `thoughts` whose payload carries
 `content` or `embedding` — inline or through an object the file fills — and on
 a SQL `UPDATE thoughts … SET` of either column: the raw write nine vendored
@@ -9282,9 +9364,9 @@ check runs against its own patterns on every run, positive and negative. A
 rebase that brings a new hit fails CI, and the choice is the same as it was at
 the pin: fix the vendored file and record the delta here, or list the exception
 with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64, SMD-1455 as change 67 and SMD-1228 as change 68 — the four rules
+change 64, SMD-1455 as change 67 and SMD-1228 as change 69 — the four rules
 named when the standard was decided are all audited and held; the next
-finding (SMD-1524, the raw inserts change 68 left outside its rule) lands the
+finding (SMD-1524, the raw inserts change 69 left outside its rule) lands the
 same way.
 
 ### Landing a rebase on `main`, which is protected

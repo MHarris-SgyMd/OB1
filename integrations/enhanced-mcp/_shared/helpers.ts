@@ -186,7 +186,7 @@ export async function embedText(text: string): Promise<number[]> {
  * model as OB1_EMBEDDING_MODEL spells it — OpenRouter's name when that key is
  * configured (embedText's first choice), else OpenAI's under the same
  * `openai/` prefix, so one model has one label whichever path served it.
- * Keep in step with embedText's provider order (FORK.md change 68).
+ * Keep in step with embedText's provider order (FORK.md change 69).
  */
 export function embeddingModelUsed(): string {
   if (Deno.env.get("OPENROUTER_API_KEY")) return Deno.env.get("OPENROUTER_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";

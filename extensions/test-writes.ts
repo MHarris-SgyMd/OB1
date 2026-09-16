@@ -3,7 +3,7 @@
  * test-writes.ts — every vendored writer of a thought's content or vector goes
  * through the functions that own them, and leaves what they leave.
  *
- * SMD-1228 (FORK.md change 68). Nine vendored files wrote `content` or
+ * SMD-1228 (FORK.md change 69). Nine vendored files wrote `content` or
  * `embedding` on `thoughts` with a raw PostgREST update around update_thought
  * and the 3-argument upsert_thought — two MCP servers, three HTTP APIs, a
  * worker, a recipe's server, a recipe's paste-in snippet and a README's

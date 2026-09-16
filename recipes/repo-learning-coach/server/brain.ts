@@ -201,7 +201,7 @@ export const captureLearningArtifact = async ({
   // the vector and its label (021) land with the row and the fingerprint with
   // the text. This used to be the 2-argument form and a raw update of the
   // vector after it, which left embedding_model NULL — a vector of unknown
-  // model to preflight and the re-embed (FORK.md change 68, SMD-1228).
+  // model to preflight and the re-embed (FORK.md change 69, SMD-1228).
   const { data, error } = await supabase.rpc('upsert_thought', {
     p_content: artifactContent,
     p_payload: { metadata, embedding_model: APP_ENV.openrouterEmbeddingModel },
