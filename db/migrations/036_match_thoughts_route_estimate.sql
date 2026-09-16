@@ -187,6 +187,13 @@
 --     binds the OID when the statement is planned and plpgsql caches the
 --     plan, so a suite that drops and recreates the table in one session
 --     would size a table that no longer exists (NULL, one page, 100%).
+--     to_regclass resolves on every call; the cached `FROM thoughts` plans
+--     re-resolve only when their relation is dropped, so a relation that
+--     SHADOWS the name after the plans are cached — a temp table named
+--     thoughts — is what gets sized while the statements still read the
+--     real one (measured: 8 pages sized, 25,778 heap blocks sampled at floor
+--     0). Under the shipped floor a smaller shadow switches the gate off for
+--     that session, which is the safe side; a fresh session sees one table.
 --   * The gate is three conditions in plpgsql over three counts from one
 --     statement, not a CASE inside the collection: the collection is 014's
 --     text and [20] holds it token for token; and a reader of this body should
@@ -206,6 +213,20 @@
 --     contiguous run, condition 3's C(8,3) x f^3 above. Measured: 0 of
 --     1,000 draws at each of a 895-row uniform filter, a 1,000-row
 --     contiguous one, 479 rows, 52, and none, on 500,000 rows.
+--   * A count above the default. Every rate and bound above is the default
+--     count's, where v_exact is 1,000. v_exact grows with match_count
+--     (GREATEST(v_base x 4, 1000): 1,600 at 100, 8,000 at the ceiling of
+--     500), and condition 1 grows with it: at the ceiling near the floor it
+--     needs about ten hits a page, so a 10% filter is not skipped there at
+--     all (measured: 0 of 2,000 draws on a 9,546-page heap, against 97% at
+--     the default count) — the collection runs as before this file, plus
+--     the sample; the 50% filter is still skipped (98.65%). The contiguous
+--     bound scales too: v_exact rows are 400 pages at the ceiling, not 50,
+--     so C(8,3) x f^3 is about 6e-3 at the floor (measured 8e-4 on 9,546
+--     pages: 16 of 20,000 draws), and a wrongly skipped 8,000-row filter
+--     went to the walk, whose direct CTE at LIMIT 2,000 the planner served
+--     from the GIN bitmap with a top-N sort — exact, 2,000 rows, in every
+--     one of the measured draws. Cost, not answers, in every case run.
 --   * The sample runs the collection on a filter that is broad. That is the
 --     cost before this file — 5.6 ms for the 10% filter, 12.6 for 50% at
 --     500,000 rows — plus about 0.15 ms. It happens by design for a clustered
@@ -450,8 +471,9 @@ DECLARE
   v_ids        uuid[];
   -- The gate on that collection (036). The heap's size in pages, exact and
   -- cheap (pg_relation_size is a stat of the main fork; to_regclass resolves
-  -- the name the way `FROM thoughts` below does, at call time, so a cached
-  -- plan never holds a dropped table's OID), and the share of it that puts
+  -- the name on every call, so a cached plan never holds a dropped table's
+  -- OID — the header says what a temp table shadowing the name does), and
+  -- the share of it that puts
   -- {{ROUTE_SAMPLE_PAGES}} pages into the sample. Both are computed at entry
   -- — a few microseconds, on the unfiltered path too — so the estimate
   -- statement below stands alone with its locals substituted, which is how

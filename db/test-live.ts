@@ -388,6 +388,7 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   // Read by the finally block below as well as the section.
   const opts036 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("036") };
   const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  let failure: unknown;
   try {
     const N = 25_000;
     await sql.unsafe(`
@@ -474,6 +475,9 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
     console.log(`      (${ROUTE_SAMPLE_PAGES} pages sampled of ${pages}: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
 
+  } catch (e) {
+    failure = e;
+    throw e;
   } finally {
     // The shipped state back on every path — a throw above would otherwise
     // leave 25,000 rows and no HNSW index to [6]..[16] (review pass 1): 036
@@ -481,15 +485,22 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
     // [15] holds that floor (the first run of this section left 020's hybrid
     // behind and [15] failed on it); the table emptied; the index rebuilt
-    // (instant on no rows).
-    // The table and the index first — they depend on nothing — so a throw
-    // from the re-apply cannot leave them behind (second review pass).
-    await sql`DELETE FROM thoughts`;
-    await sql.unsafe(String(hnswDef));
-    await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
-    assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
-    assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
-      "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
+    // (instant on no rows). The table and the index first — they depend on
+    // nothing — so a throw from the re-apply cannot leave them behind (second
+    // review pass); and when the section itself threw, a cleanup that fails
+    // on the same fault is reported, not thrown, so the cause is what the
+    // run shows (fourth review pass).
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(String(hnswDef));
+      await applyMigrations(URL_, { ...opts036, only: (f) => f.startsWith("027") || f.startsWith("036") });
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `036 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
+        "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
+    } catch (cleanup) {
+      if (failure === undefined) throw cleanup;
+      console.error(`      [5d] cleanup failed after the section did: ${(cleanup as Error).message}`);
+    }
   }
 }
 

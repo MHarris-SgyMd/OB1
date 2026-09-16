@@ -9158,7 +9158,17 @@ it, every filtered call pays the sample: 0.2 ms at a million rows and about a
 millisecond at ten million, growing with the heap (the third finding above),
 and the thin tiers move by less than the spread.
 
-**Not done here.** Preflight has no recogniser for 036's body (a 020 paste
+**Not done here.** A recency-weighted call at the ceiling count flips the
+WALK statement (014's, not this change's) onto plpgsql's generic plan after
+five costly custom plans, and the flipped plan — a GIN bitmap with a top-N
+sort — answers a broad filter with the exact top-n where the custom plan's
+HNSW walk answered approximately: identical calls from two sessions differ in
+their rows, not only their cost. The fourth review pass met it in a
+concurrency run (218 differing answers across 800 calls, 0 under
+`plan_cache_mode = force_custom_plan`) and traced every difference to that
+flip; the sample statement stayed on custom plans throughout. It is
+SMD-1464's plan-mode question, with one more fact for it. Preflight has no
+recogniser for 036's body (a 020 paste
 under a 036 ledger passes; the operator's path above), as it has none for
 027's: a `TABLESAMPLE SYSTEM (v_pct)` regex or a sentinel of 036's own would
 give the `filtered search` check a "036's body" detail, the way `atomic
@@ -9211,7 +9221,17 @@ the documents): the `hit_pages ≥ 4` bound had repeated pass 1's error
 (6e-5 at the floor, not the measured 2e-4), the 1% filter's "two in ten
 thousand" was the Poisson figure where the table shows two in a thousand,
 this paragraph described one pass, the header narrated its own review
-history — all rewritten; the operator's path is the next paragraph.
+history — all rewritten; the operator's path is the next paragraph. Pass 4
+(adversarial run-it and a fresh-eyes read of the TypeScript): 800 concurrent
+filtered calls on sixteen connections with no error, deadlock or answer the
+collection's route would not have given (0 differences under pinned plans);
+exact-branch recall 1.000 across match_count 10 / 100 / 500 with and without
+a recency weight; every odd filter shape and a table moved to another schema
+behave as 020; [5d] costs 11 s of the 94 s suite. Two header sentences added
+— the bounds are the default count's (at the ceiling, condition 1 keeps the
+10% filter's collection near the floor), and a temp table shadowing the name
+is sized while the cached plans read the real one, the safe side under the
+floor — and [5d]'s cleanup no longer masks the section's own error.
 
 **The operator's path, walked in pass 3.** A brain at 035 with rows, upgraded
 by `bun db/migrate.ts`: "036 applied, 1 applied, 35 skipped", one
