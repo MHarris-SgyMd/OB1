@@ -488,16 +488,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // Refused before BEGIN, nothing written. A shell configured differently from
   // the brain: 006 would re-record ob1_config from it.
-  const otherShell = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
+  const otherShell = await runMigrator(URL_, { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
   assert(otherShell.code === 2 && /refusing --reapply: ob1_config records embedding_model = stub-embed and this shell would re-record it as other-embed/.test(otherShell.out),
          `a shell whose model differs from the record is refused — 006 would re-record it (exit ${otherShell.code})`);
   assert((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0].value === OPTS.model && (await column()) === 0, "…and nothing was written");
-  const otherDry = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
+  const otherDry = await runMigrator(URL_, { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply", "--dry-run");
   assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out) && !/would re-apply every migration/.test(otherDry.out),
          `…and --dry-run from that shell says it would refuse, the same judgement, with no banner for a run that never begins (exit ${otherDry.code})`);
   // The width is the column's, judged before BEGIN in both modes — 006 would
   // refuse it inside the transaction, after a dry run had said green.
-  const otherWidth = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_DIM: "9" }, cwd: HERE });
+  const otherWidth = await runMigrator(URL_, { ...env, OB1_EMBEDDING_DIM: "9" }, "--reapply", "--dry-run");
   assert(otherWidth.code === 2 && /would refuse --reapply: thoughts\.embedding is vector\(8\) and this shell says OB1_EMBEDDING_DIM=9/.test(otherWidth.out) && /Set OB1_EMBEDDING_DIM=8/.test(otherWidth.out),
          `a shell whose width differs from the column is refused before BEGIN, dry run included (exit ${otherWidth.code})`);
   // The two rows 021's block labels from and 030 leaves: an acceptance under a
@@ -924,7 +924,7 @@ console.log("\n[11] 021 with the acceptances out of its sight on a plain run —
     await b.sql.unsafe(`GRANT CONNECT ON DATABASE "${db}" TO ob1_notemp`);
     await b.sql.unsafe("GRANT USAGE, CREATE ON SCHEMA public TO ob1_notemp");
     await b.sql.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_notemp");
-    const noTemp = await runScript(["bun", join(HERE, "migrate.ts"), "--url", noTempUrl.href, "--reapply", "--dry-run"], { env: { ...MIGRATOR_ENV, DATABASE_URL: noTempUrl.href }, cwd: HERE });
+    const noTemp = await runMigrator(noTempUrl.href, { ...MIGRATOR_ENV, DATABASE_URL: noTempUrl.href }, "--reapply", "--dry-run");
     assert(noTemp.code === 2 && /would refuse --reapply: this role may not create a temp relation, and 021's evidence backfill needs one/.test(noTemp.out) &&
              new RegExp(`GRANT TEMPORARY ON DATABASE "${db}" TO "ob1_notemp"; then run again`).test(noTemp.out) && !/would re-apply every migration/.test(noTemp.out),
            `a role without TEMP is refused before anything runs, with the GRANT, and the dry run says so too (exit ${noTemp.code})`);

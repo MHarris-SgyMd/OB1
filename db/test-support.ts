@@ -385,24 +385,23 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
 }
 
 /**
- * The migrator's shell for a fixture: this process's environment with the
- * fixture's width, model and trigram choice, and without what migrate.ts would
- * refuse or read as an override (a truncation request, a provider key, a
- * backfill batch). For running `migrate.ts` through `runScript` where a suite
- * or bench wants the ledger the runner keeps — test-upgrade's incremental
- * cases, bench-hnsw.ts's kept corpus — rather than `applyMigrations`' bare
- * apply.
+ * The migrator's shell for a fixture: this process's environment with every
+ * `OB1_*` variable REMOVED — an allowlist, so a flag the shell happens to
+ * carry (a truncation request, a backfill batch, a chunk-context choice 013
+ * records into ob1_config) cannot reach the fixture, today's or a future
+ * one — then the fixture's width, model and trigram choice. For running
+ * `migrate.ts` through `runMigrator` where a suite or bench wants the ledger
+ * the runner keeps — test-upgrade's incremental cases, bench-hnsw.ts's kept
+ * corpus — rather than `applyMigrations`' bare apply. (The first draft was a
+ * denylist of three names, one of them read by nothing; review pass.)
  */
 export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "model" | "trgm">): Record<string, string> {
   const env: Record<string, string> = {};
-  const set = {
-    ...process.env,
-    DATABASE_URL: url,
-    OB1_EMBEDDING_DIM: String(opts.dim),
-    OB1_EMBEDDING_MODEL: opts.model,
-    OB1_TRGM_INDEX: (opts.trgm ?? DEFAULT_TRGM_INDEX) ? "on" : "off",
-  };
-  for (const [k, v] of Object.entries(set)) if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("OB1_")) env[k] = v;
+  env.DATABASE_URL = url;
+  env.OB1_EMBEDDING_DIM = String(opts.dim);
+  env.OB1_EMBEDDING_MODEL = opts.model;
+  env.OB1_TRGM_INDEX = (opts.trgm ?? DEFAULT_TRGM_INDEX) ? "on" : "off";
   return env;
 }
 
@@ -423,20 +422,21 @@ export function runMigrator(url: string, env: Record<string, string>, ...flags: 
  * applies what is pending and refuses a file edited since it was recorded, but
  * it never looks for a recorded name it has no file for — a database migrated
  * from another branch's tree looks fully applied to it. A bench reusing a kept
- * corpus asks this first (SMD-1493).
+ * corpus asks this first (SMD-1493). A stand-in: SMD-1504 moves the check into
+ * migrate.ts, after which this goes.
  */
 export async function ledgerStrangers(sql: SQL): Promise<string[] | null> {
   const names = await ledgerNames(sql);
   if (names === null) return null;
   const files = new Set(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")));
-  return [...names].filter((name) => !files.has(name)).sort();
+  return names.filter((name) => !files.has(name));
 }
 
 /** The names the migrator's ledger records, or `null` where there is no ledger. */
-export async function ledgerNames(sql: SQL): Promise<Set<string> | null> {
+export async function ledgerNames(sql: SQL): Promise<string[] | null> {
   const [{ has }] = await sql`SELECT to_regclass('schema_migrations') IS NOT NULL AS has`;
   if (!has) return null;
-  return new Set((await sql`SELECT name FROM schema_migrations`).map((r: { name: string }) => r.name));
+  return (await sql`SELECT name FROM schema_migrations ORDER BY name`).map((r: { name: string }) => r.name);
 }
 
 export function requireDatabaseUrl(script: string): string {

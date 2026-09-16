@@ -191,21 +191,26 @@ CID="$("$RUNTIME" create --name "$NAME" \
 # A container that has EXITED — a kept data directory this image cannot open,
 # a bad parameter — is not waited for at all: its logs say why, at once.
 if [ -n "$KEEP" ]; then READY_TRIES=1800; else READY_TRIES=60; fi
+# Readiness is TCP readiness: over the unix socket, pg_isready is answered for
+# a moment by the entrypoint's initdb-time temporary server (listening on no
+# TCP address) before the real one is up, and a client that connected in that
+# window failed; under OB1_PG_KEEP the exit that followed stopped the
+# container mid-initialisation and left a volume the entrypoint then treated
+# as initialised (review pass, reproduced at ~200 ms).
+ready() { "$RUNTIME" exec "$CID" pg_isready -h 127.0.0.1 -U postgres -d "$DB" >/dev/null 2>&1; }
 echo -n "▸ waiting for readiness "
 for _ in $(seq 1 "$READY_TRIES"); do
-  # pg_isready exits 0 ready, 1 starting (recovery included), 2 unreachable,
-  # 3 bad arguments; the runtime's own failure to exec (no such running
-  # container) is 125/126. Only that last case asks the runtime whether the
-  # container is still running, and only an explicit "false" ends the wait —
-  # a failed inspect (a transient runtime error) prints nothing and must not
-  # read as an exit, or one bad call would stop a thirty-minute recovery.
-  RC=0
-  "$RUNTIME" exec "$CID" pg_isready -U postgres -d "$DB" >/dev/null 2>&1 || RC=$?
-  if [ "$RC" = 0 ]; then
+  if ready; then
     echo "— ready"
     break
   fi
-  if [ "$RC" -gt 3 ] && [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null || true)" = "false" ]; then
+  # Not ready. Whether the container is still running is asked of the runtime
+  # on every miss — a non-running container's exec fails with 125 on podman
+  # but 1 on docker, the same code pg_isready gives for "starting", so the
+  # exit code cannot tell them apart — and only an explicit "false" ends the
+  # wait: a failed inspect (a transient runtime error) prints nothing and must
+  # not read as an exit, or one bad call would stop a thirty-minute recovery.
+  if [ "$("$RUNTIME" container inspect -f '{{.State.Running}}' "$CID" 2>/dev/null || true)" = "false" ]; then
     echo " — the container exited"
     break
   fi
@@ -213,7 +218,7 @@ for _ in $(seq 1 "$READY_TRIES"); do
   sleep 1
 done
 
-if ! "$RUNTIME" exec "$CID" pg_isready -U postgres -d "$DB" >/dev/null 2>&1; then
+if ! ready; then
   echo >&2
   echo "Postgres did not become ready. Container logs:" >&2
   "$RUNTIME" logs "$CID" 2>&1 | tail -20 >&2

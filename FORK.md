@@ -9124,6 +9124,34 @@ neighbourhoods; the confound comes from one exact pass on both paths through
 one `oracle()` (the duplicate whole-table scan went); and the two paragraphs
 above say the ledger-keyed re-check and the exact-pass confound the code does.
 
+**Sixth pass.** Three defects the reviewers reproduced. Readiness is now TCP
+readiness (`pg_isready -h 127.0.0.1`): over the unix socket the entrypoint's
+initdb-time temporary server answers for about 200 ms before the real one is
+up, a client that connected then failed, and under `OB1_PG_KEEP` the exit that
+followed stopped the container mid-initialisation and left a volume the
+entrypoint thereafter treated as initialised. The container's state is asked
+on every readiness miss, not only after a runtime exec error: docker's `exec`
+on a non-running container exits 1, the code `pg_isready` gives for
+"starting", so under docker the fast fail on an unreadable kept volume had
+been dead and the wait ran the full thirty minutes. The row-rewrite refusal is
+recorded in the marker (`rewritten`) before it exits, since the ledger has
+already advanced and the next run would otherwise find nothing pending and
+measure the repaired graph; the counts and the two regenerated rows are
+checked again after the migrator. Then the smaller items: the exact oracle
+selects the distance under an alias the `ORDER BY` names — `1 - (…)` beside
+the bare distance was two expressions to the planner and it evaluated the
+distance twice per row, 12–15% of every exact scan; `pg_prewarm` runs after the
+oracle (which streams the heap and would evict what was read before it) and
+just before section A; a marker of a shape this bench cannot read is a
+refusal with the remedy, not a stack trace; `migratorEnv` is an allowlist —
+every `OB1_*` variable dropped, the fixture's three set — where the denylist
+had one dead name and let a chunk-context choice through; the marker's scale
+and build time live once, in `stats`, and comparisons use `Bun.deepEquals`;
+the marker is written only under `OB1_PG_KEEP`, so a throwaway multi-scale run
+no longer says "replacing"; test-upgrade's four remaining hand-spelled
+migrator spawns use `runMigrator`; and the bench's dry run and
+`ledgerStrangers` are labelled the stand-ins for SMD-1504 they are.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.
