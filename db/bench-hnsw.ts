@@ -224,7 +224,9 @@ if (SCALES.some((n) => !Number.isInteger(n) || n <= 0)) {
 const BEFORE_ARM_MAX = 100_000;
 // A kept database holds one corpus, and only a scale above the before arm's is
 // kept, so under OB1_PG_KEEP a run is exactly one such scale — judged where the
-// list is parsed, before a container is even asked for. The three rules this
+// list is parsed, before anything is connected to or dropped (the container
+// with-postgres.sh started for us stays; an empty kept volume is the worst a
+// refused run leaves, and the exit line names it). The three rules this
 // replaces (a marker of another scale, a small scale after a large one, a
 // descending list that built the large corpus and then replaced it) were
 // each a seam the review passes found; one invariant has none.
@@ -417,10 +419,14 @@ class Confound {
     }
   }
   assert(): number {
-    if (this.max > 0.99) {
-      throw new Error(`a query vector coincides with a stored row (cosine ${this.max.toFixed(4)}); the generator is not random enough to measure with`);
+    return Confound.check(this.max);
+  }
+  /** The one threshold, for the build's accumulated maximum and a reuse's exact pass alike. */
+  static check(max: number): number {
+    if (max > 0.99) {
+      throw new Error(`a query vector coincides with a stored row (cosine ${max.toFixed(4)}); the generator is not random enough to measure with`);
     }
-    return this.max;
+    return max;
   }
 }
 
@@ -516,22 +522,6 @@ async function writeMarker(sql: SQL, n: number, params: CorpusParams, matches: M
 /** The ledger's names, sorted, as the marker records them. */
 const ledgerList = async (sql: SQL): Promise<string[]> => [...((await ledgerNames(sql)) ?? [])].sort();
 
-/**
- * The confound check for a reuse, where the rows are not streamed past the
- * client: each query's nearest stored row through the index — a near-copy of a
- * stored row is exactly what an HNSW walk finds first — so a reuse with more
- * queries than the build had is checked for the queries it will actually run.
- */
-async function confoundViaIndex(sql: SQL, queries: number[][]): Promise<number> {
-  let max = -1;
-  for (const q of queries) {
-    const [row] = await sql.unsafe(`SELECT 1 - (embedding <=> '${lit(q)}'::vector) AS cos FROM thoughts WHERE embedding IS NOT NULL ORDER BY embedding <=> '${lit(q)}'::vector LIMIT 1`);
-    max = Math.max(max, Number(row?.cos ?? -1));
-  }
-  if (max > 0.99) throw new Error(`a query vector coincides with a stored row (cosine ${max.toFixed(4)}); the generator is not random enough to measure with`);
-  return max;
-}
-
 /** Row i of the n-row corpus, regenerated from the seed without the rows before it. */
 function rowAt(n: number, tiers: Tier[], i: number): Row {
   const stream = seedFor(n);
@@ -564,20 +554,26 @@ async function assertKeptCorpus(sql: SQL, n: number, tiers: Tier[], marker: Mark
 /**
  * The whole schema through migrate.ts — the ledger and the runner's own
  * refusals — for the arm above the before arm's scales, and again on a reuse,
- * where what it applies is what the tree gained since the build. A `--dry-run`
- * goes first: a plain run that finds a recorded file edited since reports the
- * drift and exits 1, but only AFTER applying every pending file around it, so
- * on a kept corpus the drift is judged before anything runs. Returns the files
- * the live run recorded, read from the ledger rather than the runner's output.
+ * where what it applies is what the tree gained since the build. On a kept
+ * corpus a `--dry-run` goes first: a plain run that finds a recorded file
+ * edited since reports the drift and exits 1, but only AFTER applying every
+ * pending file around it, so the drift is judged before anything runs; on a
+ * fresh database there is no ledger to drift from and the refusal, if any, is
+ * the runner's own (a pgvector floor, a privilege). Returns the files the live
+ * run recorded, read from the ledger rather than the runner's output.
  */
-async function migrateWhole(sql: SQL): Promise<string[]> {
+async function migrateWhole(sql: SQL, onto: "kept" | "fresh"): Promise<string[]> {
   const refuse = (run: { code: number; out: string }, what: string) => {
     console.error(run.out.trimEnd());
-    console.error(`\nbench-hnsw.ts: ${what}. A kept corpus is measured only under the tree's schema; nothing was measured.`);
+    console.error(
+      `\nbench-hnsw.ts: ${what}. ${onto === "kept" ? "A kept corpus is measured only under the tree's schema; nothing was measured." : "The schema could not be applied to the empty database; nothing was loaded."}`
+    );
     process.exit(1);
   };
-  const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
-  if (dry.code !== 0) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
+  if (onto === "kept") {
+    const dry = await runMigrator(URL_, MIGRATOR_ENV, "--dry-run");
+    if (dry.code !== 0) refuse(dry, `migrate.ts --dry-run exited ${dry.code} (above), before anything ran`);
+  }
   const before = (await ledgerNames(sql)) ?? new Set<string>();
   const run = await runMigrator(URL_, MIGRATOR_ENV);
   if (run.code !== 0) refuse(run, `migrate.ts exited ${run.code} (above)`);
@@ -762,6 +758,18 @@ async function oracle(sql: SQL, q: number[], filter: string | null): Promise<Set
       ORDER BY t.embedding <=> '${lit(q)}'::vector LIMIT ${K}`);
   });
   return new Set(rows.map((r: { id: string }) => r.id));
+}
+
+/** The whole-table oracle, with the nearest row's cosine beside the ids: the same exact scan, read once more. */
+async function oracleWithTop(sql: SQL, q: number[]): Promise<{ ids: Set<string>; top: number }> {
+  const rows = await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+    return tx.unsafe(`
+      SELECT t.id, 1 - (t.embedding <=> '${lit(q)}'::vector) AS cos FROM thoughts t
+      WHERE t.embedding IS NOT NULL
+      ORDER BY t.embedding <=> '${lit(q)}'::vector LIMIT ${K}`);
+  });
+  return { ids: new Set(rows.map((r: { id: string }) => r.id)), top: rows.length ? Number(rows[0].cos) : -1 };
 }
 
 async function chunksCarryParentVectors(sql: SQL): Promise<void> {
@@ -985,7 +993,15 @@ for (const n of SCALES) {
   // this run's own earlier scale (the block above refused any other).
   const kept = await readMarker(sql);
   const reuse = kept !== null && !beforeArm && kept.scale === n && canonical(kept.params) === canonical(params);
-  if (kept && kept.scale === n && !reuse) console.log(`  (the kept ${n.toLocaleString()}-row corpus was built from other parameters — width, tiers, chunk share or marker format; rebuilding it)`);
+  if (kept && kept.scale === n && !reuse) {
+    // The same refusal a scale mismatch gets: a kept build is never dropped
+    // without being asked, whichever way it stopped matching (review pass).
+    console.error(
+      `bench-hnsw.ts: the database holds a kept ${n.toLocaleString()}-row corpus (built ${kept.builtAt}) built from other parameters — width, tiers, chunk share or marker format — than this bench's; measuring it would be measuring another corpus.\n` +
+        `  Build it again under another OB1_PG_KEEP name, or remove the kept volume (db/README.md names the command). Nothing was touched.`
+    );
+    process.exit(2);
+  }
   if (kept && kept.scale !== n) console.log(`  (replacing the ${kept.scale.toLocaleString()}-row corpus this run built; a kept database holds one corpus, the last)`);
 
   let stats!: LoadStats;
@@ -997,7 +1013,12 @@ for (const n of SCALES) {
     // and 007's objects — so a table that is not the generator's is refused
     // before the migrator walks it (a pending backfill over ten million rows
     // is the better part of an hour).
-    await assertKeptCorpus(sql, n, tiers, kept!);
+    try {
+      await assertKeptCorpus(sql, n, tiers, kept!);
+    } catch (err) {
+      console.error(`bench-hnsw.ts: ${(err as Error).message}. The kept table is not the corpus its marker describes — a migration applied onto it on an earlier run may have changed rows; remove the kept volume and build again (db/README.md names the command). Nothing was touched.`);
+      process.exit(1);
+    }
     const strangers = await ledgerStrangers(sql);
     if (strangers === null) {
       console.error("bench-hnsw.ts: the kept corpus has no migration ledger, so nothing vouches for the schema under it; remove the kept volume and load again.");
@@ -1008,23 +1029,19 @@ for (const n of SCALES) {
       process.exit(1);
     }
     // migrate.ts onto the corpus: pending files applied, a drifted file refused first.
-    appliedFiles = await migrateWhole(sql);
+    appliedFiles = await migrateWhole(sql, "kept");
     await reconnect();
-    // A migration that rewrote rows (023's kind: an apply-time UPDATE of an
-    // indexed column, non-HOT) leaves dead index entries and the build's
-    // statistics; the sections below must not time those (review pass).
-    if (appliedFiles.length > 0) for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`VACUUM ANALYZE ${rel}`);
     stats = { ...kept!.stats, source: "reused" };
     matches = new Map(Object.entries(kept!.matches));
     console.log(`  ${n.toLocaleString()} thoughts and ${stats.chunkRows.toLocaleString()} chunk rows counted, rows 0 and ${(n - 1).toLocaleString()} regenerated from the seed and matched`);
-    console.log(appliedFiles.length ? `  migrations applied onto it this run: ${appliedFiles.join(", ")} (then VACUUM ANALYZE)` : "  schema already at the tree's; nothing applied");
+    console.log(appliedFiles.length ? `  migrations applied onto it this run: ${appliedFiles.join(", ")}` : "  schema already at the tree's; nothing applied");
   } else {
     console.log(`▸ ${n.toLocaleString()} rows — loading${beforeArm ? "" : " (schema applied whole through migrate.ts; the before arm runs up to " + BEFORE_ARM_MAX.toLocaleString() + " rows)"}`);
     if (beforeArm) {
       await resetSchema(URL_, { ...OPTS, only: (f) => f < "014" });
     } else {
       await dropSchema(URL_);
-      await migrateWhole(sql);
+      await migrateWhole(sql, "fresh");
     }
     await reconnect();
   }
@@ -1039,12 +1056,7 @@ for (const n of SCALES) {
   }
   for (const note of notes) console.log(`  (${note})`);
   const queries = queriesFor(n);
-  if (reuse) {
-    // The build's confound covered the build's queries; this run's may be
-    // more (a larger OB1_BENCH_QUERIES than the smoke run that built it).
-    stats.confound = await confoundViaIndex(sql, queries);
-    console.log(`  nearest query-to-row cosine ${stats.confound.toFixed(3)} over this run's ${Q} queries, through the index (a repeat would read 1.000)`);
-  } else {
+  if (!reuse) {
     process.stdout.write("  inserting         ");
     ({ stats, matches } = await load(sql, n, beforeArm ? "001–013" : "whole", tiers, queries));
     console.log(`done — ${stats.insertS.toFixed(0)} s, nearest query-to-row cosine ${stats.confound.toFixed(3)} (a repeat would read 1.000)`);
@@ -1058,10 +1070,19 @@ for (const n of SCALES) {
   // minute at ten million rows (review passes). The marker records the
   // ledger it passed under, after it passes.
   if (reuse) {
+    // Keyed on the durable comparison, not on what THIS run's migrator
+    // recorded: a run interrupted between the migrator's commits and here
+    // would otherwise leave the next run vacuuming nothing and skipping
+    // nothing it should not (review pass).
     const ledger = await ledgerList(sql);
     if (canonical(ledger) !== canonical(kept!.verifiedLedger)) {
+      // A migration that rewrote rows (023's kind: an apply-time UPDATE of an
+      // indexed column, non-HOT) leaves dead index entries and the build's
+      // statistics; the sections below must not time those.
+      for (const rel of ["thoughts", "thought_chunks"]) await sql.unsafe(`VACUUM ANALYZE ${rel}`);
       await chunksCarryParentVectors(sql);
       await sql`UPDATE bench_hnsw_corpus SET corpus = corpus || ${{ verifiedLedger: ledger }}::jsonb`;
+      console.log(`  ledger differs from the one the corpus was last verified under: VACUUM ANALYZE run, oracle premise re-checked`);
     }
   } else {
     await chunksCarryParentVectors(sql);
@@ -1081,10 +1102,24 @@ for (const n of SCALES) {
     wants.set(t.key, answers);
     process.stdout.write(".");
   }
-  // And over the whole table, for section A's recall control.
+  // And over the whole table, for section A's recall control — and, on a
+  // reuse, for the confound: the build's check covered the build's queries,
+  // this run's may be more (a larger OB1_BENCH_QUERIES than the smoke run
+  // that built it), and this exact pass sees every row for every query, where
+  // an index probe would see its first ef_search candidates (review pass).
   {
     const answers: Set<string>[] = [];
-    for (const q of queries) answers.push(await oracle(sql, q, null));
+    let nearest = -1;
+    for (const q of queries) {
+      const { ids, top } = await oracleWithTop(sql, q);
+      answers.push(ids);
+      nearest = Math.max(nearest, top);
+    }
+    if (reuse) {
+      stats.confound = Confound.check(nearest);
+      console.log(`\n  nearest query-to-row cosine ${nearest.toFixed(3)} over this run's ${Q} queries, from the exact pass (a repeat would read 1.000)`);
+      process.stdout.write("                    ");
+    }
     wants.set("", answers);
     process.stdout.write(".");
   }

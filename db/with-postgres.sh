@@ -84,9 +84,18 @@ fi
 # exactly when `podman` is not on PATH, so its basename would not paste.
 CID=""
 cleanup() {
-  # A Ctrl-C during the stop below must not abort the removal and the hint.
-  trap - INT TERM
-  [ -n "$CID" ] || return 0
+  # A Ctrl-C during the stop below must not abort the removal and the hint:
+  # ignored, not reset — the default disposition would let a second Ctrl-C
+  # kill the runtime client and the shell with it, mid-stop.
+  trap '' INT TERM
+  if [ -z "$CID" ]; then
+    # No ID reached the shell. Under OB1_PG_KEEP the name may be another
+    # invocation's and nothing is touched; otherwise the per-process name is
+    # ours alone, and a `create` the runtime finished after an interrupt cut
+    # the substitution short would leave a container and its anonymous volume.
+    [ -n "$KEEP" ] || "$RUNTIME" rm -fv "$NAME" >/dev/null 2>&1 || true
+    return 0
+  fi
   if [ -n "$KEEP" ]; then
     echo
     echo "▸ kept the database in volume $NAME. Reuse: OB1_PG_KEEP=$KEEP ./with-postgres.sh …"
@@ -131,7 +140,13 @@ if [ -n "$KEEP" ]; then
     STATUS="$("$RUNTIME" container inspect -f '{{.State.Status}}' "$NAME")"
     case "$STATUS" in
       exited|stopped|dead)
-        "$RUNTIME" rm -fv "$NAME" >/dev/null || { echo "could not remove the exited $NAME left by an earlier run; remove it by hand and run again" >&2; exit 1; }
+        # By the ID the status was read from, not the name: a forced removal
+        # by name would take whatever holds the name at that instant, another
+        # invocation's freshly created container included. If another
+        # invocation removed it first, ours fails and the `create` below
+        # decides who has the name.
+        STALE="$("$RUNTIME" container inspect -f '{{.Id}}' "$NAME")"
+        "$RUNTIME" rm -fv "$STALE" >/dev/null 2>&1 || true
         ;;
       *)
         echo "$NAME is $STATUS: another with-postgres.sh under OB1_PG_KEEP=$KEEP owns that database, or a run left it without starting it. Wait for it, use another name, or — if nothing else is running under this name — remove it: $RUNTIME rm -f $NAME" >&2
@@ -145,7 +160,11 @@ if [ -n "$KEEP" ]; then
   # anonymous one that is removed on exit. Read from the image (pulled first
   # if absent, as `run` would).
   "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 || "$RUNTIME" pull -q "$IMAGE" >/dev/null
-  PGDATA_PATH="$("$RUNTIME" image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^PGDATA=//p' | head -n 1)"
+  # Not `|| true`: a silent default on an image whose PGDATA is elsewhere
+  # would mount the kept volume at the wrong path and lose the corpus into the
+  # anonymous one — the hazard this block exists to prevent.
+  IMAGE_ENV="$("$RUNTIME" image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE")" || { echo "could not read $IMAGE's environment to find its PGDATA; nothing was started" >&2; exit 1; }
+  PGDATA_PATH="$(printf '%s\n' "$IMAGE_ENV" | sed -n 's/^PGDATA=//p' | head -n 1)"
   PGDATA_PATH="${PGDATA_PATH:-/var/lib/postgresql/data}"
   MOUNT_ARGS=(-v "$NAME:$PGDATA_PATH")
   if "$RUNTIME" volume inspect "$NAME" >/dev/null 2>&1; then VOLUME_NOTE=", on the kept volume $NAME at $PGDATA_PATH"; else VOLUME_NOTE=", new volume $NAME kept at $PGDATA_PATH"; fi
@@ -157,6 +176,7 @@ CID="$("$RUNTIME" create --name "$NAME" \
   -e POSTGRES_DB="$DB" \
   -p "$PORT:5432" \
   --shm-size "$SHM_SIZE" \
+  --stop-timeout 120 \
   ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"} \
   "$IMAGE")"
 "$RUNTIME" start "$CID" >/dev/null

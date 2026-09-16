@@ -8375,6 +8375,30 @@ code. Cut for space: caching the exact oracle in the marker; `migrationFiles()`
 shared across the seven directory listings; the marker's `scale`/`builtAt`
 held twice.
 
+**Fourth pass, at the author's call.** The exited-namesake removal went by the
+ID the status was read from, not the name — a forced removal by name would
+have taken whatever held the name at that instant, another invocation's
+freshly created container included, the race the ID rule exists to close; the
+interrupt disposition inside cleanup is *ignore*, not default (reset, a second
+Ctrl-C during the two-minute stop killed the client and the shell before the
+removal — reproduced on bash 3.2); without `OB1_PG_KEEP` a container whose ID
+never reached the shell is removed by the per-process name, so an interrupt
+that cuts the `create` short leaves no anonymous volume; the `PGDATA` read
+fails loudly rather than defaulting under `set -e`; `--stop-timeout 120` rides
+on the container so an operator's own `stop` checkpoints too. In the bench
+the vacuum and the oracle-premise re-check share one key, the ledger against
+the one the marker was last verified under (a run interrupted between the
+migrator's commits and the vacuum would otherwise leave the next run timing
+dead index entries with "nothing applied" printed); a reuse's confound comes
+from the exact whole-table pass section A already runs, not an index probe
+that sees its first forty candidates; a kept corpus of the right scale built
+from other parameters is *refused* with the remedies, as a scale mismatch is,
+rather than rebuilt behind one log line; the kept-table checks refuse in the
+named-remedy form rather than throwing; the fresh path skips the dry run and
+words its refusal for an empty database; and "before a container is asked for"
+became "before anything is connected to or dropped", which is what is true
+under `with-postgres.sh`.
+
 Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
 upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
 bun bench-hnsw.ts` twice; the second run's section L says `reused`.

@@ -1043,11 +1043,15 @@ ANALYZE`d; then this run's queries are checked against the rows through the
 index. Section L's `source` column says `loaded` or `reused (built …)` per
 scale, and the run prints what it counted and which files it applied. Under
 `OB1_PG_KEEP` a run is exactly one scale above 100,000 rows, refused otherwise
-before a container is asked for: a kept database holds one corpus, and the
+before anything is connected to or dropped (an empty kept volume is the worst
+such a refusal leaves, and the exit line names it): a kept database holds one
+corpus, and the
 published scales are never kept — the before arm needs 001–013 under the rows,
 and a build that size is seconds — so run the small scales, or several
 scales, without it. A kept database holding another scale than the one asked
-for is refused up front, before anything is dropped. Measured at a million
+for, or the same scale built from other parameters, is refused up front,
+before anything is dropped: a kept build is never replaced without being
+asked. Measured at a million
 rows: 6 min 49 s for the run that built the corpus, 3 min 45 s for the one
 that reused it.
 
