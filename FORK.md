@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-four numbered changes on top of the pin. Seven fix defects found in an
+Seventy-five numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–74 are the numbered `###` sections** further down, which is
+sections. Changes **18–75 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -4795,11 +4795,11 @@ got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an M
 request and wrong for this one. With a key — which IS the URL-only connector's
 shape: the SDK copies the connector URL's query onto its path-aware discovery
 GET (`client/auth.js`, `url.search = issuer.search`), a fact this paragraph got
-wrong until change 74's review — it
+wrong until change 75's review — it
 authenticated, cost an agent-registry resolve, and was handed to
 `StreamableHTTPTransport`, which opened an SSE stream nothing wrote to or
 closed: the response never completed (SMD-1259, found by this change's review
-pass; closed by change 74). Neither is 404. Nothing exercised the path: no test
+pass; closed by change 75). Neither is 404. Nothing exercised the path: no test
 named `.well-known`, and `deploy/smoke.sh` only ever POSTed to the endpoint.
 Local Claude Code over `x-brain-key` never asks, which is why it stayed
 invisible in development.
@@ -4826,7 +4826,7 @@ with no key and following redirects, as the SDK client does, and naming the URL
 and code that missed; the base URL must carry a scheme and no query string, or
 the script refuses it rather than derive the wrong origin. It was the
 one check a Supabase deployment cannot pass, and that failure is real; change
-74's checks 3 and 4 are the others.
+75's checks 3 and 4 are the others.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
 
@@ -4847,7 +4847,7 @@ found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
 #425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one;
-the method axis is closed by change 74, which answers GET with 405 before
+the method axis is closed by change 75, which answers GET with 405 before
 `authenticate()`. The path axis (a mount point) stays open there too.
 The concrete reason the path axis waits: a mount at `/` makes the connector URL
 the mount point, and a proxy that forwards under an unstripped prefix — the shape
@@ -10783,7 +10783,7 @@ nested `.or()` keeps it off the shim. SMD-1541 and SMD-1525 as before.
 **Upstream status:** not applicable — the shim is this fork's (fix 13); the
 worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**
 
-### 74. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
+### 75. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
 
 `server-portable/index.ts`, `server-portable/test-server.ts` ([13]),
 `deploy/smoke.sh` (check 3), `deploy/README.md`, `SETUP.md` (Linear SMD-1259,

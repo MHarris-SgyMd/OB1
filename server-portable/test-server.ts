@@ -133,7 +133,7 @@ console.log("\n[3] CORS preflight");
   // only ([13]), but this header says what a browser may send so it can hear
   // our answer, and a browser-hosted SDK client holding a session id sends
   // DELETE and accepts the 405. Hiding GET or DELETE here would turn that 405
-  // into a network error. FORK.md change 74.
+  // into a network error. FORK.md change 75.
   assert(p.methods === "GET, POST, OPTIONS, DELETE", `allow-methods advertises GET and DELETE, so a browser hears the 405 (${p.methods})`);
 }
 
@@ -181,7 +181,7 @@ console.log("\n[7] initialize");
   assert(result?.capabilities != null, "capabilities returned");
 
   // The transport wants both Accept tokens on a POST; the patch supplies
-  // whichever is missing. Before change 74 it tested only the SSE token, so
+  // whichever is missing. Before change 75 it tested only the SSE token, so
   // this request reached the transport unpatched and got 406.
   const sseOnly = await fetch(BASE, { method: "POST", headers: { ...AUTH, Accept: "text/event-stream" }, body: INIT });
   assert(sseOnly.status === 200 && (await mcpBody(sseOnly))?.result != null, `Accept: text/event-stream alone is patched to both tokens → 200 (${sseOnly.status})`);
@@ -294,7 +294,7 @@ console.log("\n[12] Query log flag — off by default, so the guard writes nothi
 console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream nothing closes (SMD-1259, upstream #424)");
 {
   // The MCP handler is registered for POST only and app.notFound answers
-  // everything else with 405 before authenticate(); FORK.md change 74 has the
+  // everything else with 405 before authenticate(); FORK.md change 75 has the
   // mechanism this closes (an authenticated GET opened an SSE stream the
   // per-request transport never closed). Drilled by registering the handler
   // with app.all and removing app.notFound — the pre-change shape: every
@@ -316,7 +316,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
     ["PUT, right key", "/", { method: "PUT", headers: AUTH, body: INIT }],
     ["PATCH, right key", "/", { method: "PATCH", headers: AUTH, body: INIT }],
     // DELETE too: there is no session here for it to end, and the SDK client
-    // accepts 405 from terminateSession() by spec (change 74 has the rest).
+    // accepts 405 from terminateSession() by spec (change 75 has the rest).
     ["DELETE, right key", "/", { method: "DELETE", headers: AUTH }],
     ["DELETE, no key", "/", { method: "DELETE", headers: H }],
     // One of the two shapes SMD-1246's review found falling past the

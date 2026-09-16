@@ -12,7 +12,7 @@
 # captures a thought, so it is safe against production.
 #
 # Checks 2, 3 and 4 are the ones a Supabase Edge Function deployment cannot
-# pass; FORK.md changes 42 and 74 say why, and why those failures are real.
+# pass; FORK.md changes 42 and 75 say why, and why those failures are real.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -92,7 +92,7 @@ done
 [ -z "$miss" ] && ok "OAuth discovery at the origin root → HTTP 404 (no OAuth here; the connector proceeds on the key)" \
                || bad "OAuth discovery: $miss (expected 404 — route /.well-known/ to the server or 404 it at the proxy; FORK.md change 42)"
 
-# 3. GET at the endpoint is 405: it serves POST only (FORK.md change 74; before
+# 3. GET at the endpoint is 405: it serves POST only (FORK.md change 75; before
 #    it, a keyed GET hung on an SSE stream the per-request transport never
 #    closed). Probed with NO key — the answer comes before authenticate(), and
 #    status() follows redirects, on which curl forwards a custom header to
@@ -101,7 +101,7 @@ done
 #    upstream's server has no method guard (#424, their PR #425).
 code=$(status "$BASE/")
 [ "$code" = "405" ] && ok "GET the endpoint → HTTP 405 (POST only; the SDK client's expected answer to its stream probe)" \
-                    || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 74)"
+                    || bad "GET the endpoint → HTTP $code (expected 405: the method guard is missing, or a front proxy answers GET / itself — forward GET to the server; FORK.md change 75)"
 
 # 4. GET /health is 200 with the body `ok`: the liveness target for a platform
 #    probe that can only GET. "$BASE/health" is right whether or not the proxy
@@ -112,7 +112,7 @@ code=$(status "$BASE/")
 #    proxy that redirects unknown paths to a landing page answers 200 too.
 hb=$(curl -sL --max-redirs 5 --max-time 20 "$BASE/health")
 [ "$hb" = "ok" ] && ok "GET /health → 200 ok (the liveness target for GET-only probes)" \
-                 || bad "GET /health → '$(printf '%s' "$hb" | head -c 60)' (expected the body 'ok': route GET /health to the server as you route POST; FORK.md change 74)"
+                 || bad "GET /health → '$(printf '%s' "$hb" | head -c 60)' (expected the body 'ok': route GET /health to the server as you route POST; FORK.md change 75)"
 
 # 5. Protocol handshake.
 pv=$(rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
