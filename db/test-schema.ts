@@ -3578,12 +3578,31 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
       FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
   assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
 
-  // prune_query_log: default arg, bounded delete, and a refusal on a bad window.
+  // prune_query_log: default arg, bounded delete, the strict bound, and a
+  // refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
   const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
   assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  // The bound is `logged_at < now()`, strict, and now() is the transaction's
+  // start, read from a clock that under PGlite has millisecond grain, so a row
+  // inserted a few statements earlier can share the prune's now() and survive
+  // prune_query_log(0) (flaked once, SMD-1498). Age the rows; the assumption
+  // was the flaw, not the function.
+  await db.exec(`UPDATE query_log SET logged_at = logged_at - interval '1 hour'`);
   const wiped = (await db.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n;
-  assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes everything older than now() (${wiped})`);
+  assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes every row older than now() (${wiped} of ${nBefore})`);
+  // The same now(), on purpose: a row logged in the prune's own transaction is
+  // kept — the strict bound the COMMENT states ("older than now()"). now() is
+  // the transaction's start on Postgres proper too; only the clock's grain
+  // differs, and strictness decides only this equality: a `<=` bound, or one
+  // read from clock_timestamp(), fails this assertion and no other here.
+  await db.transaction(async (tx) => {
+    await tx.exec(`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'logged in the prune''s own transaction')`);
+    const sameTick = Number((await tx.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n);
+    const left = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
+    assert(sameTick === 0 && left === 1, "a row logged at the prune's own now() is kept — the bound is strict (logged_at < now())");
+    await tx.rollback();
+  });
   let refusedNeg = false;
   try { await db.exec(`SELECT prune_query_log(-1)`); } catch { refusedNeg = true; }
   assert(refusedNeg, "prune_query_log refuses a negative window");
