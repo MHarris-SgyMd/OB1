@@ -30,10 +30,10 @@
 
 import { SQL } from "bun";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, parseSetConfig, versionAtLeast } from "./config.mjs";
+import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyFunctionSettings, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { applyFunctionSettings, applyMigrations, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -366,6 +366,158 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
     SELECT (SELECT prorows FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure) AS mt,
            (SELECT prorows FROM pg_proc WHERE oid = 'search_thoughts_keyword(text, int, int, jsonb)'::regprocedure) AS kw`;
   assert(Number(mt) === 10 && Number(kw) === 25, `match_thoughts declares ROWS 10 and search_thoughts_keyword ROWS 25 on a real server (${mt}, ${kw})`);
+}
+
+console.log("\n[5d] The routing count is skipped when a sample of the heap says the filter is far too broad, and runs otherwise exactly as before (migration 037)");
+{
+  // 037 gates 014's capped GIN collection — the statement every filtered call
+  // opened with, whose cost is the number of matching rows — behind a sample
+  // of ROUTE_SAMPLE_PAGES pages, skipping it when the sample puts the filter
+  // at ten times the exact threshold on eight hits over three pages. The skip
+  // needs a table past ten times the threshold, which PGlite's [8e] cannot
+  // hold; this section can. 25,000 rows at the configured width, generated on
+  // the server (a client round trip per row would be the slow part), every row
+  // tagged broad and one in 250 also tagged thin. The HNSW index is dropped for
+  // the load and put back on the emptied table at the end: maintaining it on
+  // 25,000 inserts at the shipped width is a minute the assertions here do not
+  // need, and without it the walk is a GIN bitmap and a sort — exact, and slow
+  // in a way that does not matter to a section about the statement BEFORE it.
+  await sql`DELETE FROM thoughts`;
+  const [{ hnswDef }] = await sql.unsafe(`SELECT pg_get_indexdef('thoughts_embedding_idx'::regclass) AS "hnswDef"`);
+  await sql.unsafe(`DROP INDEX thoughts_embedding_idx`);
+  // User triggers off for the load, as the bench does: 008's audit trigger
+  // would write a row per row (25,000 here, then 25,000 more for the DELETE)
+  // into a table later sections read differentially — nothing this section
+  // measures — and the heap they leave behind moves a timing-sensitive race
+  // that follows ([6g]). Re-enabled in the finally block.
+  await sql.unsafe(`ALTER TABLE thoughts DISABLE TRIGGER USER`);
+  // Read by the finally block below as well as the section.
+  const opts037 = { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f: string) => f.startsWith("037") };
+  const body = async () => String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = ${MATCH_THOUGHTS_SIGNATURE}::regprocedure`)[0].s);
+  let failure: unknown;
+  try {
+    const N = 25_000;
+    await sql.unsafe(`
+      INSERT INTO thoughts (content, metadata, embedding)
+      SELECT 'gate ' || r.i,
+             CASE WHEN r.i % 250 = 0 THEN '{"broad": true, "thin": true}' ELSE '{"broad": true}' END::jsonb,
+             -- correlated through r.i so the subquery runs per row: uncorrelated
+             -- it is an InitPlan evaluated once, and every row gets one vector
+             (SELECT ('[' || string_agg((random() - 0.5)::text, ',') || ']')::vector FROM generate_series(1, ${EMBEDDING_DIM} + 0 * r.i))
+      FROM generate_series(1, ${N}) AS r(i)`);
+    await sql.unsafe(`VACUUM ANALYZE thoughts`);
+    const [{ pages }] = await sql.unsafe(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`);
+    assert(Number(pages) > 0 && Number(pages) < ROUTE_ESTIMATE_MIN_PAGES, `${N.toLocaleString()} rows at ${EMBEDDING_DIM} dimensions are ${pages} heap pages (the vectors are TOASTed), under the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES}`);
+
+    // The floor lowered to 0 for the section, so the gate runs on this heap: 037
+    // applied through test-support with the one override SchemaOptions carries.
+    await applyMigrations(URL_, { ...opts037, routeEstimateMinPages: 0 });
+    assert(/IF v_pages >= 0 THEN/.test(await body()) && /TABLESAMPLE SYSTEM \(v_pct\)/.test(await body()), "037 is installed with its floor at 0: the sample runs on every filtered call to this table");
+
+    // The observable: 014's collection is one scan of the GIN index per call,
+    // and nothing else in a call to this table scans it the same way twice — so
+    // the difference in GIN scans per call between 020's body and 037's, on the
+    // same table, is the collection skipped. pg_stat counts are flushed on
+    // request (PG 15+), then read after one more statement.
+    const ginScans = async () => {
+      await sql`SELECT pg_stat_force_next_flush()`;
+      await sql`SELECT 1`;
+      return Number((await sql`SELECT idx_scan FROM pg_stat_user_indexes WHERE indexrelname = 'thoughts_metadata_idx'`)[0].idx_scan);
+    };
+    const { unitVector } = seededRandom(1463);
+    // Twenty, not ten: the gate misses a broad filter when its eight-page draw
+    // reaches fewer than three pages — measured 17 in 1,000 draws of the
+    // statement and 2 in 300 calls through the function on this fixture — so
+    // ten calls failed the 0.8 band once in about two thousand runs (a merge
+    // re-run met it); twenty calls at 0.75 fail once in about a million.
+    const QUERIES = 20;
+    const queries = Array.from({ length: QUERIES }, () => `[${unitVector(EMBEDDING_DIM).join(",")}]`);
+    const exactTop = (qv: string, filter: string) =>
+      sql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL enable_indexscan = off`);
+        await tx.unsafe(`SET LOCAL enable_bitmapscan = off`);
+        return tx.unsafe(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> '${qv}'::vector, id LIMIT 10`);
+      });
+    /** GIN scans per call and exact-answer agreement, for one filter under the installed body. */
+    const measure = async (filter: string): Promise<{ scansPerCall: number; agree: number }> => {
+      let agree = 0;
+      const g0 = await ginScans();
+      for (const qv of queries) {
+        const want = new Set((await exactTop(qv, filter)).map((r: { id: string }) => r.id));
+        const got = await sql.unsafe(`SELECT id FROM match_thoughts('${qv}'::vector, -1.0, 10, '${filter}'::jsonb)`);
+        if (got.length === 10 && got.every((r: { id: string }) => want.has(r.id))) agree++;
+      }
+      // The oracle runs inside the bracket too, but with index and bitmap scans
+      // off it seq-scans and touches no GIN index; what the bracket counts is
+      // the function's own scans.
+      return { scansPerCall: ((await ginScans()) - g0) / QUERIES, agree };
+    };
+    const BROAD = '{"broad": true}';
+    const THIN = '{"thin": true}';
+    const gatedBroad = await measure(BROAD);
+    const gatedThin = await measure(THIN);
+    assert(gatedBroad.agree === QUERIES, `under 037, a filter matching every row (${N.toLocaleString()}, the walk) returns the exact top-10 on ${gatedBroad.agree}/${QUERIES} queries — without an HNSW index the walk is exact`);
+    assert(gatedThin.agree === QUERIES, `…and a filter matching ${N / 250} rows (the exact branch) on ${gatedThin.agree}/${QUERIES}`);
+
+    // 020's body on the same table — the collection on every filtered call.
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("020") });
+    assert(!/TABLESAMPLE/.test(await body()), "020 re-applied over 037: the body has no sample (the state a hand re-apply of 020 leaves; preflight's remedy names 037 for that reason)");
+    const plainBroad = await measure(BROAD);
+    const plainThin = await measure(THIN);
+    const saved = plainBroad.scansPerCall - gatedBroad.scansPerCall;
+    // The sample skips the collection whenever its draw lands on three or more
+    // pages, which a binomial draw of ~8 pages fails about twice in a hundred
+    // (the QUERIES note above); the rest of a call's GIN scans (the walk's
+    // bitmap) are the same under both bodies and cancel. At most five misses
+    // in twenty is the band.
+    assert(saved >= 0.75 && saved <= 1.0, `on the broad filter 037 makes ${saved.toFixed(2)} fewer GIN scans per call than 020 — the collection skipped (020: ${plainBroad.scansPerCall.toFixed(2)} a call, 037: ${gatedBroad.scansPerCall.toFixed(2)})`);
+    assert(plainThin.scansPerCall === gatedThin.scansPerCall, `on the thin filter both bodies scan the GIN index the same ${gatedThin.scansPerCall.toFixed(2)} times a call — the collection ran, and the exact branch answered`);
+    assert(plainBroad.agree === QUERIES && plainThin.agree === QUERIES, "…and 020's answers are the same exact top-10 (the gate changed the route, not the answer)");
+
+    // The sample's cost against the collection's on this table, printed for the
+    // record: the header's numbers are a bench's, this is one server on one day.
+    const timed = async (stmt: string, n = 20): Promise<number> => {
+      const ts: number[] = [];
+      for (let i = 0; i < n; i++) { const t0 = performance.now(); await sql.unsafe(stmt); ts.push(performance.now() - t0); }
+      return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
+    };
+    const sampleMs = await timed(`SELECT count(*) FILTER (WHERE s.hit), count(DISTINCT s.blk) FILTER (WHERE s.hit), count(DISTINCT s.blk)
+      FROM (SELECT (t.metadata @> '${BROAD}'::jsonb AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
+            FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`);
+    const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
+    console.log(`      (${ROUTE_SAMPLE_PAGES} pages sampled of ${pages}: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
+
+  } catch (e) {
+    failure = e;
+    throw e;
+  } finally {
+    // The shipped state back on every path — a throw above would otherwise
+    // leave 25,000 rows and no HNSW index to [6]..[16] (first review pass): 037
+    // with its floor, and 027, because 020's file also redefines
+    // search_thoughts_hybrid as 020 had it, without 027's relative floor, and
+    // [15] holds that floor (the first run of this section left 020's hybrid
+    // behind and [15] failed on it); the table emptied; the index rebuilt
+    // (instant on no rows). The table and the index first — they depend on
+    // nothing — so a throw from the re-apply cannot leave them behind (second
+    // review pass); and when the section itself threw, a cleanup that fails
+    // on the same fault is reported, not thrown, so the cause is what the
+    // run shows (fourth review pass).
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql.unsafe(`ALTER TABLE thoughts ENABLE TRIGGER USER`);
+      // The 25,000 dead tuples and their pages go too, so the sections after
+      // start from the heap they would have had without this one.
+      await sql.unsafe(`VACUUM thoughts`);
+      await sql.unsafe(String(hnswDef));
+      await applyMigrations(URL_, { ...opts037, only: (f) => f.startsWith("027") || f.startsWith("037") });
+      assert(new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await body()), `037 restored with the shipped floor of ${ROUTE_ESTIMATE_MIN_PAGES} pages`);
+      assert(/ob1:relative-floor/.test(String((await sql`SELECT prosrc AS s FROM pg_proc WHERE oid = 'search_thoughts_hybrid(vector, text, float, int, jsonb, float, float)'::regprocedure`)[0].s)),
+        "…and search_thoughts_hybrid carries 027's sentinel again, not the 020 body the re-apply above installed");
+    } catch (cleanup) {
+      if (failure === undefined) throw cleanup;
+      console.error(`      [5d] cleanup failed after the section did: ${(cleanup as Error).message}`);
+    }
+  }
 }
 
 console.log("\n[6] The unique partial index is enforced by the server");
@@ -838,6 +990,127 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
       `…and once the captures commit both edits complete — told DUPLICATE_CONTENT, since each text's row is the other's — with no deadlock (${e1.error ?? JSON.stringify(results[0])}; ${e2.error ?? JSON.stringify(results[1])})`);
     await Promise.all(conns.map((c) => c.close()));
   }
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[6g] delete_thought joins the lock order: an accept racing a delete of the superseded thought deadlocks without the advisory lock and does not with it, forty tries each (migration 036, SMD-1462)");
+{
+  await sql`DELETE FROM thoughts`;
+  // Z is the older, superseded thought — the delete's target, and the row the
+  // accept's FK check takes KEY SHARE on; S the newer that supersedes it; P a
+  // pending directed proposal. review(P,'accept') writes S.supersedes = Z
+  // through update_thought. A small 0–3 ms stagger on each side, as 033's pass
+  // ran it. Every arm builds a fresh pair, so a deadlock's rollback leaves
+  // nothing behind, and DELETE FROM thoughts between tries clears the rest.
+  let n = 0;
+  const mkCase = async () => {
+    n += 1;
+    const z = ((await sql`SELECT upsert_thought(${"older, superseded — case " + n}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+    const s = ((await sql`SELECT upsert_thought(${"newer, supersedes it — case " + n}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+    const p = (await sql`SELECT record_supersession_proposal(${z}::uuid, ${s}::uuid, 'newer_supersedes_older', 0.9, 'raced by test [6g]', 0.9, 'test:1462') AS id`)[0].id as string;
+    return { z, s, p };
+  };
+  const jitter = () => Bun.sleep(Math.random() * 3);
+  type R = { ok: boolean; error?: string };
+
+  // Arm 1 — the pre-036 delete, by hand: a single DELETE FROM thoughts holding
+  // no advisory lock, racing the shipped review. This is 009's body minus the
+  // one line 036 adds, so the cycle it reproduces is exactly the one the fix
+  // closes. (033's pass measured 23 of 40 against the 032 review; this arm
+  // races the shipped 036 review, but the cycle is on the rows Z and P and does
+  // not depend on where the review takes the advisory lock — so the count
+  // varies run to run and the arm only asserts it happens at all.) This is the
+  // one deliberately stochastic assertion in the suite: with the delete fully
+  // lockless the per-try cycle rate is roughly half, so P(0 deadlocks in 40) is
+  // on the order of 1e-15 — a spurious pass is not a practical risk.
+  {
+    const connR = new SQL({ url: URL_, max: 1 });
+    const connD = new SQL({ url: URL_, max: 1 });
+    let deadlocks = 0;
+    for (let i = 0; i < 40; i++) {
+      const { z, p } = await mkCase();
+      const review = (async () => { await jitter(); try { await connR`SELECT review_supersession_proposal(${p}::uuid, 'accept') AS r`; return ""; } catch (e) { return (e as Error).message; } })();
+      const del = (async () => { await jitter(); try { await connD.begin(async (tx: SQL) => { await tx`SET LOCAL statement_timeout = '8s'`; await tx`DELETE FROM thoughts WHERE id = ${z}::uuid`; }); return ""; } catch (e) { return (e as Error).message; } })();
+      const [er, ed] = await Promise.all([review, del]);
+      if (/deadlock detected/.test(er) || /deadlock detected/.test(ed)) deadlocks += 1;
+      await sql`DELETE FROM thoughts`;
+    }
+    await connR.close(); await connD.close();
+    assert(deadlocks > 0, `the lockless delete (009's body, pre-036) racing an accept closes the cycle the ticket measured — ${deadlocks} of 40 deadlocked`);
+  }
+
+  // Arm 2 — the shipped delete_thought (036), which takes the supersession lock
+  // before the DELETE: forty tries, no 40P01. The delete is never the victim
+  // now; whichever writer runs first, its cascade still takes the proposal.
+  {
+    const connR = new SQL({ url: URL_, max: 1 });
+    const connD = new SQL({ url: URL_, max: 1 });
+    let deadlocks = 0, deleteVictim = 0, proposalLeft = 0;
+    for (let i = 0; i < 40; i++) {
+      const { z, p } = await mkCase();
+      const review = (async () => { await jitter(); try { return ((await connR`SELECT review_supersession_proposal(${p}::uuid, 'accept') AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+      const del = (async () => { await jitter(); try { return ((await connD`SELECT delete_thought(${z}::uuid, NULL::jsonb) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+      const [rr, rd] = await Promise.all([review, del]);
+      if (/deadlock detected/.test(rr.error ?? "") || /deadlock detected/.test(rd.error ?? "")) deadlocks += 1;
+      if (rd.ok !== true) deleteVictim += 1;
+      if (Number((await sql`SELECT count(*)::int AS c FROM supersession_proposals WHERE id = ${p}::uuid`)[0].c) !== 0) proposalLeft += 1;
+      await sql`DELETE FROM thoughts`;
+    }
+    await connR.close(); await connD.close();
+    assert(deadlocks === 0, `forty accepts raced forty shipped deletes, no 40P01 (${deadlocks})`);
+    assert(deleteVictim === 0, `the shipped delete was never the deadlock victim — it completed every try (${deleteVictim})`);
+    assert(proposalLeft === 0, `the delete's cascade still removed the proposal every try (${proposalLeft})`);
+  }
+  await sql`DELETE FROM thoughts`;
+}
+
+console.log("\n[6h] update_thought naming supersedes races a delete of that target: never a raw 23503, always SUPERSEDES_NOT_FOUND or a clean write — the same lock closes it (migration 036, SMD-1462)");
+{
+  await sql`DELETE FROM thoughts`;
+  // No proposal row here (a plain edit naming supersedes deadlocked 0 of 40
+  // pre-fix, the ticket says — nothing for the cascade to fight over). What
+  // the delete-side lock closes is the OTHER thing the same probe found: a
+  // target deleted between update_thought's existence walk and its UPDATE
+  // surfaced as a raw 23503 rather than the SUPERSEDES_NOT_FOUND 032's COMMENT
+  // promises. update_thought holds the supersession lock across both its walk
+  // and its UPDATE whenever supersedes is named (033); with delete_thought now
+  // contending on it, a delete can no longer slip between the two.
+  let n = 0;
+  const mkPair = async () => {
+    n += 1;
+    const z = ((await sql`SELECT upsert_thought(${"supersedes target — pair " + n}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id;
+    const s = ((await sql`SELECT upsert_thought(${"the newer note — pair " + n}, '{"metadata":{}}'::jsonb, ${unit(1)}::vector) AS r`)[0].r as { id: string }).id;
+    return { z, s };
+  };
+  const jitter = () => Bun.sleep(Math.random() * 3);
+  type R = { ok: boolean; error?: string };
+  const connU = new SQL({ url: URL_, max: 1 });
+  const connD = new SQL({ url: URL_, max: 1 });
+  let fkViolations = 0, unexpected = 0, pointerLeft = 0, notFound = 0, wrote = 0, deleteFailed = 0;
+  for (let i = 0; i < 40; i++) {
+    const { z, s } = await mkPair();
+    // Build the provenance jsonb server-side: binding a JS string and casting
+    // ::jsonb double-encodes it (jsonb_typeof 'string'), which update_thought's
+    // 032 guard refuses — the Bun binding trap 005 rejects.
+    const upd = (async () => { await jitter(); try { return ((await connU`SELECT update_thought(${s}::uuid, p_provenance => jsonb_build_object('supersedes', ${z}::uuid)) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+    const del = (async () => { await jitter(); try { return ((await connD`SELECT delete_thought(${z}::uuid, NULL::jsonb) AS r`) as { r: R }[])[0].r; } catch (e) { return { ok: false, error: (e as Error).message } as R; } })();
+    const [ru, rd] = await Promise.all([upd, del]);
+    if (/\b23503\b|thoughts_supersedes_fkey/.test(ru.error ?? "")) fkViolations += 1;
+    else if (ru.ok === true) wrote += 1;
+    else if (ru.error === "SUPERSEDES_NOT_FOUND") notFound += 1;
+    else unexpected += 1;
+    if (rd.ok !== true) deleteFailed += 1;
+    // Whichever way it fell, Z is gone and S points at nothing: never set (the
+    // walk found Z already deleted), or set then cleared by 025's SET NULL.
+    const after = (await sql`SELECT supersedes FROM thoughts WHERE id = ${s}::uuid`)[0] as { supersedes: string | null } | undefined;
+    if (!after || after.supersedes !== null) pointerLeft += 1;
+    await sql`DELETE FROM thoughts`;
+  }
+  await connU.close(); await connD.close();
+  assert(fkViolations === 0, `no raw 23503 in forty tries — 032's COMMENT is honoured, not tightened (${fkViolations})`);
+  assert(unexpected === 0, `every update_thought answered SUPERSEDES_NOT_FOUND or wrote cleanly — ${notFound} not-found, ${wrote} wrote, ${unexpected} other`);
+  assert(deleteFailed === 0, `the delete completed every try (${deleteFailed})`);
+  assert(pointerLeft === 0, `S.supersedes is NULL after every race — never set, or set then cleared by the delete's SET NULL (${pointerLeft})`);
   await sql`DELETE FROM thoughts`;
 }
 

@@ -199,7 +199,7 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 67, 035 change 66).
+034 change 65, 035 change 66, 036 change 68, 037 change 70).
 
 ## What changed relative to the guide
 
@@ -975,6 +975,10 @@ OB1_BENCH_SCALES=10000,100000 ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.ts
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
+# Before/after a redefinition of match_thoughts, from one tree: the after
+# arm's schema stops at the named migration (the function before 037 here).
+OB1_BENCH_UPTO=036 ./with-postgres.sh bun bench-hnsw.ts
+
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
 # it, every later run under the same name finds it, checks it, applies any
 # migration the tree gained since, and skips to the oracle. One corpus per name.
@@ -1003,7 +1007,9 @@ filtered branch's statement with its plpgsql variables rewritten as parameters,
 and EXPLAINs it under both custom and generic planning on the filter the
 function routes to it (the walk on the thinnest tier above the threshold, the
 exact branch on the broadest under it, the routing count on the broadest, the
-thinnest and the empty filter), because plpgsql may use either plan. Section D
+thinnest and the empty filter, and 037's sample of the heap — which gates that
+count on a large table — on the same three), because plpgsql may use either
+plan. Section D
 runs the walk's own statement on the thin and empty filters — which the
 function never walks for — under a forced generic plan, to show what the seeded
 scan bounds do when the walk is reached with next to nothing to find. Section
@@ -1310,6 +1316,16 @@ podman volume rm ob1-pg-keep-<name>
   populated 033 whose re-capture had just filled a pointer: the pointer stays
   (no data change), the next such re-capture fills nothing, and no capture
   takes the supersession lock.
+- **The routing count is gated by a sample of the heap** (migration 037).
+  [5d] loads 25,000 rows at the configured width, applies 037 with its floor
+  lowered to zero, and counts GIN index scans per call: the broad filter makes
+  one fewer under 037 than under 020's body (the collection skipped), the thin
+  filter the same number (the collection ran), and both answer exactly.
+  `test-schema.ts` [8e] holds the body's shape and the three conditions, and
+  judges five sample draws by the rule on a table too small to skip;
+  `test-upgrade.ts` [14] applies 037 onto a populated 036 — no column,
+  signature, row or privilege moves — and, after a hand re-apply of 014 puts
+  the 4-argument form back, applies 037 alone and finds one form again.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the

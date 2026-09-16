@@ -4,6 +4,12 @@
 // SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
 // ob1-original-import: npm:@supabase/supabase-js@2
 // Revert with: node scripts/migrate-to-sql-shim.mjs --revert <file>
+// ob1-fork (SMD-1228): a thought's content and vector are written through the
+// functions that own them — update_thought for an edit, the 3-argument
+// upsert_thought for a capture — so the fingerprint (003/018), the model label
+// (021) and the chunk rows (022) follow the text and vector, and the actor
+// reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
+// against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -40,6 +46,8 @@ import {
   asString,
   asInteger,
   computeContentFingerprint,
+  embedText,
+  embeddingModelUsed,
 } from "../_shared/helpers.ts";
 import {
   CLASSIFIER_MODEL_OPENROUTER,
@@ -415,20 +423,43 @@ async function upsertProfile(
   };
 
   if (existingId) {
-    const { error: updateError } = await supabase
+    // The text and its vector through update_thought (db/migrations/033), so
+    // the fingerprint follows the text (003/018), the label the vector (021),
+    // and the actor reaches the audit (008); the patch is shallow-merged into
+    // metadata, and every key here is rewritten each run. The vector is made
+    // here: a content edit WITHOUT one sets the row's vector and label NULL —
+    // and a db/reembed.ts pass gives this row a vector between runs, so an
+    // unembedded rewrite would un-embed the profile every night (the first
+    // review pass). A raw update of `content` left the fingerprint describing
+    // the previous profile, and the vector describing it too. An embedding
+    // failure fails the run — the previous profile stands, whole.
+    const embedding = await embedText(profileContent);
+    const { data, error: updateError } = await supabase.rpc("update_thought", {
+      p_id: existingId,
+      p_content: profileContent,
+      p_metadata_patch: profileMetadata,
+      p_embedding: embedding,
+      p_embedding_model: embeddingModelUsed(),
+    });
+    if (updateError) {
+      throw new Error(`Failed to update existing profile (id=${existingId}): ${updateError.message}`);
+    }
+    const result = (data ?? {}) as Record<string, unknown>;
+    if (result.ok !== true) {
+      throw new Error(`Failed to update existing profile (id=${existingId}): update_thought refused (${String(result.error ?? "unknown")})`);
+    }
+    // The enhanced-thoughts columns the function does not know: a raw update
+    // that carries neither content nor vector, so nothing it writes goes stale.
+    const { error: sidecarError } = await supabase
       .from("thoughts")
       .update({
-        content: profileContent,
         type: "person_note",
         importance: 5,
         source_type: "system_profile",
-        metadata: profileMetadata,
-        updated_at: now,
       })
       .eq("id", existingId);
-
-    if (updateError) {
-      throw new Error(`Failed to update existing profile (id=${existingId}): ${updateError.message}`);
+    if (sidecarError) {
+      throw new Error(`Failed to update existing profile (id=${existingId}): ${sidecarError.message}`);
     }
     return { id: existingId, created: false };
   }
@@ -528,6 +559,13 @@ Deno.serve(async (req) => {
 
   if (!OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
     return json({ error: "No LLM API keys configured" }, 503);
+  }
+  // The profile is embedded on every rewrite (FORK.md change 69), and
+  // embedText() knows OpenRouter and OpenAI only: an Anthropic-only
+  // configuration can synthesise the profile and then cannot store it.
+  // Refused here, before the LLM call is paid for.
+  if (!OPENROUTER_API_KEY && !OPENAI_API_KEY) {
+    return json({ error: "An embedding key is required: set OPENROUTER_API_KEY or OPENAI_API_KEY (the profile carries a vector; ANTHROPIC_API_KEY alone cannot embed)" }, 503);
   }
 
   const targetName = url.searchParams.get("name") || undefined;

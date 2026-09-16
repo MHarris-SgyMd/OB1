@@ -118,6 +118,13 @@ export type SchemaOptions = {
   trgm?: boolean;
   /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
   backfillLimit?: number | null;
+  /**
+   * The heap size, in pages, under which 036's match_thoughts does not sample
+   * before its routing count. The shipped floor (ROUTE_ESTIMATE_MIN_PAGES) is
+   * 64 MB of heap; a suite that wants the gate on a table of a few thousand
+   * rows applies 036 with 0 and restores the default afterwards.
+   */
+  routeEstimateMinPages?: number;
 };
 
 /**
@@ -135,7 +142,7 @@ export function substitute(sql: string, opts: SchemaOptions): string {
   // shell migratorEnv strips) must not disagree by which helper applied it.
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: opts.backfillLimit ?? null })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: opts.backfillLimit ?? null, routeEstimateMinPages: opts.routeEstimateMinPages })
   );
 }
 
@@ -473,10 +480,13 @@ export function requireDatabaseUrl(script: string): string {
  * text under the same rewrite.
  *
  * `route` is the statement that decides between the filtered branches: the
- * capped collection of matching ids that runs on EVERY filtered call. It is a
- * plpgsql SELECT INTO rather than a RETURN QUERY, so it is extracted on its own.
+ * capped collection of matching ids that ran on EVERY filtered call until 036
+ * gated it. It is a plpgsql SELECT INTO rather than a RETURN QUERY, so it is
+ * extracted on its own. `estimate` is 036's gate — the TABLESAMPLE count that
+ * runs before it on a large heap and decides whether it runs at all — the
+ * other SELECT INTO in the body.
  */
-export type Branch = "unfiltered" | "walk" | "exact" | "route";
+export type Branch = "unfiltered" | "walk" | "exact" | "route" | "estimate";
 
 /**
  * The one match_thoughts in `public`, whatever its signature: the benches'
@@ -516,6 +526,13 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
     const m = /SELECT array_agg\(s\.id\) INTO v_ids\s+(FROM \([\s\S]*?\) s);/.exec(def);
     if (!m) throw new Error("match_thoughts has no `SELECT array_agg(s.id) INTO v_ids` routing statement; the bench's rewrite does not apply");
     block = `SELECT array_agg(s.id) ${m[1]}`;
+  } else if (branch === "estimate") {
+    // 036's gate: `SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen
+    // FROM (... TABLESAMPLE SYSTEM (v_pct)) s;` — minus the INTO. A body from
+    // before 036 has none, and says so.
+    const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?TABLESAMPLE SYSTEM[\s\S]*?\) s);/.exec(def);
+    if (!m) throw new Error("match_thoughts has no TABLESAMPLE estimate before its routing statement (a body from before 036); the bench's rewrite does not apply");
+    block = `SELECT ${m[1]} ${m[2]}`;
   } else {
     // Three RETURN QUERY branches: unfiltered, the exact answer for a thin
     // filter, and the HNSW walk for a broad one. Only the walk tests
@@ -625,7 +642,7 @@ function declaredLocals(def: string): Map<string, string> {
  * 020 re-based it on v_base, and a redefinition that raises the floor
  * (SMD-1464) moves every consumer at once (SMD-1018 review pass).
  */
-export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number }> {
+export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number; vPct?: number }> {
   const { def, argNames } = await matchThoughtsDef(sql);
   const locals = declaredLocals(def);
   if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
@@ -645,8 +662,18 @@ export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch:
         half_life_days: "90.0::float",
       },
     });
-  const [row] = await sql.unsafe(`SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact`);
-  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact) };
+  // 036's sample share too, where the body declares it: the fraction of the
+  // heap TABLESAMPLE reads, evaluated NOW against this table. An explainer
+  // that substituted the declaring expression instead — pg_relation_size is
+  // volatile — left the planner unable to size the sample scan; it priced a
+  // scan of the whole heap, and at ten million rows that estimate crossed
+  // jit_above_cost and the explained statement paid ~50 ms of JIT the
+  // function never pays (its custom plan knows the parameter's value). The
+  // bench passes this back as the local's override (SMD-1463).
+  const [row] = await sql.unsafe(
+    `SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact${locals.has("v_pct") ? `, ${resolve("v_pct")}::float AS v_pct` : ""}`
+  );
+  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact), ...(locals.has("v_pct") ? { vPct: Number(row.v_pct) } : {}) };
 }
 
 /**

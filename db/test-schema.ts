@@ -32,6 +32,8 @@ import {
   MATCH_COUNT_CEILING,
   MATCH_THOUGHTS_SIGNATURE,
   QUERY_LOG,
+  ROUTE_ESTIMATE_MIN_PAGES,
+  ROUTE_SAMPLE_PAGES,
   UPDATE_THOUGHT_SIGNATURE,
   migrationValues,
   parseSetConfig,
@@ -690,15 +692,122 @@ console.log("\n[8d] rows without a vector or chunks do not count towards the wal
   assert(got.rows.every((r) => r.content.startsWith("scoreable")), "…and only those");
 }
 
+// ── 8e. Migration 037 — a sample of the heap before the routing count ────────
+//
+// Every filtered call opened with the capped GIN collection, whose cost is the
+// number of matching rows — 240 ms at 50% of ten million (SMD-1018). 037 reads
+// eight random pages first, on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or
+// more, and skips the collection when the sample puts the filter at ten times
+// the exact threshold on at least eight hits over at least three pages. PGlite
+// holds the shape and what a small table can show: under the floor nothing
+// runs but 014's collection; with the floor lowered to zero the gate runs on
+// every filtered call, cannot skip — condition 1 needs a table past ten times
+// the threshold — and the answers are still exact. The skip itself is
+// db/test-live.ts [5d]'s, on a real server with rows enough to reach it.
+
+console.log("\n[8e] Migration 037: the routing count is gated by a sample of the heap — the shape, the floor, and exactness with the gate reached");
+{
+  const shipped = async () => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = '${MATCH_THOUGHTS_SIGNATURE}'::regprocedure`)).rows[0].s);
+  const src = await shipped();
+  assert(lastDefinerOf("match_thoughts").startsWith("037"), `037 is the last definer of match_thoughts (${lastDefinerOf("match_thoughts")})`);
+  assert(/TABLESAMPLE SYSTEM \(v_pct\)/.test(src) && /INTO v_hits, v_hit_pages, v_pages_seen/.test(src),
+    "the shipped body samples the heap with TABLESAMPLE SYSTEM into the three counts the gate reads");
+  assert(new RegExp(`100\\.0 \\* ${ROUTE_SAMPLE_PAGES} / v_pages`).test(src) && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(src),
+    `…with config.mjs's constants substituted: ${ROUTE_SAMPLE_PAGES} pages sampled, no sample under ${ROUTE_ESTIMATE_MIN_PAGES} heap pages`);
+  assert(/v_hits >= 8\s+AND v_hit_pages >= 3\s+AND v_hits \* v_pages >= 10 \* v_exact \* v_pages_seen/.test(src),
+    "…and the three conditions as the header states them: eight hits, on three pages, at ten times the threshold");
+  assert(/IF NOT v_broad THEN\s+SELECT array_agg\(s\.id\) INTO v_ids/.test(src) && /IF NOT v_broad AND COALESCE\(cardinality\(v_ids\), 0\) <= v_exact THEN/.test(src),
+    "…the collection runs only when the gate did not decide, and the exact branch only when the collection ran");
+  // The statement itself, not the source around it: the body's comments
+  // mention EXISTS and TABLESAMPLE in the same breath (review pass 1).
+  const sampleStmt = /INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?TABLESAMPLE SYSTEM[\s\S]*?\) s);/.exec(src)?.[1] ?? "";
+  assert(/embedding IS NOT NULL\) AS hit/.test(sampleStmt) && !/EXISTS/.test(sampleStmt) && !/thought_chunks/.test(sampleStmt),
+    "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — the header says)");
+
+  // 1,000 random rows, 990 of one kind and 10 of another: both filters are
+  // under the exact threshold, so both answers must be the exact top-10.
+  await db.exec(`DELETE FROM thoughts`);
+  const { unitVector } = seededRandom(1463);
+  for (let i = 0; i < 1000; i += 100) {
+    const values = Array.from({ length: 100 }, (_, k) => `('gate ${i + k}', '{"kind":"${(i + k) % 100 === 0 ? "thin" : "broad"}"}'::jsonb, '[${unitVector(EMBEDDING_DIM).join(",")}]'::vector)`).join(",");
+    await db.exec(`INSERT INTO thoughts (content, metadata, embedding) VALUES ${values}`);
+  }
+  const exactTop = async (qv: string, filter: string) => {
+    await db.exec(`SET enable_indexscan = off`);
+    await db.exec(`SET enable_bitmapscan = off`);
+    try {
+      return (await db.query<{ id: string }>(`SELECT id FROM thoughts WHERE metadata @> '${filter}' ORDER BY embedding <=> $1::vector, id LIMIT 10`, [qv])).rows.map((x) => x.id);
+    } finally {
+      await db.exec(`RESET enable_indexscan`);
+      await db.exec(`RESET enable_bitmapscan`);
+    }
+  };
+  const agree = async (label: string) => {
+    let ok = 0;
+    for (let q = 0; q < 3; q++) {
+      const qv = `[${unitVector(EMBEDDING_DIM).join(",")}]`;
+      for (const f of ['{"kind":"broad"}', '{"kind":"thin"}']) {
+        const want = await exactTop(qv, f);
+        const got = (await db.query<{ id: string }>(`SELECT id FROM match_thoughts($1::vector, -1.0, 10, '${f}'::jsonb)`, [qv])).rows.map((x) => x.id);
+        if (got.length === want.length && got.every((id) => want.includes(id))) ok++;
+      }
+    }
+    assert(ok === 6, `${label}: the 990-row and the 10-row filter — both under the threshold — return the exact top-10 on 3 random queries (${ok}/6 agree)`);
+  };
+  // Under the shipped floor: this heap is a few dozen pages, and the sample never runs.
+  const [{ pages }] = (await db.query<{ pages: number }>(`SELECT (pg_relation_size(to_regclass('thoughts')) / current_setting('block_size')::int)::int AS pages`)).rows;
+  assert(pages > 0 && pages < ROUTE_ESTIMATE_MIN_PAGES, `the fixture's heap is ${pages} pages, under the floor of ${ROUTE_ESTIMATE_MIN_PAGES}: the sample does not run and the call is 020's`);
+  await agree("under the floor");
+  // The floor lowered to zero: the gate runs on every filtered call. It cannot
+  // skip — condition 1 needs the table at ten times the threshold, and 1,000
+  // rows are not — so the collection still runs and the answers hold.
+  const file037 = files.find((f) => f.startsWith("037"))!;
+  await db.exec(substituteMigration(readFileSync(join(MIGRATIONS, file037), "utf8"), migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm: DEFAULT_TRGM_INDEX, backfillLimit: null, routeEstimateMinPages: 0 })));
+  assert(/IF v_pages >= 0 THEN/.test(await shipped()), "037 applied with SchemaOptions.routeEstimateMinPages = 0: the sample runs on any heap");
+  await agree("with the gate reached");
+  // The gate's own input on this table, computed as the body computes it: the
+  // sample scaled to the heap is under ten times the threshold, which is why
+  // the collection ran above — and why the skip needs test-live's table.
+  // Five independent draws, each judged by the body's own three conditions:
+  // a draw is random and may reach no page at all (one run here drew none),
+  // and the rule must say "collect" whatever it drew — on 1,000 rows the
+  // scaled estimate can never reach ten times the threshold (second review pass).
+  const draws: string[] = [];
+  let wouldSkip = 0;
+  for (let i = 0; i < 5; i++) {
+    const [{ hits, hit_pages, pages_seen }] = (await db.query<{ hits: number; hit_pages: number; pages_seen: number }>(
+      `SELECT count(*) FILTER (WHERE s.hit)::int AS hits, count(DISTINCT s.blk) FILTER (WHERE s.hit)::int AS hit_pages, count(DISTINCT s.blk)::int AS pages_seen
+       FROM (SELECT (t.metadata @> '{"kind":"broad"}' AND t.embedding IS NOT NULL) AS hit, (t.ctid::text::point)[0] AS blk
+             FROM thoughts t TABLESAMPLE SYSTEM (LEAST(100.0, 100.0 * ${ROUTE_SAMPLE_PAGES} / ${pages}))) s`)).rows;
+    draws.push(`${hits}/${hit_pages}/${pages_seen}`);
+    if (hits >= 8 && hit_pages >= 3 && hits * pages >= 10 * 1000 * pages_seen) wouldSkip++;
+  }
+  assert(wouldSkip === 0,
+    `five draws of the sample on 1,000 rows (hits/hit pages/pages seen: ${draws.join(", ")}) — none meets the three conditions on ${pages} pages, so the gate cannot skip here`);
+  const restored = await restoreShipped("match_thoughts");
+  assert(restored.length === 1 && restored[0].startsWith("037") && new RegExp(`IF v_pages >= ${ROUTE_ESTIMATE_MIN_PAGES} THEN`).test(await shipped()),
+    "…and the shipped floor is back for the sections after");
+}
+
 console.log("\n[9] updated_at trigger fires on update, created_at does not move");
 {
   await db.exec(`DELETE FROM thoughts`);
   await db.query(`SELECT upsert_thought('trigger probe', '{}'::jsonb)`);
-  const before = await db.query<{ c: string; u: string }>(`SELECT created_at::text c, updated_at::text u FROM thoughts`);
+  const stamps = () => db.query<{ c: string; u: number }>(`SELECT created_at::text c, extract(epoch FROM updated_at)::float8 u FROM thoughts`);
+  const before = await stamps();
+  // now() is read from a clock that under PGlite has millisecond grain
+  // (SMD-1498); adjacent statements share it 96 of 100 times, and the two
+  // stamps here are two statements apart. Without the sleep, review mutants
+  // (SMD-1514) had a `>=` compare pass with the trigger dropped and a `>`
+  // fail 1 run in 5. The row cannot be aged by an UPDATE while the trigger
+  // under test is armed, so a sleep: pg_sleep is a wall-clock lower bound and
+  // each statement its own transaction, so the UPDATE's now() is at least
+  // 2 ms past the capture's — past the millisecond boundary.
+  await db.exec(`SELECT pg_sleep(0.002)`);
   await db.exec(`UPDATE thoughts SET content = 'trigger probe edited'`);
-  const after = await db.query<{ c: string; u: string }>(`SELECT created_at::text c, updated_at::text u FROM thoughts`);
+  const after = await stamps();
   assert(after.rows[0].c === before.rows[0].c, "created_at unchanged");
-  assert(after.rows[0].u >= before.rows[0].u, "updated_at advanced");
+  assert(after.rows[0].u > before.rows[0].u, `updated_at advanced (${before.rows[0].u.toFixed(3)} -> ${after.rows[0].u.toFixed(3)})`);
 }
 
 // ── 10. No Supabase-isms left behind ─────────────────────────────────────────
@@ -1743,14 +1852,16 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   const kwPlan = await plan(`SELECT * FROM search_thoughts_keyword('zylotrope', 25, 0, '{}'::jsonb)`);
   assert(/Function Scan on search_thoughts_keyword\s+\(cost=[^)]*rows=25\b/.test(kwPlan), `…and 25 from search_thoughts_keyword (${kwPlan.split("\n")[0]})`);
 
-  // The candidate scan is 014's, byte for byte, through 019 and 020: the three
-  // RETURN QUERY blocks' CTEs (direct, chunked, best) and the routing statement.
-  // 020 changed each branch's final SELECT and nothing above it; this holds
-  // "carried verbatim" for the part that decides the plan. Re-applying 014
-  // gives 014's text to compare against — as a SECOND function, since 014's
-  // signature is the 4-argument one 020 dropped.
+  // The candidate scan is 014's, byte for byte, through 019, 020 and 037: the
+  // three RETURN QUERY blocks' CTEs (direct, chunked, best) and the routing
+  // statement. 020 changed each branch's final SELECT and nothing above it;
+  // 037 wrapped the routing statement in the gate's IF (so it is indented two
+  // more spaces — compared with whitespace collapsed) and changed nothing in
+  // it; this holds "carried verbatim" for the part that decides the plan.
+  // Re-applying 014 gives 014's text to compare against — as a SECOND
+  // function, since 014's signature is the 4-argument one 020 dropped.
   const cteBlocks = (src: string) => [...src.matchAll(/WITH direct AS \([\s\S]*?GROUP BY u\.tid\s*\)/g)].map((m) => m[0]);
-  const routing = (src: string) => /SELECT array_agg\(s\.id\) INTO v_ids[\s\S]*?\) s;/.exec(src)?.[0] ?? "";
+  const routing = (src: string) => (/SELECT array_agg\(s\.id\) INTO v_ids[\s\S]*?\) s;/.exec(src)?.[0] ?? "").replace(/\s+/g, " ");
   await reapply("014");
   assert((await functionsNamed("match_thoughts")) === 2, "re-applying 014 puts the 4-argument function back BESIDE 020's — the overload 020's header names");
   const mt014 = await proc(MT_4);
@@ -1778,11 +1889,12 @@ console.log("\n[20] Migration 019: the row estimates and the plan setting — ca
   assert(Number(back.prorows) === 10 && back.settings["enable_seqscan"] === "off" && Number((await proc(KW)).prorows) === 25,
          `re-applying the migrations that last define each (${restored.join(", ")}) restores both — the shipped state, for whatever runs after`);
   assert((await functionsNamed("match_thoughts")) === 1 && (await functionsNamed("search_thoughts_keyword")) === 1, "…and 020's DROP removed the 4-argument function again: one match_thoughts, one search_thoughts_keyword");
-  // Deliberately pinned, as [20] pinned 019 before 020 landed: 019 last defines
-  // the keyword function, 020 match_thoughts. A successor that redefines either
-  // fails here on purpose, and the expectations move with the clauses it must carry.
-  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("020"),
-         `019 is the last definer of search_thoughts_keyword and 020 of match_thoughts (${restored.join(", ")})`);
+  // Deliberately pinned, as [20] pinned 019 before 020 landed and 020 before
+  // 037: 019 last defines the keyword function, 037 match_thoughts. A
+  // successor that redefines either fails here on purpose, and the
+  // expectations move with the clauses it must carry.
+  assert(restored.length === 2 && restored[0].startsWith("019") && restored[1].startsWith("037"),
+         `019 is the last definer of search_thoughts_keyword and 037 of match_thoughts (${restored.join(", ")})`);
 
   // The migrator's floor line, since whichever file last defines the function
   // redefines it with the hnsw.* clause 014 needed pgvector 0.8 for.
@@ -2799,14 +2911,20 @@ console.log("\n[28] Migration 029: supersession proposals — candidates, the on
     `SELECT status, superseding_id, review_note, reviewed_at FROM supersession_proposals WHERE id = $1`, [pid])).rows[0];
   assert(accRow.status === "accepted" && accRow.superseding_id === reversal && accRow.review_note === "confirmed in the June minutes" && accRow.reviewed_at !== null,
     "…the row is accepted, names the thought it wrote, and keeps the note");
-  // By created_at: thought_audit.id is a uuid, so `ORDER BY id` is a coin toss
-  // (this read ordered by it until SMD-1323's twin exposed the flake).
-  const audit = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
-    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [reversal])).rows[0];
+  // Not ordered: neither `id` (a uuid — this read ordered by it until
+  // SMD-1323's twin exposed the flake) nor `created_at` (separate transactions
+  // can share now(), SMD-1514) picks the newest row. What makes the read safe
+  // is that the reversal has exactly one update row here — its capture wrote
+  // a capture row, and seed()'s created_at UPDATE an empty diff, which 008's
+  // guard in the audit trigger (025's body is the last definer) records as
+  // nothing — and that is asserted.
+  const auditRows = (await db.query<{ actor_name: string | null; diff: Record<string, unknown> }>(
+    `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update'`, [reversal])).rows;
+  const audit = auditRows[0];
   const auditAfter = (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const supDiff = (audit?.diff as { supersedes?: { before?: unknown; after?: unknown } } | undefined)?.supersedes;
-  assert(auditAfter === auditBefore + 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
-    `the write is one audit row with the reviewer as actor and the supersedes diff (${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
+  assert(auditAfter === auditBefore + 1 && auditRows.length === 1 && audit?.actor_name === "reviewer" && supDiff?.before === null && supDiff?.after === decision,
+    `the write is one audit row — the reversal's only update row — with the reviewer as actor and the supersedes diff (${auditRows.length}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
   const again = await review(pid, "accept");
   assert(again.ok === false && again.error === "ALREADY_ACCEPTED", "accepting an accepted proposal is refused, not re-written");
   assert((await candidates(reversal)).length === 1 && (await candidates(reversal))[0].older_id === farAxis, "a thought already superseded is not a candidate on either side");
@@ -3156,16 +3274,25 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
       `SELECT update_thought($1::uuid, NULL::text, NULL::jsonb, NULL::vector, NULL::jsonb, $3::timestamptz, $4::jsonb, NULL::text, $2::jsonb) AS r`,
       [id, prov === undefined ? null : JSON.stringify(prov), extra.since ?? null, extra.actor === undefined ? null : JSON.stringify(extra.actor)])).rows[0].r;
   const rowOf = async (id: string) =>
-    (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: string }>(
+    (await db.query<{ s: string | null; d: unknown; content: string; fp: string | null; axis: number | null; m: string | null; k: number; u: number }>(
       `SELECT supersedes AS s, derived_from AS d, content, content_fingerprint AS fp, array_position(embedding::real[], 1::real) - 1 AS axis,
-              embedding_model AS m, (metadata->>'k')::int AS k, updated_at::text AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
-  // By created_at, not id — thought_audit.id is a uuid, so ordering by it is
-  // random ([28] had that flake latent). created_at is now(), the
-  // transaction's start, and every call here is its own transaction writing
-  // at most one audit row for the thought, so the newest is unambiguous.
-  const lastAudit = async (id: string) =>
-    (await db.query<{ actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> }>(
-      `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' ORDER BY created_at DESC, id LIMIT 1`, [id])).rows[0];
+              embedding_model AS m, (metadata->>'k')::int AS k, extract(epoch FROM updated_at)::float8 AS u FROM thoughts WHERE id = $1`, [id])).rows[0];
+  type Audit = { actor_name: string | null; diff: Record<string, { before?: unknown; after?: unknown }> };
+  // The update row one write added: the thought's audit ids before the write,
+  // excluded after it; `audit` is undefined when the write added none. Not
+  // `ORDER BY created_at DESC, id`: separate transactions do not promise
+  // distinct created_at — now() is read from a clock that under PGlite has
+  // millisecond grain (SMD-1498), so two edits a few statements apart can
+  // share it — and the tiebreak `id` is a uuid, a coin toss between them (two
+  // rows sharing created_at: the read picked the older 51 of 100 times,
+  // SMD-1514).
+  const auditOfWrite = async <T>(id: string, write: () => Promise<T>): Promise<{ r: T; audit: Audit | undefined; added: number }> => {
+    const seen = (await db.query<{ id: string }>(`SELECT id FROM thought_audit WHERE thought_id = $1`, [id])).rows.map((x) => x.id);
+    const r = await write();
+    const rows = (await db.query<Audit>(
+      `SELECT actor_name, diff FROM thought_audit WHERE thought_id = $1 AND action = 'update' AND NOT (id = ANY($2::uuid[]))`, [id, seen])).rows;
+    return { r, audit: rows[0] as Audit | undefined, added: rows.length };
+  };
   const audits = async () => (await db.query<{ c: number }>(`SELECT count(*)::int AS c FROM thought_audit`)).rows[0].c;
   const srcOf = async (sig: string) => String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).rows[0].s);
   const exists = async (sig: string) => (await db.query<{ e: boolean }>(`SELECT to_regprocedure($1) IS NOT NULL AS e`, [sig])).rows[0].e;
@@ -3175,8 +3302,8 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   assert((await functionsNamed("update_thought")) === 1 && Number((await db.query<{ n: number }>(`SELECT pronargs AS n FROM pg_proc WHERE oid = $1::regprocedure`, [UT])).rows[0].n) === 9,
     "one update_thought, of nine parameters");
   assert(!(await exists(UT_8)) && !(await exists(UT_7)), "…neither the 8- nor the 7-argument form beside it");
-  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("032") && lastDefinerOf("validate_derived_from").startsWith("032"),
-    `032 is the last definer of review_supersession_proposal and validate_derived_from, 033 of update_thought — 032's body with the fingerprint lock before the row ([33]) (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
+  assert(lastDefinerOf("update_thought").startsWith("033") && lastDefinerOf("review_supersession_proposal").startsWith("036") && lastDefinerOf("validate_derived_from").startsWith("032"),
+    `033 is the last definer of update_thought, 036 of review_supersession_proposal (its lock moved before the proposal row, SMD-1462 [36]), 032 of validate_derived_from (${lastDefinerOf("update_thought")}, ${lastDefinerOf("review_supersession_proposal")})`);
   const src = await srcOf(UT);
   for (const [re, what] of [
     [/ob1:unchanged-edit-not-duplicate/, "018's sentinel"], [/ob1\.actor/, "008's actor"], [/FROM thoughts WHERE id = p_id FOR NO KEY UPDATE/, "018's row lock, FOR NO KEY UPDATE since 032"],
@@ -3195,14 +3322,25 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   const c = await cap("a source note", 2);
   const before = await rowOf(b);
   const auditsBefore = await audits();
-  let r = await edit(b, { supersedes: a }, { actor: { name: "editor", source: "test" } });
+  // The capture a few statements back can share the edit's now(): PGlite's
+  // clock has millisecond grain (SMD-1498), and adjacent statements read the
+  // same value 96 of 100 times — at this site, with a capture between, 0 of
+  // 20 runs did (SMD-1514's probes), so the sleep turns odds into a proof
+  // rather than closing a seen flake. The row cannot be aged by an UPDATE
+  // while 001's trigger is armed (it re-stamps updated_at = now()), and
+  // disabling the trigger would disarm what [9] tests; so a sleep, the one
+  // place it is honest here. pg_sleep is a wall-clock lower bound and each
+  // statement its own transaction, so the edit's now() is at least 2 ms past
+  // the capture's — past the millisecond boundary (measured 200 of 200).
+  await db.exec(`SELECT pg_sleep(0.002)`);
+  let r: R, audit: Audit | undefined, added: number;
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { supersedes: a }, { actor: { name: "editor", source: "test" } })));
   let row = await rowOf(b);
   assert(r.ok === true && row.s === a, `an edit naming supersedes sets the pointer (${JSON.stringify(r)})`);
   assert(row.content === before.content && row.fp === before.fp && row.axis === 1 && row.m === before.m && row.k === 1, "…and touches neither content, fingerprint, vector, label nor metadata");
-  assert(row.u > before.u, "…while updated_at moves: a provenance edit is an edit");
-  let audit = await lastAudit(b);
-  assert((await audits()) === auditsBefore + 1 && audit.actor_name === "editor" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === a && !("content" in audit.diff) && !("metadata" in audit.diff),
-    `…one audit row, the actor and the supersedes diff and nothing else (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
+  assert(row.u > before.u, `…while updated_at moves: a provenance edit is an edit (${before.u.toFixed(3)} -> ${row.u.toFixed(3)})`);
+  assert((await audits()) === auditsBefore + 1 && added === 1 && audit?.actor_name === "editor" && audit?.diff.supersedes?.before === null && audit?.diff.supersedes?.after === a && !("content" in (audit?.diff ?? {})) && !("metadata" in (audit?.diff ?? {})),
+    `…one audit row, the actor and the supersedes diff and nothing else (${added}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
   r = await edit(b, {});
   assert(r.ok === true && (await rowOf(b)).s === a, "an envelope without the key leaves the pointer");
   r = await edit(b, undefined);
@@ -3211,18 +3349,16 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
   r = await edit(b, { derived_from: [c, c.toUpperCase()] });
   row = await rowOf(b);
   assert(r.ok === true && JSON.stringify(row.d) === JSON.stringify([c]) && row.s === a, `derived_from is set canonical — lowercased, de-duplicated — and the pointer is left (${JSON.stringify(row.d)})`);
-  r = await edit(b, { supersedes: null });
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { supersedes: null })));
   row = await rowOf(b);
   assert(r.ok === true && row.s === null && JSON.stringify(row.d) === JSON.stringify([c]), "a JSON null clears the pointer and leaves derived_from");
-  audit = await lastAudit(b);
-  assert(audit.diff.supersedes?.before === a && audit.diff.supersedes?.after === null, "…audited as before a, after null");
+  assert(added === 1 && audit?.diff.supersedes?.before === a && audit?.diff.supersedes?.after === null, "…audited as before a, after null");
   r = await edit(b, { derived_from: [] });
   assert(r.ok === true && (await rowOf(b)).d === null, "an empty derived_from array clears the column — [] and null are one spelling");
-  r = await edit(b, { derived_from: [c], supersedes: a });
+  ({ r, audit, added } = await auditOfWrite(b, () => edit(b, { derived_from: [c], supersedes: a })));
   row = await rowOf(b);
   assert(r.ok === true && row.s === a && JSON.stringify(row.d) === JSON.stringify([c]), "both keys set in one envelope");
-  audit = await lastAudit(b);
-  assert(audit.diff.supersedes?.after === a && JSON.stringify(audit.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${JSON.stringify(audit.diff)})`);
+  assert(added === 1 && audit?.diff.supersedes?.after === a && JSON.stringify(audit?.diff.derived_from?.after) === JSON.stringify([c]), `…one audit row carrying both diffs (${added}; ${JSON.stringify(audit?.diff)})`);
   r = await edit(b, { derived_from: null, supersedes: null });
   row = await rowOf(b);
   assert(r.ok === true && row.s === null && row.d === null, "…both cleared in one envelope");
@@ -3284,13 +3420,15 @@ console.log("\n[32] Migration 032: update_thought takes provenance — set, clea
     (await db.query<{ r: Record<string, unknown> }>(`SELECT review_supersession_proposal($1::uuid, $2, NULL, NULL, '{"name":"reviewer","source":"test"}'::jsonb, false) AS r`, [id, decision])).rows[0].r;
   const pid = await propose(p, q);
   const auditsAtReview = await audits();
-  const acc = await reviewCall(pid, "accept");
+  const accepted = await auditOfWrite(q, () => reviewCall(pid, "accept"));
+  const acc = accepted.r;
   assert(acc.ok === true && acc.written === true && (await rowOf(q)).s === p, `accept writes the pointer through update_thought (${JSON.stringify(acc)})`);
-  audit = await lastAudit(q);
-  assert((await audits()) === auditsAtReview + 1 && audit.actor_name === "reviewer" && audit.diff.supersedes?.before === null && audit.diff.supersedes?.after === p,
-    `…one audit row, the reviewer as actor, the supersedes diff — update_thought's row (${audit.actor_name}: ${JSON.stringify(audit.diff)})`);
-  const rej = await reviewCall(pid, "reject");
-  assert(rej.ok === true && rej.cleared === true && (await rowOf(q)).s === null && (await lastAudit(q)).diff.supersedes?.after === null, "reject clears it through update_thought, audited the same way");
+  audit = accepted.audit;
+  assert((await audits()) === auditsAtReview + 1 && accepted.added === 1 && audit?.actor_name === "reviewer" && audit?.diff.supersedes?.before === null && audit?.diff.supersedes?.after === p,
+    `…one audit row, the reviewer as actor, the supersedes diff — update_thought's row (${accepted.added}; ${audit?.actor_name}: ${JSON.stringify(audit?.diff)})`);
+  const rejected = await auditOfWrite(q, () => reviewCall(pid, "reject"));
+  const rej = rejected.r;
+  assert(rej.ok === true && rej.cleared === true && (await rowOf(q)).s === null && rejected.added === 1 && rejected.audit?.diff.supersedes?.after === null, "reject clears it through update_thought, audited the same way");
   const x = await cap("loop: the earlier note", 5);
   const y = await cap("loop: the later note", 5);
   await db.query(`UPDATE thoughts SET created_at = now() - interval '5 days' WHERE id = $1`, [x]);
@@ -3448,9 +3586,12 @@ console.log("\n[33] Migration 033: both capture forms take the fingerprint lock,
   await reapply("032");
   const edit032 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit032.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") < edit032.indexOf(LOCK) && (await functionsNamed("update_thought")) === 1, "032 re-applied over 033 puts the row-then-fingerprint order back, one function still");
-  // 033's file, update_thought's last definer, also redefines both capture
-  // forms — as 033's; upsert_thought's last definer (035) must follow it.
-  await restoreShipped("update_thought", "upsert_thought");
+  // reapply("032") reverts update_thought AND review_supersession_proposal to
+  // 032's bodies; restoring update_thought re-applies 033, which also rewrites
+  // both capture forms as 033's. So restore all three shipped bodies:
+  // update_thought (033), upsert_thought (035, recapture), and
+  // review_supersession_proposal (036, its lock moved before the proposal row).
+  await restoreShipped("update_thought", "upsert_thought", "review_supersession_proposal");
   const edit033 = await srcOf(UPDATE_THOUGHT_SIGNATURE);
   assert(edit033.indexOf(LOCK) < edit033.indexOf("FROM thoughts WHERE id = p_id FOR NO KEY UPDATE") && (await functionsNamed("update_thought")) === 1, "…and 033 re-applied puts the fingerprint lock before the row again");
   await db.exec(`DELETE FROM thoughts`);
@@ -3577,12 +3718,31 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
       FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
   assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
 
-  // prune_query_log: default arg, bounded delete, and a refusal on a bad window.
+  // prune_query_log: default arg, bounded delete, the strict bound, and a
+  // refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
   const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
   assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  // The bound is `logged_at < now()`, strict, and now() is the transaction's
+  // start, read from a clock that under PGlite has millisecond grain, so a row
+  // inserted a few statements earlier can share the prune's now() and survive
+  // prune_query_log(0) (flaked once, SMD-1498). Age the rows; the assumption
+  // was the flaw, not the function.
+  await db.exec(`UPDATE query_log SET logged_at = logged_at - interval '1 hour'`);
   const wiped = (await db.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n;
-  assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes everything older than now() (${wiped})`);
+  assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes every row older than now() (${wiped} of ${nBefore})`);
+  // The same now(), on purpose: a row logged in the prune's own transaction is
+  // kept — the strict bound the COMMENT states ("older than now()"). now() is
+  // the transaction's start on Postgres proper too; only the clock's grain
+  // differs, and strictness decides only this equality: a `<=` bound, or one
+  // read from clock_timestamp(), fails this assertion and no other here.
+  await db.transaction(async (tx) => {
+    await tx.exec(`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'logged in the prune''s own transaction')`);
+    const sameTick = Number((await tx.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n);
+    const left = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
+    assert(sameTick === 0 && left === 1, "a row logged at the prune's own now() is kept — the bound is strict (logged_at < now())");
+    await tx.rollback();
+  });
   let refusedNeg = false;
   try { await db.exec(`SELECT prune_query_log(-1)`); } catch { refusedNeg = true; }
   assert(refusedNeg, "prune_query_log refuses a negative window");
@@ -3718,6 +3878,59 @@ console.log("\n[35] Migration 035: a re-capture writes no provenance — the env
   assert(/ob1:re-capture-writes-no-provenance/.test(restored) && !/supersession-review/.test(restored) && !/COALESCE\(thoughts\.supersedes/.test(restored) && (await functionsNamed("upsert_thought")) === 3 && lastDefinerOf("update_thought").startsWith("033"),
     "035 re-applied: the fill and the lock gone again, three overloads, update_thought still 033's");
   assert(!/add-if-empty/.test(await commentOf(REVIEW)), "…and review_supersession_proposal's COMMENT re-issued without the aside");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[36] Migration 036: delete_thought and review_supersession_proposal both take the supersession lock before their contended row (SMD-1462)");
+{
+  // Self-contained: restore both bodies 036 last-defines rather than trusting
+  // that an earlier block's reapply/restore left them shipped ([33] reapplies
+  // 032, which defines review). A block inserted before this one that reapplied
+  // 032/029/009 without restoring would otherwise silently give us a stale body.
+  await restoreShipped("delete_thought", "review_supersession_proposal");
+  await db.exec(`DELETE FROM thoughts`);
+  // 036 is the only redefinition of delete_thought since 009; the body is
+  // 009's plus one advisory-lock line, so a future edit that drops the lock —
+  // reopening the accept-vs-delete deadlock db/test-live.ts [6g] proves — is
+  // caught here, in the fast suite, without a live server.
+  assert((await functionsNamed("delete_thought")) === 1 && lastDefinerOf("delete_thought").startsWith("036"),
+    `one delete_thought, 036 the last definer (${lastDefinerOf("delete_thought")})`);
+  const src = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["delete_thought(uuid, jsonb)"])).rows[0].s);
+  const iLock = src.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
+  const iDelete = src.indexOf("DELETE FROM thoughts WHERE id = p_id");
+  assert(iLock > 0 && iDelete > 0 && iLock < iDelete,
+    `the supersession lock — the key review_supersession_proposal and update_thought take — is acquired before the DELETE (${iLock} < ${iDelete})`);
+  assert((src.match(/pg_advisory_xact_lock/g) ?? []).length === 1, "…exactly one advisory lock: the supersession one, not the fingerprint one a delete has no fingerprint for");
+  // 009's body, carried forward: 008's actor, the RETURNING that tells a
+  // missing row from a deletion, and the NOT_FOUND that reports it.
+  assert(/set_config\('ob1\.actor'/.test(src) && /DELETE FROM thoughts WHERE id = p_id RETURNING id INTO v_deleted/.test(src) && /'NOT_FOUND'/.test(src),
+    "…and 009's body is intact: the actor set for the audit trigger, the RETURNING, the NOT_FOUND branch");
+  // Behaviour: the lock does not change the contract. A present row deletes
+  // and returns its id; a second delete of the same id is NOT_FOUND.
+  const t = String((await db.query<{ id: string }>(`SELECT upsert_thought('a thought to delete', '{"metadata":{}}'::jsonb) ->> 'id' AS id`)).rows[0].id);
+  const first = (await db.query<{ r: { ok: boolean; id?: string } }>(`SELECT delete_thought($1::uuid, NULL::jsonb) AS r`, [t])).rows[0].r;
+  assert(first.ok === true && first.id === t, `delete_thought removes a present row and returns its id (${JSON.stringify(first)})`);
+  const gone = (await db.query(`SELECT 1 FROM thoughts WHERE id = $1`, [t])).rows.length;
+  const second = (await db.query<{ r: { ok: boolean; error?: string } }>(`SELECT delete_thought($1::uuid, NULL::jsonb) AS r`, [t])).rows[0].r;
+  assert(gone === 0 && second.ok === false && second.error === "NOT_FOUND", `…and the row is gone, a second delete NOT_FOUND (${JSON.stringify(second)})`);
+
+  // review_supersession_proposal takes the same lock before the proposal row
+  // now (036): the delete-side lock alone left a second cycle — a delete
+  // holding the lock and waiting on the proposal through 029's cascade, a
+  // review holding the proposal and waiting on the lock (db/test-live.ts [6g]
+  // reproduced it 10 of 40). Only both writers taking the lock first close it.
+  assert((await functionsNamed("review_supersession_proposal")) === 1 && lastDefinerOf("review_supersession_proposal").startsWith("036"),
+    `one review_supersession_proposal, 036 the last definer (${lastDefinerOf("review_supersession_proposal")})`);
+  const review = String((await db.query<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, ["review_supersession_proposal(uuid, text, text, text, jsonb, boolean)"])).rows[0].s);
+  const iRLock = review.indexOf("pg_advisory_xact_lock(hashtext('ob1:supersession-review'))");
+  const iProposal = review.indexOf("FROM supersession_proposals WHERE id = p_id FOR UPDATE");
+  assert(iRLock > 0 && iProposal > 0 && iRLock < iProposal,
+    `review takes the supersession lock before it locks the proposal row (${iRLock} < ${iProposal})`);
+  assert((review.match(/pg_advisory_xact_lock/g) ?? []).length === 1, "…acquired once, at the top, for accept and reject alike");
+  // 032's shape, unmoved: writes through update_thought, no UPDATE of its own,
+  // no walk of its own — [32] asserts this too, over the same source.
+  assert(!/UPDATE\s+thoughts\b/i.test(review) && (review.match(/update_thought\(/g) ?? []).length === 2 && !/v_walk/.test(review),
+    "…and 032's shape is intact: two update_thought calls, no UPDATE and no walk of its own");
   await db.exec(`DELETE FROM thoughts`);
 }
 

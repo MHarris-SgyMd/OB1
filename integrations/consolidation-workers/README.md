@@ -10,7 +10,7 @@
 
 This integration provides two Supabase Edge Function workers that improve thought quality after initial import:
 
-**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is updated in place on subsequent runs. Useful for generating "Who is X" summaries from scattered notes.
+**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run's insert is a raw row with no vector (SMD-1524). Useful for generating "Who is X" summaries from scattered notes.
 
 **Metadata Normalization Worker** (`metadata-norm/index.ts`): Finds thoughts with weak metadata (catch-all type="reference", default importance=3, low-confidence topics) and re-evaluates them via LLM. Only applies changes when the reclassification confidence exceeds 0.8 and the change is material (different type, importance shift >= 2, or new topics where none existed). Marks reviewed thoughts to prevent re-processing.
 
@@ -80,6 +80,8 @@ supabase secrets set \
   OPENAI_API_KEY="your-openai-key" \
   ANTHROPIC_API_KEY="your-anthropic-key"
 ```
+
+`consolidation-bio` embeds the profile it writes, and embeddings come from OpenRouter or OpenAI only — with `ANTHROPIC_API_KEY` alone the worker answers 503 before it spends an LLM call. The vectors these writers make are `openai/text-embedding-3-small`'s, 1536 wide, so the brain must be built at that model and width (`OB1_EMBEDDING_MODEL=openai/text-embedding-3-small`, `OB1_EMBEDDING_DIM=1536` — upstream's Supabase brain is); on this fork's default, `qwen3-embedding:4b` at 1024, the function refuses the vector and the whole capture or edit fails — loudly, where the raw write failed the same way or had its error ignored.
 
 Optional tuning:
 
