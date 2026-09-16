@@ -10226,7 +10226,7 @@ run's queries' confound from the exact whole-table pass section A already runs
 would see only its first `ef_search` candidates) and re-checks the oracle's
 premise whenever the ledger differs from the one the marker says it last passed
 under; then goes on to the oracle. Section L
-gains a `source` column — `loaded`, or `reused (built <when>)` with the build's
+gains a `source` column — `loaded`, or `reused (built <when>)` (change 73 adds where the exact oracle's answers came from) with the build's
 own numbers — and the run says which it did, what it counted and which files it
 applied, so a report never silently mixes a fresh build's load line with a
 reused corpus. A kept database holds **one** corpus: a run asking for another
@@ -10644,6 +10644,33 @@ volume by the name both carry, and the wrapper's own cleanup is by then
 writing into a dead pipe — names the volume up front, turns a thrown stop
 into a failure with a tally rather than a stack trace, and compares the two
 scored tables through one helper that carries the rows guard to both sites.
+
+**Second pass.** The shape number was a hand-bumped integer standing in for
+the statement's identity, which an edit to the statement would not bump; the
+oracle's SQL is one function now, and `shape` is a digest of it rendered over
+placeholders (both filter forms and the tier filter's), so a tie-break or
+another operator recomputes on its own. `markerAnswers` hands back the
+answers it validated rather than counts the caller re-derives through two
+non-null assertions; the three-way state is one value the four renderings
+index; the extension write is gated on `OB1_PG_KEEP` as the first write is
+(a persistent database reached some other way is marked by neither). The
+suite's interrupt handler had been fire-and-forget beside a main flow that
+did not know it had fired — a Ctrl-C in run 1 could reach `report()`'s exit
+while the removal was mid-retry, and in a later run could start the next
+container under the name being removed; the handler now only notes the
+signal, the run in flight finishes (a terminal's Ctrl-C reaches the wrapper
+too, which stops and removes its container), the next `run` throws instead
+of starting, and the removal happens once, in `finally`, before the exit the
+signal asked for (verified in run 1 and in a later run: exit 130, no
+container, no volume). The runtime is read from the wrapper's own output
+rather than a second copy of its pick (which would have chosen a docker whose
+daemon was down and then retried ten removals against it); the wrapper's
+image and shared-memory knobs and the build's workers and memory pass
+through the environment strip, which is now `shellWithoutOb1()` shared with
+`migratorEnv`; `runScript` matches the bun token by basename, so a binary
+spelled by path gets the flag; `scored()` gates on the section letter by
+regex (the empty section had matched `"ABDE".includes`); and the catch keeps
+the stack.
 
 ## Detached from the fork network
 

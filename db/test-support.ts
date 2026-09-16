@@ -16,7 +16,7 @@
 import { SQL } from "bun";
 import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -399,13 +399,22 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
   // after a fixture's strip is every OB1_* name, and db/.env is where a
   // migrator-only flag is documented to live — so `--no-env-file` rides on
   // every `bun` spawn that passes an env (review passes, reproduced) — after
-  // the FIRST `bun` token, since a spawn fronted by with-postgres.sh runs bun
-  // just the same (SMD-1562's suite; reproduced with a flag in db/.env).
-  const bun = opts.env ? cmd.indexOf("bun") : -1;
+  // the first token that IS bun, by basename, since a spawn fronted by
+  // with-postgres.sh runs bun just the same (SMD-1562's suite; reproduced with
+  // a flag in db/.env) and a caller may spell the binary by path. An argument
+  // that merely reads "bun" would be matched too; no caller passes one.
+  const bun = opts.env ? cmd.findIndex((t) => basename(t) === "bun") : -1;
   const argv = bun >= 0 ? [...cmd.slice(0, bun + 1), "--no-env-file", ...cmd.slice(bun + 1)] : cmd;
   const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
   return { code: await p.exited, out };
+}
+
+/** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
+export function shellWithoutOb1(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("OB1_")) env[k] = v;
+  return env;
 }
 
 /**
@@ -421,8 +430,7 @@ export async function runScript(cmd: string[], opts: { cwd: string; env?: Record
  * denylist of three names, one of them read by nothing; review pass.)
  */
 export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "model" | "trgm">): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("OB1_")) env[k] = v;
+  const env = shellWithoutOb1();
   env.DATABASE_URL = url;
   env.OB1_EMBEDDING_DIM = String(opts.dim);
   env.OB1_EMBEDDING_MODEL = opts.model;

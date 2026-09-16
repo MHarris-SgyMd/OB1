@@ -26,15 +26,18 @@
  *
  * Needs podman or docker (it drives with-postgres.sh itself, so it runs
  * WITHOUT the wrapper), about three minutes, and removes the volume it kept —
- * on the way out, and on an interrupt (the wrapper's own cleanup would be
- * writing into a dead pipe by then; review pass).
+ * on the way out, and on an interrupt: a signal is noted, the run in flight
+ * is let finish (a terminal's Ctrl-C reaches the wrapper too, which stops and
+ * removes its container; a signal to this process alone waits for the run,
+ * a minute at most), no further run starts, and the container and volume
+ * are removed by the name both carry before exiting as the signal would
+ * have (review passes).
  *
  *   bun test-bench-reuse.ts
  */
-import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAssert, runScript } from "./test-support.ts";
+import { createAssert, runScript, shellWithoutOb1 } from "./test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -42,52 +45,62 @@ const SCALE = 150_000;
 /** One kept name per run of this suite, so a failed run's volume cannot be mistaken for the next run's; the container and the volume both carry it. */
 const KEEP = `test-reuse-${Date.now().toString(36)}`;
 const NAME = `ob1-pg-keep-${KEEP}`;
-/** The runtime as with-postgres.sh picks it, for removing what was kept without a run's output to read it from. */
-const RUNTIME = Bun.which("podman") ?? (existsSync("/opt/podman/bin/podman") ? "/opt/podman/bin/podman" : null) ?? Bun.which("docker");
-if (!RUNTIME) {
-  console.error("test-bench-reuse.ts: neither podman nor docker is on PATH; the suite starts containers itself");
-  process.exit(2);
-}
-
-/** The shell's environment without its own OB1_* choices (a width or a query count from the shell would change what the bench measures), plus this run's. runScript keeps db/.env out of the spawned bun too. */
+/**
+ * The wrapper's and the build's own knobs pass through from the shell — a
+ * registry mirror's image, the shared memory, the build's workers and memory
+ * — since only run 1 builds and none of them can tell a reused answer from a
+ * computed one; every other OB1_* name is stripped (a width or a query count
+ * from the shell would change what is measured), and runScript keeps db/.env
+ * out of the spawned bun too. Not the port: six containers in a row on one
+ * fixed port would race the previous one's release.
+ */
+const PASS_THROUGH = ["OB1_PG_IMAGE", "OB1_PG_SHM_SIZE", "OB1_BENCH_BUILD_WORKERS", "OB1_BENCH_MAINTENANCE_MEM"];
 function env(extra: Record<string, string>): Record<string, string> {
-  const base = Object.fromEntries(Object.entries(process.env).filter(([k, v]) => v !== undefined && !k.startsWith("OB1_"))) as Record<string, string>;
+  const base = shellWithoutOb1();
+  for (const k of PASS_THROUGH) if (process.env[k] !== undefined) base[k] = process.env[k]!;
   return { ...base, OB1_BENCH_SCALES: String(SCALE), ...extra };
 }
 
+/** The exit code a signal asked for, once one has arrived; the run in flight finishes, nothing else starts. */
+let interrupted: number | null = null;
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+  process.on(signal, () => {
+    if (interrupted !== null) return;
+    interrupted = code;
+    console.error(`\n  ${signal}: finishing the run in flight, then removing the kept container and volume ${NAME}`);
+  });
+}
+class Interrupted extends Error {}
+/** The runtime as the wrapper found it, read from the first run that printed it; nothing was kept where none did. */
+let runtime: string | null = null;
+async function run(cmd: string[], extra: Record<string, string>): Promise<{ code: number; out: string }> {
+  const r = await runScript(cmd, { cwd: HERE, env: env(extra) });
+  runtime ??= /\(via (\S+)\)/.exec(r.out)?.[1] ?? null;
+  if (interrupted !== null) throw new Interrupted();
+  return r;
+}
+
 /** One bench run under the kept name, Q queries. */
-const bench = (q: number) => runScript(["./with-postgres.sh", "bun", "bench-hnsw.ts"], { cwd: HERE, env: env({ OB1_PG_KEEP: KEEP, OB1_BENCH_QUERIES: String(q) }) });
+const bench = (q: number) => run(["./with-postgres.sh", "bun", "bench-hnsw.ts"], { OB1_PG_KEEP: KEEP, OB1_BENCH_QUERIES: String(q) });
 
 /** One statement against the kept database, through the wrapper (the only door to it). */
 const onKept = (statement: string) =>
-  runScript(["./with-postgres.sh", "bun", "-e", `import { SQL } from "bun"; const sql = new SQL(process.env.DATABASE_URL); await sql.unsafe(${JSON.stringify(statement)}); await sql.close();`], {
-    cwd: HERE,
-    env: env({ OB1_PG_KEEP: KEEP }),
-  });
+  run(["./with-postgres.sh", "bun", "-e", `import { SQL } from "bun"; const sql = new SQL(process.env.DATABASE_URL); await sql.unsafe(${JSON.stringify(statement)}); await sql.close();`], { OB1_PG_KEEP: KEEP });
 
-/** The kept container (a run in flight, or one the wrapper is still stopping) and then the volume, by the name both carry; the volume may take a moment to free. */
+/**
+ * The kept container (one the wrapper is still stopping, after an interrupt)
+ * and then the volume, by the name both carry — safe by name here, where
+ * the wrapper removes only by ID, because the name is this run's alone; the
+ * volume may take a moment to free. True where nothing was ever kept.
+ */
 async function removeKept(): Promise<boolean> {
-  await runScript([RUNTIME!, "rm", "-f", NAME], { cwd: HERE });
+  if (!runtime) return true;
+  await runScript([runtime, "rm", "-f", NAME], { cwd: HERE });
   for (let i = 0; i < 10; i++) {
-    if ((await runScript([RUNTIME!, "volume", "rm", NAME], { cwd: HERE })).code === 0) return true;
+    if ((await runScript([runtime, "volume", "rm", NAME], { cwd: HERE })).code === 0) return true;
     await Bun.sleep(1000);
   }
   return false;
-}
-
-// A Ctrl-C would otherwise end this process without the `finally` below and
-// leave the kept Postgres running with its volume, under a name printed
-// nowhere: the signal handler removes both and exits as the signal would have.
-let interrupted = false;
-for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
-  process.on(signal, async () => {
-    if (interrupted) return;
-    interrupted = true;
-    console.error(`\n  ${signal}: removing the kept container and volume ${NAME}`);
-    const removed = await removeKept();
-    console.error(removed ? `  removed ${NAME}` : `  could not remove ${NAME}; \`${RUNTIME} volume rm ${NAME}\` once its container is gone`);
-    process.exit(code);
-  });
 }
 
 /**
@@ -106,7 +119,7 @@ function scored(out: string): string {
       mask = null;
       continue;
     }
-    if (!"ABDE".includes(section) || !line.startsWith("| ")) continue;
+    if (!/^[ABDE]$/.test(section) || !line.startsWith("| ")) continue;
     const cells = line.slice(1, -1).split(" | ").map((c) => c.trim());
     if (!mask) {
       mask = cells.map((header) => !/\bms\b/.test(header));
@@ -182,10 +195,16 @@ try {
   assert(r6.out.includes("had its tables changed by migrations applied onto it on an earlier run"), "with the rewritten refusal");
   assert(!r6.out.includes("exact oracle"), "and the cached answers were never read");
 } catch (err) {
-  // A throw is a failure with a tally, not a stack trace in place of one.
-  assert(false, `the suite stopped: ${(err as Error).message}`);
+  // A throw is a failure with a tally, not a stack trace in place of one —
+  // the stack kept, since the next run is three minutes of containers.
+  if (!(err instanceof Interrupted)) assert(false, `the suite stopped: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
 } finally {
-  if (!interrupted) assert(await removeKept(), `the kept volume ${NAME} is removed`);
+  const removed = await removeKept();
+  if (interrupted !== null) {
+    console.error(removed ? `  removed ${NAME}` : `  could not remove ${NAME}; \`${runtime} volume rm ${NAME}\` once its container is gone`);
+    process.exit(interrupted);
+  }
+  assert(removed, `the kept volume ${NAME} is removed`);
 }
 
 report();
