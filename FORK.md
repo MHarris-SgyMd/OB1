@@ -10329,6 +10329,13 @@ path filter. The renumber the merge owes is counted: this branch's
 mentions of the number in eight files, one of them line-wrapped in the
 shim's header, and one sentence in this section that must not be touched.
 
+**Boyscout.** The shim's header counted "about twenty methods … ten
+filters, and five modifiers" and "three of the 54 files" using resource
+embedding; the README tables thirteen filters and seven modifiers, and the
+codemod refuses four files for embedding today — the header says so. The
+empty `.in()` list's early return says why an unrenderable column is not
+refused there (the column is never read). No behaviour changed.
+
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
 before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
 186/186 under podman (157 before: eight bio text guards gone, the header

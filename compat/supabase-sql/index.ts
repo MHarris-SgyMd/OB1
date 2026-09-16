@@ -6,10 +6,10 @@
  * code that is mostly community recipes, and it would fork every one of them away
  * from upstream permanently.
  *
- * But the API surface they use is small and closed — about twenty methods, and
- * measurably so: `.from .select .insert .update .upsert .delete .rpc`, ten
- * filters, and five modifiers. That is shimmable. With this module a file migrates
- * by changing one line:
+ * But the API surface they use is small and closed — under thirty methods, and
+ * measurably so: `.from .select .insert .update .upsert .delete .rpc`, thirteen
+ * filters, and seven modifiers (the README tables them). That is shimmable. With
+ * this module a file migrates by changing one line:
  *
  *     - import { createClient } from "@supabase/supabase-js";
  *     + import { createClient } from "../../compat/supabase-sql/index.ts";
@@ -19,7 +19,7 @@
  *
  * ── What is deliberately NOT supported ───────────────────────────────────────
  * PostgREST resource embedding — `.select("*, other_table(*)")` — needs foreign
- * key introspection to become a join. Three of the 54 files use it. Rather than
+ * key introspection to become a join. Four of the 54 files use it. Rather than
  * guess and return subtly wrong rows, those selects throw with a message saying
  * so. Silently mishandling a join is exactly the failure class this migration has
  * been removing.
@@ -258,7 +258,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   in(c: string, values: unknown[]): this {
     if (values.length === 0) {
-      this.filters.push({ sql: "FALSE", values: [] }); // matches PostgREST: in.() selects nothing
+      // Matches PostgREST: in.() selects nothing. The column is not read, so an unrenderable one is not refused here.
+      this.filters.push({ sql: "FALSE", values: [] });
       return this;
     }
     const col = column(c);
