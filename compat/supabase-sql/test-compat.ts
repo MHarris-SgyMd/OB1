@@ -292,7 +292,7 @@ try {
     try { await db.from("widgets").select("id").eq(bad, "x"); } catch (e) { msg = (e as Error).message; }
     assert(re.test(msg), `${what} (${msg.slice(0, 60)})`);
   }
-  const refused = async (run: () => Promise<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
+  const refused = async (run: () => PromiseLike<unknown>) => { try { await run(); return ""; } catch (e) { return (e as Error).message; } };
   assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("meta->>owner"))), "a path in a select list is still refused — not a filter column");
   assert(/Identifiers must match/.test(await refused(() => db.from("widgets").update({ "meta->>owner": "x" }).eq("name", "delta"))), "a path as a payload key is still refused");
   assert(/Identifiers must match/.test(await refused(() => db.from("widgets").select("id").contains("meta->>owner", {}))), "contains() refuses a path — it is jsonb containment on a column, and text @> jsonb has no operator");

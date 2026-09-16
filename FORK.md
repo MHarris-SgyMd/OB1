@@ -10755,7 +10755,7 @@ no crash), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
 one-row, many-row and rpc pins), the worker's `generated_by` filter (five),
 its `subject` equality (three), its actor on either path and its first-run
 sidecar (one each); `bun test-store-postgrest.ts` 86/86, the store still
-normalising what the fixture hands it; `bun test-auth.ts` 643/643; `bun
+normalising what the fixture hands it; `bun test-auth.ts` 643/643; `bunx tsc --noEmit` in `compat/supabase-sql` clean (PR #61's first CI run caught a helper typed `Promise` where a query builder is `PromiseLike`); `bun
 scripts/check-fork-consistency.mjs` PASS; the codemod round-trips (24
 reverted, 24 re-applied, the tree clean) and triages as before (the shim's
 new column form changes no file's eligibility — the one nested `.or()`
