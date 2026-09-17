@@ -135,7 +135,7 @@ key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
 (`toISOString()`'s form), as PostgREST's JSON has it, not as the Date Bun hands
 back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 73,
 SMD-1544). A `date` column is the bare date PostgREST gives, `2026-09-16`, from
-a table's rows, a `RETURNS TABLE` function's and a `date[]` (change 76; five
+a table's rows, a `RETURNS TABLE` function's and a `date[]` (change 77; five
 extension tools read one). A `timestamp without time zone` column is still a
 `Z` instant where PostgREST gives a zone-less datetime; `.slice(0, 10)` agrees,
 an equality does not — no migrated file reads one.
@@ -220,7 +220,7 @@ development — the test caught it.
   against their own schemas (change 74's review had found seven of twenty-nine
   failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
   four embedded selects the codemod's blocker regex let through — and driving
-  every argument branch found two more; change 76 closed them all). Exercise
+  every argument branch found two more; change 77 closed them all). Exercise
   the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column

@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-six numbered changes on top of the pin. Seven fix defects found in an
+Seventy-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–76 are the numbered `###` sections** further down, which is
+sections. Changes **18–77 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -179,7 +179,7 @@ evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
-scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 76 (the embed blockers are the shim's refusals; agent-memory-api kept)
+scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
 <23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
@@ -195,10 +195,10 @@ integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — th
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
 <8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
-compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 76 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
+compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
-extensions/test-tools.ts         # change 76 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
+extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11027,7 +11027,7 @@ failing tools above the Connect step (household-knowledge's all ran), the
 primitive and the shim README carry the count once, and this section's claim
 is the exact one: the servers start, authenticate and answer over the port —
 eighteen of twenty-five tools work end to end, seven wait on SMD-1588 (done in
-change 76, which also found the count was twenty-nine: the shared meal-planning
+change 77, which also found the count was twenty-nine: the shared meal-planning
 server's four had not been counted).
 
 **Boyscout.** The passes' cut-for-space tidy-ups in the files this change
@@ -11087,7 +11087,7 @@ convenience rather than the files' only runtime — is the suite.
 class, the codemod's embed blocker (a space or an alias before the
 parenthesis), the one-hop embed or an honest refusal for the three servers
 already on the shim, and a drive of every extension tool against Postgres —
-seven of twenty-five fail today, named in the READMEs (done in change 76). Deno deployability of a shim-importing file: the shim is
+seven of twenty-five fail today, named in the READMEs (done in change 77). Deno deployability of a shim-importing file: the shim is
 Bun's `SQL`, and a Deno-capable shim would be a second client to hold equal
 to the first — the files that must deploy to Supabase stay on supabase-js
 (`family-calendar`, `job-hunt`, `ob-graph`, `agent-memory-api`,
@@ -11175,7 +11175,7 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 
 Then update the pin table at the top of this file.
 
-### 76. The SQL shim reads the catalog — arrays bound by their column's type, `.not()`, one hop of resource embedding, an `Error` for an error, one pool per URL — and `test-tools.ts` drives all twenty-nine extension tools against Postgres (SMD-1588)
+### 77. The SQL shim reads the catalog — arrays bound by their column's type, `.not()`, one hop of resource embedding, an `Error` for an error, one pool per URL — and `test-tools.ts` drives all twenty-nine extension tools against Postgres (SMD-1588)
 
 `compat/supabase-sql/index.ts`, `compat/supabase-sql/test-compat.ts`,
 `compat/supabase-sql/README.md`; `scripts/migrate-to-sql-shim.mjs`;

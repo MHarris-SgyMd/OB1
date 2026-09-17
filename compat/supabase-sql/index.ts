@@ -17,7 +17,7 @@
  * and passing a Postgres URL where it passed a project URL. The rest of the file
  * is untouched, which keeps it mergeable from upstream.
  *
- * ── The catalog (SMD-1588, FORK.md change 76) ────────────────────────────────
+ * ── The catalog (SMD-1588, FORK.md change 77) ────────────────────────────────
  * PostgREST knows the schema; supabase-js callers lean on that without knowing
  * it. A JavaScript array in a payload is a `text[]` literal for one column and
  * a JSON array for the next (`tags TEXT[]` beside `instructions JSONB` in one
@@ -167,7 +167,7 @@ function column(name: string): { sql: string; text: boolean } {
  * one hands a finite extended-year Date, which becomes
  * `-000043-03-15T00:00:00.000Z`; server-portable/store.ts's `isoTimestamp`
  * reads every one of these to the same result), numerics as text — nothing
- * driven has needed more. Change 76 has the column map in hand for a table
+ * driven has needed more. Change 77 has the column map in hand for a table
  * verb, and a `date` column's Date (UTC midnight, whatever the process's
  * zone) becomes the bare date PostgREST gives — `2026-09-21` — because five
  * extension tools read one (`week_start`, `follow_up_date`, `expected_close_
@@ -503,7 +503,7 @@ function parseSelect(spec: string): SelectItem[] {
 type Filter = (cols: Columns) => { sql: string; values: unknown[] };
 type Op = "select" | "insert" | "update" | "upsert" | "delete";
 
-/** `error` is a PostgrestError at runtime (change 76); the type stays the structural one migrated files were written against. */
+/** `error` is a PostgrestError at runtime (change 77); the type stays the structural one migrated files were written against. */
 export type Result<T> = { data: T | null; error: { message: string; code?: string } | null; count: number | null };
 
 export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<Result<T>> {
@@ -900,7 +900,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     }
 
     const returning = await this.projection(cols, true);
-    // A value bound by its column's type: an array column takes an array literal with a cast (change 76).
+    // A value bound by its column's type: an array column takes an array literal with a cast (change 77).
     const bind = (c: string, v: unknown, values: unknown[]): string => {
       const b = bound(cols.get(c), v);
       values.push(b.value);
@@ -948,7 +948,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
 
   /**
    * Exposed for tests and for anyone debugging what the shim generates. Reads
-   * the catalog, so it is a promise (change 76); it rejects where execute()
+   * the catalog, so it is a promise (change 77); it rejects where execute()
    * would resolve `{ error }` for what compiles badly — an `.or()` term that is
    * PostgREST's 400 — since there is no result to carry the error in.
    */

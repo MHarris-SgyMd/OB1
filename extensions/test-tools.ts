@@ -3,7 +3,7 @@
  * test-tools.ts — every tool of the five extension servers on the SQL shim
  * answers against a real Postgres carrying the extensions' own schemas.
  *
- * SMD-1588 (FORK.md change 76). Fix 13 moved these servers onto
+ * SMD-1588 (FORK.md change 77). Fix 13 moved these servers onto
  * compat/supabase-sql by changing one import line and never drove them; change
  * 74's review did, and seven of their tools failed on the shim itself — no
  * `.not()`, four embedded selects the codemod's blocker regex had let through,
@@ -477,8 +477,8 @@ console.log("\n[the servers' clients share one pool]");
   const requests = [...driven.values()].reduce((a, set) => a + set.size, 0);
   // The shared pool is ten wide (Bun opens it to `max`, serial or not) and this suite's own two more, and a backend
   // from an earlier step of the CI job may not have been reaped yet — so the bound is a fifth of the limit, not the
-  // arithmetic: 84 were held before change 76, against a default of 100.
-  assert(Number(n) <= 20, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees a handful of connections, not one per request (${n}; 84 held before change 76, against a default limit of 100)`);
+  // arithmetic: 84 were held before change 77, against a default of 100.
+  assert(Number(n) <= 20, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees a handful of connections, not one per request (${n}; 84 held before change 77, against a default limit of 100)`);
 }
 
 // ── The drift guard: every registered tool is driven, and nothing else is ────

@@ -445,7 +445,7 @@ jobs:
       # tools/call against the extensions' own schema.sql files (applied after
       # the READMEs' two auth.* stubs, dropped again at the end) — each read's
       # filters, each write's row, the embedded relation, the trigger's effect,
-      # the message a failure carries (change 76, SMD-1588). A shim gap fails a
+      # the message a failure carries (change 77, SMD-1588). A shim gap fails a
       # named assertion here rather than a user's first call; a tool added to a
       # server fails the drift guard until it is driven. Last in the job because
       # it applies those schemas.
