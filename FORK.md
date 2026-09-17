@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-six numbered changes on top of the pin. Seven fix defects found in an
+Seventy-seven numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–76 are the numbered `###` sections** further down, which is
+sections. Changes **18–77 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -8740,7 +8740,10 @@ sample) the principal is a parameter; where it was a module singleton
 (`delete-thought-mcp`, `update-thought-mcp`, `work-operating-model-activation`)
 `buildServer(principal)` runs once per key scope and `serverFor(principal)`
 hands back the cached one — two servers at most, not one per request, which is
-the property those files and the cost recipe care about. A server with no
+the property those files and the cost recipe care about (undone by change 77:
+a server shared across requests is connect()ed to a fresh transport each time
+and answers on the wrong one; `buildServer(principal)` runs per request now,
+and the cost recipe's sample per session). A server with no
 tool for a read-scoped principal (the two single-tool integrations) still
 declares a tools capability and lists an empty set — the SDK wires `tools/list`
 only when a tool is registered, and a client whose listing fails shows a broken
@@ -8870,11 +8873,11 @@ module-singleton MCP servers still `connect()` one cached `McpServer` to a
 fresh transport per request, as they did on main: the SDK overwrites the
 transport on connect and captures it when a message arrives, so two concurrent
 requests to one of them can cross responses — a pre-existing defect the
-per-scope cache neither causes nor cures (SMD-1497 held it; change 76 builds
+per-scope cache neither causes nor cures (SMD-1497 held it; change 77 builds
 each server per request, and found `enhanced-mcp` a fourth); the "after"
 sample's one transport per session was the shape this paragraph first called
 correct — it shared one server per scope across sessions and hung every
-session but the last minted; change 76 builds its server per session.
+session but the last minted; change 77 builds its server per session.
 
 **Review, first pass** (triaged; two reviewers, nineteen findings — one HIGH,
 four MED, the rest low — twelve fixed, one filed, the rest noted or declined).
@@ -8933,7 +8936,7 @@ branch's hunks (the fourth pass found three that were, hidden among the
 shim's, and fixed them; two casts in `work-operating-model-activation` are
 `main`'s);
 two overlapping requests to a module singleton hang on `main` and here alike —
-SMD-1497 has the trigger, any two, not a burst (closed by change 76). Text: `metadata-norm` deploys
+SMD-1497 has the trigger, any two, not a burst (closed by change 77). Text: `metadata-norm` deploys
 through its `deno.json`, not an inline specifier; fourteen importers, not
 thirteen; the Verified line's count; two non-probes record spellings the rule
 must keep ignoring (a property of a bound principal, a `typeof` beside a bound
@@ -11346,7 +11349,7 @@ is why check 4 reads the body.
 
 Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
-### 76. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons and two more the ticket did not name no longer answer one request on another's transport (SMD-1497)
+### 77. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons, one the ticket did not name and one it called correct no longer answer a request on another's transport (SMD-1497)
 
 **The defect.** `integrations/delete-thought-mcp`, `integrations/update-thought-mcp`
 and `recipes/work-operating-model-activation` built their `McpServer` once —
@@ -11430,10 +11433,10 @@ sample, whose tool modules are not in the repository, is held by the
 text-only rules to building its server beside its transport when a session is
 minted, and to no `serverFor`.
 
-**Verified.** `bun test-auth.ts` 770/770 (709 before: 3 concurrent × 13
-servers + 14 guards + 5 for `enhanced-mcp` + 3 text-only rules for the "after"
+**Verified.** `bun test-auth.ts` 771/771 (709 before: 3 concurrent × 13
+servers + 14 guards + 5 for `enhanced-mcp` + 4 text-only rules for the "after"
 sample). Drilled by putting `main`'s file
-back: `delete-thought-mcp` fails 3 of 770 — requests 11 and 12 `timed out
+back: `delete-thought-mcp` fails 3 of 771 — requests 11 and 12 `timed out
 after 2000 ms`, request 13 (the last transport connected) answered, and the
 guard; `enhanced-mcp` the same three. `deno check` on `enhanced-mcp` passes
 (CI does not run it for that file; its deno.json resolves supabase-js).

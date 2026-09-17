@@ -150,7 +150,7 @@ app.all("*", async (c) => {
 });
 ```
 
-The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, hands the first session's transport to the second the moment it is minted — every session but the last one hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 76). Building the server costs tens of microseconds and happens once per session, so nothing the numbers below rest on changes.
+The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, drops the first session's transport for the second's the moment the second is minted — every session but the newest hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 77). Building the server costs tens of microseconds and happens once per session, so nothing the invocation counts above rest on changes.
 
 Don't forget `Access-Control-Expose-Headers: mcp-session-id` in your CORS config — without it, browser clients can't read the session ID off the response.
 

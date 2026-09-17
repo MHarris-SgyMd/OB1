@@ -17,7 +17,7 @@
  * for a worker anything but a dry run answers 403. The webhook receiver's
  * secret has no scope to give and is compared digest to digest. Each MCP
  * server answers three requests at once each with its own id (SMD-1497,
- * change 76: a server that outlives the request and is connect()ed to a fresh
+ * change 77: a server that outlives the request and is connect()ed to a fresh
  * transport each time answers on the wrong one). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
@@ -373,7 +373,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   }
 
   // Three requests at once under one key, each answered with its own id and the
-  // full list (SMD-1497, FORK.md change 76). Any two overlapping requests are
+  // full list (SMD-1497, FORK.md change 77). Any two overlapping requests are
   // the trigger, not a burst: a server built once and `connect()`ed to a fresh
   // transport per request has the SDK overwrite its transport on the second
   // connect and capture it when the first message arrives, so the first
@@ -749,7 +749,7 @@ for (const s of SERVERS) {
       assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
-    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request — not one built at module scope or cached per scope and connect()ed to a fresh transport each request, which crosses concurrent requests (SMD-1497, change 76)");
+    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 77)");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -791,7 +791,7 @@ for (const s of SERVERS) {
   const file = "integrations/enhanced-mcp/index.ts";
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
-    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 76)`);
+    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 77)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in
@@ -803,7 +803,7 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // sessions and connect()ed once per session hands its transport to the newest session and hangs the rest.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/],
-    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/] },
+    mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /export function buildServer\(principal: Principal\): McpServer/, /register\w+\(server, principal\)/],
     mustNot: [/export const server\b/, /new Map</, /serverFor/] },

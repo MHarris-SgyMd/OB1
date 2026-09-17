@@ -7,7 +7,7 @@
 // ob1-fork (SMD-1497): the McpServer is built per request, inside buildServer()
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
-// FORK.md change 76; extensions/test-auth.ts fires three requests at once.
+// FORK.md change 77; extensions/test-auth.ts fires three requests at once.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -107,7 +107,7 @@ function truncateContent(content: string, maxLen: number): string {
 // arrives, which is after handleRequest() has awaited the body — so the first of
 // two overlapping requests was answered on the second's transport and hung. A
 // build registers the thirteen tools in about half a millisecond (FORK.md
-// change 76 has the measurement); extensions/test-auth.ts fires three requests
+// change 77 has the measurement); extensions/test-auth.ts fires three requests
 // at once.
 function buildServer(): McpServer {
   const server = new McpServer({

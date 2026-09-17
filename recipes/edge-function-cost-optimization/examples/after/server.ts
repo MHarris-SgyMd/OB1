@@ -14,7 +14,7 @@
 // whichever transport the server holds when the message arrives — so the
 // second session minted for a scope took the server's transport from the
 // first, and every session but the last minted hung (ob1-fork, SMD-1497,
-// FORK.md change 76). A build is tens of microseconds, once per session.
+// FORK.md change 77). A build is tens of microseconds, once per session.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Principal } from "../_shared/auth.ts";

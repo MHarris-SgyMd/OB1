@@ -4,7 +4,7 @@
 //  - One McpServer per session, built with the session's transport when the
 //    session is minted (not per request — and not one per key scope shared
 //    across sessions, which hangs every session but the last minted: a server
-//    holds one transport; ob1-fork, SMD-1497, FORK.md change 76); the Supabase
+//    holds one transport; ob1-fork, SMD-1497, FORK.md change 77); the Supabase
 //    client at module scope
 //  - app.options("*") returns CORS preflights cheaply BEFORE auth
 //  - Mcp-Session-Id header is minted on first request and reused on
@@ -69,7 +69,7 @@ app.all("*", async (c) => {
 
   // ✅ Named, scoped, hashed keys through the shared module: every presented
   // form tried, digests compared timing-safe, and the server this principal
-  // gets is the one built for its scope (server.ts).
+  // gets is built for its session with its scope's tools (server.ts).
   const principal = authenticateRequest(c.req.raw, {
     MCP_ACCESS_KEYS: Deno.env.get("MCP_ACCESS_KEYS"),
     MCP_ACCESS_KEY: Deno.env.get("MCP_ACCESS_KEY"),
