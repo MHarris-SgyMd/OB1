@@ -198,6 +198,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
+<4 vendored MCP servers, 1 sample> # change 77 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -11446,7 +11447,16 @@ guard; `enhanced-mcp` the same three. `deno check` on `enhanced-mcp` passes
 own key compare (change 67's decision) and its integer-id read tools
 (SMD-1525) are their own tickets. The "after" sample cannot be run here (its
 tool modules are placeholders), so its fix is held by text and by the
-mechanism the four runnable servers prove. Nothing here changes a response, a
+mechanism the four runnable servers prove. The third review pass found, in
+the per-session transport that sample keeps, a growth this change did not
+introduce and does not fix: `@hono/mcp` 0.1.1 records every POST's `{ ctx,
+stream }` in the transport's `#streamMapping` and deletes it only on abort or
+`close()`, so a transport reused across a session holds one `Request` and one
+Hono `Context` per tool call until the 30-minute prune drops the session
+(measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
+finalized after GC; with a transport per request, 200 of 200). The four
+servers moved to a transport per request are clear of it; the sample's README
+says the bound; SMD-1607 holds the library fix. Nothing here changes a response, a
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
 

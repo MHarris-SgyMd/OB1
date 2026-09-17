@@ -19,7 +19,7 @@ The MCP `StreamableHTTPTransport` is **stateless** in its default configuration.
 | `tools/list` | Enumerate tools | ✅ |
 | `tools/call` | Run the tool | ✅ |
 
-Multiply that by **4 connectors** at session startup → **16 invocations** before the user has done anything useful. Add the per-request `McpServer` reconstruction in 3 of 4 functions and the missing OPTIONS handlers (which don't bill themselves but cause client retries that DO bill), and you have a free-tier-burning machine.
+Multiply that by **4 connectors** at session startup → **16 invocations** before the user has done anything useful. Add the per-request `McpServer` reconstruction in 3 of 4 functions (tens of microseconds each — the invocations are the cost, not the build; Step 3) and the missing OPTIONS handlers (which don't bill themselves but cause client retries that DO bill), and you have a free-tier-burning machine.
 
 ## The Three Fixes
 
@@ -112,6 +112,9 @@ Each extension's tools live in their own module, exporting a `register(server, p
 The minimal pattern (full version in [`examples/after/index.ts`](./examples/after/index.ts)):
 
 ```ts
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { buildServer } from "./server.ts";
+
 type Session = { server: McpServer; transport: StreamableHTTPTransport; lastSeen: number };
 const sessions = new Map<string, Session>();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -150,7 +153,7 @@ app.all("*", async (c) => {
 });
 ```
 
-The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, drops the first session's transport for the second's the moment the second is minted — every session but the newest hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 77). Building the server costs tens of microseconds and happens once per session, so nothing the invocation counts above rest on changes.
+The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, drops the first session's transport for the second's the moment the second is minted — every session but the newest hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 77). Building the server costs tens of microseconds and happens once per session, so nothing the invocation counts above rest on changes. One thing to know about the transport that lives as long as the session: `@hono/mcp` 0.1.1 keeps a record of every POST it has answered until the transport is closed, so a session's memory grows by one request per tool call until the TTL sweep drops it — bounded, and a defect in the library, not the pattern (SMD-1607).
 
 Don't forget `Access-Control-Expose-Headers: mcp-session-id` in your CORS config — without it, browser clients can't read the session ID off the response.
 
