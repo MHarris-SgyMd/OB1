@@ -1191,16 +1191,19 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
    * is this thought's own vectors against the query and nothing else, and
    * "not found" after the model change is the thought in the scored set with
    * no vector that answers. The unfiltered call is an HNSW walk over the
-   * thoughts index, and read that way the same-model assertion below failed
-   * in five CI attempts on three trees that touched nothing here, and four
-   * times in thirty-four runs of this suite looped locally under load. Two of
-   * those were caught with the state dumped: the index scan itself returned
-   * one of the table's three live rows once and none of them once, with the
-   * iterative scan on and off, 300 ms later still — after an autovacuum had
-   * run during [6]'s deletes, with the chunk index answering throughout. Not
-   * a tie among live rows: a graph the scan cannot reach live rows through,
-   * which the sections after heal by inserting more. SMD-1632 holds that
-   * finding; the walk's recall is [5b]/[5c]'s to hold, on random vectors.
+   * thoughts and chunk indexes, and read that way the same-model assertion
+   * below failed in five CI attempts on three trees that touched nothing
+   * here, and four times in thirty-seven runs of this suite looped locally
+   * under load. Two of those were caught with the state dumped: the thoughts
+   * index scan itself returned one of the table's three live rows once and
+   * none of them once, with the iterative scan on and off, 300 ms later
+   * still; an autovacuum had run on both tables during the run (the dump
+   * does not time it against the sections), the chunk index answered
+   * throughout, and the sections after found their rows again. Not a tie
+   * among live rows: a graph the scan cannot reach live rows through.
+   * SMD-1632 holds that finding. This section no longer exercises the walk
+   * at all; its recall is [5b]/[5c]'s to hold, on random vectors, and [4],
+   * [11] and [15] still read it unfiltered over the same shape of corpus.
    * 035's re-capture merges metadata (`||`), so the key survives every
    * re-capture below — the last assertion reads `k` beside it.
    */

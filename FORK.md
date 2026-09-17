@@ -4431,25 +4431,35 @@ re-applied is ok, the 3-argument form dropped is refused naming 022 and not
 004, and a capturing role without DELETE on `thought_chunks` is refused with
 the GRANT and starts once granted. Suites after: schema 483 at both widths,
 live 308, upgrade 36, preflight 138, chunking 35, sql 62, postgrest 46.
+
 `test-live` [7]'s three found-by reads go through `match_thoughts`'s filtered
 branch since SMD-1574: a metadata key only the re-captured thought carries, so
-014 scores it and its chunks by id and no walk decides. The unfiltered top-10
-they read before is an HNSW walk over the thoughts index, and the same-model
-assertion missed the freshly moved vector in five CI attempts on three trees
-that touched nothing under `db/`, passing on rerun each time. The ticket's
-own reading — ten live rows tied at the axis — was wrong: [7] starts from an
-emptied table and has three. The unmodified suite looped locally under load
-(a second suite beside it) missed four times in thirty-four runs, at that
-assertion and at the other-model read, and an instrumented copy caught two
-with the state dumped: the index scan returned one of the three live rows
-once and none of them once — iterative scan on or off, 300 ms later still —
-after an autovacuum had run during [6]'s deletes, with the chunk index
-answering throughout and the sections after finding their rows again. A graph
-the scan cannot reach live rows through, not a tie; the 022 sequence alone,
-its index history emulated four ways with and without a vacuum in flight,
-and ~118k inserts against ~50k vacuums standalone, never missed. SMD-1632
-holds the finding and its production question; the read here no longer
-depends on the walk either way.
+014 scores it and its chunks by id and no walk decides (measured on [7]'s
+rows by the first review pass: a filtered call adds no `idx_scan` to either
+HNSW index and one to the metadata GIN; the unfiltered call adds one to each
+HNSW index; the heap is one page, so 037's sample gate cannot fire) — the
+section no longer
+exercises the HNSW path at all; [5b]/[5c] hold the walk's recall, on random
+vectors, and [4], [11] and [15] still read it unfiltered over the same shape
+of corpus. The unfiltered top-10 [7] read before is a walk over the thoughts
+and chunk indexes, and the same-model assertion missed the freshly moved
+vector in five CI attempts on three trees that touched nothing under `db/`,
+passing on rerun each time. The ticket's own reading — ten live rows tied at
+the axis — was wrong: [7] starts from an emptied table and has three. The
+unmodified suite looped locally under load (a second suite beside it) missed
+four times in thirty-seven runs, at that assertion and at the other-model
+read, and an instrumented copy caught two with the state dumped: the thoughts
+index scan returned one of the three live rows once and none of them once —
+iterative scan on or off, 300 ms later still — with an autovacuum having run
+on both tables during the run (the dump does not time it against the
+sections), the chunk index answering throughout and the sections after
+finding their rows again. A graph the scan cannot reach live rows through,
+not a tie. The 022 sequence alone never missed: 282 iterations over three
+index histories (random rows then unit rows, unit rows only, none) under
+three vacuum modes (none, before, in flight), and two 150-second runs of
+~117k inserts against 55k and 43k nonstop vacuums (probe output not
+retained). SMD-1632 holds the finding and its production question; the read
+here no longer depends on the walk either way.
 
 **A first pass, triaged.** Its top finding was the rule itself: the first
 version deleted the windows on every vectored re-capture, and on the path the
@@ -12370,6 +12380,15 @@ Deliberate. Recorded so nobody assumes they were missed.
   divergent content, and `AGENTS.md` mandates updating a private tracker.
   [PR #274](https://github.com/NateBJones-Projects/OB1/pull/274) proposed the
   obvious fix, was endorsed in review, and was closed unmerged.
+- **The thoughts HNSW index scan has returned none of the table's live rows**
+  (pgvector 0.8.6). Caught twice in `test-live.ts` looped under load, after an
+  autovacuum had run over a mass-deleted, unit-vector graph: an index walk
+  returned one of three live rows once and none of them once, iterative scan
+  on or off, still 300 ms later; the chunk index answered, and later sections
+  found their rows again. Whether a real corpus with real vectors can reach the
+  same state is not shown either way, and no mitigation (a reachability check,
+  `REINDEX`) is built. [7]'s reads no longer depend on the walk (change 40's
+  note, SMD-1574); [4], [11] and [15] still do. SMD-1632.
 
 ---
 
