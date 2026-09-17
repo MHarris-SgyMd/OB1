@@ -13,6 +13,8 @@
     "graphrag": "../db/with-postgres.sh bun eval-graphrag.ts",
     "hybrid": "../db/with-postgres.sh bun eval-hybrid.ts",
     "recency": "../db/with-postgres.sh bun eval-recency.ts",
+    "store-compare": "bun store-compare.ts",
+    "store-scale": "bun store-scale.ts",
     "longmemeval": "bun eval-longmemeval.ts",
     "export-queries": "bun export-queries.ts",
     "replay": "bun eval-replay.ts",

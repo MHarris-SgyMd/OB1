@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-eight numbered changes on top of the pin. Seven fix defects found in an
+Seventy-nine numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
-data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
+data layer (Phase 2). Five (changes 31, 53, 55, 59, and 79) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–78 are the numbered `###` sections** further down, which is
+sections. Changes **18–79 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -12435,6 +12435,67 @@ Upstream status: at the pin, all five files carry the shared server —
 "after" sample as an exported singleton connected once per session.
 **Unfiled** by us.
 
+### 79. The store measured against pgvector, and the second store not built — filtered recall is an in-engine question migration 014 already answers (SMD-1037)
+
+The un-numbered section above, "A second vector store beside Postgres"
+(SMD-1038), wrote down before any number existed the shape a second vector store
+would take beside Postgres and the bar its numbers would have to clear: a recall
+gap at a used filter tier, a latency gap at a reachable row count, or an index
+build time that turns a re-embed into a maintenance window. SMD-1037 is that
+measurement. It scores pgvector HNSW against pgvectorscale's DiskANN and
+pgvector IVFFlat in the same Postgres, and against Qdrant in its own container,
+on the fork's own corpus and on synthetic corpora to 10M rows — every store
+against one exact-cosine ground truth over the same vectors, the comparators
+wired into an eval (`evals/store-compare.ts`, `store-scale.ts`,
+`store-backends.ts`) and never into the product. Like changes 31, 53, 55 and 59,
+it ships no runtime change; the numbers are in evals/README.md, "Does the store
+matter?".
+
+**Unfiltered, the store does not matter.** On the real corpus pgvector HNSW
+returns the exact top-10 for the unfiltered query — the case every vendor
+benchmark reports — and so does every comparator. The pre-registered anti-bar
+named an unfiltered-only win as no reason to move; there is not even a win to
+argue.
+
+**Filtered, a bare index loses recall — and that is the migration-014 question,
+not a store question.** As the filter tightens, pgvector HNSW's default scan
+returns a shrinking share of the exact top-10 (10% at a 3.5%-selective label),
+because it picks its candidates before the filter and a rare label survives in
+few of them — the SMD-968 hazard. Qdrant, filtering inside its graph, holds
+100%; DiskANN, filtering its stream and rescoring, holds strongly and recovers
+to near-exact. But the product does not run a bare index: `match_thoughts`
+pushes the filter into the scan (migration 014), pgvector's own in-engine answer
+to this exact loss, and DiskANN is a second in-engine rung. The recall dimension
+of the bar is real and is met inside the engine; a second store matches the
+in-engine rungs, it does not beat them.
+
+**Latency and build cost at scale.** At a million synthetic rows (64-dim, where
+random vectors defeat every index's recall, so these are build, size and latency
+— not realistic recall): HNSW builds in 160s to a 570 MB index, IVFFlat in 12s,
+and DiskANN — the best small-corpus filtered recall — in 8,165s, two hours and
+sixteen minutes, with a filtered query latency of 520ms at a million rows.
+Qdrant's read is its ANN search plus a Postgres resolve of the ids it returns:
+9.3ms end-to-end at p95, larger than single-store pgvector HNSW's 4.1ms
+unfiltered. At the product's real 1024 width the build costs are an order larger
+— HNSW 35 minutes to an 8 GB index, and DiskANN's build exhausted the 14 GB test
+machine outright. At ten million the pattern only sharpens: DiskANN did not
+build inside a ten-minute bound (it needed 136 minutes at one million), HNSW's
+own build took 139 minutes, and Qdrant's index no longer fit the test machine's
+memory — in RAM it crashed search, on-disk it answered at seconds per query.
+
+**Verdict.** None of the three triggers clears in favour of a second store
+within reach. Filtered recall — the one real gap — is answered inside the engine
+by migration 014 (and by DiskANN, at a build cost that rules DiskANN out at
+scale); the external store matches that, it does not beat it. Latency does not
+gap toward the external store — its id→row resolve makes the two-store read
+slower than the single store, not faster. Build time is a real cost, but it
+argues against DiskANN, not for Qdrant. The second store is not built. The
+`thoughts.embedding` column stays the source of truth (SMD-1038's guardrail).
+Two threads left open, each worth its own ticket if taken: a bounded evaluation
+— not adoption — of DiskANN's SBQ compression, which gave the smallest index and
+strong small-corpus filtered recall; and an upstream note that pgvectorscale's
+parallel DiskANN build crashed the Postgres backend at a million rows (a serial
+build completed).
 ## Detached from the fork network
 
 This repository was forked from `NateBJones-Projects/OB1` and then detached, for
