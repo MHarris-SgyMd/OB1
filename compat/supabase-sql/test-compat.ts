@@ -62,7 +62,20 @@ if (!URL_) {
   await admin`DROP TABLE IF EXISTS manuals CASCADE`;
   await admin`CREATE TABLE manuals (id serial PRIMARY KEY, widget_id int UNIQUE REFERENCES widgets(id), pages int)`;
   await admin`DROP TABLE IF EXISTS nodes CASCADE`;
-  await admin`CREATE TABLE nodes (id serial PRIMARY KEY, parent_id int REFERENCES nodes(id), name text, counts int[] DEFAULT '{}')`;
+  await admin`CREATE TABLE nodes (id serial PRIMARY KEY, parent_id int REFERENCES nodes(id), name text, counts int[] DEFAULT '{}', days date[] DEFAULT '{}', blob bytea)`;
+  // Two more shapes of "unique": a unique index with INCLUDE columns is a one-to-one; an INVALID one is not.
+  await admin`DROP TABLE IF EXISTS badges CASCADE`;
+  await admin`CREATE TABLE badges (id serial PRIMARY KEY, widget_id int REFERENCES widgets(id), note text)`;
+  await admin`CREATE UNIQUE INDEX badges_widget ON badges (widget_id) INCLUDE (note)`;
+  await admin`DROP TABLE IF EXISTS stickers CASCADE`;
+  await admin`CREATE TABLE stickers (id serial PRIMARY KEY, widget_id int REFERENCES widgets(id))`;
+  await admin`CREATE UNIQUE INDEX stickers_widget ON stickers (widget_id)`;
+  await admin`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'stickers_widget'::regclass`;
+  // A function returning a table's rows, and one returning a scalar date: shaped as the table's rows are.
+  await admin`
+    CREATE OR REPLACE FUNCTION gizmos_all() RETURNS SETOF gizmos LANGUAGE sql STABLE AS $$ SELECT * FROM gizmos ORDER BY id $$`;
+  await admin`
+    CREATE OR REPLACE FUNCTION gizmo_made_on(p_label text) RETURNS date LANGUAGE sql STABLE AS $$ SELECT made_on FROM gizmos WHERE label = p_label $$`;
   // A domain over an array type (format_type gives the domain's name; the type category says array), and a
   // same-named table in a schema behind the visible one, carrying the foreign key the visible one lacks.
   await admin`DROP DOMAIN IF EXISTS tagset CASCADE`;
@@ -177,9 +190,10 @@ console.log("\n[4] Filters");
   try { await db.from("widgets").select("name").or("and(a.eq.1,b.eq.2),c.eq.3"); } catch (e) { nested = (e as Error).message; }
   assert(/nested and\(\)\/or\(\) grouping/.test(nested), "or() refuses nested grouping rather than half-parsing it");
 
-  let badOp = "";
-  try { await db.from("widgets").select("name").or("score.bogus.1"); } catch (e) { badOp = (e as Error).message; }
-  assert(/operator "bogus" is not supported/.test(badOp), "or() refuses an unknown operator");
+  // An operator term() does not know is PostgREST's 400 — the same answer whether the file wrote it or a comma in
+  // user text made it (`v1.2.3` reads as operator "2"); or() cannot tell the two apart.
+  const badOp = await db.from("widgets").select("name").or("score.bogus.1");
+  assert(badOp.error?.code === "PGRST100" && /operator "bogus" is not supported/.test(badOp.error.message), `or() with an unknown operator resolves as the 400, naming the operator (${badOp.error?.code})`);
   // Four tools interpolate user text into their expression; a comma in it splits a term PostgREST cannot parse either.
   const split = await db.from("widgets").select("name").or("name.ilike.%Sea, Salt%,kind.is.null");
   assert(split.error !== null && split.error.code === "PGRST100" && /not column\.operator\.value/.test(split.error.message), `a term user text broke resolves as { error } with PostgREST's 400 code, not a throw out of the handler (${split.error?.code})`);
@@ -193,6 +207,22 @@ console.log("\n[4] Filters");
   assert(unclosed.error?.code === "PGRST100", `a group nothing closes is the 400, not a swallowed expression (${unclosed.error?.code})`);
   const quotedValue = rows4(await db.from("widgets").select("name").or('name.eq."alpha",name.eq."no, body"'));
   assert(quotedValue.length === 1, `PostgREST's double-quoted value form holds a comma (${quotedValue.length})`);
+  // What a comma in user text can put at a term start is the 400, never a refusal out of the handler.
+  for (const [expr, what] of [
+    ["name.ilike.%x, and (y%,kind.is.null", "grouping words after a comma"],
+    ["name.ilike.%v1, v1.2.3 pipe%,kind.is.null", "an operator a comma made (\"2\")"],
+    ["name.ilike.%a, b.in.(1,2)%,kind.is.null", "an in() a comma made"],
+    ["name.ilike.%a, meta.cs.junk%,kind.is.null", "a cs value that is not JSON"],
+  ] as [string, string][]) {
+    let threw = false, r: { error: { code?: string } | null } = { error: null };
+    try { r = await db.from("widgets").select("name").or(expr); } catch { threw = true; }
+    assert(!threw && r.error?.code === "PGRST100", `${what} resolves as the 400, not a throw (${threw ? "threw" : r.error?.code})`);
+  }
+  let grouping = "";
+  try { await db.from("widgets").select("name").or("and(name.eq.1,kind.eq.2)"); } catch (e) { grouping = (e as Error).message; }
+  assert(/nested and\(\)\/or\(\) grouping/.test(grouping), "…while an expression that begins with grouping — the file's own text — still throws at the call");
+  const negated = rows4(await db.from("widgets").select("name").or("kind.not.eq.tool,score.gt.999").order("id"));
+  assert(negated.map((r) => r.name).join() === "gamma", `PostgREST's col.not.op.value negates inside or() (${negated.map((r) => r.name).join()})`);
 
   // PostgREST semantics: an empty in() list matches nothing rather than everything.
   const emptyIn = await db.from("widgets").select("name").in("name", []);
@@ -387,6 +417,10 @@ try {
   assert(dated[0]?.made_on === "2026-09-20", `a date column arrives as the bare date PostgREST gives, not a Z instant (${String(dated[0]?.made_on)}) — five extension tools read one`);
   const viaFn = rowsOf(await db.rpc("gizmos_made", { p_label: "dated" }), "date through a function");
   assert(viaFn[0]?.made_on === "2026-09-20", `…and the same column through a RETURNS TABLE function is the same bare date — one shape whichever path a tool takes (${String(viaFn[0]?.made_on)})`);
+  const viaSetof = rowsOf(await db.rpc("gizmos_all"), "SETOF a table");
+  assert(viaSetof.length >= 1 && viaSetof.every((r) => r.made_on === "2026-09-20"), `…and through a RETURNS SETOF <table> function, shaped by that table's columns (${String(viaSetof[0]?.made_on)})`);
+  const viaScalar = await db.rpc("gizmo_made_on", { p_label: "dated" });
+  assert(viaScalar.data === "2026-09-20", `…and a scalar date-returning function answers the bare date (${String(viaScalar.data)})`);
   await db.from("gizmos").delete().eq("label", "dated");
 } catch (e) {
   assert(false, `[13] threw: ${e instanceof Error ? e.message : String(e)}`);
@@ -427,8 +461,12 @@ try {
   assert(JSON.stringify(two[0]?.labels) === '["ai","with, comma","quo\\"te"]', `elements with a comma and a quote survive the literal (${JSON.stringify(two[0]?.labels)})`);
   const domain = rowsOf(await db.from("crates").insert({ tags: ["a", "b"] }).select("tags"), "domain over text[]");
   assert(JSON.stringify(domain[0]?.tags) === '["a","b"]', `a domain over text[] binds as an array — the type's category decides, not its name (${JSON.stringify(domain[0]?.tags)})`);
-  const ints = rowsOf(await db.from("nodes").insert({ name: "counted", counts: [3, 1, 2] }).select("counts"), "int[]");
+  const ints = rowsOf(await db.from("nodes").insert({ name: "counted", counts: [3, 1, 2], days: ["2026-01-02", "2026-01-03"] }).select("counts, days"), "int[]");
   assert(Array.isArray(ints[0]?.counts) && JSON.stringify(ints[0]?.counts) === "[3,1,2]", `an int[] column comes back as a list, not the Int32Array Bun decodes it into (${JSON.stringify(ints[0]?.counts)})`);
+  assert(JSON.stringify(ints[0]?.days) === '["2026-01-02","2026-01-03"]', `a date[] column's elements are bare dates, as the scalar is (${JSON.stringify(ints[0]?.days)})`);
+  await new SQL({ url: URL_, max: 1 }).unsafe(`UPDATE nodes SET blob = '\\x0102'::bytea WHERE name = 'counted'`);
+  const blob = rowsOf(await db.from("nodes").select("blob").eq("name", "counted"), "bytea");
+  assert(blob[0]?.blob instanceof Uint8Array && !Array.isArray(blob[0]?.blob), `a bytea column stays the byte view Bun hands back — the list rule is for an array column (${Object.prototype.toString.call(blob[0]?.blob)})`);
   await db.from("nodes").delete().eq("name", "counted");
   const upd = rowsOf(await db.from("widgets").update({ labels: ["ai", "ops"] }).eq("name", "zeta").select("labels"), "update");
   assert(JSON.stringify(upd[0]?.labels) === '["ai","ops"]', "update binds an array the same way");
@@ -521,6 +559,11 @@ try {
   rowsOf(await db.from("manuals").insert({ widget_id: alpha, pages: 12 }).select("id"), "manual");
   const o2o = rowsOf(await db.from("widgets").select("name, manuals(pages)").in("name", ["alpha", "beta"]).order("id"), "one-to-one");
   assert(JSON.stringify(o2o[0]?.manuals) === JSON.stringify({ pages: 12 }) && o2o[1]?.manuals === null, `a one-to-one embed is the row or null, as PostgREST's is — not [row] and [] (${JSON.stringify(o2o.map((r) => r.manuals))})`);
+  rowsOf(await db.from("badges").insert({ widget_id: alpha, note: "gold" }).select("id"), "badge");
+  rowsOf(await db.from("stickers").insert({ widget_id: alpha }).select("id"), "sticker");
+  const shapes = rowsOf(await db.from("widgets").select("name, badges(note), stickers(id)").eq("name", "alpha"), "index shapes");
+  assert(JSON.stringify(shapes[0]?.badges) === JSON.stringify({ note: "gold" }), `a unique index with INCLUDE columns still makes a one-to-one — the key columns decide, not the whole indkey (${JSON.stringify(shapes[0]?.badges)})`);
+  assert(Array.isArray(shapes[0]?.stickers) && (shapes[0]?.stickers as unknown[]).length === 1, `an INVALID unique index does not — a list, as with no index (${JSON.stringify(shapes[0]?.stickers)})`);
   // A self-reference: the table's name does not say which side; the column form does.
   rowsOf(await db.from("nodes").insert([{ name: "root" }]).select("id"), "root");
   const root = rowsOf(await db.from("nodes").select("id").eq("name", "root"), "root id")[0]?.id as number;
@@ -563,6 +606,12 @@ try {
   const typo1 = await db.from("latecomers").select("id").eq("nmae", "x");
   const typo2 = await db.from("latecomers").select("id").eq("nmae", "x");
   assert(typo1.error?.code === "42703" && typo2.error?.code === "42703", "a column the table lacks is Postgres's 42703, both times");
+  // …and when a migration then adds that very column, the absent memo would bind its array raw for the process's life:
+  // the failed call forgets the map (22P02 is not "undefined column"), and the next one reads the table again.
+  await admin`ALTER TABLE latecomers ADD COLUMN nmae text[] DEFAULT '{}'`;
+  const staleFirst = await db.from("latecomers").insert({ nmae: ["late"] }).select("nmae");
+  const staleSecond = rowsOf(await db.from("latecomers").insert({ nmae: ["later"] }).select("nmae"), "insert after the map was forgotten");
+  assert(staleFirst.error?.code === "22P02" && JSON.stringify(staleSecond[0]?.nmae) === '["later"]', `a column queried before it existed costs one failed call after the migration adds it, not a restart (${staleFirst.error?.code ?? "no error"}; ${JSON.stringify(staleSecond[0]?.nmae)})`);
   await admin`DROP TABLE latecomers`;
   await admin.close();
 } catch (e) {

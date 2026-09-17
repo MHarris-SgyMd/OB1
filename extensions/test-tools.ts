@@ -174,14 +174,18 @@ try {
   assert(ok(byFilters) && byFilters.body?.count === 1 && byFilters.body?.items?.[0]?.name === "Dishwasher", "…by category and location, ILIKE both");
   const comma = await c("search_household_items", { query: "Sea, Salt" });
   assert(!ok(comma) && comma.body?.success === false && /PGRST100/.test(failure(comma)), `…a query with a comma splits the .or() expression as it would through PostgREST (400), and the tool's own error handling reports PostgREST's code — the shim resolved { error }, it did not throw (${failure(comma).slice(0, 80)})`);
-  const quoteQuery = await c("search_household_items", { query: 'Paint (Sea "Salt' });
-  assert(ok(quoteQuery) && quoteQuery.body?.count === 0, `…a query with an unclosed quote and parenthesis is pattern text — four ILIKE terms, no rows, no error (${failure(quoteQuery) || quoteQuery.body?.count})`);
-  const exactQuery = await c("search_household_items", { query: "Living Room Paint" });
-  assert(ok(exactQuery) && exactQuery.body?.count === 1, "…and an exact name finds its row through the four-term .or()");
+  // An item whose name carries a parenthesis and a quote, found by the unbalanced prefix a person types: under a
+  // splitter that read brackets and quotes inside a value, the terms after the first were swallowed and this was 0.
+  const tap = await c("add_household_item", { name: 'Kitchen (main) 12" tap', category: "plumbing", location: "Kitchen" });
+  assert(ok(tap), "an item named with a parenthesis and a quote is stored");
+  const parenQuery = await c("search_household_items", { query: "Kitchen (main" });
+  assert(ok(parenQuery) && parenQuery.body?.count === 1 && parenQuery.body?.items?.[0]?.name === 'Kitchen (main) 12" tap', `…a query with an unclosed parenthesis is pattern text through all four ILIKE terms and finds it (${failure(parenQuery) || parenQuery.body?.count})`);
+  const quoteQuery = await c("search_household_items", { query: '12" tap' });
+  assert(ok(quoteQuery) && quoteQuery.body?.count === 1, `…as is one with a quote (${failure(quoteQuery) || quoteQuery.body?.count})`);
   const none = await c("search_household_items", { query: "nothing-of-the-kind" });
   assert(ok(none) && none.body?.count === 0 && eqJson(none.body?.items, []), "…and none is an empty list");
   const all = await c("search_household_items", {});
-  assert(ok(all) && all.body?.count === 2 && all.body?.items?.[0]?.name === "Dishwasher", "…no filter lists every item, newest first");
+  assert(ok(all) && all.body?.count === 3 && all.body?.items?.[0]?.name === 'Kitchen (main) 12" tap', "…no filter lists every item, newest first");
 
   const details = await c("get_item_details", { item_id: paint.body?.item.id });
   assert(ok(details) && details.body?.item?.name === "Living Room Paint" && typeof details.body?.item?.created_at === "string", `get_item_details finds the row, timestamps as strings (${failure(details)})`);

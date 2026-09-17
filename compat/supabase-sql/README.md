@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`144 assertions: 144 passed, 0 failed` and `PASS`. A migrated file behaves
+`165 assertions: 165 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the five extension servers
 on the shim against their own schemas — the migrated files this shim is judged by.
@@ -134,10 +134,11 @@ the key's *text*, so a number against `meta->>score` is a text comparison
 key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
 (`toISOString()`'s form), as PostgREST's JSON has it, not as the Date Bun hands
 back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 73,
-SMD-1544). A `date` or a `timestamp without time zone` column is reshaped the
-same way, into a `Z` instant, where PostgREST would give `2026-09-16` or a
-zone-less datetime; `.slice(0, 10)` agrees, an equality against the bare date
-does not — no migrated file reads one.
+SMD-1544). A `date` column is the bare date PostgREST gives, `2026-09-16`, from
+a table's rows, a `RETURNS TABLE` function's and a `date[]` (change 76; five
+extension tools read one). A `timestamp without time zone` column is still a
+`Z` instant where PostgREST gives a zone-less datetime; `.slice(0, 10)` agrees,
+an equality does not — no migrated file reads one.
 
 ## What is deliberately refused
 

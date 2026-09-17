@@ -11318,8 +11318,8 @@ columns as the labels say. *Twenty-nine:* recorded, not corrected backwards —
 change 74's prose keeps its count with a note.
 
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 131/131 (84
-before; 144 after pass 1, 152 after pass 2 — the passes' pins are listed in
-their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
+before; 144 after pass 1, 152 after pass 2, 165 after pass 3 — the passes'
+pins are listed in their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
 renderings in `toSQL()`, an unknown operator refused; [15] `[]` and
 `["ai", "with, comma", "quo\"te"]` into `text[]` beside an array into `jsonb`
 in one insert, an update, `.contains()` on both column kinds and with
@@ -11331,8 +11331,8 @@ across lines, by key column with and without an alias, one-to-many with `(*)`,
 `null` and `[]`, an embed under `.single()`, the correlated subquery in
 `toSQL()`, and eight refusals; [1] two clients share a pool and closing one
 twice leaves the other's open. `../db/with-postgres.sh bun test-tools.ts`
-114/114 (117 after pass 1, 121 after pass 2) — 29 tools, every argument
-branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
+114/114 (117 after pass 1, 121 after pass 2, 122 after pass 3) — 29 tools,
+every argument branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
 removed → 5 named failures in the tool suite (the two tools' `.not is not a
 function`), 1 in compat; the array literal removed → 50 and 17 (`malformed
 array literal: "quick,vegetarian"`, `""`; the first run read 25 because a
@@ -11487,9 +11487,61 @@ date through a function; `[15]` the domain; `[17]` the hidden table; `[18]`
 the typo's 42703 twice; the tool suite: an unclosed quote and parenthesis as
 pattern text, an exact name through the four-term `.or()`, `follow_up_date`
 one shape through the function. `test-compat.ts` 152/152; `test-tools.ts`
-121/121. The stop signal holds: nothing the pass found in the original
-mechanism is above LOW, and the one mechanism whose seams recurred is
-replaced.
+121/121. The stop signal holds on the original mechanism: nothing the pass
+found there is above LOW; the one mechanism whose seams recurred is replaced.
+
+**Review pass 3** (the same two shapes, aimed at the seams between the rules
+passes 1 and 2 added — the case the house rule says earns a pass after the
+stop signal; twenty items, sixteen taken). Both reviewers found the same two
+seams, in pass 2's additions. The absent-name memo undid pass 1's
+add-a-column rule for a column ever named before it existed: the name sat in
+`absent`, no re-read followed the migration, and the array bound raw — the
+22P02 this change exists to remove — for the process's life (executed:
+reads stayed at two across the `ALTER`). The failure path knows when the map
+disagreed with the schema, so a query that named an absent column and then
+failed with anything but "undefined column" forgets the table's map, and so
+does one that RAN (a `date` column added after it was first named would
+otherwise shape as an instant, silently): one failed call after the
+migration, not a restart — `[18]` pins the 22P02 then the success. And the
+term parser's grouping refusal fired at every term start, where a comma in
+user text makes one: `Sofa, and (chairs)` threw the refusal out of
+`search_household_items` on the real server, `v1, v1.2.3 pipe` an "operator
+2" refusal, `a, meta.cs.junk` the JSON-parse refusal — and
+`professional-crm` has no `try/catch` at all. Grouping is refused only where
+the file's own expression begins; every refusal a comma-made term raises in
+`term()` is the `PGRST100` `{ error }`, so an unknown operator in the file's
+own text is the 400 now too (`or()` cannot tell the two apart, and PostgREST
+answers 400 to both); `col.not.op.value`, PostgREST's negation inside
+`.or()`, parses. Also taken: pass 2's two household pins were vacuous — an
+unbalanced `(` and `"` in a query that matches nothing is 0 rows under the
+swallowing splitter too — replaced by an item named `Kitchen (main) 12" tap`
+found by `Kitchen (main` and by `12" tap` (0 under pass 1's splitter, 1 under
+the parser; the runner verified both ways); four pass-2 rules that survived
+mutation with no assertion have one each — the `bytea` guard, `date[]`
+elements, `indisvalid`, the index's key columns (`INCLUDE (note)` on the
+unique index still a one-to-one, an invalidated index not); `RETURNS SETOF
+<table>` rows and a scalar result were unshaped (`proargnames` is NULL) —
+the overload carries its return type, a table's rows take that table's map,
+a scalar its one column, and candidates agree only when their shapes are
+equal (one with no OUT columns beside one with some had passed the check
+vacuously); twenty concurrent callers missing the same name each dropped
+the memo and re-read (20 reads) — only the caller whose map is still current
+drops it; the absent set is bounded at 64 names (a comma in user text can
+inject a well-formed term with any column name); the typed-array rule works
+without a column map too (a function's rows), sparing a byte view; the
+README's `date` paragraph and the header's cache sentence said the pre-pass-1
+rule. Noted, no change: a plain value keeps its surrounding whitespace and a
+value beginning with `{`, `[` or `"` is read as a group or a quoted string
+(PostgREST's reading; every user-text call site prefixes `%`); a DOMAIN over
+`date[]` shapes by the type's name where `bound()` reads the category (no
+such column anywhere); the empty broken term's message names nothing (a
+leading or doubled comma — PostgREST 400s too). Pins: `[4]` grouping words,
+an operator, an `in` and a bad `cs` value after a comma as the 400, grouping
+at the start still a throw, `not.`; `[13]` `SETOF` and a scalar date; `[15]`
+`date[]`, `bytea`; `[17]` `INCLUDE`, an invalid index; `[18]` the late column
+named early. `test-compat.ts` 165/165; `test-tools.ts` 122/122. Every top
+finding again sat in the previous pass's additions, and the two mechanisms
+pass 2 added have each had their seam closed once; the loop stops here.
 
 **Upstream status:** not applicable — the shim, the codemod and the suite are
 fork-only, and the five servers' own text is untouched (the embeds, the
