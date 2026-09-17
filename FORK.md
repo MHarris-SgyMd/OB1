@@ -4432,39 +4432,49 @@ re-applied is ok, the 3-argument form dropped is refused naming 022 and not
 the GRANT and starts once granted. Suites after: schema 483 at both widths,
 live 308, upgrade 36, preflight 138, chunking 35, sql 62, postgrest 46.
 
-`test-live` [7]'s three found-by reads go through `match_thoughts`'s filtered
-branch since SMD-1574: a metadata key only the re-captured thought carries, so
-014 scores it and its chunks by id and no walk decides (measured on [7]'s
-rows by SMD-1574's review pass: a filtered call adds no `idx_scan` to either
-HNSW index and one to the metadata GIN, the unfiltered call adds one to each
-HNSW index, and the heap is far under 037's 8,192-page floor, so the sample
-gate cannot fire; the exact branch costs about 0.2 ms more a call than the
-walk on three rows). The same pass's runner emptied the exact branch's chunk
-CTE and the two window reads failed, then sent every call down the walk and
-the same-model read missed in two of two standalone runs: the chunk rows are
-what answer, the filter is what routes. The section no longer exercises the
-HNSW path at all: [5b] holds the walk's recall on random vectors, [5c] its
-plan, and [4], [15] and [11]'s hybrid reads still read it unfiltered over
-the same shape of corpus. The unfiltered
-top-10 [7] read before is a walk over the thoughts and chunk indexes, and the
-same-model assertion missed the freshly moved vector in five CI attempts on
-three trees that touched nothing under `db/`, passing on rerun each time. The
-ticket's own reading — ten live rows tied at the axis — was wrong: [7] starts
-from an emptied table and has three, so a tie cannot cost a row from a window
-of ten. The unmodified suite looped locally missed four times in thirty-seven
-runs (thirty-four of them with a second suite beside it), twice at that
-assertion and twice at the other-model read, and an instrumented copy caught
-two with the state dumped: the thoughts index scan returned one of the three
-live rows once and none of them once — iterative scan on or off, 300 ms later
-still — with an autovacuum having run on both tables during the run (the dump
-does not time it against the sections), the chunk index answering throughout
-and the sections after finding their rows again. A graph the scan cannot
-reach live rows through; no tie returns nothing. The 022 sequence alone never
-missed: 282 iterations over three index histories (random rows then unit
-rows, unit rows only, none) under three vacuum modes (none, before, in
+`test-live` [7]'s three found-by assertions (five `foundAt` calls, two of them
+window reads at axis 2) go through `match_thoughts`'s filtered branch since
+SMD-1574: a metadata key only the re-captured thought carries, so 014 scores
+it and its chunks by id and no walk decides (measured on [7]'s rows by
+SMD-1574's review passes: a filtered call adds no `idx_scan` to either HNSW
+index and one to the metadata GIN, the unfiltered call adds one to each HNSW
+index, the heap is far under 037's 8,192-page floor so the sample gate cannot
+fire, and the exact branch costs about 0.1 ms more a call than the walk on
+three rows — 0.07 to 0.2 across two measurements, round trip dominated). Two
+mutants say what answers and what routes: the exact branch's chunk CTE
+emptied, and the two window reads fail; every call in the suite forced down
+the walk, and the same-model read missed in two of two standalone runs the
+day it was written and in none of two the next — a walk that sometimes
+returns none of three live rows, not a deterministic miss, and a forced walk
+for every section, not a model of the code before the fix, so the
+four-in-thirty-seven rate below is the one that stands. The
+section no longer exercises the HNSW path at all: [5b] holds the walk's
+recall on random vectors, [5c] its plan, and the unfiltered reads left on the
+walk are [4]'s, [15]'s, [11]'s two hybrid reads and [5b]'s two ([15] and [11]
+run after the suite's mass deletes, as [7] does; [4] runs first, on a
+near-fresh index). The unfiltered top-10 [7] read before is a walk over the
+thoughts and chunk indexes, and the same-model assertion missed the freshly
+moved vector in five CI attempts on three trees that touched nothing under
+`db/`, passing on rerun each time. The ticket's own reading — ten live rows
+tied at the axis — was wrong: [7] starts from an emptied table and has three
+thoughts and four chunk rows, under a returned limit of ten and a candidate
+window of forty, so nothing is truncated at any stage and a tie can reorder
+candidates, not remove them. The unmodified suite looped locally missed four
+times in thirty-seven runs (thirty-four of them with a second suite beside
+it), twice at that assertion and twice at the other-model read, and an
+instrumented copy caught two with the state dumped: the thoughts index scan
+returned one of the three live rows once and none of them once — iterative
+scan on or off, 300 ms later still — with an autovacuum having run on both
+tables during the run (the dump does not time it against the sections), the
+chunk index answering throughout and the sections after finding their rows
+again. A graph the scan cannot reach live rows through. The 022 sequence alone
+never missed: 282 iterations over three index histories (random rows then
+unit rows, unit rows only, none) under three vacuum modes (none, before, in
 flight), and two 150-second runs of ~117k inserts against 55k and 43k nonstop
-vacuums (probe output not retained). SMD-1632 holds the finding and its
-production question; the read here no longer depends on the walk either way.
+vacuums (probe output not retained). The fixed suite is green in eleven local
+runs under `db/with-postgres.sh` (500/500 each); the ticket's twenty CI runs
+are not done. SMD-1632 holds the finding and its production question; the
+read here no longer depends on the walk either way.
 
 **A first pass, triaged.** Its top finding was the rule itself: the first
 version deleted the windows on every vectored re-capture, and on the path the
@@ -12393,8 +12403,8 @@ Deliberate. Recorded so nobody assumes they were missed.
   found their rows again. Whether a real corpus with real vectors can reach the
   same state is not shown either way, and no mitigation (a reachability check,
   `REINDEX`) is built. [7]'s reads no longer depend on the walk (change 40's
-  note, SMD-1574); [4], [15], [11]'s hybrid reads and [5b]'s walk-branch probe
-  still do. SMD-1632.
+  note, SMD-1574); [4]'s, [15]'s, [11]'s two hybrid reads and [5b]'s two walk
+  reads still do. SMD-1632.
 
 ---
 

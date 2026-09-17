@@ -1201,12 +1201,15 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
    * 300 ms later still; an autovacuum had run on both tables during the run
    * (the dump does not time it against the sections), the chunk index
    * answered throughout, and the sections after found their rows again. A
-   * tie cannot explain it — the window is ten over three live rows, and one
-   * dump returned no row at all: a graph the scan cannot reach live rows
-   * through. SMD-1632 holds that finding. This section no longer exercises
-   * the walk at all; [5b] holds its recall on random vectors, [5c] its plan,
-   * and [4], [15] and [11]'s hybrid reads still read it unfiltered over the
-   * same shape of corpus.
+   * tie cannot explain it: three thoughts and four chunk rows under a
+   * returned limit of ten and a candidate window of forty, so nothing is
+   * truncated and a tie can reorder candidates, not remove them — and one
+   * dump's index scan returned no row at all. A graph the scan cannot reach
+   * live rows through. SMD-1632 holds that finding. This section no longer
+   * exercises the walk at all; [5b] holds its recall on random vectors, [5c]
+   * its plan, and the unfiltered reads left on it are [4]'s, [15]'s, [11]'s
+   * two hybrid reads and [5b]'s two.
+   *
    * 035's re-capture merges metadata (`||`), so the key survives every
    * re-capture below — the last assertion reads `k` beside it.
    */
