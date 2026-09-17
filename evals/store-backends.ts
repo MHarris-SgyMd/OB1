@@ -368,14 +368,23 @@ export class QdrantEngine implements Store {
     }
     this.stat.loadMs = nowMs() - t0;
     // Build time: force optimizers to index the whole collection, then wait green.
+    // If the wait exhausts without green (seen at 10M on-disk in a small VM), the
+    // build time is only a floor and any recall measured next is brute-forced over
+    // the unindexed majority — exact, so inflated. Record that so a future run's
+    // Qdrant row is self-flagging rather than silently trusted.
     const tb = nowMs();
     await this.api("PATCH", `/collections/${this.collection}`, { optimizers_config: { indexing_threshold: 1 } });
+    let reachedGreen = false;
     for (let i = 0; i < 3600; i++) {
       const info = await this.api("GET", `/collections/${this.collection}`);
-      if (info.result.status === "green" && Number(info.result.indexed_vectors_count ?? 0) > 0) break;
+      if (info.result.status === "green" && Number(info.result.indexed_vectors_count ?? 0) > 0) { reachedGreen = true; break; }
       await Bun.sleep(500);
     }
     this.stat.buildMs = nowMs() - tb;
+    if (!reachedGreen) {
+      this.stat.note = "indexing did not reach green — build time is a floor and recall is brute-force-inflated";
+      console.warn(`  ⚠ qdrant: ${this.stat.note}`);
+    }
     // Footprint: Qdrant's on-disk storage for this collection.
     try {
       const du = await docker(["exec", this.containerName, "du", "-sb", "/qdrant/storage/collections/" + this.collection]);

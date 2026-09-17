@@ -2772,7 +2772,10 @@ Qdrant, filtering inside its graph against a payload index, holds 100% at every
 tier; DiskANN, filtering its stream and rescoring with full vectors, holds
 strongly at default and recovers to near-exact when rescored. IVFFlat at its
 default single probe is the weak control; at 200 probes it is exact, at a
-latency cost.
+latency cost. The "200" rows are each engine's own effort knob — HNSW's
+`ef_search`, IVFFlat's `probes`, DiskANN's `query_rescore` — at a nominal
+setting, not an equalised cost; the latency tables below show what each costs to
+buy that recall.
 
 **The finding, and the caveat that decides it.** A dedicated store *can*
 preserve filtered recall where a bare HNSW index cannot. But the product does

@@ -75,7 +75,7 @@ function queryVectors(seed: number): number[][] {
 }
 
 type Cell = { recall: number; p50: number; p95: number };
-type Row = { store: string; effort: string; buildS: string; bytes: number; cells: Map<string, Cell>; e2e95?: number };
+type Row = { store: string; effort: string; buildS: string; bytes: number; cells: Map<string, Cell>; e2e95?: number; note?: string };
 
 async function measure(store: Store, queries: number[][], exact: Map<string, string[]>, arms: { name: string; f: Filter }[], effort?: number): Promise<Map<string, Cell>> {
   if (effort !== undefined && "setEffort" in store) await (store as any).setEffort(effort);
@@ -137,7 +137,7 @@ for (const N of SCALES) {
         await pg.raw(`SELECT ref FROM points WHERE ref IN (${list})`);
         e2e.push(nowMs() - t0);
       }
-      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: qcells, e2e95: pct(e2e, 95) });
+      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: qcells, e2e95: pct(e2e, 95), note: qd.stat.note });
     } catch (e) {
       // Qdrant's search timed out at 10M in the 14 GB VM: keep its build/footprint
       // (already measured) and let the pg-side numbers still land.
@@ -145,7 +145,7 @@ for (const N of SCALES) {
       console.log(`  qdrant measure FAILED at ${N.toLocaleString()} — ${msg}`);
       failures.push(`qdrant search: ${msg}`);
       const nanCells = new Map(arms.map((a) => [a.name, { recall: NaN, p50: NaN, p95: NaN }]));
-      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: nanCells });
+      rows.push({ store: qd.name, effort: "default", buildS: (qd.stat.buildMs / 1000).toFixed(1) + "s", bytes: qd.stat.indexBytes, cells: nanCells, note: qd.stat.note });
     }
 
     // Postgres indexes, DiskANN last. A backend crash during a build poisons the
@@ -200,5 +200,6 @@ function report(N: number, rows: Row[], arms: { name: string; f: Filter }[], tab
   for (const r of rows) { if (seen.has(r.store)) continue; seen.add(r.store); console.log(`| ${r.store} | ${r.buildS} | ${(r.bytes / 1e6).toFixed(0)} MB |`); }
   console.log(`\n  points table (no vector index): ${(tableBytes / 1e6).toFixed(0)} MB · pg load ${(pgLoad / 1000).toFixed(1)}s · qdrant load ${(qdLoad / 1000).toFixed(1)}s`);
   if (failures.length) console.log(`  build failures: ${failures.join("; ")}`);
+  for (const r of rows) if (r.note) console.log(`  note (${r.store}): ${r.note}`);
   console.log();
 }
