@@ -34,7 +34,12 @@
  *
  * A file is INELIGIBLE when it uses something the shim deliberately does not
  * implement, or when it deploys somewhere the shim cannot follow (KEEP below).
- * Those need a human, and the report says which and why.
+ * Those need a human, and the report says which and why. The blockers are the
+ * shim's own refusals, spelled as regexes over the file: since change 77
+ * (SMD-1588) one hop of resource embedding is served, so only a nested embed
+ * or an embedding hint blocks — the earlier embed regex wanted the relation
+ * flush against its parenthesis, let `maintenance_tasks (` through, and three
+ * servers were migrated onto a shim that threw at their first embedded select.
  */
 
 import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
@@ -51,7 +56,13 @@ const NPM_IMPORT_RE = /(['"])(?:npm:|https:\/\/esm\.sh\/|jsr:)@supabase\/supabas
 
 /** Reasons the shim cannot stand in. Each is something it refuses to fake. */
 const BLOCKERS = [
-  { re: /\.select\(\s*[`'"][^`'"]*[a-z_]+\(/, why: "PostgREST resource embedding (a join) — needs FK introspection" },
+  // Resource embedding: one hop is served since change 77 (SMD-1588) — `relation (cols)`, `alias:fk_column (cols)`,
+  // `children(*)`, whitespace anywhere — through the shim's own foreign-key read. What the shim refuses at the
+  // call, this refuses at triage: a nested embed, and an embedding hint. (The regex this replaced wanted the
+  // relation flush against its parenthesis, so `maintenance_tasks (` and `recipes:recipe_id (` passed as
+  // non-embeds and three servers were migrated onto a shim that threw at their first embedded select.)
+  { re: /\.select\(\s*[`'"][^`'"]*\([^)`'"]*\(/, why: "nested PostgREST resource embedding — one hop is served; write the deeper join as an .rpc() or a SQL view" },
+  { re: /\.select\(\s*[`'"][^`'"]*![A-Za-z_]/, why: "a PostgREST embedding hint (!inner, !fk_name) — name the foreign-key column instead: alias:fk_column (…)" },
   { re: /\.auth\b/, why: "Supabase Auth (GoTrue) — not implemented" },
   { re: /\.storage\b/, why: "Supabase Storage — not implemented" },
   { re: /\.channel\s*\(/, why: "Supabase Realtime — not implemented" },
@@ -72,6 +83,11 @@ const BLOCKERS = [
 const KEEP = new Map([
   ["recipes/local-brain-no-mcp/functions/_shared/db.ts",
     "runs inside the recipe's own self-hosted Supabase stack (setup.sh symlinks functions/ into its edge runtime), where PostgREST is present and bun is not"],
+  // Blocked by its two one-to-many embeds until change 77 served one hop; deployed as the Supabase Edge
+  // Function its README describes and started as one by extensions/test-auth.ts, so moving it is its own
+  // change (the CI typecheck, the test's client shape and its README's deploy step all move with it).
+  ["integrations/agent-memory-api/index.ts",
+    "deploys as a Supabase Edge Function (its README, the deno-check job, test-auth.ts); its embeds are servable since change 77 — migrating it is a separate change"],
 ]);
 
 /** Supabase's type-only import of the Edge Functions runtime's types; Bun cannot resolve a jsr: specifier. */
