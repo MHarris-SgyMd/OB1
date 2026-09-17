@@ -179,11 +179,11 @@ evals/lib.ts                     # fix 20  (new file — shared embedding path)
 evals/bench.ts                   # fix 20  (new file — compare a model to the record)
 evals/baselines.json             # fix 20  (new file — recorded results)
 .dockerignore                    # fix 20  (new file — root build context)
-scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod)
-<24 recipe/integration files>    # fix 13  (one import line each; revert with the codemod)
+scripts/migrate-to-sql-shim.mjs  # fix 13  (new file — the codemod); change 74 (the runtime line, the KEEP list); change 77 (the embed blockers are the shim's refusals; agent-memory-api kept)
+<23 recipe/integration files>    # fix 13  (one import line each; revert with the codemod; 24 until change 74 put the local-brain client back)
 <7 extension servers>            # change 64 (keys through extensions/_shared/auth.ts; the tools that write gated)
 extensions/_shared/auth.ts       # change 64 (new file — server-portable/auth.ts byte for byte; the test holds them equal)
-extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server
+extensions/test-auth.ts          # change 64 (new file — the seven servers under scoped keys); change 67 widened it to every vendored server; change 74 starts every server on the shim under bun
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json)
 extensions/bun.lock              # change 64 (new file)
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
@@ -194,6 +194,13 @@ integrations/_shared/auth.ts     # change 67 (new file — the same)
 integrations/consolidation-workers/_shared/auth.ts  # change 67 (new file — the same, beside the workers' existing _shared/)
 <9 vendored files>               # change 69 (a thought's content and vector through update_thought / the 3-argument upsert_thought; the enhanced columns beside them)
 extensions/test-writes.ts        # change 69 (new file — every vendored writer driven against Postgres, its row against update_thought's)
+<8 vendored files>               # change 71 (a captured thought through the 3-argument upsert_thought instead of a raw INSERT; three more say they bypass it)
+compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork); change 77 (the catalog: arrays by declared type, .not(), one-hop embedding, PostgrestError, one pool per URL)
+compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
+<16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
+extensions/test-tools.ts         # change 77 (new file — every tool of the five extension servers on the shim, driven against Postgres with their schemas)
+db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
+db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -1875,12 +1882,12 @@ OB1_BENCH_MAINTENANCE_MEM=9GB`, as the README's commands say; the count in
 the "other indexes" column is the schema's — four under 001–013, seven under
 the whole set — and was added to the printout after the two large runs):
 
-| rows | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
-| 10,000 | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
-| 100,000 | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
-| 1,000,000 | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
-| 10,000,000 | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
+| rows | source | oracle | schema | insert s | rows/s | chunk rows | chunk s | thoughts MiB | thoughts HNSW MiB | build s | chunks MiB | chunks HNSW MiB | build s | other indexes s (count) | maintenance_work_mem | workers |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 10,000 | loaded | computed | 001–013 | 0 | 47,123 | 4,000 | 0 | 4 | 5 | 2 | 1 | 1 | 0 | 0 (4) | 256MB | 4 |
+| 100,000 | loaded | computed | 001–013 | 2 | 46,782 | 40,000 | 0 | 38 | 54 | 8 | 13 | 11 | 2 | 0 (4) | 256MB | 4 |
+| 1,000,000 | loaded | computed | whole | 21 | 47,624 | 400,000 | 4 | 391 | 544 | 111 | 125 | 109 | 28 | 6 (7) | 977MB | 4 |
+| 10,000,000 | loaded | computed | whole | 207 | 48,412 | 4,000,000 | 30 | 3907 | 5437 | 1134 | 1250 | 1099 | 327 | 63 (7) | 9GB | 4 |
 
 The index is 1.4× its heap at this width and about 570 bytes a row (the
 sizes are MiB; the heap is 410 bytes a row); the build
@@ -4790,12 +4797,14 @@ Cloudflare Worker in front that returns 404 for the prefix.
 `server-portable` had the same defect by a different door. `app.all("*")` caught
 every path, so the discovery GET went through `authenticate()`. With no key it
 got HTTP 200 and a JSON-RPC `-32001` envelope — fix 1's answer, right for an MCP
-request and wrong for this one. With a key — not the connector's shape, its
-discovery GET carries none, but any client that echoes the URL's `?key=` — it
+request and wrong for this one. With a key — which IS the URL-only connector's
+shape: the SDK copies the connector URL's query onto its path-aware discovery
+GET (`client/auth.js`, `url.search = issuer.search`), a fact this paragraph got
+wrong until change 75's review — it
 authenticated, cost an agent-registry resolve, and was handed to
-`StreamableHTTPTransport`, which opened an SSE stream nothing writes to or
-closes: the response never completes (SMD-1259, found by this change's review
-pass). Neither is 404. Nothing exercised the path: no test
+`StreamableHTTPTransport`, which opened an SSE stream nothing wrote to or
+closed: the response never completed (SMD-1259, found by this change's review
+pass; closed by change 75). Neither is 404. Nothing exercised the path: no test
 named `.well-known`, and `deploy/smoke.sh` only ever POSTed to the endpoint.
 Local Claude Code over `x-brain-key` never asks, which is why it stayed
 invisible in development.
@@ -4820,8 +4829,9 @@ check 2 probes the **origin root** — where RFC 9728 puts the document and wher
 claude.ai looks, with the server's path as a suffix when the URL carries one —
 with no key and following redirects, as the SDK client does, and naming the URL
 and code that missed; the base URL must carry a scheme and no query string, or
-the script refuses it rather than derive the wrong origin. It is the
-one check a Supabase deployment cannot pass, and that failure is real.
+the script refuses it rather than derive the wrong origin. It was the
+one check a Supabase deployment cannot pass, and that failure is real; change
+75's checks 3 and 4 are the others.
 `tsc --noEmit` is clean and the Workers bundle still builds
 (`wrangler deploy --dry-run`, 272 KiB gzipped).
 
@@ -4841,7 +4851,9 @@ That is a design decision, and it sits with the **method** axis the review passe
 found — an authenticated GET anywhere costs an agent-registry resolve and then
 hangs on an SSE stream the per-request transport never closes, because the
 Accept patch stamps `text/event-stream` on every method (upstream #424; their PR
-#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one.
+#425 answers GET with 405). Both are SMD-1259, a second mechanism, not this one;
+the method axis is closed by change 75, which answers GET with 405 before
+`authenticate()`. The path axis (a mount point) stays open there too.
 The concrete reason the path axis waits: a mount at `/` makes the connector URL
 the mount point, and a proxy that forwards under an unstripped prefix — the shape
 `deploy/README.md` already anticipates — would then 404 the MCP endpoint itself.
@@ -8341,7 +8353,7 @@ checker's non-probe for the servers' own call spells the call they make today
 
 **Not done here.** SMD-1455 holds the seventeen excepted files; SMD-1480 the
 five extensions that import the shim and read `Deno.env`, which as they stand
-neither deploy nor run — CI's `deno check` covers `server/index.ts` and the two
+neither deploy nor run (done in change 74) — CI's `deno check` covers `server/index.ts` and the two
 extensions on supabase-js, and the runtime test is what exercises all seven.
 The three vendored files that already compare timing-safe on their own
 (`integrations/rest-api` by a hand-rolled XOR loop, `enhanced-mcp` by
@@ -8391,7 +8403,13 @@ data at rest — every query typed. The bound is strict: a row logged in the
 prune's own transaction shares its `now()` and stays, and `test-schema` [34]
 asserts that with insert and prune in one transaction (SMD-1498 — the section
 had assumed each statement's `now()` is later than the last's, which PGlite's
-millisecond clock does not promise, and its wipe assertion flaked once).
+millisecond clock does not promise, and its wipe assertion flaked once). The
+window's unit is asserted too (SMD-1515): the section had checked the default
+over rows hours old and rows going only at 0, which a body counting hours
+passes; now a row half a day past 30 days goes and one half a day inside
+stays under the default — half a day, since rows a whole day out sit on a 31-
+or 29-day bound whenever the insert and the prune share a `now()`, and the
+tick then decides whether such a window is caught.
 `db/config.mjs`'s `QUERY_LOG` is the one spelling of the flag, names, tool sets
 and retention, read by the server, preflight and the tests; a `querylog` grant
 group (query_log `INSERT`, since 034) means a self-hosted role that runs
@@ -8922,7 +8940,8 @@ must keep ignoring (a property of a bound principal, a `typeof` beside a bound
 secret); the Next.js dashboard README told users to enter `MCP_ACCESS_KEY`
 against `open-brain-rest`, converted here. Noted, not changed:
 `consolidation-workers/deno.json`'s `check` task still names `bio/index.ts`,
-whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone);
+whose shim import fails it (SMD-1480; CI checks `metadata-norm` alone — the
+task names `metadata-norm` alone since change 74);
 `readwise-capture` answers an empty body 200 before the secret check —
 upstream's accommodation of Readwise's Test Webhook button, unchanged.
 
@@ -9035,8 +9054,8 @@ servers' write tools beside the extensions' (six copies follow); the test's
 Deno stand-in and postgres stub lines are wrapped.
 
 **Not done here.** SMD-1228 holds the last rule of the vendored-tree standard
-(integrations writing around `update_thought`) — done in change 69. SMD-1480 holds the
-deployability of everything that imports the shim. `recipes/vercel-neon-telegram`'s
+(integrations writing around `update_thought`) — done in change 69. SMD-1480 held the
+deployability of everything that imports the shim — done in change 74. `recipes/vercel-neon-telegram`'s
 `validateAccessKey` guards the lengths before its `timingSafeEqual`, a small
 length leak the ticket did not name and this change did not touch.
 
@@ -9256,8 +9275,8 @@ quoted identifiers and an alias allowed. Word-bounded: `content_fingerprint
 =` and `embedding_model =` are other columns. In every non-binary,
 non-ignored file under the seven category directories and `docs/`, prose
 included. Outside the rule, and said so: an `.insert(` (a fresh row around
-the functions — no fingerprint, no label — is a different defect, SMD-1524),
-a metadata-only update, a payload spread from another object, one that
+the functions — no fingerprint, no label — is a different defect, SMD-1524 —
+in the rule since change 71), a metadata-only update, a payload spread from another object, one that
 arrives as a function's return value or parameter, a builder split across
 statements, a table name held in a variable, Python's `dict(content=…)`, a
 hand-built REST `PATCH` (none in the tree), and the remedy itself — the
@@ -9331,7 +9350,8 @@ sentence names the spelling.
 **Decisions.** Updates, not inserts: the ticket's rule and the carry-forward
 comment named the update, and an insert leaves nothing *stale* — it leaves
 the pre-003 shape the backfills repair; six sites are filed as SMD-1524 with
-the widening of check 10 they need. The enhanced columns stay a raw update
+the widening of check 10 they need — done in change 71, which found eight.
+The enhanced columns stay a raw update
 beside the function rather than a payload key: the function never read them,
 and adding them would put a vendored schema's columns into a core function.
 `rest-api`'s failed-embedding edit blanks the vector rather than keeping the
@@ -9361,7 +9381,8 @@ idempotency key; `db/ci-parity.sh` did not run the suite; the probe list
 lacked the worker's statement and miscounted the files. Not fixed, and said
 where: the shim's table verbs bind a `number[]` as an array literal
 (pre-existing; every vendored `.insert({ embedding })` through the shim has
-it — carried to SMD-1524); a name bound to a payload is one for the whole
+it — carried to SMD-1524, where the inserts left the table verbs and the
+binding stayed); a name bound to a payload is one for the whole
 file (check 8's stance); the embed-before-`NOT_FOUND` cost. Run for real:
 PostgREST resolves `{p_content, p_payload, p_embedding}` to the 3-argument
 form, a JSON `null` vector included, and 013's 4-argument form is never a
@@ -9399,10 +9420,11 @@ timestamp); this section's Verified paragraph is rewrapped and names the
 third Deno check.
 
 **Not done here.** SMD-1524 (six raw inserts of content and vector, and check
-10's widening to them). SMD-1525 (`enhanced-mcp`'s read tools cannot address
-a UUID row). SMD-1480 holds the deployability of `update-thought-mcp`,
-`open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim;
-their behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun.
+10's widening to them) — done in change 71. SMD-1525 (`enhanced-mcp`'s read tools cannot address
+a UUID row). SMD-1480 held the deployability of `update-thought-mcp`,
+`open-brain-rest`, `rest-api` and `consolidation-bio`, which import the shim —
+done in change 74; their behaviour is exercised by `test-auth.ts` and
+`test-writes.ts` under Bun.
 `server/index.ts`, upstream's Edge Function, is untouched. The `docs/` READMEs
 that show a SQL `UPDATE thoughts SET metadata …` are metadata-only and outside
 the rule.
@@ -9810,6 +9832,2396 @@ commands run and label their arms `after (014–035)` (no estimate row, the
 "declares no sample share" note) and `after (014 on)` (three estimate rows).
 
 **Upstream status:** not applicable — 014's routing statement is this fork's.
+
+### 71. The vendored captures that inserted a thought go through the 3-argument `upsert_thought` — eight files off a raw `INSERT` into `thoughts`, three deployments with a database of their own say they bypass it, and check 10 holds the insert (SMD-1524)
+
+`integrations/readwise-capture/index.ts`,
+`integrations/consolidation-workers/bio/index.ts` (its first run),
+`recipes/editorial-policy/auditor/index.ts`,
+`recipes/adaptive-capture-classification/capture-with-gating.ts`,
+`recipes/local-ollama-embeddings/embed-local.py`,
+`recipes/readwise-import/import-readwise.py`, the samples in
+`integrations/telegram-capture/README.md` and
+`integrations/slack-capture/README.md`; headers on
+`integrations/kubernetes-deployment/index.ts`,
+`recipes/vercel-neon-telegram/src/lib/db.ts` and
+`recipes/schema-aware-routing/index.ts`; `scripts/check-fork-consistency.mjs`
+(check 10); `extensions/test-writes.ts`; their READMEs and
+`recipes/local-brain-no-mcp/README.md` (Linear SMD-1524, filed from change
+69's audit). Change 69 moved every vendored *update* of a thought's `content`
+or `embedding` onto the functions and drew its rule at the update, because an
+update leaves something *stale*; it named the other door and left it: a raw
+`INSERT` of a fresh row with content, or content and a vector, around the
+3-argument `upsert_thought`. The ticket named six sites. Check 10's first run
+with the insert in its rule found eight hits in eight files — the two the
+ticket's grep had not reached being `editorial-policy`'s auditor, which
+stored every weekly report as a raw row, and `schema-aware-routing`, which
+turned out to write a database of its own — and a hand search found two
+more the rule cannot see: the readwise backfill's batch insert of a list
+built by comprehension, and the Ollama recipe's `POST /rest/v1/thoughts`.
+What a raw insert leaves is not stale but *missing*: `content_fingerprint`
+NULL — 003's rule is in the functions, 016's trigger does not fill it, so the
+row is invisible to dedup until 023's backfill runs, and a later capture of
+the same text through `upsert_thought` makes a twin, which is the duplicate
+the fork's whole fingerprint machinery exists to refuse; `embedding_model`
+NULL — 021's vector of unknown model, which the re-embed pool treats as not at
+the target and re-embeds; and, where the writer holds a key, no name for
+008's audit row — the functions record an actor the caller passes, a raw
+insert has nowhere to pass one. Two of the eight
+were worse than the shape: the bio worker's first run computed its own
+fingerprint and stored **no vector at all** (the comment said `upsert_thought`
+would drop the enhanced columns, which is true, and is what the sidecar
+update change 69 gave the rewrite path is for), so the first profile was
+unsearchable until a re-embed pass reached it; and the classification
+recipe's example inserted `tags`, `project` and `due_date` as columns
+`thoughts` has never had, so it failed on any brain.
+
+**The mechanism** is change 69's, on the capture side. A capture is one call
+to the 3-argument `upsert_thought(p_content, p_payload, p_embedding)` with
+`embedding_model` in the payload — the function writes the text, its
+fingerprint, the vector and the vector's label in one statement under 033's
+lock order, sets 008's actor from `p_payload.actor` when the caller names one,
+and answers `{id, fingerprint, existed, supersedes}`; a text the brain already holds comes back `existed` with its
+metadata merged and its vector replaced, which is what a re-sent webhook or a
+re-run backfill should do, and what a raw insert could not (the readwise
+backfill bisected its batches to find the row a unique violation aborted
+them on — gone with the batch). The enhanced-thoughts columns the function
+does not know (`source_type`, `type`, `importance`) follow by an update that
+carries neither content nor vector — for the bio worker on a fresh row only
+(`existed` skips it), for the receiver and the backfill wherever the columns
+are NULL (the second pass, below) — so a re-capture leaves a hand-set tier
+alone, change 69's escalation-only stance. Where the writer makes no vector — the auditor's report, the
+classification example — `{p_content, p_payload}` resolves to the 2-argument
+form and the row waits, labelled NULL as a vectorless row should be, for a
+re-embed pass; the files say so, and say that this form answers `{id,
+fingerprint}` only — no `existed` — so a vectorless writer that wants a
+fresh-row gate must pass the 3-argument form with a JSON `null` vector (the
+review pass ran both through real PostgREST). The readwise receiver and the auditor are
+driven in `test-writes.ts` (the receiver behind a stubbed Readwise book
+lookup and the `readwise-books` sidecar, now the third the suite applies and
+drops); the bio worker's first run, the classification example, the two
+Python recipes and the two README samples are read by regex there. Per
+file: `readwise-capture` — one call with the label constant the file now
+names, the sidecar per column where it is NULL, `existed` answered `ok` and
+the book counter still incremented; `consolidation-bio` — the first run embeds the
+profile as the rewrite path does and captures it whole, a concurrent run's
+`existed` row reported as not created and left its columns,
+`computeContentFingerprint` no longer imported; `editorial-policy` — the
+report through the 2-argument form, its window timestamps keeping two reports
+two rows; `adaptive-capture-classification` — the 2-argument form with the
+classifier's fields in metadata, and the note that the capture MCP tool is
+the better call there; `embed-local.py` — `POST /rest/v1/rpc/upsert_thought`
+with the Ollama model's bare name as the label (the spelling
+`OB1_EMBEDDING_MODEL` uses for an Ollama model, so `db/reembed.ts` sees these
+rows as at its target or not), `existed` reported per thought, and the
+"ALTER the column" advice answered by a fork note (the width is
+`db/config.mjs`'s); `import-readwise.py` — one call per row, the bisection
+and its `APIError` gone, `existed` counted as already present, the sidecar
+per fresh row, a slower backfill said in the README; the two samples — the
+3-argument call with the label constant, Slack's sample gaining the constant
+Telegram's already had.
+
+**Check 10** widens to the insert: a PostgREST `.insert(` on `thoughts` whose
+payload carries either key — a literal, an array of literals, a bound name,
+and a name filled one literal at a time by `x.push({ … })` or Python's
+`x.append({ … })`, a binding form the update rule did not need — and the SQL
+`INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` whose column list
+names `content` or `embedding` (quoted or not; word-bounded, so
+`content_fingerprint` and `embedding_model` are the other columns they are;
+`INSERT … SELECT` with a list caught, `VALUES` or `SELECT` without one
+outside the rule, said so). The one insert the non-probe list carried as
+"outside" moved to the probes, joined by thirteen more — each site's own
+shape and the forms a rebase could bring — and ten non-probes: another
+table's insert with a `content` column, the other columns, no column list,
+a metadata-only row, the remedy, prose naming the statement, the
+comprehension the rule cannot see. Sixty-one probes, forty-one non-probes
+(eleven and four from the review passes), each probe held to its verb's line. **Exceptions, seven, the list's first
+entries** — none a bypass a fix here could remove, each a file whose header
+or README says what its rows lack: three deployments whose database is their
+own, built from the guide's shape, where the fork's functions are not —
+`kubernetes-deployment` (its own Postgres in the cluster, `k8s/init.sql`),
+`vercel-neon-telegram` (Neon, `sql/001-create-thoughts.sql`) and
+`schema-aware-routing` (a five-table project from its README's SQL, a
+`thoughts` with `domain`/`status`/`source` columns) — the first two the same
+files check 7 excepts for creating a brain rather than adding to one; the two
+guides that show upstream's `upsert_thought` body and the `local-brain-no-mcp`
+container init that shows its own, where the `INSERT` is the function's; and
+`test-writes.ts` itself, which plants a row as an older write left it,
+fingerprint and label by hand, for the writer under test to move whole. The
+Kubernetes and Neon READMEs say how to get a fork-shaped brain there instead
+(apply `db/migrations/` in place of the init script; backfill and re-embed
+data moved across); the routing README says to capture through the function
+and keep its three columns in metadata.
+
+**Decisions.** The three own-database deployments are excepted, not
+converted: routing their captures through a function their database does not
+have would break them, and replacing their init scripts with the fork's
+migrations is a deployment change beyond a write audit — each README says
+the path. The shim's table verbs still bind a `number[]` as a Postgres array
+literal (change 69's carried finding): after this change no vendored table
+verb carries a vector, so the dependence is gone rather than the binding
+fixed, and the binding stays because the shim cannot tell a vector from an
+`int[]` column by the array's shape — `rpc()` can, because a function
+parameter is typed. The readwise backfill stores one row per call rather
+than a batch: PostgREST has no batch RPC, a duplicate is now the function's
+answer rather than a violation to bisect for, and the cost — a few minutes
+per ten thousand highlights against a batch of twenty-five — is the
+backfill's to bear, said in its README. The Ollama label is the model's bare
+name, not `ollama/<name>`: the fork spells `OB1_EMBEDDING_MODEL` that way
+(`qwen3-embedding:4b`), and a label the re-embed pool does not recognise as
+its target is a row it re-embeds. The bio worker's first run pays for an
+embedding it did not before — the rewrite path already did, and an
+unembedded profile is one nobody finds. The two vectorless captures use the
+2-argument form by omission rather than passing a JSON `null` vector: the
+form is the function's own, and the label rule (NULL with no vector) holds
+either way. `INSERT INTO thoughts VALUES (…)` without a column list stays
+outside the rule: the statement does not say which columns it writes, and
+none is in the tree.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with real PostgREST v12.2.3 beside the database; eleven
+findings, none above MEDIUM: eight fixed, two noted, one informational). The
+readwise backfill read the
+function's reply with `isinstance(data, dict) else {}` and skipped any other
+shape as "already present" — a client wrapping the reply in a list or a
+string would have stored every row and written no sidecar, silently; the
+reply is unwrapped from those two shapes now and a reply naming no id raises
+(both reviewers, independently; the running one confirmed postgrest-py's
+current shape is the dict). The backfill's sidecar was one update per row —
+two round trips per highlight, and the README's "a few minutes per 10K"
+undercounted by an order — and is one update per batch over the fresh ids
+now, the README saying ten to twenty minutes. The classification example's
+comment and README promised the enhanced `type` column and wrote only
+metadata; reworded, with the 3-argument-with-null path named for a writer
+that wants a fresh-row gate. The receiver's book counter still counts an
+`existed` highlight (Readwise's semantics) — said in the README. The Ollama
+recipe's summary counted an `existed` row as ingested; a separate line now,
+and its own `metadata.embedding_model` key explained beside the column. A
+`-- comment` inside a multi-line SQL column list read as a column; stripped,
+one probe and one non-probe added (50/37). The bio guards in the test
+matched one spelling of the call; they hold the three arguments in any
+order, and the header says the guards are spelling-sensitive by design. Not
+fixed, and said: `computeContentFingerprint` in the workers' helpers has no
+importer left outside the helpers (the boyscout found they call it
+themselves — it stays); check 10 catches a column-listed `INSERT INTO
+thoughts (content)` in a comment or README sentence, by design. Run for
+real: the shim and PostgREST both resolve `{p_content, p_payload}` to the
+2-argument form and `{…, p_embedding: null}` to the 3-argument one, the
+latter answering `existed`; a 768-wide vector is refused with SQLSTATE 22000
+(HTTP 400), so the recipes' status checks report it per thought; a restored
+raw insert in the receiver fails check 10 at its line and two test
+assertions — as `500` from the shim's array binding, the limit change 69's
+header states, not by naming the columns; five runs on one container, and a
+run after a SIGKILL, all green; `dropSidecars` drops the readwise-books
+table and both functions.
+
+**Review pass 2** (the same two lenses; seven findings, two MEDIUM, both in
+the original change — the running reviewer's top finding was in pass 1's
+batching, so the passes' fixes are among the top findings but not all of
+them). The fresh-row gate met the dedupe filter: `readwise-capture` and the
+backfill check for a row by `source_type = 'readwise'`, and wrote
+`source_type` only when the function said the row was fresh — so a first
+write interrupted between the function and that update (a crash, a 500 and
+Readwise's retry, the backfill's new `raise` after earlier rows of the batch
+were stored) left a row the dedupe could not see, which the re-capture then
+found `existed` and left without its columns for good — before the change
+the retry made a duplicate row, after it a permanently half-shaped one. The
+sidecar is written `WHERE source_type IS NULL` now, on every capture: a
+fresh row takes it, the interrupted row takes it on the re-capture, a
+complete row is left alone; the backfill writes it in a `finally`, so the
+rows stored before a refused reply take theirs before the error propagates
+(the running reviewer traced the raise path; the reading one the retry). The
+test interrupts a first write by hand and re-captures. The second MEDIUM was
+prose: every converted file, its README and this section said "the audit
+actor (008) is written with the text", and none of the writers named one —
+the functions set `ob1.actor` only from `p_payload.actor` (or
+`update_thought`'s `p_actor`), and change 69's five servers, which hold a
+principal, pass none either, so their headers' "the actor reaches the audit"
+has been false since change 69. Here: the two writers that authenticate a
+key — `consolidation-bio` (both paths) and the auditor — pass `{name:
+principal.name}`, and the test reads 008's row for the auditor's report
+(`actor_name = MCP_ACCESS_KEY`); the writers without a key (the receiver,
+the two scripts, the example, the two samples) say they name none, which is
+008's own distinction for a write without a key, and the test reads the
+receiver's audit row as NULL. Change 69's five are SMD-1541. Smaller: the
+UPDATE rule read a `-- comment` after a comma in a SET list as defeating the
+target match while pass 1's INSERT rule stripped it (asymmetry) — both rules
+blank line and block comments now, two probes and two non-probes (52/39); a
+`;` inside a string argument or a payload built into a variable first fails
+the bio text guards, within the header's stated sensitivity; pass 1's count
+sentence said nine fixed of eleven — eight fixed, two noted, one
+informational; the receiver's `existed` merge carries the latest highlight's
+id, said in the code. Run for real: the batched sidecar over PostgREST
+(`PATCH /thoughts?id=in.(…)` → 204; an empty `in.()` touches nothing);
+postgrest-py 2.31's rpc reply is the dict; the classification example's old
+insert fails `42703` on a plain fork brain and on one with the enhanced
+schema, so "failed on any brain" holds; two runs on one container green.
+
+**Review pass 3** (the same two lenses; eight findings, the top ones in the
+passes' own additions and one pre-existing — the stop signal). Check 10's
+comment handling, added in passes 1 and 2, blanked a comment AFTER the
+statement's boundary had been found, so a comment's own text still ended the
+list: `SET metadata = $1, -- v2; was v1` stopped the SET list at the
+comment's `;`, `-- where content lives` at its "where", and a paren inside a
+comment in an INSERT column list broke the list match — three false
+negatives from mundane comments (both reviewers; the running one ran them).
+The rules find the statement's head in the text and read the list from a
+copy blanked from the head onward — line and block comments, and the text of
+single-quoted strings, replaced by spaces with newlines kept, the string
+state starting at the head where the text is SQL, so a quote in the prose
+before it opens nothing; six probes and two non-probes (58/41), among them a
+dash pair and a `content =` inside a string beside a real target. The heal
+filter was one update WHERE `source_type IS NULL` writing both columns, so a
+row another path captured first, typed by hand and without a `source_type`,
+had its type overwritten to `reference` on the re-capture (the running
+reviewer made one); the heal is per column now — `source_type` where it is
+NULL, `type` where it is NULL — in the receiver and the backfill, and the
+test hand-sets a type on a row without `source_type` and re-captures. The
+backfill's `finally` let a failing sidecar update bury the loop's own error
+(the reading reviewer; the running one saw the chained traceback) — the
+loop's error is tracked and stays the one raised, the sidecar's a warning;
+the sidecar's own failure on a clean loop still raises (a fake client for
+all four cases). Prose: the receiver's header, README and this section still
+said "on a fresh row only" from before pass 2; said per writer now. Run for
+real: the actor plumbing end to end over the shim and PostgREST — a
+3-argument call with `actor` names it on 008's `capture` row with
+`actor.source` over `metadata.source`, `update_thought` with `p_actor` as a
+JS object binds as jsonb (005's guard silent) and names it on the `update`
+row, the 2-argument call names it too; `PATCH …&source_type=is.null` updates
+the NULL row once. **Pre-existing, found by driving the bio worker for
+real:** the SQL shim's `ident()` refuses a JSON-path filter column
+(`metadata->>generated_by`), so `consolidation-bio` as shipped on the fork
+answers 500 at its first query and never reaches `upsertProfile` — the
+reason it can only be read here, not driven; the shim fix and the drive are
+SMD-1544 — done in change 73, which found a second gap (a `Date` where
+PostgREST gives a string) one step past the first. A fresh worktree needs `bun install` in `extensions/` before
+`test-writes.ts` (eight MCP assertions fail without the packages); CI
+installs.
+
+**Review pass 4** (the same two lenses; six findings, all LOW or
+informational, the top ones in pass 3's blanker — the stop signal holding).
+The blanker read a backslash-escaped quote inside an `E'…'` string as the
+string's close and reopened one over the target that followed, and read a
+dash pair inside a `"quoted identifier"` as a line comment — two false
+negatives, both theory-grade for the tree (no E-string, no dashed identifier
+near a `thoughts` statement) and both confirmed by running the blanker; an
+E-string's backslash skips its next character and a quoted identifier is
+read whole now, three probes (61/41): the doubled quote, the E-string, the
+dashed identifier, each beside a real target. The 4000-character window is
+named in its comment (the tree's longest statement is under 400). One
+per-file clause above still said "the sidecar on a fresh row" for the
+receiver — pass 2's fix overtook it; said per column. Run for real: the
+per-column heal over PostgREST leaves a hand-set type and fills
+`source_type`, and a repeated PATCH touches nothing; a row another tool
+labelled (`source_type = 'mcp'`) keeps its label and, since the receiver's
+dedupe looks for readwise rows only, is re-sent to the function on every
+delivery — one row throughout, one `update` audit row per delivery — said in
+the README now; the backfill's `finally` under a KeyboardInterrupt writes
+the stored rows' columns and re-raises, under a clean loop with a failing
+first column raises the sidecar's error with the second column unwritten
+(the next run heals both), under a double failure raises the loop's error
+with one warning; the checker's scan is no slower for the per-head slice
+(0.7 s either way); `deno check` on the receiver shows the shim typings
+only. Two runs on one container green.
+
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the Ollama recipe's usage text, `--dry-run`
+help and README still said "insert" for what is a store through the
+function; the readwise backfill's README opening and one troubleshooting
+heading the same; the test's sidecar comment counted two files where there
+are three; the probe list's doc comment named the updates alone. The
+`computeContentFingerprint` pass 1 marked for removal is called by the
+helpers file itself (the workers' shared copy computes a fingerprint for its
+own structured-capture path), so it stays; the pass-1 note above says so.
+
+**Not done here.** SMD-1544 (the shim refuses a JSON-path filter column, so
+`consolidation-bio` cannot run on the fork; with that fixed, bio joins the
+driven set) — done in change 73. SMD-1541 (change 69's five servers hold a principal and
+pass no actor to `update_thought`/`upsert_thought`; their headers claim the
+actor reaches the audit). SMD-1525 (`enhanced-mcp`'s read tools address rows by
+integer id). SMD-1480 (deployability of the shim-importing writers —
+`readwise-capture`, `consolidation-bio` and the auditor among them; their
+behaviour is exercised by `test-auth.ts` and `test-writes.ts` under Bun) —
+done in change 74. A
+fork-shaped brain for the Kubernetes and Neon deployments is theirs to take
+up; the READMEs name the path. `db/`'s and `evals/`' own `INSERT INTO
+thoughts` statements are the fork's fixtures and benches, outside the scan
+as they were for the update rule.
+
+**Verified:** `bun scripts/check-fork-consistency.mjs` FAILED with check 10's
+eight hits in eight files before the conversions and PASS after (61 probes,
+41 non-probes, each probe caught on its verb's line; seven exceptions, each
+matching its one line); `../db/with-postgres.sh bun test-writes.ts` 157/157
+under podman — the receiver's capture judged column by column, its retry
+answered `duplicate` before any write, the same passage highlighted again one
+row with the newer highlight id and a hand-set tier kept, the book cached and
+counted, a wrong secret writing nothing, the auditor's report fingerprinted,
+vectorless and unlabelled with its findings in metadata; `bun test-auth.ts`
+643/643 on the converted receiver and auditor; the two Python recipes compile
+(`py_compile`); the four converted `.ts` files parse under Bun (all four
+import the SQL shim, so `deno check` does not reach them, as change 69
+found); the codemod round-trips. The ticket's verify — check 10 fails on the
+six today and passes after; a capture through `readwise-capture` leaves
+`content_fingerprint`, `embedding_model` and no chunk rows as the 3-argument
+`upsert_thought` leaves them, one round trip — is the check's before/after
+and the test.
+
+**Upstream status:** not applicable — the raw inserts are upstream's, the
+function they now call is this fork's. The classification example's
+nonexistent columns and the bio worker's vectorless first row are upstream
+defects on their own terms; **unfiled** upstream.
+
+### 72. A loaded bench corpus outlives the run — `OB1_PG_KEEP` keeps the container and a named volume, and `bench-hnsw.ts` reuses the corpus it finds there, checked and re-migrated, instead of rebuilding it (SMD-1493)
+
+A `bench-hnsw.ts` pass at ten million rows is about forty minutes, and thirty of
+them are the load and the index builds (change 28, "At scale": 207 s of
+INSERTs, 1,134 s for the thoughts HNSW index, 327 s for the chunk index, 63 s
+for the rest). The corpus is deterministic — the same scale is the same rows —
+and SMD-1018's three passes rebuilt an identical table three times before
+measuring anything: an hour and a half spent on what the first pass had built.
+`with-postgres.sh` starts a throwaway container and removes it, with its
+anonymous volume, on exit; nothing survives a run by design (776 leftover
+volumes, 79 GB, once filled a podman VM — change 20's review pass).
+
+**The container (`db/with-postgres.sh`).** `OB1_PG_KEEP=<name>` mounts a
+*named* volume, `ob1-pg-keep-<name>`, at the data directory and otherwise runs
+as every run does — a fresh container, `stop`ped on exit with two minutes for
+Postgres to checkpoint a large database cleanly (the runtimes' default ten
+seconds would SIGKILL it into crash recovery on the next start) and then removed
+with `rm -v`, which removes *anonymous* volumes only on both runtimes, so the
+named one survives and the exit line prints the one command that removes it.
+The next run under the same name mounts it again; the image, shared memory and
+port given then apply, as on any run (the first draft `start`ed the kept
+container instead, which froze all three at creation and put the random port
+back in the way of "address already in use" — the review pass had the simpler
+shape). The container carries the name too, so a second invocation while the
+first is running is refused before anything starts — sharing would let
+whichever exited first stop the database under the other — and a stopped shell
+an interrupted run left behind is removed (its data is in the volume). Under
+the variable the readiness wait is thirty minutes rather than one: a kept
+ten-million-row data directory may start into crash recovery and replay WAL
+for minutes, and giving up would stop it mid-replay and start the next run
+over. Cleanup touches only a container this invocation started. Without the
+variable the script does what it did: a fresh container, removed on exit, no
+volume behind it.
+
+**The corpus (`db/bench-hnsw.ts`).** A scale above the before arm's (100,000
+rows — below it the before arm needs 001–013 under the rows and a build is
+seconds) is applied through **`migrate.ts`** now, not `applyMigrations`' bare
+apply, so the migrator's ledger records what the schema is; and once the load
+and every build have finished the bench writes one marker row
+(`bench_hnsw_corpus`: the scale, the parameters that shape the rows — width,
+tiers and their shares, the chunked share — the tier match counts it counted as
+it generated, and section L's numbers). An interrupted load leaves no marker and
+nothing reads as a corpus (the oracle's premise — every chunk carries its
+parent's vector — is checked on the build, before the marker, and on a reuse
+only when the ledger differs from the one the marker says it last passed under,
+since that join over every chunk row costs a minute at ten million rows and a
+migration applied onto the table is the one way a kept chunk vector can
+change). The next run at
+that scale finds the marker and, in this order, (1) counts both tables against
+the marker and regenerates the corpus's first and last rows from the seed,
+comparing the tiers exactly and the vectors to float32 — a generator change or
+a foreign table cannot pass as the corpus, and is refused before the migrator
+walks it; (2) reads the ledger against the tree and refuses a name the ledger
+records that no file carries — a corpus migrated from another branch, which the
+runner would not notice; (3) runs `migrate.ts --dry-run` and refuses on its
+`DRIFTED` before anything runs — a plain run reports a recorded file edited
+since, but only after applying every pending file around it, which on a kept
+corpus would land a migration and then say "nothing was measured" — then
+`migrate.ts` itself, so a migration added since the build is **applied onto
+the corpus** (as onto a real brain that size, which is the measurement wanted),
+the files it recorded read back from the ledger rather than scraped from its
+output — and refuses the corpus if those files *rewrote rows* (the update and
+delete counters moved), since a heap at twice its pages and HNSW graphs of
+repaired twins are not the bulk-built state the marker's sizes describe, and
+the `VACUUM FULL` that would restore it is the rebuild the reuse exists to
+avoid; (4) reads both HNSW relations into the page cache (`pg_prewarm`, best
+effort), so the walks time the same cache a fresh build leaves; (5) takes this
+run's queries' confound from the exact whole-table pass section A already runs
+(the build's client-side check covered the build's queries; an index probe
+would see only its first `ef_search` candidates) and re-checks the oracle's
+premise whenever the ledger differs from the one the marker says it last passed
+under; then goes on to the oracle. Section L
+gains a `source` column — `loaded`, or `reused (built <when>)` (change 76 adds where the exact oracle's answers came from) with the build's
+own numbers — and the run says which it did, what it counted and which files it
+applied, so a report never silently mixes a fresh build's load line with a
+reused corpus. A kept database holds **one** corpus: a run asking for another
+scale than the one an *earlier* run kept is refused before anything is dropped,
+naming the three ways past (reuse it, run the other scale without `OB1_PG_KEEP`
+or under another name, or remove the volume) — a corpus this run built itself
+is this run's to replace, so the header's two-scale command keeps the last (the
+first draft refused its own second scale, after building and measuring the
+first: review pass); a corpus of the right scale built from other parameters is
+rebuilt, said aloud. The loopback guard every destructive statement used to
+inherit from `resetSchema` is asked once, up front, since the kept paths drop a
+marker table and run the migrator without it. `test-support.ts` gained
+`migratorEnv()` (test-upgrade's local copy, shared), `runMigrator()` (the spawn
+three files spelled for themselves) and `ledgerStrangers()`; `test-upgrade.ts`
+[15] holds the last one's contract — a bare apply has no ledger, the migrator's
+names only the tree's files, a stranger is reported by name where a plain
+`migrate.ts` run skips everything and exits 0. That the migrator itself never
+looks for a recorded name it has no file for — so `--reapply`'s "every recorded
+migration" is silently short on such a brain — is SMD-1504's, not this
+change's: a bench ticket does not change what the migrator refuses.
+
+**Measured.** At ten million rows (the README's command: `OB1_PG_SHM_SIZE=11g
+OB1_BENCH_MAINTENANCE_MEM=9GB`, 50 queries, the same VM as change 28's
+"At scale"): the run that built the corpus took **37 min 9 s** end to end —
+206 s of inserts, 1,059 s and 267 s for the two HNSW indexes, 60 s for the
+rest, the numbers change 28's third pass records — and the run that reused it
+**7 min 24 s**, against the ticket's fifteen: `10,000,000 thoughts and
+4,000,000 chunk rows counted, rows 0 and 9,999,999 regenerated from the seed
+and matched`, `schema already at the tree's; nothing applied`, the confound
+0.656 from the exact pass, section L reading `reused (built …)` with the
+first run's numbers. The two runs' recall columns are identical (0.6 / 3.4 of
+ten unfiltered at `ef_search` 40 / 400; 0.7 at 50%, 5.1 at 1%) and their
+latencies sit inside the ~30% pass-to-pass spread change 28 reports (the
+default path 7.8 against 10.1 ms), so the fresh container's cold index, once
+warmed by the untimed pass, does not show in the tables. Of the seven
+minutes, the exact oracle — 500 exact scans of ten million rows — is most,
+which is why caching its answers in the marker is the first cut-for-space
+item below. At a million rows: the fresh kept run 6 min 49 s, the reuse 3 min
+45 s. At 150,000 rows (the
+smallest kept scale; 3 queries): a fresh kept run 27 s, the reuse 5 s, with
+`150,000 thoughts and 60,000 chunk rows counted, rows 0 and 149,999 regenerated
+from the seed and matched` and `schema already at the tree's; nothing applied`.
+With a pending probe file in the tree (numbered after its last) the reuse
+printed `migrations applied onto it this run: …` and went on; with that file
+edited after being recorded and a second probe pending beside it, the run was
+refused on the dry run's `DRIFTED 1` and the second probe was never applied;
+with the file removed from the tree, the bench refused on the ledger's stranger
+by name. A run asking for 10,000 rows against a kept 150,000 was refused before
+anything was dropped (exit 2); a run over 150,000 and 200,000 rows in one
+throwaway container built both, the second replacing the first. A second
+invocation under a name in use was refused with the owner named. The default
+command left `podman volume ls` at the same count before and after. The first
+two reuse runs each failed on a driver fact: a JSON **string** bound to a
+`$n::jsonb` parameter is JSON-encoded once more by Bun's driver and lands as a
+jsonb string, which `@>` never matches — the double-encoding the README's
+live-suite section already names, met from the other side (bind objects); and
+jsonb hands an object back with its keys in its own order, so a round trip's
+text is not the text that went in (compare a key-sorted serialisation).
+
+**Second review pass, on the seams the first pass's fixes made.** The
+container is now stopped and removed by the ID `run` returned, not by name —
+under a shared name a removal by name after our own `stop` could take a
+container another invocation created meanwhile — and a namesake in any state
+but exited is refused, since podman reports `stopping` (another invocation's
+exit checkpointing the database, up to two minutes) as not running; the
+cleanup flag is raised *before* `run`, because a `run` that creates the
+container but fails to bind its port leaves the container and, without
+`OB1_PG_KEEP`, the anonymous volume the `-v` exists for (reproduced by the
+reviewer: one volume per failed run, the 79 GB leak in miniature); the
+readiness wait breaks out at once when the container has exited, so a kept
+data directory the image cannot open prints its logs in a second rather than
+after thirty minutes of dots; the removal hint prints the runtime as found,
+since `/opt/podman/bin/podman` is chosen exactly when `podman` is not on
+`PATH`; and an interrupt exits through the EXIT trap once. In the bench the
+one-corpus rule is judged against the *whole* run before the loop — the
+per-scale refusal, added by the first pass, would have measured a kept scale
+in full and then refused the run's second scale with every section unprinted —
+and a run under `OB1_PG_KEEP` that puts a small scale after a large one is
+refused up front, since the small scale would drop the corpus and keep nothing;
+the regenerated rows and counts run *before* the migrator on a reuse, so a
+table that is not the generator's is refused before a pending backfill walks
+ten million rows; the chunk-vector check runs on a reuse that applied a
+migration (the one way a kept chunk vector can change); the marker carries a
+format number beside the parameters, so a marker an earlier bench wrote
+rebuilds aloud instead of passing every check and failing in the report; the
+marker table joined `dropSchema`'s list, so a suite run in a kept database
+cannot leave a marker over rows that are gone; and both paths run the queries
+once untimed before section A, since a kept index in a new container is cold
+where a freshly built one is warm. Two ledger reads became one
+(`ledgerNames`), the row recipe one function shared by the load and the
+regenerated rows, and the reviewer's altitude finding — that `migrate.ts`
+itself should check drift and strangers before applying anything, which would
+retire both the bench's dry run and `ledgerStrangers` — is SMD-1504's. Cut
+for space: caching the exact oracle's answers in the marker (the bulk of a
+reuse's remaining minutes at ten million rows), not measured.
+
+**Third pass.** The stop signal — the previous pass's additions as the top
+findings — fired at the second pass and again here, and the shape of the
+findings said why: three rules for which scale a kept database holds, keyed
+three ways (the marker, the environment, the per-scale marker), and an
+ownership rule in the script keyed by a flag and a name. Both became one
+invariant. In the script the container is *created* and *started* as two
+steps and cleanup touches only the ID `create` returned, never the name — the
+flag went, and with it the case where an invocation that lost a name race
+stopped the other's container through the name fallback; a namesake in any
+state but exited is refused with the removal named, since `created` is either
+another invocation between its two steps or a shell whose start failed, and
+the two cannot be told apart from outside; the data-directory mount is read
+from the image's `PGDATA` (`/var/lib/postgresql/<major>/docker` from the pg18
+images, where a mount at the old path would keep an empty volume); the
+interrupt trap is disarmed before the stop so a Ctrl-C during the checkpoint
+cannot skip the removal and the hint, which now prints before the stop. In
+the bench, under `OB1_PG_KEEP` a run is exactly one scale above the before
+arm's, judged where the list is parsed — a descending list had built the
+large corpus and then replaced it "by design", a small-scale-only run had
+kept a volume nothing would reuse, a duplicated scale had reused a marker
+written seconds earlier; the marker is written in one transaction (a table
+with no row read as "no corpus" and would have let a small-scale run drop what
+it stood over); the marker records the ledger the oracle's premise last passed
+under, so a check that threw after a file was recorded is not skipped by the
+re-run; a reuse that applied files `VACUUM ANALYZE`s both tables, since a
+migration of 023's kind leaves a dead index entry per row and the build's
+statistics; and this run's queries are confound-checked through the index,
+since a build with three queries said nothing about a reuse with fifty. The
+header's count and the check order in two paragraphs were brought up to the
+code. Cut for space: caching the exact oracle in the marker; `migrationFiles()`
+shared across the seven directory listings; the marker's `scale`/`builtAt`
+held twice.
+
+**Fourth pass, at the author's call.** The exited-namesake removal went by the
+ID the status was read from, not the name — a forced removal by name would
+have taken whatever held the name at that instant, another invocation's
+freshly created container included, the race the ID rule exists to close; the
+interrupt disposition inside cleanup is *ignore*, not default (reset, a second
+Ctrl-C during the two-minute stop killed the client and the shell before the
+removal — reproduced on bash 3.2); without `OB1_PG_KEEP` a container whose ID
+never reached the shell is removed by the per-process name, so an interrupt
+that cuts the `create` short leaves no anonymous volume; the `PGDATA` read
+fails loudly rather than defaulting under `set -e`; `--stop-timeout 120` rides
+on the container so an operator's own `stop` checkpoints too. In the bench
+the vacuum and the oracle-premise re-check share one key, the ledger against
+the one the marker was last verified under (a run interrupted between the
+migrator's commits and the vacuum would otherwise leave the next run timing
+dead index entries with "nothing applied" printed); a reuse's confound comes
+from the exact whole-table pass section A already runs, not an index probe
+that sees its first forty candidates; a kept corpus of the right scale built
+from other parameters is *refused* with the remedies, as a scale mismatch is,
+rather than rebuilt behind one log line; the kept-table checks refuse in the
+named-remedy form rather than throwing; the fresh path skips the dry run and
+words its refusal for an empty database; and "before a container is asked for"
+became "before anything is connected to or dropped", which is what is true
+under `with-postgres.sh`.
+
+**Fifth pass, on the tree merged with main** (PR #47's fourth and fifth
+passes, changes 66 and 67). The stale namesake's status and ID now come from
+one inspect and the removal goes by that ID (two reads by name were a second
+snapshot, and a name gone between them aborted under `set -e`); the data path
+is pinned with `-e PGDATA` rather than discovered from the image, which
+retires the pre-pull, the environment parse and the silent default the
+discovery needed; `--stop-timeout 120` rides only on a kept container, since
+podman's `rm -f` honours it and a throwaway container should go at once; the
+readiness wait ends only on an explicit `Running=false`, not on a failed
+inspect, so one transient runtime error cannot stop a thirty-minute recovery.
+In the bench the marker format is 2 (main's `otherIndexes` in section L) and a
+format mismatch is documented as the refusal it is; a reuse whose migrations
+rewrote rows is refused rather than plain-vacuumed and measured — main's
+fourth pass found plain `VACUUM` leaves the heap doubled and the graphs as
+repaired twins, and its `VACUUM FULL` at ten million rows is the rebuild the
+reuse exists to avoid; both HNSW relations are prewarmed on a reuse, since the
+untimed pass over the default call had warmed only the query vectors'
+neighbourhoods; the confound comes from one exact pass on both paths through
+one `oracle()` (the duplicate whole-table scan went); and the two paragraphs
+above say the ledger-keyed re-check and the exact-pass confound the code does.
+
+**Sixth pass.** Three defects the reviewers reproduced. Readiness is now TCP
+readiness (`pg_isready -h 127.0.0.1`): over the unix socket the entrypoint's
+initdb-time temporary server answers for about 200 ms before the real one is
+up, a client that connected then failed, and under `OB1_PG_KEEP` the exit that
+followed stopped the container mid-initialisation and left a volume the
+entrypoint thereafter treated as initialised. The container's state is asked
+on every readiness miss, not only after a runtime exec error: docker's `exec`
+on a non-running container exits 1, the code `pg_isready` gives for
+"starting", so under docker the fast fail on an unreadable kept volume had
+been dead and the wait ran the full thirty minutes. The row-rewrite refusal is
+recorded in the marker (`rewritten`) before it exits, since the ledger has
+already advanced and the next run would otherwise find nothing pending and
+measure the repaired graph; the counts and the two regenerated rows are
+checked again after the migrator. Then the smaller items: the exact oracle
+selects the distance under an alias the `ORDER BY` names — `1 - (…)` beside
+the bare distance was two expressions to the planner and it evaluated the
+distance twice per row, 12–15% of every exact scan; `pg_prewarm` runs after the
+oracle (which streams the heap and would evict what was read before it) and
+just before section A; a marker of a shape this bench cannot read is a
+refusal with the remedy, not a stack trace; `migratorEnv` is an allowlist —
+every `OB1_*` variable dropped, the fixture's three set — where the denylist
+had one dead name and let a chunk-context choice through; the marker's scale
+and build time live once, in `stats`, and comparisons use `Bun.deepEquals`;
+the marker is written only under `OB1_PG_KEEP`, so a throwaway multi-scale run
+no longer says "replacing"; test-upgrade's four remaining hand-spelled
+migrator spawns use `runMigrator`; and the bench's dry run and
+`ledgerStrangers` are labelled the stand-ins for SMD-1504 they are.
+
+**Seventh pass.** The rewrite check had compared the row counters against
+this run's own first read, which three findings got past: a migrator that
+committed a rewriting file and failed on the next exited through the refusal
+before the comparison, a statistics flush that landed after the read left the
+delta at zero, and a rewrite without DML — a column type change, a re-created
+index — moved no counter at all. One durable fingerprint replaces it: at the
+build the marker records, for the two heaps and the two HNSW indexes, the
+cumulative insert-update-delete counters and the file each relation lives in
+(`relfilenode`, which DML never changes and a rewrite always does); a reuse
+compares the current state against the build's, refuses on any movement and
+records the refusal, so the run after an interrupted migrator catches what
+the interrupted one could not; a counter that went *down* is a statistics
+reset after a crash recovery, said and not refused, since the files still
+vouch. That subsumed the second count-and-rows check. The marker is read once,
+before the loop, and every rule about it is judged there — the in-loop read,
+its second refusal family and six non-null assertions went; a duplicated
+scale is folded at parse. The exact oracle runs under the build's worker
+count (`max_parallel_workers_per_gather`, the image's cap is two) — a setting,
+not a measured saving. The skip self-check exercises the shared row recipe
+rather than a hand-spelled copy of it; a marker's `stats` are checked for
+every field section L reads by name (a compiler-held list), not by the format
+number, whose comment now says what it is for; `substitute` pins the
+chunk-context default as it pins the trigram one, so a fixture applied bare
+and through the migrator agree on what 013 records; test-upgrade's [7] no
+longer describes a refusal the migrator does not make.
+
+**Eighth pass.** The fingerprint compared against the build alone had one
+blind spot the reviewer built: after a crash recovery resets the statistics
+(the ten-million-row counters read zero), a full-table rewrite lands them back
+on the build's figure and the files are unchanged, so nothing moved. The
+comparison is now made twice — against the build, for what earlier runs did,
+and against this run's own read before the migrator, for what this run's
+files did — and the refusal records the evidence (what moved, since when)
+rather than this run's file list, which had blamed whichever file happened to
+run last for a rewrite an earlier, interrupted migrator committed. The
+prewarm runs on both paths: the oracle streams the heap some five hundred
+times, so at ten million rows a freshly built index is no warmer than a
+reused one by section A, and the per-query warm pass — which had made
+section A a repeat-query figure — went. In the script, an interrupt is noted
+and the command's own exit status stands (the trap had replaced a clean exit
+with 130 whenever a signal reached the wrapper, a psql cancel included); a
+container created and never started — an interrupt inside the tens of
+milliseconds between `create` and the ID reaching the shell, reproduced — is
+removed by its inspected ID instead of refusing that name for ever; a new
+kept volume gets the ordinary one-minute wait, the thirty minutes being for a
+data directory with WAL to replay; the refusal's pasted removal is `rm -fv`.
+Smaller: the relation names come from one list (`HNSW_INDEXES`), bound as an
+array; `scale` is a generated column of the payload; readMarker's shape check
+carries the kept-scale rule, so the loop's reuse test is one term; the
+build's confound stays the accumulator's, said so; test-schema pins the
+chunk-context default too. The denylist copies left in test-live,
+test-search-path and measure-1288 predate this change and are on the boyscout
+list.
+
+**Ninth pass.** Two mechanisms rebuilt at the root rather than patched. The
+interrupt handling: the eighth pass's note-only traps had made a signal to
+the wrapper before its command ran vanish — a `kill` during a thirty-minute
+readiness wait set a flag nothing read, the wait ran out, the bench started
+and the wrapper exited 0 — and its status remap reported any non-zero exit
+after any signal as 130 (reproduced under bash 3.2). Now the trap acts
+(`exit 130`/`143`) until the command runs, when it becomes a no-op body — not
+an empty string, which a child inherits as "ignore" and never sees the
+signal — and the command's own status carries out through the EXIT trap. The
+fingerprint: the counters half is lost to a crash recovery, so a rewrite that
+committed before a recovery and was never judged (the run died before its
+own comparison) left counters below the build's, said and not refused, with
+the file unchanged — invisible. Each relation's main-fork size joined the
+record: DML over the rows grows it, nothing resets it, and growth past a
+tenth of the build's is the refusal; the counters are no longer
+load-bearing, which also covers a server with `track_counts` off (said when
+seen). Then: a marker table that exists with no row is a refusal, not "no
+corpus" (the fresh path would have dropped what stood under it); the marker
+is written after the exact pass's confound gate, so a refused build leaves
+nothing to reuse, and that gate refuses in the named form rather than
+throwing; the loop's tail is one `if (kept)`/`else` with no non-null
+assertions, and the dead `!beforeArm` on the marker write went with it. The
+spawned migrator runs with `--no-env-file`: Bun loads `db/.env` into a child
+for every variable the passed environment lacks — every `OB1_*` name after
+the strip — so the allowlist had a hole the size of the file the fork
+documents as the migrator's own (reproduced); `runMigrator` takes an
+optional environment and the three suites still spelling the spawn use it;
+one `migrationFiles()` lists the directory for the bare apply, the ledger
+comparison and test-upgrade's count.
+
+**Tenth pass, on the tree merged with main again** (changes 68–70; this
+section became 71, its test case [15]; main's `OB1_BENCH_UPTO` applies bare
+on the whole-schema path and is refused with `OB1_PG_KEEP`, since a schema
+cut at a migration is not one the ledger describes). Two things at the root.
+The marker records the build's transaction id, and a reuse counts the rows of
+either table whose `xmin` is newer — exact at any share and blind to a
+statistics reset, where a subset backfill committed on an earlier interrupted
+run had grown the heap by less than the tolerance and moved counters a
+recovery then zeroed; with that, the ledger-keyed re-check of the oracle's
+premise went, since no row written since the build is the premise's proof.
+And the database-level HNSW bounds in force are compared with the tree's
+seeds on both paths: a kept database carries the `ALTER DATABASE` its build's
+014 ran, the migrator skips a recorded 014 and 014's guard leaves a seed in
+place, so a config-only change to `HNSW_SEEDS` would have walked under the old
+bound while section E's header named the new one. Then: `--no-env-file`
+rides on every `bun` spawn `runScript` makes with its own environment, not
+only the migrator's (test-live's re-embed worker with a stripped shell was
+the reachable case); `dropSchema` refuses a database holding a kept corpus
+unless `OB1_DROP_KEPT_CORPUS=1` names the intent, so a suite run under a kept
+name cannot drop thirty minutes of build in silence; the kept-table checks
+throw a tagged error and anything else — a dropped connection, a timeout —
+is rethrown rather than blamed on the corpus; the script's comment says what
+its `created` arm does and the kept hint prints only for a container that
+started; the marker's `stats.confound` is documented as the exact pass's
+value; the reuse assigns its stats once.
+
+**Boyscout, while the files were open** (what the passes cut for space, no
+behaviour change): the script's stop timeout is one constant where it had
+been spelled three ways; test-upgrade's [7] reads `MIGRATOR_ENV` where an
+alias of it stood; the marker constant says why its name is spelled out in the
+tagged templates; two comments that narrated which review run found what say
+the fact instead; change 28's section L table gained the `source` column the
+bench now prints, every row `loaded`; the README's thirty-minute wait is said
+to be a kept volume's that already exists; a second look folded the script's
+four removals into one `discard` and let the README count the thirty minutes
+as the 1,800 tries they are. Left as they were, being either behaviour or
+beyond the touched files: caching the exact oracle's answers in the marker
+(the bulk of a reuse's remaining minutes at ten million rows — SMD-1562), and
+test-live's own stripped-shell spawns for the re-embed worker and preflight,
+which predate this change.
+
+Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
+upstream. Reproduce: `OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh
+bun bench-hnsw.ts` twice; the second run's section L says `reused`.
+
+### 73. The SQL shim takes PostgREST's JSON-path column and hands a timestamp back as a string — `consolidation-bio` runs on the fork, and `test-writes.ts` drives both of its write paths (SMD-1544)
+
+`compat/supabase-sql/index.ts`, `compat/supabase-sql/test-compat.ts`,
+`compat/supabase-sql/README.md`; a header on
+`integrations/consolidation-workers/bio/index.ts` and its README;
+`extensions/test-writes.ts`; comments in `server-portable/store.ts` and
+`server-portable/test-store-postgrest.ts` (Linear SMD-1544, filed from change
+71's third review pass).
+
+Change 71's running reviewer drove the bio worker for real and found it
+could not be driven: `gatherSourceThoughts()` filters on
+`.is("metadata->>generated_by", null)` and `findExistingProfile()` on three
+`.eq("metadata->>…")` equalities, and the shim's `ident()` — which holds
+every column name to `^[A-Za-z_][A-Za-z0-9_]*$` and quotes it — threw on the
+path. On the fork, then, the worker answered 500 at its first query and had
+never reached `upsertProfile()`: the rewrite through `update_thought` (change
+69), the embedded first run through the 3-argument `upsert_thought`, the
+sidecar and the actor (change 71) were held by `test-writes.ts`'s text guards
+alone. The worker is the only shim-migrated file that filters on a JSON path
+(`metadata-norm` does too, and stays on supabase-js for its nested `.or()`).
+Driving it found a second gap the ticket had not named: Bun.sql hands a
+`timestamptz` back as a `Date`, PostgREST as a JSON string, and the worker's
+prompt does `created_at.slice(0, 10)` — a 500 at the prompt, one step past
+the first.
+
+**The mechanism.** A filter or ORDER BY column goes through `column()`, which
+accepts a plain identifier as before or PostgREST's path
+`col(->key)*->>key`, the column quoted as an identifier and every key —
+identifier-shaped, held to it — as a string literal:
+`"metadata"->>'generated_by'`. The path's result is text, so the bound value
+is cast to it (`= $1::text`): PostgREST renders the value as an unknown
+literal against a text expression, which is a text comparison, and without
+the cast Bun binds a JavaScript number as an integer and Postgres has no
+`text >= integer` — the probe that decided it. `.eq/.neq/.gt/.gte/.lt/.lte/
+.like/.ilike/.is/.in/.match`, an `.or()` term and `.order()` take the path;
+`.contains()` does not (its operator is jsonb's; containment under a key is
+`.contains("meta", { key })`), and `ident()` still holds a select list, an
+insert or update payload key, a conflict target, a table, a function and its
+argument names. Rows from a table verb and from `rpc()` pass through
+`jsonShaped()`: a `Date` with a finite time becomes its `toISOString()`
+string; everything else — the number ±Infinity Bun gives an infinite
+timestamp, a simple query's `Date(NaN)` for a BC date (the parameterised
+case is under Decisions), numerics as text — stays as Bun returns it, which
+`server-portable/store.ts`'s `isoTimestamp` already knows. The walk costs
+about 75 ns a row and doubles a Date-heavy projection's client time (25 ms
+against 13 for 20,000 rows of three timestamps — the second pass's runner
+measured it); a row without a `Date` is returned as the same object.
+`test-compat.ts` pins both: [12] a path in the comparison filters, `is`,
+`in`, `match`, `.or()` and `.order()`, a nested `meta->a->>b`, `is(null)`
+selecting the rows without the key, a number comparing as text, the
+generated SQL's shape, and seven refusals (`.contains()` among them); [13] a
+timestamp as a string on a
+one-row, a many-row and a set-returning function's result, a NULL staying
+null. `test-writes.ts` drives the worker: seven sources planted through the
+function with their enhanced columns set beside it; `POST /?name=Test`
+gathers exactly the two person notes and the one decision it should — the
+restricted note, the minor decision and a note an earlier bio run generated
+are kept out, the last by the path filter — dates each in the prompt from a
+string, stores the profile through the 3-argument form, judged column by
+column with the enhanced columns, the metadata, 008's `capture` row naming
+the key and the worker, and a `consolidation_log` row; a second run finds
+the profile through three path equalities, keeps the profile row itself out
+of its sources, feeds it to the prompt and rewrites it through
+`update_thought`, judged against the oracle edit with 022's planted windows
+gone and a `model-before` label replaced; another subject gets its own row,
+a dry run writes and logs nothing, a first run whose text a row already
+holds answers that row as not created and leaves its hand-set columns (the
+function's `existed`), a name with no sources is 404. The worker
+leaves the read set: its header names SMD-1544, the per-ticket header guard
+holds it in the driven set for all three tickets, and the eight text guards
+the drive now proves are gone — the Anthropic-only refusal stays read,
+because the worker reads its keys at import.
+
+**Decisions.** A path ending in `->` is refused, not rendered: it yields
+jsonb, and what a bound value means against it depends on the value's
+JavaScript type and Bun's binding — the probe answered `"meta"->'owner' =
+$1` one row for `"ann"` and none for `'"ann"'`, which is not PostgREST's
+reading (it parses the value as JSON) — so the message names `->>` for the
+key's text and `.contains()` for containment; nothing in the tree uses the
+form. The string form is `toISOString()`'s (`Z`, milliseconds), not
+Postgres's own (`+00:00`, microseconds) that PostgREST would give: both
+parse, both slice to the same date, and a consumer comparing the spellings
+had a bug on either client; the store's helper normalises both to the
+same result, and its tests say which form the fixture now hands it. Only a
+finite `Date` is reshaped, so ±Infinity and a simple query's `Date(NaN)` for
+a BC date reach the store as before; a parameterised query's BC date is a
+finite extended-year Date to Bun and becomes `-000043-03-15T00:00:00.000Z`,
+which the helper reads to the same result. The rule is timestamptz-shaped:
+a `date` or a zone-less `timestamp` column arrives as a `Z` instant where
+PostgREST spells `2026-09-16` or a zone-less datetime — `.slice(0, 10)`
+agrees, an equality against the bare date does not, and no shim-migrated
+file reads one; said in the shim and its README rather than implied away.
+The sources are planted through
+`upsert_thought` and a raw update of the enhanced columns, not a raw
+`INSERT`: `test-writes.ts` is check 10's counted exception for one line, its
+`plant()`, and a second insert of content would fail the count. The bio
+worker's log table is created from `schemas/entity-extraction/schema.sql`'s
+own `CREATE TABLE` alone rather than by applying that sidecar: its other
+tables include a `thought_entities` migration 016 owns, and the suite's
+teardown drops every table a sidecar creates. The comments in `store.ts` and
+`test-store-postgrest.ts` that described the shim handing back a `Date`
+are corrected here rather than left to describe the old behaviour.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with PostgREST v12.2.3 beside the database; nineteen findings,
+one MEDIUM: nine fixed, the rest noted). The first-run `existed` branch —
+a concurrent run's row, or a hand-captured one holding the profile's text —
+lost its text guard to the drive and gained no drive: the stub's next
+profile text is predictable, so the test plants that row typed by hand and
+asserts the worker answers it as not created with its columns kept. The
+shim's header and README said the path works "in every filter" —
+`.contains()` still refuses it, rightly (its operator is jsonb's) — and that
+the bio worker was "the first shim-migrated file to run against a real
+database" (the REST APIs and the receiver have run under this suite since
+change 69); both corrected, a `.contains()` refusal pinned. The `date` and
+zone-less-timestamp shapes and the parameterised BC date are said, above.
+The two headers that called the string "the one PostgREST would" say "as
+PostgREST does". `test-compat.ts` [12] and [13] read a result's error
+before its rows and hold a throw as one counted failure — with the cast
+removed the suite had died in a `TypeError` before its tally. A CI comment
+counted two sidecars. Noted, not fixed: `.is(path, true)` is 42804 on
+either client; whitespace around a path is trimmed here where PostgREST
+would 400; a bound `null` against a path is `= NULL::text`, no rows, as
+PostgREST's `eq.null`; `.in(path, [])` returns `FALSE` before the column is
+read, as before. The running reviewer verified against PostgREST itself
+what the README claims of it: `meta->>score=gte.20` matches `25` and `"5"`
+and not `"100"`; `meta->owner=eq.ann` is 400 `22P02` while `eq."ann"`
+matches — the JSON reading that is the reason the shim refuses a `->`
+ending; `or` and `order` with a path agree.
+
+**Review pass 2** (the same two reviewers; sixteen findings, none above
+LOW in the code, one MEDIUM about the merge). The stop signal: the top findings
+were pass 1's own residue — the Mechanism paragraph still said "every
+filter" after the header and README had been corrected, its BC-date clause
+had not been brought in line with the Decisions sentence pass 1 added, and
+the Verified paragraph credited pass 1's runner with a named failure that
+only pass 1's error-first read produces; all three corrected above, and
+the runner re-ran the mutation (three named failures, a tally). The README's
+Safety paragraph, left with one unwrapped line, says now that a number or a
+null in an `.in()` list against a path compares as text where a plain text
+column refuses the integer (the runner's live probe). The runner also
+confirmed each pass-1 fix under mutation — the `existed` drive fails loudly
+when the early return is removed, moved after the sidecar, or reported as
+created, and when the predicted text is off by one run; `rowsOf` cannot
+pass vacuously (no `.length === 0` pin in [12]/[13]) — measured
+`jsonShaped()`'s cost (above), and found that the four shim-migrated
+extensions parse (`new Date(row.x)`) or pass through the timestamps they
+read, none holding a `Date` instance. The MEDIUM is not in this branch:
+`origin/main` has taken
+FORK change 72 for SMD-1493 while this was in review, so this section is 73
+at the merge, renumbered with the pattern change 71 used.
+
+**Review pass 3** (the same two reviewers; eleven findings, all LOW or
+INFO, none in the code — the stop signal held). Pass 2's paragraph had
+counted one reviewer's findings and said "this pass's error-first read" of
+a read that is pass 1's, twice; corrected. The README's Caveats gain the
+one behaviour change every migrated file sees — a timestamp is a string —
+where a maintainer looks for differences from supabase-js, and the limit
+that a key with a non-ASCII letter or a `$` is refused where PostgREST
+accepts it; the Not-done-here list names `.contains()` with a path. The
+runner rehearsed the merge: `origin/main` conflicts in FORK.md alone (its
+ten changed files meet this branch's ten there only), and on the merged
+tree — main's FORK, this branch's code, main's `test-support.ts` and
+`with-postgres.sh` under every suite — `test-compat` 84, `test-writes`
+186, `test-store-postgrest` 86, `test-auth` 643, `db/test-upgrade.ts`
+178, `db/test-schema.ts` 869, the checker PASS; it re-measured the two
+mutants below (four, five), confirmed a Date-free row is returned as the
+same object, that a keyword key (`meta->>select`) renders as a literal and
+works, and that `.order()` with `nullsFirst` and `.range()` compose with a
+path filter. The renumber the merge owes is counted: this branch's
+mentions of the number in eight files, one of them line-wrapped in the
+shim's header, and one sentence in this section that must not be touched.
+
+**Boyscout.** The shim's header counted "about twenty methods … ten
+filters, and five modifiers" and "three of the 54 files" using resource
+embedding; the README tables thirteen filters and seven modifiers, and the
+codemod refuses four files for embedding today — the header says so. The
+empty `.in()` list's early return says why an unrenderable column is not
+refused there (the column is never read). No behaviour changed.
+
+**Verified:** `../../db/with-postgres.sh bun test-compat.ts` 84/84 (61
+before; [12] and [13] new); `../db/with-postgres.sh bun test-writes.ts`
+186/186 under podman (157 before: eight bio text guards gone, the header
+guard's third ticket and the drive added); with `jsonShaped()` removed the
+bio block fails four assertions — the first `POST` answers 500 at the
+prompt's `.slice` and the run ends there — and with `column()` reduced to
+`ident()` the ticket's own 500 returns at the first query (five) — both
+re-measured after pass 1, the later assertions skipping inside their
+`if`; the two running reviewers' mutations each caught by name: the `::text`
+cast (three, the `gte` pins and the SQL's shape — pass 1's runner saw the
+`TypeError` pass 1's error-first read replaced, pass 2's the tally),
+`column()` reduced to `ident()` in the shim suite (one counted `[12] threw`,
+no crash), the `->` refusal (two), `jsonShaped()` off either site ([13]'s
+one-row, many-row and rpc pins), the worker's `generated_by` filter (five),
+its `subject` equality (three), its actor on either path and its first-run
+sidecar (one each); `bun test-store-postgrest.ts` 86/86, the store still
+normalising what the fixture hands it; `bun test-auth.ts` 643/643; `bunx tsc --noEmit` in `compat/supabase-sql` clean (PR #61's first CI run caught a helper typed `Promise` where a query builder is `PromiseLike`); `bun
+scripts/check-fork-consistency.mjs` PASS; the codemod round-trips (24
+reverted, 24 re-applied, the tree clean) and triages as before (the shim's
+new column form changes no file's eligibility — the one nested `.or()`
+stays a blocker). The ticket's verify — `POST /` to the bio worker under
+test-writes' prelude answers 200 with a stored profile; `test-compat.ts`
+holds the JSON-path filter; test-writes drives bio on both paths — is the
+suite.
+
+**Not done here.** SMD-1480 (deployability: the worker still imports the
+Bun-only shim and reads `Deno.env`; it runs under `test-writes.ts`'s stand-in,
+not under `supabase functions deploy`) — done in change 74. A path ending in `->`, an array
+index, a key with a non-ASCII letter or a `$` (PostgREST takes both), a path
+in a select list, and `.contains()` with a path (containment under a key is
+`.contains("meta", { key })`) stay refused until a file needs one. The
+other shapes a PostgREST consumer might read differently — numerics as text,
+`int8` — are left as Bun gives them; nothing driven has needed more.
+`metadata-norm`'s `metadata->>confidence` term would parse now, and its
+nested `.or()` keeps it off the shim. SMD-1541 and SMD-1525 as before.
+
+**Upstream status:** not applicable — the shim is this fork's (fix 13); the
+worker's `created_at.slice(0, 10)` is correct over PostgREST. **Unfiled.**
+
+### 74. The servers on the SQL shim run under Bun — `compat/deno-on-bun.ts` is the second one-line change, the codemod writes it, check 11 holds it, and `test-auth.ts` starts all sixteen (SMD-1480)
+
+`compat/deno-on-bun.ts` (new); `scripts/migrate-to-sql-shim.mjs`; one import
+line in sixteen vendored files — `extensions/home-maintenance`,
+`household-knowledge`, `meal-planning` (`index.ts` and `shared-server.ts`) and
+`professional-crm`; `integrations/consolidation-workers/bio`,
+`delete-thought-mcp`, `entity-extraction-worker`, `open-brain-rest`,
+`readwise-capture`, `rest-api`, `smart-ingest` and `update-thought-mcp`;
+`recipes/editorial-policy/auditor`, `work-operating-model-activation` and the
+cost recipe's "before" sample — and `recipes/local-brain-no-mcp/functions/
+_shared/db.ts` back on supabase-js; `scripts/check-fork-consistency.mjs`
+(check 11); `extensions/test-auth.ts`; `compat/supabase-sql/README.md` and
+`tsconfig.json`; the four extension READMEs and their `metadata.json`, the
+deploy primitive, ten recipe and integration READMEs (`rest-api`'s and
+`smart-ingest`'s gain the callout the other eight had),
+`integrations/consolidation-workers/deno.json`, two comments in
+`.github/workflows/fork-checks.yml`, `extensions/test-writes.ts`'s header
+(Linear SMD-1480, filed from change 64's third review pass and widened by
+comment from change 67).
+
+Fix 13's codemod moved a file off supabase-js by changing one import line, and
+the shim it moved it onto imports `bun`. The files it moved were written as
+Supabase Edge Functions: they read their environment through `Deno.env.get`
+and end in `Deno.serve`. So one line left them running nowhere — not under
+Deno, which cannot resolve `bun`; not under Bun, which has no `Deno` — and
+that state held for sixteen files: the five extension servers the ticket
+names, the nine recipes and integrations change 67's comment widened it to,
+and `rest-api` and `smart-ingest`, on the shim with a key compare of their
+own. Changes 64, 67, 69, 71 and 73 each exercised them under the tests' two-
+line stand-in for those globals, which is the only way they ran at all, and
+twelve READMEs and the deploy primitive sent a reader to `supabase functions
+deploy` above a callout saying it would fail. The ticket offered a revert; this fork's stated purpose
+is running Open Brain without Supabase, fix 13 put these files on the shim for
+exactly that, and change 73 had just made `consolidation-bio` run on it — so
+the migration is finished instead, for every file on the shim, by the
+mechanism fix 13 already owns.
+
+**The mechanism.** `compat/deno-on-bun.ts`, imported first, installs
+`globalThis.Deno` where none exists, with exactly the two members these files
+use: `env.get(name)` reads `process.env`, and `serve(handler)` /
+`serve({ port, hostname }, handler)` is `Bun.serve` on the option's port, else
+`PORT`, else 8000 (Deno's default), printing Deno's `Listening on http://…/`
+line and returning an object with Deno's `finished`, `shutdown()` and `addr`.
+Anything else on `Deno` stays undefined, so a file that starts using
+`readTextFile`, `args` or `exit` fails at the call under Bun with its name —
+not on a quiet emulation of another runtime's semantics. Where `Deno` already
+exists — on Deno itself, and under `test-auth.ts` and `test-writes.ts`, whose
+stand-in captures the handler instead of listening and is installed before
+any server is imported — the module does nothing. The codemod writes the line:
+`--apply` adds `import "…/compat/deno-on-bun.ts";` before a migrated file's
+first import statement when the file uses a `Deno.` member (ES modules
+evaluate imports in order, and a helper whose module body reads `Deno.env`
+before the polyfill has run is a `ReferenceError` at startup), and where the
+file's first import was Supabase's type-only `import
+"jsr:@supabase/functions-js/edge-runtime.d.ts";` — a specifier Bun does not
+resolve; four of the sixteen had it — that line becomes the polyfill import
+with the original recorded beside it (`// ob1-original-types:`), so the
+position is kept; `--revert` undoes both byte for byte, and `--apply --all`
+completes a file migrated before the line existed, so revert-then-apply is
+still the identity (23 reverted, 23 re-applied, the tree unchanged). A `KEEP`
+list beside the blockers names the one file the shim can resolve but must not
+take: the local-brain recipe's client runs inside that recipe's own
+self-hosted Supabase stack — `setup.sh` symlinks its `functions/` into the
+stack's edge runtime — where PostgREST is present and `bun` is not; it is back
+on `jsr:@supabase/supabase-js@2`, and the triage report says why. A recipe or
+integration has no `node_modules` on its path; `NODE_PATH=extensions/
+node_modules` (Bun honours it — probed) points the five that import `hono` or
+the MCP SDK at the install `extensions/package.json` already pins to their
+`deno.json` files, and the workers, the two APIs and the webhook receiver
+import nothing but the shim and their own files. Check 11 holds the state: a
+file under the seven category directories or `docs/` that imports the shim
+and — itself or through the relative imports it evaluates, transitively — uses
+a `Deno.` member has the polyfill as its first import statement; no member
+beyond `env.get` and `serve` appears in the file or its imports; no `jsr:`,
+`npm:` or URL specifier remains (`node:` is fine); comments and string
+contents blanked first, line numbers kept; twelve probes, three through a
+dependency, six non-probes, no exceptions. And `test-auth.ts` proves the run:
+every file in the tree that imports the shim and calls `Deno.serve` — a glob,
+so a newly migrated server joins or the guard fails — is started as a child
+process, `bun <file>` with the environment its README documents and
+`PORT=0`, the port read from the polyfill's `Listening on` line; then asked
+over HTTP for the one thing that proves it is that server authenticating —
+an MCP server's `tools/list` under a write key is its full tool list, an
+API's read probe passes under a read key, a worker dry-runs under one, the
+receiver admits its secret, the two APIs on their own key pass their gate —
+refused with a wrong key, still running afterwards, then stopped. Sixteen
+starts, four assertions each, in the required Portable-server job, no
+database; the child's exit is awaited beside the read, so a crash fails at
+once, and the child is stopped before its stderr is read, so a silent one
+fails at the deadline rather than hanging the job.
+
+**Decisions.** *Finish, not revert:* above. *A polyfill, not a per-file
+seam:* the ticket sketched `server-portable/index.ts`'s pattern — env through
+one accessor, `export default { fetch }` — which is right for a file the fork
+owns and wrong for sixteen it vendors: the sixteen entries hold 96
+`Deno.env.get` reads and 16 `Deno.serve` calls, and the four
+`_shared/helpers.ts` modules and `network.ts` behind them 65 more reads,
+every one a line the next rebase conflicts on, where the polyfill is one
+line the codemod owns and reverts, the same standard fix 13 set (a probe first: an unmodified
+`home-maintenance/index.ts` under `bun --preload` of the two globals
+answered `tools/list` with its four tools and 401 to a wrong key). *Two
+members, no more:* the polyfill is a statement of what these files use, and
+the loud failure at any other member is the point — an emulated
+`Deno.readTextFile` that differed from Deno's in one respect would be the
+fork's recurring defect, a value defined twice. *First import:* a second
+import ahead of it is a race the file's own order decides; check 11 names the
+line. *In the `jsr:` line's place:* a byte-exact round trip needs the
+position, and the swapped line is Bun's one unresolvable specifier in these
+files — a type-only import, so Deno lost nothing either. *`KEEP`, not a
+blocker regex:* nothing in the local-brain client's text says where it runs;
+its deployment does, so the codemod names the file and the reason. *`NODE_PATH`,
+not a `package.json` per category:* `extensions/package.json` already pins
+what the servers' `deno.json` files pin and `test-auth.ts` holds the two
+equal; a second install under `integrations/` and a third under `recipes/`
+would be two more copies of that pin to drift. *`SUPABASE_URL` still carries
+the Postgres URL:* fix 13's documented convention (the codemod's banner says
+it); renaming the variable is the per-file rewrite the one-line philosophy
+exists to avoid, and every README's run line says what the variable holds.
+*`rest-api` and `smart-ingest` in scope:* the ticket and its comment count
+fourteen; the tree has sixteen on the shim, and the drift guard is over the
+tree, not a list. *The tests keep their stand-in:* they need the handler, not
+a port, and the polyfill yielding to an existing `Deno` is what lets both be
+true; only the last section of `test-auth.ts` runs the polyfill, and it runs
+it as a user would. *`PORT=0`:* the OS picks a free port and the polyfill
+reports it, which is what Deno's `Listening on` line is for — no probe, no
+race. *`metadata.json`'s `tools`:* `Bun 1.4+` for the four, `Supabase CLI`
+for the two that deploy by the primitive.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree with podman; twenty-nine items between them, three HIGH — two
+of them one defect seen by both — five MED, nineteen taken). The running reviewer broke the new test section both
+ways a child process can go wrong. A child that crashed at startup — the
+polyfill with `serve` removed — was reported only after the full thirty-second
+deadline, at 100% CPU, sixteen times over (eight minutes), with `exit null`
+and a code frame where the error text should be: `reader.read()` answers
+`{ done: true }` at once after the child's stdout hits EOF, so the loop spun
+eleven million times, and Bun sets `exitCode` only when `exited` settles,
+which the loop never awaited. And a healthy child whose `Listening on` line
+did not match the regex hung the suite past fifteen minutes and left an
+orphan: the failure message read the child's stderr to EOF while the child
+was alive (the reading reviewer saw the same line). Now the loop races the
+child's `exited` beside the read and a tick, drains once at EOF, kills the
+child before reading stderr, surfaces the line containing `error` rather than
+the frame above it, and names the deadline it waited — a crash fails in under
+a second with `TypeError: Deno.serve is not a function`, sixteen crashes in
+one, an unmatched port line at the deadline with no orphan, each re-run under
+the mutation. A polyfill made to install over the tests' stand-in killed the
+suite at the first import with a stack and no tally (port 8000 taken or not):
+the import loop is a counted failure now, and an assertion after it says the
+stand-in is still `Deno` — the identity the whole in-process section rests
+on (709 assertions). The documented port was wrong for the fork's own
+machine: podman's `gvproxy` holds `*:8000` on macOS, so `PORT` unset answered
+`Is port 8000 in use?` on the first try; the polyfill keeps Deno's default,
+the examples say `PORT=8787` (the shared meal-planning server 8788) and each
+callout says why to set one. The reading reviewer found the two README
+claims that would have failed a reader: every extension `schema.sql` creates
+RLS policies on Supabase's `auth.uid()` (meal-planning's on `auth.jwt()`
+too), which the fork's Postgres does not have, so the new `psql -f` step
+died at the first policy — Step 1 now creates the two stub functions first
+and says the table owner is not subject to the policies while the server
+scopes rows by `DEFAULT_USER_ID` itself; and `work-operating-model-activation`
+refuses to start without `SUPABASE_SERVICE_ROLE_KEY`, which its callout said
+to leave unset — the callout says to set any value, and the test's spawns no
+longer inherit the variable from the process, so "may be left unset" is what
+the other fifteen starts prove. Check 11 widened at the running reviewer's
+probes: a bare `Deno` — aliased (`const D = Deno`), bracketed
+(`Deno["env"]`), destructured — is a use the rule cannot follow and is
+refused as one; a dynamic `import("jsr:…")` is a specifier too; four probes
+added and a non-probe widened (`globalThis.Deno.env.get`, a relative dynamic
+import). The codemod, given a `jsr:` types import that was not the first
+import, had swapped it in place — second — and left a second such line
+alone; it puts the polyfill first in every layout now and turns any other
+types import into the recorded comment, round trip identical on both
+constructed files. Smaller: `PORT=""` was port 0, a random port, silently —
+empty is unset now; `Deno.serve({ port, handler })`, Deno's options-only
+form, is accepted; the reader is cancelled rather than released around a
+pending read; the codemod's `Deno.` test reads comments (a harmless extra
+line, said so) and check 11's import statements end at `;` (a semicolon-less
+import would be a silent miss, said so). This section's counts were wrong
+and are fixed: 96 reads and 16 serves in the entries and 65 in the helper
+modules, not "64 and 64"; twelve READMEs and the primitive carried the
+callout, not fourteen; ten recipe and integration READMEs were edited, not
+nine; and the by-hand probe of an unmodified extension ran with the globals
+preloaded, so "fails at `Deno is not defined`" was not observed and is not
+claimed. The four extension credential trackers gain a Postgres URL line.
+Not taken: the migrated files' banner still says `node scripts/…` while the
+header says `bun` (rewriting 23 banners for a word; node runs it too); the
+bio worker's dry run under a write key answers 404 without a `?name=`, past
+the gate as the test counts it; `deno check` of the local-brain recipe's
+`capture/index.ts` fails in its `embed.ts` on a parameter property —
+pre-existing at the pin, not this change (its `db.ts`, back on supabase-js,
+checks clean).
+
+**Review pass 2** (the same two reviewers; twenty-one items between them,
+one HIGH, three MED; sixteen taken, one filed). **The stop signal, for this
+change's mechanism:** every finding in the polyfill, the codemod, check 11
+and the test was polish on pass 1's additions — the deadline constant printed
+as its own source text (a double-quoted string inside the template), the
+error-line picker preferring `throw new Error(` to the `error:` line below
+it, a child that printed its port and then exited crashing the suite with no
+tally where the probe's `fetch` threw (a counted failure now, re-run under the
+mutation), the postgres stub left in `/tmp` on the import-failure path,
+`--revert` turning a person's `// ob1-original-types: …` comment into an
+import (the record is a `jsr:` specifier and only that is restored, the
+constructed layout round-trips identical now), a backtick dynamic import
+unread (read now; one with `${…}` is not a literal), the blanker's template
+literals and the two runtime-detection idioms stated as limits, the ten
+callouts saying "set one" above command lines that set no port (they say
+`PORT=8787` now), the README's `CREATE OR REPLACE FUNCTION auth.uid()` — which
+on a real Supabase database would have replaced GoTrue's function with one
+returning NULL and broken row-level security across the project — a plain
+`CREATE` now, refused where the function exists, with the warning before the
+command, and pass 1's own tallies (twenty-nine items, not thirty-two). The
+running reviewer confirmed pass 1's two fixes load-bearing: with the `exited`
+race removed the busy-spin returns (sixteen crashes in 49 s at a 3 s
+deadline); with it, 1.1 s. And it re-ran the codemod's four odd layouts
+(identical) and the mutations (a)–(c) (as pass 1 left them).
+
+**The one HIGH is not this change's.** The running reviewer did what no pass
+before it had: it applied the five `schema.sql` files to a real Postgres
+(after the README's two stubs — they apply cleanly, RLS on, connected as the
+owner), started each server under `bun`, and called all twenty-five
+extension tools through `tools/call` with a real key. Seven fail, on three
+gaps in the shim that predate this ticket — fix 13 migrated these files and
+never drove them: the shim has no `.not()` (two tools: `get_upcoming_
+maintenance`, `crm_get_follow_ups` — the only two calls in the tree); four
+tools select a PostgREST embed the codemod's blocker regex let through, since
+it wants the table name flush against the parenthesis and `maintenance_tasks (`
+and `recipes:recipe_id (` are not (`search_maintenance_history`,
+`get_meal_plan`, `generate_shopping_list`, the shared `view_meal_plan`) — so
+fix 13's "four of the 54 files use embedding" undercounts; and a JavaScript
+array binds as its `String()`, so `crm_add_contact` with `tags: []` is `22P02
+malformed array literal: ""`. Two more tools' error paths render `[object
+Object]` because the shim's error is a plain object where supabase-js's
+extends `Error`. The write path works — `add_maintenance_task` stores the row
+under the configured `user_id` — so a fork user could add tasks and never
+list what is due. That is a second mechanism (three shim features and the
+codemod's blocker, with a tool-level drive to hold them), and it is filed as
+SMD-1588 with the evidence; here, the four extension READMEs name their
+failing tools above the Connect step (household-knowledge's all ran), the
+primitive and the shim README carry the count once, and this section's claim
+is the exact one: the servers start, authenticate and answer over the port —
+eighteen of twenty-five tools work end to end, seven wait on SMD-1588 (done in
+change 77, which also found the count was twenty-nine: the shared meal-planning
+server's four had not been counted).
+
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the test's deadline is one constant for the
+section rather than one per child; the CI step that runs the checker names
+what it checks through check 11 (it stopped at check 8); this section's
+counts of check 11's probes read the arrays as pass 1 left them (twelve,
+three through a dependency, six non-probes; "eight" and "eleven" were the
+implementation's) and pass 1's paragraph says what it added (four probes and
+one widened non-probe, not "two non-probes"). Left as they are, with the
+reason: the migrated files' banner says `node scripts/…` while the codemod's
+header says `bun` — 23 upstream-owned files for a word, and node runs it; the
+extension credential trackers' Supabase lines beside the new Postgres URL
+line — upstream's teaching path.
+
+**Verified:** `bun test-auth.ts` 709/709 (643 before: sixteen starts × four
+assertions, the tree guard, and the stand-in's identity after every import); every one of the sixteen — the five
+extension servers, the sample, `work-operating-model-activation`, the two
+thought servers, `open-brain-rest`, the auditor, the two workers,
+`readwise-capture`, `rest-api`, `smart-ingest` — starts under `bun`, says its
+port, answers its probe and is still running (the auditor's dry run under a
+read key answers 500 against the refused stub database, past the gate as in
+the in-process section); before the change an unmodified integration under `bun` failed at its
+`jsr:` import and an unmodified extension served only under `bun --preload`
+of the two globals — the two starts probed by hand; `bun scripts/check-fork-consistency.mjs`
+PASS with check 11's fifteen probes, and six mutations of the tree each caught
+on the right file and line — the runtime line removed, the line moved after
+`hono`, `Deno.exit` in an entry, `Deno.args` in a `_shared/helpers.ts` reached
+through its entry, the `jsr:` line restored beside the polyfill, `npm:hono`
+as a specifier (a lesson from the mutant run: `git checkout --` restored the
+mutated files to HEAD and wiped the branch's own uncommitted lines with them
+— restore a mutation from the saved text, never from git, on a dirty tree);
+after pass 1, the test's own failure modes re-run under mutation — `serve`
+removed from the polyfill: sixteen named failures in 0.9 s with the
+`TypeError` text; the polyfill installing over the stand-in: one counted
+failure with a tally in 0.1 s; the port line unmatched under a two-second
+deadline: sixteen failures in 33 s, no orphan — and the codemod's two odd
+layouts (a `jsr:` types import second; two of them) each round-trip
+identical with the polyfill first; after pass 2, a child that exits after
+its port line is one counted failure, a human-written
+`// ob1-original-types:` line survives `--revert`, and the running
+reviewer's end-to-end run stands as the measure of what works: five schemas
+applied, sixteen servers started, eighteen of twenty-five extension tools
+answering, the seven that do not named in their READMEs and in SMD-1588;
+`../db/with-postgres.sh bun test-writes.ts` 186/186 (the bio worker and the
+other drivers unchanged under the stand-in); `bunx tsc --noEmit` in
+`compat/supabase-sql` clean with `../deno-on-bun.ts` in its include;
+`../../db/with-postgres.sh bun test-compat.ts` 84/84; the codemod round-trips
+(23 reverted, 23 re-applied, the tree byte-identical, the local-brain client
+kept) and its triage report marks a migrated file lacking the line with `!`
+and prints the `KEEP` reason under "Needs a human". The ticket's verify —
+each of the five starts under Bun and answers `tools/list` with a scoped key,
+in CI; `test-auth.ts` still passes, and its stand-in is now the test's
+convenience rather than the files' only runtime — is the suite.
+
+**Not done here.** SMD-1588: the shim's `.not()`, array binding and error
+class, the codemod's embed blocker (a space or an alias before the
+parenthesis), the one-hop embed or an honest refusal for the three servers
+already on the shim, and a drive of every extension tool against Postgres —
+seven of twenty-five fail today, named in the READMEs (done in change 77). Deno deployability of a shim-importing file: the shim is
+Bun's `SQL`, and a Deno-capable shim would be a second client to hold equal
+to the first — the files that must deploy to Supabase stay on supabase-js
+(`family-calendar`, `job-hunt`, `ob-graph`, `agent-memory-api`,
+`metadata-norm`, `kubernetes-deployment`, the local-brain client). A compose
+service per extension in `deploy/`: each server is one `bun` process on one
+port, and `SETUP.md`'s TLS proxy is where a hosted client reaches it; the
+READMEs say so. The extension READMEs' Supabase-shaped prose outside the run
+step — credential trackers naming a project ref, RLS steps that assume
+`auth.jwt()` — is upstream's teaching path and is left as it is beyond the
+prerequisites, the schema step and the user-id step. The `Deno.serve` return
+object carries `finished`, `shutdown()` and `addr` and nothing else of
+Deno's `HttpServer`; no file on the shim reads even those. `rest-api` and
+`smart-ingest` keep their own single-key compare (check 8 passes it; SMD-1455
+left them). SMD-1541 and SMD-1525 as before.
+
+**Upstream status:** not applicable — the shim, the codemod and the polyfill
+are this fork's (fix 13); upstream's copies of these files deploy to
+Supabase on supabase-js, which is what `--revert` restores. **Unfiled.**
+
+### 75. The MCP endpoint answers GET with 405 before `authenticate()` — an authenticated GET no longer opens an SSE stream nothing writes to or closes (SMD-1259)
+
+`server-portable/index.ts`, `server-portable/test-server.ts` ([13]),
+`deploy/smoke.sh` (check 3), `deploy/README.md`, `SETUP.md` (Linear SMD-1259,
+filed from change 42's first review pass; upstream
+[#424](https://github.com/NateBJones-Projects/OB1/issues/424)).
+
+**The defect.** `app.all("*")` handled every method. Beneath it the Accept patch
+— upstream's #33 fix, written for POSTs from Claude Desktop connectors that omit
+the header — set `Accept: application/json, text/event-stream` on GETs too, and
+`StreamableHTTPTransport.handleRequest` then took an authenticated GET as a
+request to open the standalone SSE stream. The transport here is built per
+request and is sessionless: nothing ever wrote a message to that stream or
+closed it. The response was `200 text/event-stream`, its headers flushed at
+once, its body a `ping` event every 30 s from the transport's keep-alive and
+nothing else, until the client hung up — or, on Bun alone, until its 10 s
+per-connection idle reset beat the ping (SMD-1259 measured 10–12 s there). On
+Node and Workers nothing on the server side ended it: an uptime checker
+configured with the key parked one connection per probe, indefinitely. Each
+such GET first cost an agent-registry resolve and a server build. Change 42's review reproduced it three ways:
+`GET /?key=…`; `GET //.well-known/…?key=…` (a trailing slash on the base URL
+doubles the slash, which Hono does not match to `/.well-known/*`); and
+`GET /.Well-Known/…` (Hono matches case-sensitively). Upstream #424 reports the
+same hang from mcp-remote, whose handshake GET waited 60 s for it. Any holder of
+a key — a browser opening the connector URL the docs hand out, an uptime checker
+configured with the key, a client echoing `?key=` on GET — could park
+connections at will, and nothing rate-limited it.
+
+**The change.** The route table now says what the endpoint serves. The MCP
+handler is registered with `app.on(MCP_METHODS, "*", …)` for `["POST"]` alone,
+and Hono's `notFound` answers whatever no route matched with
+`405 Method Not Allowed`, `Allow: POST, OPTIONS` and the CORS headers —
+before `authenticate()`, so no key shape reaches the agent registry or builds a
+server, and the answer is the same for no key, a wrong key and a revoked one; it
+is about the method, not the caller. 405 and not 404 because the handler serves
+POST at every path: an unmatched request is always a method the endpoint does
+not serve, never an unknown path. `notFound` rather than a trailing
+`app.all("*")` (the second pass's shape) so that a route registered later is not
+silently shadowed by dispatch order — the third review pass verified the two
+byte-identical across every method and both odd paths. That 405 is the
+Streamable HTTP transport's documented answer from a server that offers no
+server-initiated stream. HEAD,
+PUT and PATCH land there (the transport's own 405 for PUT and PATCH came after
+auth and named `GET` in its `Allow`), and so does DELETE. The first draft kept
+DELETE on the premise that the SDK client sends it from `terminateSession()` and
+accepts 200 or 405; the first review pass read the client and found the premise
+true and irrelevant: `terminateSession()` returns before sending anything when
+it holds no session id, the id comes from an `mcp-session-id` response header —
+which this server strips from every response — or from a `sessionId` the
+application passes to the transport's constructor, so the only DELETE that can
+arrive is from a client an application seeded by hand, and it accepts the 405 by
+spec. A keyed DELETE bought a resolve and a server build for a transport with
+nothing to close. One list — `MCP_METHODS` — registers the handler and names the
+405's `Allow`, so the two cannot drift; the first draft had a string beside a
+hand-written boolean, which the review named as a value defined twice. The CORS
+`Access-Control-Allow-Methods` is left as it was on main, `GET, POST, OPTIONS,
+DELETE`, on purpose: it answers a different question — what a browser may send
+so that it can hear our answer — and the first review pass's version, which
+derived it from the served list, would have turned a browser-hosted client's
+DELETE (or a preflighted GET carrying `mcp-protocol-version`; GET itself is
+CORS-safelisted, but a preflight still happens for the header) into a network
+error where the server would have said 405. The second pass caught that.
+
+**A contract change for health checks, and its remedy.** A keyless `GET /` or
+`HEAD /` used to get the 200 JSON-RPC refusal; it now gets 405. A
+platform-default HTTP probe — Kubernetes `httpGet`, a load balancer's target
+check, an uptime monitor — can only GET and expects 2xx, so aimed at `/` it
+would mark a healthy server down. So `GET /health` is a route of its own,
+registered between `/.well-known/*` and the MCP handler, before
+`authenticate()`: `ok`, 200, no key needed, a key ignored; Hono routes HEAD to
+it as GET, so a HEAD probe gets a bodiless 200. It says the process is serving
+and nothing else — readiness (is the database reachable) stays preflight's job
+at the entrypoint, as the Dockerfile comment records. The third review pass
+found the second pass's route an exact root match: behind the unstripped proxy
+prefix `deploy/README.md` and change 42 already anticipate, `GET /mcp/health`
+got the 405 — the very outcome the route was added to prevent — and so did
+`/health/`. The route is now a GET handler on `*` that tests the path for
+`health` as its last segment, optional trailing slash, and calls `next()`
+otherwise (which lands on the 405). A route pattern was tried first —
+`/:prefix{.+}/health` — and in `test-server.ts` matched `/mcp/health` and
+`/a/b/health` but not `/functions/v1/open-brain-mcp/health`. Three passes
+stated three mechanisms for that, and the fifth is the one driven directly
+against the project's Hono 4.9.2 with each router named: the RegExpRouter
+accepts `/:prefix{.+}/health` on its own and matches four segments; what makes
+it throw `UnsupportedPathError` at registration is a `:param` route sharing the
+root node with a static route — `/.well-known/*` here, or a plain `/health` —
+regex or no regex; SmartRouter then falls back to the TrieRouter, and the
+TrieRouter miscounts a `{.+}` prefix of three or more segments (its segment
+counter matches one slash where it should match all). The scratch apps that
+"matched every depth" in passes 3 and 4 were loading Hono 4.13.8 from Bun's
+global cache, not the project's 4.9.2 — a scratch file outside the package
+resolves `hono` elsewhere. The lesson holds either way: the pattern's reach
+depends on router internals and on which Hono answers, and testing the path
+depends on neither. The name is exact after Hono's decodeURI: `/healthz`,
+`/Health` and `/health/x` are not it; `/he%61lth` is; an encoded slash `%2F`
+stays encoded and is not a slash, so `/health%2F` and `/health//` are refused
+while `/health/` and `//health` pass — one trailing slash, and an empty segment
+is tolerated. The breadth — `health` under any prefix — stands in for a
+base-path setting the server does not have; the mount change 42 defers would
+match `${base}/health` exactly and should narrow it. `POST /health` is the MCP
+endpoint, as POST at every path is, and a PUT or DELETE at a health path gets
+its 405 with `Allow: GET, HEAD, POST, OPTIONS` — the health resource's methods,
+which include the endpoint's, derived from the same list (the fourth pass wrote
+`GET, HEAD, OPTIONS` and contradicted its own sentence about POST). The
+image's `HEALTHCHECK` keeps POSTing to the endpoint, which also proves the MCP
+path serves; `deploy/README.md` points platform probes at `<base>/health` and
+says a browser opening the connector URL sees `Method Not Allowed`, which is
+expected. Nothing in the tree GETs the endpoint for liveness (checked: the
+Dockerfile, `compose.yaml`, `smoke.sh`, the workflows; the Kubernetes
+integration uses a `tcpSocket` probe).
+
+**What the ticket's smallest fix would have missed.** SMD-1259's second review
+pass offered a method condition on the Accept patch as the minimal fix. Read
+against the SDK client (`@modelcontextprotocol/sdk` 1.24.3,
+`_startOrAuthSse`): the client sets `Accept: text/event-stream` on its own GET,
+so the transport would have opened the stream for it whether or not the patch
+ran. The patch is left as it was, with a comment saying only POST now reaches
+it. The guard is the fix; gating the patch as well would have been a second
+mechanism with no observable behaviour left to test.
+
+**What the client does with a 405.** Read in the SDK source, not asserted:
+`_startOrAuthSse` cancels the body and returns on 405 — the comment there reads
+"indicates that the server does not offer an SSE stream at GET endpoint … an
+expected case that should not trigger an error" — and any other non-2xx is a
+`StreamableHTTPError` it reports through `onerror`. mcp-remote wraps this
+client. A live connector has not been seen to do it; see below.
+
+**Verified.** `test-server.ts` [13], 64 assertions against the real
+server: eleven fetch rows — GET under no key, a wrong key, the right key in the
+header and in `?key=`, GET carrying the SDK client's own headers, HEAD, PUT,
+PATCH, DELETE with and without a key, and the case-variant discovery path — each
+asserted for 405, an `Allow` naming the served methods, CORS, and a body that
+is not a JSON-RPC envelope; the doubled-slash path handed to `worker.fetch` as
+a `Request` object, because Bun's `fetch()` collapses `//` to `/` on the wire
+and a fetch row probed the 404 route instead (found when that row failed) — an
+earlier draft wrote the request line over a raw socket to prove Bun.serve's
+parser passes `//` through, which the sixth pass called a harness property and
+not a repo contract, production being Deno and Workers; `/health` → 200 with
+CORS bare, with a key, as HEAD, with a trailing slash, under a one-segment and
+under the Supabase-shaped three-segment prefix; `/healthz`, `/Health`,
+`/health/x`, `/a/healthz` → 405 or 404 — route exactness, not a status
+contract, since what a stray GET gets is the deferred path-axis decision, but
+one of the two refusals and nothing else, because the third pass's `!== 200`
+would have passed the abort marker, which is a hang, the one outcome the block
+exists to refuse (the fourth pass reproduced it with a wrapped `fetch`);
+`PUT /health` → 405 with `Allow: GET, HEAD, POST, OPTIONS`, and `POST /health`
+with the key → the transport's `initialize` result (a keyless row would have
+been satisfied by the JSON-RPC refusal, which the sixth pass caught). The sixth
+pass also asked whether that health-path `Allow` — a second evaluation of
+`HEALTH_PATH`, for a request nothing sends — is worth its seam; it is kept,
+because an `Allow` that omits GET at a path that serves GET is a false
+statement, and the cost is one regex test on a refusal path. A base-path
+setting would make both the route and this branch exact; that is the mount
+change 42 defers. The exact CORS method list lives in [3], where the preflight is
+now probed through the same abortable helper, whose body parse sits outside the
+transport try so a non-JSON body reports the status the server sent rather than
+`SyntaxError`; POST reaching the transport is [7], which also sends
+`Accept: text/event-stream` alone and gets 200 — the Accept patch now supplies
+whichever of the two tokens the transport requires is missing, where it used to
+test only the SSE token and let that POST through to a 406 after paying the
+resolve and the build. Drilled by restoring the pre-change shape — the handler on
+`app.all` and the `notFound` removed — 34 of 151 assertions fail: the
+fetch rows holding a valid GET fail as `TimeoutError`; the doubled-slash row as
+a 200 (the stream's headers flush at once; it is the body that never ends, and
+that row reads only the status); the rows without a key as 200 with an envelope; HEAD, PUT and PATCH
+by an `Allow` that names GET, from the transport's own 405 after auth; the keyed
+DELETE by the transport's 200; the four near-miss paths and `PUT /health` by
+the 200 refusal; `/health` keeps passing, being its own route. The
+suite's 2 s abort on every routing probe stays: it is what turns the failure
+mode this change closes into a red assertion instead of a stuck CI job, so it is
+the test's teeth, not scaffolding to retire. `deploy/smoke.sh` check 3 GETs the
+endpoint and expects 405; check 4 GETs `<base>/health` and expects the body
+`ok` — right whether or not the proxy strips its prefix, by the path test
+above. The body and not the status, because a 200 there proves nothing: a
+server with no health route (upstream's, say) answers a keyless GET with a 200
+JSON-RPC refusal, and a proxy that redirects unknown paths to a landing page
+answers 200 too — the fifth pass's status-only check passed on both, while
+three documents claimed a Supabase deployment fails it. Two checks, because
+they are two contracts with two remedies (the fourth pass bundled them into one
+tally to keep the count at eight, a constraint it had itself dissolved by moving
+the count literal into one file). Both **with no key**. No key, because both answers come before `authenticate()` so a key proves
+nothing, and because the script's status helper follows redirects with `-L`, on
+which curl forwards a custom header to whatever host comes next — the first
+draft sent the key, and behind a redirecting front proxy it would have landed in
+a third party's access log. A 200 from the endpoint is the guard missing or a
+front proxy answering `GET /` itself, and the message says both; a hang would
+also read as 200 under `--max-time`, since the stream's headers flush before the
+body stalls (the first draft said `000`, which curl prints only when no status
+line arrives at all). Check 2's comment now says why a keyless discovery probe
+suffices — the route answers before auth whether or not the key rides along —
+rather than the false claim that the connector sends none. The former checks
+3–7 are now 5–9. No document carries the count any more: `deploy/README.md`
+says the summary ends with `0 failed` and exits 0, and `SETUP.md` points there.
+This change bumped seven to eight by hand in two files before the fourth pass
+noticed, then eight to nine in one, before the sixth pass asked why a number
+the script computes is copied anywhere. `SETUP.md`'s tool counts (ten for a
+write key, seven for a read key; three tools gated, not two) are corrected
+where they contradicted each other eight lines apart, and
+`server-portable/README.md`'s suite count and bundle size, stale since [11]
+landed, now match the run, and are the only current copies of either number
+(the dated run records in changes 42 and 43 keep theirs) — `SETUP.md` and the
+known-issues entry below point there.
+`tsc --noEmit` clean; the Workers bundle builds (`wrangler deploy --dry-run`,
+281 KiB gzipped). The compose stack's smoke run is CI's `deploy-stack` job.
+
+**Tidied while the files were open** (boyscout, after the sixth pass; no
+behaviour change, the suite count unchanged): the two 405 header sets are built
+once instead of spread per refusal; the test's probe deadline is one constant
+where it was the literal `2000` twice; and the per-row refusal triple that [11]
+and [13] each spelled out is one `expectRefusal()` helper beside `probe()`. Two
+cut-for-space items were left alone because they change behaviour: an `Allow`
+on the OPTIONS answer, and Hono's `cors()` middleware in place of the
+hand-spread header (its preflight answers 204 where [3] asserts 200) — the
+latter is a ticket if anyone wants it.
+
+**Not verified: a live connector.** The same standing as change 42: a real
+Claude Desktop connector, a claude.ai connector and mcp-remote against a deployed
+build of this `main`, each completing `initialize` and listing tools. The SDK
+reading above says they will. It is not the same as seeing it.
+
+**Not done here.** The path axis — mounting the transport at a path and letting
+Hono's `notFound` answer `/favicon.ico` and `/robots.txt` — remains the
+deployment-contract decision change 42 describes; `/health` no longer waits on
+it. Today those stray paths get the 405 like any other GET, which is a complete
+answer if not the most descriptive one.
+`server/index.ts`, the Deno Edge Function upstream deploys, carries the same
+Accept patch and no method guard; it is upstream's file, and #424's PR #425 is
+their fix for it. A Supabase deployment therefore fails smoke checks 3 and 4 as
+it fails check 2, and for as real a reason: with a key, its GET hangs, and it
+has no `/health` — its keyless GET there gets the 200 JSON-RPC refusal, which
+is why check 4 reads the body.
+
+Upstream status: #424 open, PR #425 open. **Unfiled** by us.
+
+### 76. The kept bench corpus answers the exact oracle from its marker — `bench-hnsw.ts` records the exact pass's answers when it builds, and a reuse takes the first Q of them and computes only what the marker lacks (SMD-1562)
+
+Change 72 made a `bench-hnsw.ts` pass at ten million rows reusable: 37 min 9 s
+for the run that built the corpus, 7 min 24 s for the one that reused it. Most
+of the seven minutes was the exact oracle — for each of the eight tiers and
+once over the whole table, for each of fifty queries, an exact scan of ten
+million rows with the vector index kept out of the plan: about 450 full scans.
+Its answers are a pure function of the corpus (the seed and the scale), the
+query count and K — the same on every reuse, and recomputed on every reuse.
+Change 72's eighth and ninth review passes named it as the first thing cut for
+space, and its boyscout left it out as new behaviour.
+
+**The cache (`db/bench-hnsw.ts`).** The marker gains one field, `oracle`: a
+map from the *shape* of the exact pass — a digest of the oracle's statement
+in both filter forms (K inside it), the tier filter's form, a probe of how a
+vector is rendered into its literal, and a probe of the server's distance
+kernel — to that shape's entry: a digest of each query's literal, in
+order, and for each tier key and the whole table one answer per query, the
+exact top-K ids in distance order and the nearest row's cosine (the whole
+table's is the confound the run prints). A build writes it with the marker,
+after the exact pass — the marker was already written last, once the pass's
+own confound gate had passed, so a refused build still leaves nothing. A
+reuse looks up its own shape's entry, checks it whole (one well-formed answer
+per query for every key: distinct ids, exactly as many as the exact answer
+holds — K, or every matching row where fewer match — and a finite cosine),
+and
+takes answers from the front while the entry's query digests match its own:
+the queries are drawn from the seeded stream after the rows' draws, so the
+first Q of a longer run's queries *are* a shorter run's, and a run asking
+fewer needs nothing computed. A run asking more computes the queries the
+entry lacks — per key, only those — and writes its entry back whole, merged
+into the map beside other shapes' entries; an entry answering for every query
+is left as it is. Before anything is computed the plan the statement gets on
+this server is read once, and a plan that reaches the vector index is
+refused: the pass is exact because `enable_indexscan` is off and
+`enable_seqscan` on, and an approximate pass written under a shape that
+vouches for it would be trusted by every later reuse. The confound is the
+largest nearest-cosine over this run's whole-table answers, the marker's and
+the computed alike, and the gate on it stays. No new invalidation: the
+answers are valid exactly while the rows are, and they ride inside the marker
+whose physical fingerprint a reuse judges first — every refusal (another
+scale, other parameters, a `rewritten` corpus, counts or regenerated rows
+that differ, a ledger stranger, a drifted migration, a relation that moved,
+a row written since the build's transaction id) exits before the oracle is
+consulted. A marker without an entry for this shape — written before this
+change, or by a tree whose statement differs — or whose digests stop
+matching is computed for and extended, not refused: the answers are
+derivable, the thirty-minute build is not, and `MARKER_FORMAT` stays at 2
+because the cache names its own inputs. Answers are written back only under
+`OB1_PG_KEEP` (a persistent database reached some other way is not this
+bench's to mark), and the run says which: `corpus kept: marker written`,
+`marker extended: … (had n, m of them this run's)`, or `not kept`. The oracle
+hands its ids back in distance order (the marker's form) and the arms score
+against those lists; the run line says `reused from the marker (…)`, `n of Q
+queries from the marker, computing the rest` or nothing, as before; and
+section L gains an `oracle` column — `computed`, `reused`, or `n of Q
+reused, the rest computed` — beside `source`, since the heap is warmer after
+a computed pass and latencies compare between rows with the same value. At
+ten million rows and fifty queries an entry is nine keys × fifty × ten
+uuids, under 200 KB of jsonb.
+
+**Held to the computation (`db/test-bench-reuse.ts`, new).** The claim that
+matters is that what a reuse takes from the marker is what it would have
+computed, and two builds cannot test it — the parallel HNSW build gives two
+graphs, and two recall figures — so the suite runs the bench eight times
+against one database at 150,000 rows (the smallest kept scale) and compares
+on one index: a build with five queries; a reuse with three (all the
+marker's); the marker's answers removed, as a marker from before this change
+has none, and three again (computed, the marker extended) — sections A, B, D
+and E equal the previous run's, timings aside, and the confound agrees; one
+whole-table answer given a duplicated id, and three again (the entry
+discarded, computed, written back whole); the entry's second query digest
+changed, and three again (one from the marker, two computed); six (three
+from the marker, three computed, the marker extended to six); six again (all
+the marker's, the tables as the run that extended it); then the corpus
+marked `rewritten` as a refused reuse leaves it, and a run refused before
+the oracle is consulted. It runs under `with-postgres.sh` like every
+suite and tells only the bench it spawns that the database is kept — to the
+bench, "kept" is the variable and the marker row, and the volume is the
+wrapper's concern, held by change 72 — so the throwaway container is the kept
+database for the runs and nothing outlives the suite; it drops its
+marker table on the way out and takes about three minutes, which is why it
+is in neither CI nor `ci-parity.sh`. A mutant that takes the *last* answers
+the marker holds instead of the first fails exactly the equality.
+
+**First review pass.** The cache named the rows it was valid for (through the
+marker's fingerprint) but not the queries or the oracle's statement it was a
+function of; it now carries a digest of each query vector and an
+`ORACLE_SHAPE` number beside K, and a reuse takes answers from the front only
+while the digests match its own queries — a changed stream, another K or
+shape, or a malformed field answers for nothing and is computed for, and
+each element is checked to be an answer before any is trusted (a marker
+edited by hand would otherwise have been a bare `TypeError` after the
+fingerprint was paid, or a silent recall of zero). The answers are one
+record per (key, query), `{ids, top}`, where the confound had been a parallel
+array aligned only by the loop that filled it; the three-way state — every
+answer the marker's, some, none — is named once and rendered from there; the
+spread over Q arguments that would have died at a million queries is a
+reduce; and the marker line says what the marker had and how many of them
+were this run's, where it had said `had none` for a record it was replacing.
+The suite, which then drove `with-postgres.sh` itself under a kept name,
+gained what that lifecycle needed: `--no-env-file` reaching a bun fronted by
+the wrapper (it was loading `db/.env` for every `OB1_*` name the suite had
+just stripped; reproduced with a flag in the file), removal of the container
+and volume on an interrupt, the volume named up front, a thrown stop turned
+into a failure with a tally rather than a stack trace, and one helper for
+the two scored-table comparisons that carries the rows guard to both sites.
+
+**Second pass.** The shape number was a hand-bumped integer standing in for
+the statement's identity, which an edit to the statement would not bump; the
+oracle's SQL is one function now, and `shape` is a digest of it rendered over
+placeholders (both filter forms and the tier filter's), so a tie-break or
+another operator recomputes on its own. `markerAnswers` hands back the
+answers it validated rather than counts the caller re-derives through two
+non-null assertions; the three-way state is one value the four renderings
+index; the extension write is gated on `OB1_PG_KEEP` as the first write is
+(a persistent database reached some other way is marked by neither). And a
+second round on the suite's kept-volume lifecycle: the interrupt handler had
+been fire-and-forget beside a main flow that did not know it had fired, the
+runtime was a second copy of the wrapper's pick, the environment strip took
+the wrapper's own knobs with it, `runScript` matched only a leading `bun`;
+each was fixed (and the interrupt verified in run 1 and a later run: exit
+130, nothing left), the build's workers and memory pass through the strip,
+which is `shellWithoutOb1()` shared with `migratorEnv`, `scored()` gates on
+the section letter by regex (the empty section had matched
+`"ABDE".includes`), and the catch keeps the stack.
+
+**Third pass — the mechanism was the finding.** Three passes in a row had
+found seams in the suite's container-and-volume lifecycle (the runtime it
+parsed from the wrapper's banner was a basename the wrapper itself may not
+have on `PATH`, so the removal would have thrown inside `finally` on the very
+macOS layout the README names), and what the bench means by "kept" is a
+variable and a marker row: the suite now runs under one ordinary
+`with-postgres.sh` container and tells only the bench it spawns that the
+database is kept. Six kept volumes, the interrupt handler, the runtime pick
+and the argv heuristic in `runScript` (back to a command that *is* bun, by
+basename) went with it; the suite drops its marker table on the way out, so
+it could join `ci-parity.sh` and stays out only for its three minutes. In
+the bench: the marker's `oracle` is a map keyed by statement shape, each
+tree writing its own entry beside the others' (`jsonb_build_object` over the
+existing map) rather than over them — a kept volume outlives branches, and
+two trees that disagree on the statement would otherwise have recomputed the
+pass on every switch; the per-query digest covers the literal the server
+parsed, not the doubles it was rendered from; an answer is at most K
+distinct ids (a duplicated or overlong list had passed and skewed the
+denominator); `markerAnswers` returns how many the entry held, so the
+marker's line no longer reads a raw field the helper had rejected; the
+three-way state is one `note` the run line, the cell and the confound's
+parenthetical are read from, and the cell says `computed … not kept (no
+OB1_PG_KEEP)` where the answers went nowhere, instead of `extended`; and the
+arms take the answers themselves (`ids.includes` over lists of at most ten)
+where a second copy as sets had stood behind eight non-null assertions.
+
+**Fourth pass.** Two things at the root. The suite's exit dropped the marker
+table unconditionally — under a kept name it would have dropped a kept
+corpus's marker, the one witness `dropSchema` has, after run 1 was refused
+for asking another scale; it now refuses a database that already holds a
+marker and drops only the one it planted, on a normal exit and on a signal
+(Bun runs no `finally` on one), through a connection it opens only after
+the throwaway-database guard the other suites' resets go through. And the
+oracle's exactness rested on `enable_indexscan = off` alone, unasserted:
+with `enable_seqscan` also off — 019's setting on `match_thoughts`, or a
+database- or role-level one — the planner reaches for the HNSW index again
+(EXPLAIN on the bench's image), and this change raises the stakes, since an
+approximate pass would be kept under a shape that vouches for it; the scan
+now sets both, the settings are in the shape, and the plan is read once per
+scale and refused, in the named form, if it touches the index (reproduced by
+forcing `enable_seqscan` off: the refusal quotes the `Index Scan using
+thoughts_embedding_idx` line). Then: `amendOracle` merges into
+the map only where the map is an object (`||` on a hand-cleared `null` built
+an array and killed the cache from then on); the shape digests a rendering
+probe of `lit`, so two trees that agree on the statement and differ in the
+literal — a last-ulp change in the generator, a formatter — hold two
+entries instead of overwriting each other's; section L's `oracle` is its own
+column, decided by provenance alone (`computed`, `reused`, `n of Q reused,
+the rest computed`), and where the answers went is the marker lines' to say,
+with a line for the reuse that was not kept; an entry carries only its
+queries and answers, its key being the shape; the prewarm comment no longer
+claims a heap warmed by a pass a reuse does not run, and says which rows'
+latencies compare; the suite asserts every scored section is present rather
+than a row count both reports could lack a section under; and this
+section's lead now describes the shipped mechanism rather than the first
+draft with the passes as errata.
+
+**Fifth pass, on the tree merged with main** (SMD-1544 took change 73; this
+section became 74 — and 76 once SMD-1480 and SMD-1259 took 74 and 75). The exact statement orders by distance *and id*: the
+column is `vector(64)` and the cosine accumulates in float4, so distinct
+rows can tie at rank K, and without the tie-break the id kept was whichever
+worker's stream it landed in — an answer the marker keeps must not depend
+on the plan that computed it. The map's key gains the server's side: a probe
+of the distance kernel (the cosine between two fixed vectors, as text),
+since the kernel's last bits differ between pgvector builds and CPUs, a
+pinned image *tag* does not fix that and `extversion` does not show it; and
+the planner settings leave the key — they decide the plan, which the plan
+check holds, and a reordered `SET LOCAL` should not cost a recomputation.
+An entry's whole-table answers must hold exactly K ids (a kept scale has
+more than K rows; a trimmed list had passed and would have read as recall
+lost). The suite: it had proved no marker existed when it started, so the
+marker it finds at the end is its own and is dropped whether or not it
+read run 1's line saying so (the line came after the commit; a Ctrl-C in
+between would have left the marker); a signal is noted rather than acted
+on, the run in flight finishes, the next run throws, and the drop happens
+once in `finally` before the signal's exit — the handler had been dropping
+the marker while the main flow, whose child had died of the same signal,
+went on to spawn the next bench onto the dropped marker, which would have
+rebuilt the corpus and written a new one. Two planted malformations join
+the runs — a duplicated id in one whole-table answer, and a query digest
+changed at index 1 — asserted to be computed for (`had none`) and to answer
+for one query only (`1 of 3 reused`), so the guards and the prefix walk are
+no longer mutant-blind; the remote-database flags pass through to the
+spawned bench, which had refused a database the suite accepted; the marker
+table's name is one exported constant the suite, the bench and `dropSchema`
+share; and the suite reads section L's `oracle` cell rather than the run
+line's prose. Declined: rewriting the statement as an `OFFSET 0` fence so
+exactness holds by construction — the plan check already asserts it, and
+the fence would trade a measured parallel top-N (Gather Merge over
+per-worker sorts) for an unmeasured leader-side sort.
+
+**Sixth pass — the stop signal.** Its top findings were the fifth's fixes:
+the kernel probe keyed the cache on a float8's *text*, which the session's
+`extra_float_digits` shortens (a role default set by some other tool would
+have keyed a volume away from itself), so the probe renders under a pinned
+setting; the tie-break had left the plan check's refusal blaming a database
+setting its own `SET LOCAL` excludes, so the check judges by node kind (any
+`Index Scan` over the one relation) and says what can still cause it; a
+signal between runs still spawned the next bench, so the check comes before
+the spawn too, and the header says what happens to a run in flight under a
+group signal; a tier answer of any length up to K was trusted, so every key
+is held to the exact answer's own size (K, or the rows that match); and a
+malformed entry had read as `had none` again, so it counts what it held.
+The guards themselves had been mutant-blind under two twenty-second
+container runs — five of seven clauses could go and the suite would pass —
+and the bench is a script that connects at import, so the pure part moved
+to `db/bench-oracle.ts` and `test-schema.ts` [37] drives it in milliseconds
+with the mechanism removed a clause at a time. Then: a run that exits other
+than expected stops the suite with its output rather than cascading nulls
+through the runs after it; the marker's DML reads the table's name from the
+one constant; the remote-database flags are named once beside the guard
+that honours them; and this section's lead names the kernel probe and not
+the settings. Two passes had opened with the previous pass's fixes as the
+top findings, which is where the loop stops.
+
+**Seventh pass, at the user's call.** The key named the statement and the
+kernel but not how `oracle()` turns the rows into what is stored (the
+nearest row's `1 − d`, the ids in row order, `−1` for none), so a tree that
+derived an answer differently would have read earlier entries as its own;
+an ANSWER_FORM tag is one more element of the shape. The plan check's
+`Index Scan` match also matched a `Bitmap Index Scan` line — the exact
+bitmap over the GIN the comment beside it excludes — harmless on the
+whole-table form it reads today and wrong the day the check reaches a
+filtered form; a `Bitmap` prefix is excluded. The first query's digest joins
+the key, so a tree whose query stream differs (an edit to the draws that
+leaves the rows alone, which the regenerated rows do not catch) is another
+entry beside the others rather than a write over them, and the write-back
+that shortens an entry is left only for a stream that changed after its
+first query. Then: the planted duplicate is the last id copied from the
+first, the same length at any K, where `- 9` had spelled K = 10 and would
+have let the length guard reject it before the distinctness guard was
+reached; a run that exits other than expected is one tallied failure, not
+two; the PGlite case is [37] (two blocks had carried [35]); the README's
+expected outcome says the tally the suite prints; the lead counts eight
+runs and names the two planted ones; the marker's binding comment names
+`unsafe`'s parameter array, where the tagged template it described is gone;
+`markerAnswers` is called as the total function [37] proves it to be, with
+no ternary in front of it; and the 25-line JSDoc the extraction left behind
+is the entry's, in its module.
+
+**Boyscout, while the files were open** (what the passes cut for space, no
+behaviour change): the marker-table probe is one `hasKeptCorpus` the bench,
+the suite and `dropSchema` share, where three had spelled the `to_regclass`;
+the digest uses `node:crypto`'s `createHash`, as `migrate.ts` and `auth.ts`
+do, in place of Bun's hasher; the suite's two table readers share one cell
+splitter and the section-L reader finds the data row from the separator
+rather than by position; and the oracle entry is built where it is written
+rather than on every path. A second look found the run line saying `done`
+after a pass the marker had answered, and let it end as it stands. Left as
+they were, being behaviour or outside the touched files: test-live's own
+by-hand `OB1_*` strips, which
+`shellWithoutOb1` could replace; a `--json` report the suite could compare
+as data rather than scraped markdown; and prewarming the metadata GIN on
+both paths so a reused row's first tier queries find it warm.
+
+**Measured at ten million rows**, on the kept volume `hnsw10m`, with the
+caveat that another session's ten-million-row store benchmark held two to
+four of the VM's eight cores throughout, so no wall clock here is change
+72's 7 min 24 s reuse's peer. The build took 56 min. A reuse that met the
+marker as SMD-1493 wrote it — no answers — computed the exact pass and
+extended the marker within about five minutes of connecting, then spent
+52 minutes in sections A–E under that load (56 min 45 s in all). The reuse
+after it took every answer from the marker (`exact oracle reused from the
+marker (all 50 queries)`) and was into section A within three minutes of
+connecting; its arms then took 78 minutes as the neighbour's load rose (81
+min 1 s in all). Sections A, B, D and E of the two runs are identical cell
+for cell, timings aside — the suite's comparison, run over the two reports.
+The marker grew from 2,018 bytes to 208,858 with the one entry: ten keys ×
+fifty queries × ten uuids. What the change removes is the exact pass, and
+under the load it was worth about five minutes of a reuse here; alone, it
+was most of change 72's seven.
+
+Upstream status: **not applicable** — a fork-only bench harness. **Unfiled**
+upstream. Reproduce: `./with-postgres.sh bun test-bench-reuse.ts`; or
+`OB1_PG_KEEP=x OB1_BENCH_SCALES=150000 ./with-postgres.sh bun bench-hnsw.ts`
+twice, the second run's section L reading `reused` under `source` and
+`reused` under `oracle`.
+
+### 77. The SQL shim reads the catalog — arrays bound by their column's type, `.not()`, one hop of resource embedding, an `Error` for an error, one pool per URL — and `test-tools.ts` drives all twenty-nine extension tools against Postgres (SMD-1588)
+
+`compat/supabase-sql/index.ts`, `compat/supabase-sql/test-compat.ts`,
+`compat/supabase-sql/README.md`; `scripts/migrate-to-sql-shim.mjs`;
+`extensions/test-tools.ts` (new), `extensions/package.json`,
+`extensions/test-writes.ts` (its header); the four extension READMEs and the
+deploy primitive; `.github/workflows/fork-checks.yml` (one step) (Linear
+SMD-1588, filed from change 74's second review pass).
+
+Fix 13 moved the five extension servers onto the shim by changing one import
+line each and never drove a tool. Change 74's running reviewer did — five
+schemas applied, every tool called through `tools/call` — and seven failed
+on the shim itself: the shim had no `.not()` (two tools), four tools selected
+a PostgREST embed the codemod's blocker regex had let through because it
+wanted the relation flush against its parenthesis (`maintenance_tasks (` and
+`recipes:recipe_id (` are not), and `crm_add_contact` with `tags: []` was
+`22P02 malformed array literal: ""` because Bun serialises a JavaScript array
+as its `String()`. Two more tools rendered every error as `[object Object]`,
+the shim's error being a plain object where supabase-js's extends `Error`.
+Driving every argument branch here found two more paths nobody had reached:
+a tag filter through `.contains()` on a `text[]` column (`text[] @> jsonb` has
+no operator — three tools), and an ingredient filter through `.or()`'s `cs`,
+an operator the shim's `.or()` did not know. And the drive itself surfaced a
+defect outside the ticket's list that would have stopped every one of these
+servers after about ninety-five calls: each request handler calls
+`createClient` and closes nothing — a Supabase Edge Function's shape, where an
+invocation dies with its client — and under Bun (change 74) each client's
+pool held its connection for the life of the process. The suite's eighty-odd
+calls left 84 connections open against Postgres's default limit of 100.
+
+**The mechanism.** PostgREST knows the schema; a supabase-js caller leans on
+that without knowing it, and value shape cannot stand in — meal-planning's
+`add_recipe` inserts `tags: string[]` into `TEXT[]` beside `instructions:
+string[]` into `JSONB` in one statement. Probed on Bun 1.4.0 against a real
+Postgres: the driver serialises a parameter by the type the server describes
+for it and has no array-literal form, so a JS array reaches `text[]` as `a,b`
+(`""` for `[]`), reaches `jsonb` as JSON, and an `int[]` fails inside the wire
+protocol (`08P01`). So the shim reads what PostgREST reads, once per name per
+process, cached by connection URL (the servers make a client per request): a
+table's column types with their category (`pg_attribute` joined to `pg_type`),
+its foreign keys in both directions with their column lists (`pg_constraint`
+with `conkey`/`confkey` unnested in order), and each overload of a function's
+IN-argument names, types and type categories (`pg_proc`; `proargmodes` keeps
+a `RETURNS TABLE` function's OUT columns out of the name list — they follow
+the IN arguments in `proargnames`, so the filter matters only to a caller
+naming one). From that: a JS array in a
+payload becomes a Postgres array literal — elements double-quoted, `\` and `"`
+escaped, `NULL` for null, nested arrays recursively, an object its JSON — bound
+with a cast to the declared type (`$2::text[]`); a `vector` column or argument
+takes JSON text, the form `.rpc()` always sent an embedding in (the numeric-
+array heuristic stays as the fallback where overloads disagree or the function
+is unknown); `.contains()` is `@>` with the column's own operator, an array
+literal against an array column and the bound object against jsonb;
+`.or()` takes `cs`, the value parsed to JSON for a jsonb column (a string
+would bind as a JSON scalar — the 005 trap) and passed as PostgREST's `{a,b}`
+text for an array column; `.not(col, op, v)` is `IS NOT` for `is` and
+`NOT (…)` around everything else, which is PostgREST's rendering too (`not.eq.1`
+is `NOT (x = 1)`, not `x <> 1` — they differ on NULL). Every filter is now a
+closure rendered at compile time with the column map in hand, `build()` is
+async `compile()`, `toSQL()` is a promise, and a catalog read that fails (the
+database unreachable) resolves as `{ error }` like any other runtime failure
+while the shim's own refusals still throw — except inside `.or()`, where a
+term the shim cannot serve is PostgREST's 400 (pass 3), because four tools
+build that expression from a user's text.
+
+One hop of embedding, from the select list parsed at the call — top-level
+commas, `*`, columns, `[alias:]relation (cols|*)`, whitespace anywhere. The
+relation is a foreign-key column of the table (`recipes:recipe_id (…)`:
+many-to-one through that key, keyed by the alias or the column) or a table
+with exactly one foreign key between the two, in either direction (this
+table's key to it: many-to-one; its key to this table: one-to-many).
+Many-to-one is a correlated `row_to_json` subquery — an object, `NULL` when
+the key is; one-to-many a `json_agg` under `COALESCE(…, '[]')` — an array,
+`[]` when empty: PostgREST's shapes and keys. The embedded table is aliased
+`__e` so a self-reference still names the outer row by the table's name, and
+multi-column keys join pairwise. Refused, each naming why: a nested embed, an
+embedding hint (`!inner`, `!fk_name`), a relation with no key to the table or
+with two (name the column), an embed in a `RETURNING` list, a JSON path or an
+aggregate inside one. An embedded row arrives with Postgres's own spellings
+(`2026-09-20` for a date, `+00:00` for a timestamp), as PostgREST's does.
+
+The error is `PostgrestError extends Error` with `code`, `details` and `hint`,
+so meal-planning's `if (error) throw error` hands the MCP SDK an `Error` whose
+message is the database's (`error instanceof Error ? error.message :
+String(error)` in the SDK is where `[object Object]` came from). Clients on
+one connection URL share one pool, counted, the first client's `max` sizing
+it; `close()` releases a hold and the pool closes with the last. The codemod's
+embed blocker is now the shim's refusals spelled as regexes — a nested embed
+(a parenthesis inside the embed), a hint (`!` after a relation) — so a one-hop
+embed no longer blocks, the three servers migrated with one are re-applied by
+the round trip, and `job-hunt`, `enhanced-mcp` and `ob-graph` stay blocked
+for what they actually use. `agent-memory-api`, blocked until now by two
+one-to-many `child(*)` embeds the shim serves, would have become eligible and
+been migrated by the next `--apply --all`; it is in `KEEP` with the reason —
+deployed as the Edge Function its README describes, typechecked as one by the
+deno job, started as one by `test-auth.ts` — and moving it is its own change.
+
+`extensions/test-tools.ts` is the drive the ticket asked for and change 74's
+lesson (a "runs under Bun" claim needs the tools driven, not the process
+started). Each of the five servers is imported under the stand-in for Deno's
+two globals that `test-auth.ts` and `test-writes.ts` use, against the fork's
+migrations (`crm_link_thought` reads `thoughts`, so a thought is planted
+through `upsert_thought`) plus the four `schema.sql` files applied as their
+READMEs' Step 1 says, after the two `auth.*` stubs, dropped again at the end
+because CI shares one Postgres across the job. Every tool is called with the
+arguments its schema describes — each optional filter on its own, each error
+path the tool documents — and the reply is read: the row a write stored
+(`tags` as an array, `details` as an object), the rows a read chose, the
+embedded relation as an object or `null`, the trigger's effect (`next_due`
+ninety days on from the log's time, `last_contacted` from the interaction),
+the shopping list aggregated from two recipes' embedded ingredients, the
+message a failure carries (`invalid input syntax for type uuid`, a CHECK
+constraint's name, `.single()`'s PGRST116 text). The drift guard: each
+server's `tools/list` under a write key is exactly the set driven, and every
+extension file that imports the shim is among the five. The count is
+twenty-nine, not the twenty-five the ticket, change 74 and the READMEs said:
+the four `index.ts` files carry twenty-five and the shared meal-planning
+server four more, one of which (`view_meal_plan`) was already among the seven
+failing. The section before the drift guard reads `pg_stat_activity` and
+holds the connection count at twenty or fewer — a handful against 84 — after
+eighty-odd requests that each built a client. The suite runs last in the
+data-layer job, after `test-writes.ts`.
+
+**Decisions.** *Introspection, not shape:* the ticket's sketch said "decide by
+the value shape as PostgREST does"; PostgREST decides by the column's type,
+and shape cannot separate `tags` from `instructions` in the same insert. The
+cost is one catalog query per table, function or foreign-key set per process,
+and `toSQL()` becoming a promise (two call sites, both in `test-compat.ts`).
+*Serve one hop, not refuse:* the ticket offered either; refusing would have
+left four tools broken or forked three vendored files away from upstream to
+rewrite their selects, which is the outcome fix 13 exists to avoid. What is
+not one hop is refused at the call with the hint form named, and the codemod
+refuses the two refusals a regex can see (a nested embed, a hint); whether a
+relation has one foreign key or two is the catalog's to say, at the first call. *The pool is in scope:* it is a shim change, it was found
+by the ticket's own drive, and a server that dies after ninety-five calls does
+not serve its tools; the fix is a map and a counter. *`vector(N)` columns
+too:* the vector rule matches `format_type`'s typmod form, so a number array
+into a `vector` column now binds as JSON text through a table verb as well —
+`test-writes.ts`'s header had named the old failure ("invalid input syntax for
+type vector" at the shim, before its column assertions) as a limit of its
+fixture; the fixture now matches PostgREST, and the assertions name the stale
+columns as the labels say. *Twenty-nine:* recorded, not corrected backwards —
+change 74's prose keeps its count with a note.
+
+**Verified:** `../../db/with-postgres.sh bun test-compat.ts` 131/131 (84
+before; 144 after pass 1, 152 after pass 2, 165 after pass 3, 177 after pass
+4 — the passes' pins are listed in their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
+renderings in `toSQL()`, an unknown operator refused; [15] `[]` and
+`["ai", "with, comma", "quo\"te"]` into `text[]` beside an array into `jsonb`
+in one insert, an update, `.contains()` on both column kinds and with
+PostgREST's literal, `.or()`'s `cs` on both, a `text[]` rpc argument with
+`["ai"]` and with `[]`, the cast in the generated SQL; [16] `error instanceof
+Error`, `instanceof PostgrestError`, the SQLSTATE, `String(error)`, the shim's
+own PGRST116 and an rpc's 42883; [17] many-to-one by table with a column list
+across lines, by key column with and without an alias, one-to-many with `(*)`,
+`null` and `[]`, an embed under `.single()`, the correlated subquery in
+`toSQL()`, and eight refusals; [1] two clients share a pool and closing one
+twice leaves the other's open. `../db/with-postgres.sh bun test-tools.ts`
+114/114 (117 after pass 1, 121 after pass 2, 122 after passes 3 and 4) — 29
+tools, every argument branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
+removed → 5 named failures in the tool suite (the two tools' `.not is not a
+function`), 1 in compat; the array literal removed → 50 and 17 (`malformed
+array literal: "quick,vegetarian"`, `""`; the first run read 25 because a
+null body threw past the tally — every `.body` read is optional now);
+embedding refused → 20 and 2; the
+error a plain object → 2 and 4 (`[object Object]` in both tools' text); `cs`
+removed → 6 (compat aborted at `[4]`'s `.contains()`, which throws outside a
+try — the tool suite carried the tally); `cs` always jsonb → 4 and 4
+(`operator does not exist: text[] @> jsonb`). The connection probe: 84 held
+before the shared pool, the assertion at ≤ 20 after (pass 1; 12 before it). `bun
+scripts/migrate-to-sql-shim.mjs` triage: the three embed files no longer
+blocked, `job-hunt` on nesting and a hint, `enhanced-mcp` and `ob-graph` on a
+hint, `agent-memory-api` under `KEEP` with its reason; `--revert` then
+`--apply --all` 23/23, the tree byte-identical. `bun test-auth.ts` 709/709
+(every server still starts under `bun` and answers); `../db/with-postgres.sh
+bun test-writes.ts` 186/186; `../db/with-postgres.sh bun
+test-store-postgrest.ts` green in `server-portable` (the shim is its
+fixture); `bunx tsc --noEmit` in `compat/supabase-sql` clean; `bun
+scripts/check-fork-consistency.mjs` PASS. The ticket's verify — every extension
+tool answers against a Postgres carrying the five schemas, `crm_add_contact`
+with `tags: []` and `["a"]` stores an array, `search_maintenance_history`
+returns the task nested as PostgREST would, the codemod refuses or the shim
+serves every embed whatever the spacing or alias, `test-compat.ts` pins
+`.not()`, array binding and `error instanceof Error` — is the two suites.
+
+**Not done here.** `agent-memory-api` onto the shim (servable now; `KEEP` says
+why not here). A second hop of embedding, `!inner`, a named foreign key, an
+embed in a `RETURNING` list, a filter on an embedded column
+(`.neq("thoughts.sensitivity_tier", …)`, `enhanced-mcp`) — refused, with the
+files that use them still blocked by the codemod. A column DROPPED under a running server, or one
+whose type changes, is not seen until the process restarts (a column added is
+— pass 1); PostgREST's cache has none but a reload either. A `timestamp
+without time zone` column still arrives as a `Z` instant (change 73's rule;
+the `date` case is closed for a table's rows, a function's and an array's —
+passes 1 and 2). `uuid[]` columns arrive as Postgres's literal text (`{…}`),
+`int[]` as a list (pass 1), a `bytea` as Bun's `Buffer` — no migrated file
+reads any of them. VARIADIC arguments cannot be called by name in Postgres, so
+`.rpc()` cannot reach one; nothing in the tree is variadic. `test-compat.ts`'s
+`[4]` block has no try, so a refusal thrown inside it ends the run without a
+tally (seen under the `cs` mutant); the tool suite's blocks and `[12]`–`[18]`
+do. Pre-existing divergences the review found and this change leaves, filed
+as one ticket: `count: "exact"` without `head` answers the page size;
+`.single()` with several rows returns the first; `head: true` without a count
+streams every row; upsert's default conflict target is the payload's first
+key and its EXCLUDED filter reads the target unsplit; `.rpc()` collapses any
+one-row, one-column result to a scalar (SMD-1602). The two
+extensions still on supabase-js (`family-calendar`, `job-hunt`) are not driven
+— they do not run on the fork's shim, and their PostgREST is Supabase's.
+
+**Review pass 1** (a reading reviewer and a running one, the latter in its
+own worktree; twenty-five items between them, sixteen taken, seven filed,
+two declined). The running reviewer reproduced every tally, drove
+`home-maintenance` for real over HTTP (the embed an object on the wire), ran
+nine more mutations — four survived: the memo (performance only, +25% on the
+tool suite without it), the `::type` cast (pinned by its spelling in `[15]`,
+redundant to Postgres in the driven paths), the `proargmodes` filter (matters
+only to a caller naming an OUT column), the literal's quote escaping in the
+tool suite alone (compat's `[15]` catches it) — and probed twenty edge shapes.
+Taken: a `date` column arrived as a `Z` instant from the base row while the
+same column inside an embed arrived as `2026-09-20`, and five tools read one
+(`week_start`, `follow_up_date` …) — `jsonShaped` has the column map now and
+gives the bare date; the comparison filters and `.in()` bypassed `bound()`, so
+`.eq("tags", ["ai"])` still hit the `String()` bug — routed through it; an
+EMPTY catalog answer was memoised for the process's life (a server that took
+one request before its `schema.sql` was applied bound every array raw until
+restarted) — an empty map is not kept, a named column the map lacks re-reads
+the table (`ALTER TABLE … ADD COLUMN` under a running server), and `close()`
+drops the URL's store with its pool; foreign keys were matched by bare
+`relname`, so a same-named table behind the visible one on the search path
+could be counted and then joined as the visible one — the read is restricted
+to `pg_table_is_visible`; `.or()` split on every comma, and four tools
+interpolate user text into their expression (`search_recipes` an ingredient
+into a `cs` value, `search_household_items` a query into four ILIKE terms) —
+a comma inside brackets, braces or quotes now stays with its value, and a
+term the split still breaks resolves as `{ error }` with PostgREST's
+`PGRST100`, reaching the tool's own error handling instead of throwing past
+it; `not in []` rendered `TRUE`, which kept NULL rows PostgREST's
+`NOT (x = ANY('{}'))` drops — `IS NOT NULL`; `bound()` tested `endsWith("[]")`
+where `cs` tested the type category — a domain over `text[]` took different
+branches — both read the category, the rpc read carries categories too; a
+one-to-one (unique referencing column) rendered as a list where PostgREST
+gives the row or null — `pg_index` decides; a self-referencing table by name
+was refused as "more than one foreign key" (one constraint counted from both
+sides) — refused as itself, naming the column form; an embed on a missing
+table threw about foreign keys where the same select without it resolved
+`42P01` — the embed is left out so the database reports the table; an `int[]`
+column came back as Bun's `Int32Array` (`{"0":1}` in JSON) — a list; the
+tool suite's "90 days on" expectation was the client's millisecond sum where
+the trigger's interval is calendar arithmetic in the database's zone (an hour
+off across a DST edge under `America/Los_Angeles`) — the database's own sum;
+the connection bound had no headroom (Bun opens the pool eagerly to `max`, so
+12 was the arithmetic) — twenty, the teeth being 84; the READMEs name
+`OB1_PG_POOL` and what ten per server costs; and the doc claims corrected
+above (the codemod's "same set", the `date` sentence, twenty-five, "last
+section"). Filed: the pre-existing divergences listed under Not done here.
+Declined: widening `Result.error` to `PostgrestError | null` (a typing change
+for consumers, boyscout territory); a `uuid[]` literal parser (nothing reads
+one). Pins: `[4]` the broken term as `{ error }`; `[13]` the bare date;
+`[14]` `not in []` against a NULL kind; `[15]` `.eq()` and `.in()` with arrays,
+commas inside `cs` values, `int[]`; `[17]` one-to-one, self-reference by name
+and by column, the missing table; `[18]` a late table and a late column; the
+tool suite: `week_start` bare, a comma in an ingredient and in a household
+query, `follow_up_date` equal to the bare date. `test-compat.ts` 144/144 (131
+after the change, 84 before); `test-tools.ts` 117/117.
+
+**Review pass 2** (the same two shapes; eighteen items, thirteen taken, the
+rest noted). The stop signal fired on its face — eight of the reader's ten
+and every one of the runner's findings sat in pass 1's additions — and the
+top two were consecutive seams in one of them, so the mechanism was the
+finding: pass 1's comma split for `.or()` counted brackets and quotes found
+INSIDE a plain value, so an unbalanced `(`, `]` or `"` in user text (`Kitchen
+(main`, `12" pipe`) swallowed the remaining terms into the first value's
+literal and `search_household_items` answered no rows with no error where
+the change's first commit had answered the row — a regression, measured
+against df86661 — while `and (` anywhere in user text still threw the
+nested-grouping refusal out of the handler. `.or()` is a term parser now: a
+column (a name or a JSON path) to the first dot, an operator to the next,
+then a value that is a balanced `[…]`/`{…}` group when it starts with one, a
+double-quoted string when it starts with `"` (PostgREST's quoting), or plain
+text to the next comma with nothing else structural in it; a term whose
+column is not column-shaped (what a comma in a plain value leaves behind), or
+a group nothing closes, is the `PGRST100` `{ error }`; grouping is refused
+only where a term begins. Also taken: pass 1's `ArrayBuffer.isView` rule ate
+a `bytea` column's `Buffer` — it applies to an array column only; `date[]`
+and `timestamptz[]` elements were Dates — shaped by element as the scalar
+is; a function's rows had no column map, so `crm_search_contacts` gave
+`follow_up_date` as an instant through `crm_search_contacts_fts` and as the
+bare date through the ILIKE fallback, the shape changing with whether
+`to_tsquery` accepted the query — each overload carries its OUT columns
+(`proallargtypes` by `proargmodes`) and the rows take that map; a column the
+schema lacks re-read `pg_attribute` on every call for the process's life
+(200 reads for 200 calls, 2.5× the time, no coalescing under concurrency) —
+a fresh read that still lacks the name remembers it as absent, forgotten
+when a later read finds new columns; the one-to-one test reads a valid
+index's key columns only (`indisvalid`, `indnkeyatts`; an `int2vector`
+cast is zero-based, so the first attempt's `[1:n]` slice dropped the first
+key and the pin caught it); the RETURNING refusal is checked after the
+missing-table skip; two pass-1 additions the runner proved load-bearing by
+mutation but nothing pinned — foreign keys among visible tables only (a
+same-named table in a hidden schema with the key the visible one lacks was
+joined as the visible one without the predicate), and array binding by type
+category (a `DOMAIN` over `text[]`) — have their pins; the tool suite's
+comment that Bun opens a pool lazily was wrong (it opens to `max`; the
+FORK sentence was right); the Verified block's superseded numbers. Noted,
+no change: the STORES clear on `close()` is dead in production (no server
+closes) and fires in tests and scripts; the connection bound is 20 against
+an observed 12; the 90-day pin's database-zone case is exercised only
+outside CI's UTC container. Pins: `[4]` a quote, a parenthesis and `and (`
+inside plain values, an unclosed group, PostgREST's quoted form; `[13]` the
+date through a function; `[15]` the domain; `[17]` the hidden table; `[18]`
+the typo's 42703 twice; the tool suite: an unclosed quote and parenthesis as
+pattern text, an exact name through the four-term `.or()`, `follow_up_date`
+one shape through the function. `test-compat.ts` 152/152; `test-tools.ts`
+121/121. The stop signal holds on the original mechanism: nothing the pass
+found there is above LOW; the one mechanism whose seams recurred is replaced.
+
+**Review pass 3** (the same two shapes, aimed at the seams between the rules
+passes 1 and 2 added — the case the house rule says earns a pass after the
+stop signal; twenty items, sixteen taken). Both reviewers found the same two
+seams, in pass 2's additions. The absent-name memo undid pass 1's
+add-a-column rule for a column ever named before it existed: the name sat in
+`absent`, no re-read followed the migration, and the array bound raw — the
+22P02 this change exists to remove — for the process's life (executed:
+reads stayed at two across the `ALTER`). The failure path knows when the map
+disagreed with the schema, so a query that named an absent column and then
+failed with anything but "undefined column" forgets the table's map, and so
+does one that RAN (a `date` column added after it was first named would
+otherwise shape as an instant, silently): one failed call after the
+migration, not a restart — `[18]` pins the 22P02 then the success. And the
+term parser's grouping refusal fired at every term start, where a comma in
+user text makes one: `Sofa, and (chairs)` threw the refusal out of
+`search_household_items` on the real server, `v1, v1.2.3 pipe` an "operator
+2" refusal, `a, meta.cs.junk` the JSON-parse refusal — and
+`professional-crm` has no `try/catch` at all. Grouping is refused only where
+the file's own expression begins; every refusal a comma-made term raises in
+`term()` is the `PGRST100` `{ error }`, so an unknown operator in the file's
+own text is the 400 now too (`or()` cannot tell the two apart, and PostgREST
+answers 400 to both); `col.not.op.value`, PostgREST's negation inside
+`.or()`, parses. Also taken: pass 2's two household pins were vacuous — an
+unbalanced `(` and `"` in a query that matches nothing is 0 rows under the
+swallowing splitter too — replaced by an item named `Kitchen (main) 12" tap`
+found by `Kitchen (main` and by `12" tap` (0 under pass 1's splitter, 1 under
+the parser; the runner verified both ways); four pass-2 rules that survived
+mutation with no assertion have one each — the `bytea` guard, `date[]`
+elements, `indisvalid`, the index's key columns (`INCLUDE (note)` on the
+unique index still a one-to-one, an invalidated index not); `RETURNS SETOF
+<table>` rows and a scalar result were unshaped (`proargnames` is NULL) —
+the overload carries its return type, a table's rows take that table's map,
+a scalar its one column, and candidates agree only when their shapes are
+equal (one with no OUT columns beside one with some had passed the check
+vacuously); twenty concurrent callers missing the same name each dropped
+the memo and re-read (20 reads) — only the caller whose map is still current
+drops it; the absent set is bounded at 64 names (a comma in user text can
+inject a well-formed term with any column name); the typed-array rule works
+without a column map too (a function's rows), sparing a byte view; the
+README's `date` paragraph and the header's cache sentence said the pre-pass-1
+rule. Noted, no change: a plain value keeps its surrounding whitespace and a
+value beginning with `{`, `[` or `"` is read as a group or a quoted string
+(PostgREST's reading; every user-text call site prefixes `%`); a DOMAIN over
+`date[]` shapes by the type's name where `bound()` reads the category (no
+such column anywhere); the empty broken term's message names nothing (a
+leading or doubled comma — PostgREST 400s too). Pins: `[4]` grouping words,
+an operator, an `in` and a bad `cs` value after a comma as the 400, grouping
+at the start still a throw, `not.`; `[13]` `SETOF` and a scalar date; `[15]`
+`date[]`, `bytea`; `[17]` `INCLUDE`, an invalid index; `[18]` the late column
+named early. `test-compat.ts` 165/165; `test-tools.ts` 122/122. Every top
+finding again sat in the previous pass's additions, and the two mechanisms
+pass 2 added have each had their seam closed once.
+
+**Review pass 4** (the same two shapes, at the user's call; fourteen items,
+ten taken). Both reviewers found the seam pass 3's forget-on-success rule
+opened: `.in(col, [])` renders `FALSE` without the column, so on a column
+the table lacks it RAN, the rule forgot the absent memo the same call had
+built, and the next call re-read the catalog — measured at two reads per
+call for ever, against two in total under pass 2 — and one such call
+poisoned the table's memo for every other query. A column that never
+reaches the SQL is not one the query names: `in.()`'s positive form returns
+before the name is recorded. Its pin counts the reads through a spy on the
+pool's `unsafe()` (two calls, zero reads; a typo, one read then none) — the
+first pin had asserted only the empty answer, which the defect also gave.
+The reader then found the rule's own comment broader than its code, in the
+original change: a column that appears only in the select list, or only in a
+`*` row, never passed through `names()`, so a `date` column added under a
+running server shaped as an instant on every read (measured) — the select
+list names its columns now, and a returned row carrying a key the map does
+not know forgets the table for the next call. The runner found the absent
+set losing names under concurrency (pass 2's bookkeeping: read before the
+await, written after — twenty concurrent callers naming twenty missing
+columns kept one; nineteen re-reads followed) — one set per table, made
+before the await, pinned by count. And one original-mechanism defect with a
+wrong answer and no error: two overloads sharing an argument's name but not
+its type (`tagged(search_tags text[])` beside `tagged(search_tags text)`, in
+one schema or across two visible ones) made `typeOf` give up, the array went
+as `"a,b"`, and Postgres chose the text overload — the value's shape now
+tells the candidates apart as PostgREST's JSON body does (an array fits an
+array, json or vector parameter; an object json), and the cast then resolves
+the call. Also taken: an `undefined` payload value was written as NULL where
+supabase-js's JSON drops the key and Postgres applies the DEFAULT (a `NOT
+NULL DEFAULT` column was a 23502) — dropped from the column list and the SET
+list; a function returning a standalone composite type was unshaped
+(`relkind 'c'`); the typed-array rule without a map, the cap and the
+coalescing have their pins (overloads that disagree, a counted shared
+re-read); the header's error convention and the Mechanism paragraph name
+`.or()`'s exception; the `cs` message says when the column is not the
+table's; the ticket for the pre-existing divergences is named. Noted, no
+change: the shapes-equality check is a tidy-up of the agreement rule, not a
+closed defect (the runner could not make the old check misbehave); `RETURNS
+SETOF <scalar>` answers `[{fn: v}, …]` where PostgREST may answer bare
+scalars (unverified, nothing in the tree); a JSON path the file wrote wrong
+inside `.or()` is the 400 where the same path outside it throws — the
+undecidable case, now stated. Pins: `[2]` the DEFAULT applied, the SET list;
+`[13]` the composite type, overloads that disagree; `[15]` the array-typed
+overload chosen, the text one for a string; `[18]` the read counts, the
+select-list and `*` columns seen. `test-compat.ts` 177/177; `test-tools.ts`
+122/122. The two silent wrong values were in the original change, found by
+reading the rule pass 3 wrote against the header's claim; the loop stops
+here — the reviewers said so too.
+
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the no-op `this.op = "select"` line is its
+comment alone; `cs` trims and quotes the column once instead of in the
+closure; `toSQL()`'s comment says it rejects where `execute()` would resolve
+`{ error }` (an `.or()` term that is the 400); `arrayLiteral`'s comment names
+`undefined` beside `null`; `Result<T>`'s comment says the error is a
+`PostgrestError` at runtime while the type stays what migrated files were
+written against; two `SQL` instances the compat fixtures opened for one raw
+statement each are closed; the tool suite's misplaced drift-guard banner sits
+above its section, and two labels say what their assertion checks (a zod
+refusal is `Invalid arguments`, which a database's `invalid input syntax`
+would not have matched; "an empty list", not "before the log query", which a
+count cannot tell). Left as they are, with the reason: `close()`'s
+`POOLS.get(…) === this.pool` guard, called unreachable — harmless, and
+"unreachable" has been wrong before; `catch()`/`finally()` re-running the
+query after an `await` (pre-existing; memoising `execute()` would change
+what a second `await` sees); the upsert's `EXCLUDED` filter reading the
+target unsplit (SMD-1602's, a behaviour change); `forget()` leaving the
+foreign-key memo (a table's keys change more rarely than its columns, and
+dropping them is a read, not a tidy); `.or()`'s 400 messages carrying the
+developer's hint to a user (PostgREST's do too); `meal-planning`'s
+`search_recipes` being the one driven tool with no `try/catch` — upstream's
+text, named here so the next reader knows which tool a thrown error would
+leave to the SDK.
+
+**Upstream status:** not applicable — the shim, the codemod and the suite are
+fork-only, and the five servers' own text is untouched (the embeds, the
+`.not()` calls and the array payloads are upstream's spelling, now served).
+
+### Vendored content: audit once, hold the delta
+
+Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
+`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
+vendored wholesale at the pin. That means we ship its worst advice with its
+best, under this repository's name, in a repo whose stated differentiator is
+that the core is tested and the auth path is hardened. The rule (SMD-1251,
+change 51): **we audit the tree once and hold the delta**, and a standing check
+carries the audit so a rebase cannot quietly undo it. Four rules are audited
+today. Writes around the functions (SMD-1228, change 69; SMD-1524, change
+71): check 10 fails the build on a PostgREST `.update(`/`.upsert(`/`.insert(`
+on `thoughts` whose payload carries `content` or `embedding` — inline or
+through an object the file fills — and on a SQL `UPDATE thoughts … SET` of
+either column or `INSERT INTO thoughts (…)` naming one: the raw update nine
+vendored files made around `update_thought` and the 3-argument
+`upsert_thought`, leaving a stale fingerprint, a stale model label and the
+previous vector's windows, and the raw insert eight more made around the
+capture, leaving no fingerprint and no label at all; with counted per-file
+exceptions for a file whose README says it bypasses the functions — seven,
+each a database of its own, a function body shown, or the test's fixture.
+Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
+the build on a value read from the environment under a credential's name
+compared with an equality operator — the one shared plaintext key seven
+extension servers, and then seventeen more vendored files, compared with `!==`
+before they became consumers of `server-portable/auth.ts` — with counted
+per-file exceptions, and the list has been empty since change 67. Core
+ownership (SMD-1250, change 58): check 7 fails the build on any
+vendored statement that redefines, drops or re-comments a function
+`db/migrations/` owns, the owned set read from the migrations, with counted
+exceptions for the files that create a brain rather than add to one. And
+shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
+Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
+or mode, any allow rule that grants all of `Bash` or a prefix of a network
+client or interpreter, or any spawn through a shell (the `shell:` option with a
+non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
+argv), in every non-binary, non-ignored file under those seven directories,
+with a reviewed exception list — per file *and* per pattern, and *counted* —
+for prose that names a flag in order to say it was removed, and probe lists the
+check runs against its own patterns on every run, positive and negative. A
+rebase that brings a new hit fails CI, and the choice is the same as it was at
+the pin: fix the vendored file and record the delta here, or list the exception
+with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
+change 64, SMD-1455 as change 67, SMD-1228 as change 69 and SMD-1524 — the
+raw inserts change 69 left outside its rule — as change 71: the four rules
+named when the standard was decided are all audited and held, the last on
+both of its doors.
+
+### Landing a rebase on `main`, which is protected
+
+`main` is the working default and carries a ruleset: nine required status checks,
+no deletion, **no force-push**, and no bypass actors — it applies to admins too.
+That is deliberate, and it interacts with a rebase in one specific way.
+
+A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
+cannot fast-forward onto `main`. Two ways forward:
+
+**Open a pull request (normal case).** Required status checks mean **no push
+directly to `main` succeeds**, merge commit or not — a push carries commits CI has
+never seen, so the rule cannot be satisfied:
+
+```
+remote: - 9 of 9 required status checks are expected.
+```
+
+That is not a quirk of the merge; it is what requiring checks means. Everything
+reaching `main` goes through a PR, which is two commands:
+
+```bash
+gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
+gh pr merge --merge --auto        # lands itself once the nine checks pass
+```
+
+History keeps both lines, which is what happened when the fork's work first landed
+on `main`, and is the right default: the rebase is a reconciliation, not a
+replacement.
+
+**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
+*be* the rebased history — cleaner, but it discards the record of how the fork
+diverged. This is a force-push and the ruleset will refuse it:
+
+```
+remote: - Cannot force-push to this branch
+```
+
+To do it anyway — as with any push that must bypass the checks — set the ruleset
+to `disabled`, push, and put it back:
+
+```bash
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
+git push --force-with-lease origin main
+gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
+```
+
+Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
+is refused rather than silently discarding it.
+
+**Nothing forces the rewrite.** The pin is held by the annotated tag
+`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
+rewritten to record where upstream was. Reach for the merge.
+
+**Drop a patch rather than carry it** if upstream fixes the same defect. Check
+issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
+and possibly the auth work may arrive upstream.
+
+### Why we do not send these upstream
+
+`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
+reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
+closed on exactly that basis:
+
+> The main change edits the core MCP server, which is explicitly out of scope for
+> community contributions in this repo… If we want this behavior upstream, it
+> needs to come through a focused maintainer-led path instead.
+
+Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
+principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
+reports the upstream PR gate currently fails on **every** fork-originated PR.
+
+---
 
 
 ### 78. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
@@ -10358,122 +12770,6 @@ git tag -a upstream-pin-$(git rev-parse --short upstream/main) \
 
 Then update the pin table at the top of this file.
 
-### Vendored content: audit once, hold the delta
-
-Everything under `recipes/`, `integrations/`, `extensions/`, `skills/`,
-`schemas/`, `dashboards/` and `primitives/` is upstream's community tree,
-vendored wholesale at the pin. That means we ship its worst advice with its
-best, under this repository's name, in a repo whose stated differentiator is
-that the core is tested and the auth path is hardened. The rule (SMD-1251,
-change 51): **we audit the tree once and hold the delta**, and a standing check
-carries the audit so a rebase cannot quietly undo it. Four rules are audited
-today. Writes around the functions (SMD-1228, change 69): check 10 fails the
-build on a PostgREST `.update(`/`.upsert(` on `thoughts` whose payload carries
-`content` or `embedding` — inline or through an object the file fills — and on
-a SQL `UPDATE thoughts … SET` of either column: the raw write nine vendored
-files made around `update_thought` and the 3-argument `upsert_thought`, leaving
-a stale fingerprint, a stale model label and the previous vector's windows,
-with counted per-file exceptions for a file whose README says it bypasses the
-functions (none today). Credentials (SMD-1252, change 64; SMD-1455, change 67): check 8 fails
-the build on a value read from the environment under a credential's name
-compared with an equality operator — the one shared plaintext key seven
-extension servers, and then seventeen more vendored files, compared with `!==`
-before they became consumers of `server-portable/auth.ts` — with counted
-per-file exceptions, and the list has been empty since change 67. Core
-ownership (SMD-1250, change 58): check 7 fails the build on any
-vendored statement that redefines, drops or re-comments a function
-`db/migrations/` owns, the owned set read from the migrations, with counted
-exceptions for the files that create a brain rather than add to one. And
-shell safety — `scripts/check-fork-consistency.mjs` check 6 fails the build on
-Codex's sandbox-bypass flag or its aliases, Claude Code's skip-permissions flag
-or mode, any allow rule that grants all of `Bash` or a prefix of a network
-client or interpreter, or any spawn through a shell (the `shell:` option with a
-non-false value, `exec`/`execSync`, `os.system`, an explicit `sh -c`/`cmd /c`
-argv), in every non-binary, non-ignored file under those seven directories,
-with a reviewed exception list — per file *and* per pattern, and *counted* —
-for prose that names a flag in order to say it was removed, and probe lists the
-check runs against its own patterns on every run, positive and negative. A
-rebase that brings a new hit fails CI, and the choice is the same as it was at
-the pin: fix the vendored file and record the delta here, or list the exception
-with its reason. SMD-1250 landed in that shape as change 58, SMD-1252 as
-change 64, SMD-1455 as change 67 and SMD-1228 as change 69 — the four rules
-named when the standard was decided are all audited and held; the next
-finding (SMD-1524, the raw inserts change 69 left outside its rule) lands the
-same way.
-
-### Landing a rebase on `main`, which is protected
-
-`main` is the working default and carries a ruleset: nine required status checks,
-no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-That is deliberate, and it interacts with a rebase in one specific way.
-
-A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
-cannot fast-forward onto `main`. Two ways forward:
-
-**Open a pull request (normal case).** Required status checks mean **no push
-directly to `main` succeeds**, merge commit or not — a push carries commits CI has
-never seen, so the rule cannot be satisfied:
-
-```
-remote: - 9 of 9 required status checks are expected.
-```
-
-That is not a quirk of the merge; it is what requiring checks means. Everything
-reaching `main` goes through a PR, which is two commands:
-
-```bash
-gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the nine checks pass
-```
-
-History keeps both lines, which is what happened when the fork's work first landed
-on `main`, and is the right default: the rebase is a reconciliation, not a
-replacement.
-
-**Reset `main` to the rebased line (rare).** Only if you want `main`'s history to
-*be* the rebased history — cleaner, but it discards the record of how the fork
-diverged. This is a force-push and the ruleset will refuse it:
-
-```
-remote: - Cannot force-push to this branch
-```
-
-To do it anyway — as with any push that must bypass the checks — set the ruleset
-to `disabled`, push, and put it back:
-
-```bash
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=disabled
-git push --force-with-lease origin main
-gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 -f enforcement=active
-```
-
-Prefer `--force-with-lease` over `--force` so a push that raced with someone else's
-is refused rather than silently discarding it.
-
-**Nothing forces the rewrite.** The pin is held by the annotated tag
-`upstream-pin-<sha>`, not by any branch, so `main`'s history never has to be
-rewritten to record where upstream was. Reach for the merge.
-
-**Drop a patch rather than carry it** if upstream fixes the same defect. Check
-issues #470 and #216 first — both are open with volunteers waiting, so fixes 3
-and possibly the auth work may arrive upstream.
-
-### Why we do not send these upstream
-
-`CONTRIBUTING.md:268` lists modifying "the core MCP server" as an automatic
-reject, and [PR #122](https://github.com/NateBJones-Projects/OB1/pull/122) was
-closed on exactly that basis:
-
-> The main change edits the core MCP server, which is explicitly out of scope for
-> community contributions in this repo… If we want this behavior upstream, it
-> needs to come through a focused maintainer-led path instead.
-
-Fixes 1–5 all live in `server/index.ts`. Fixes 6 and 7 are contributable in
-principle; note that [issue #482](https://github.com/NateBJones-Projects/OB1/issues/482)
-reports the upstream PR gate currently fails on **every** fork-originated PR.
-
----
-
 ## Known issues we did NOT fix
 
 Deliberate. Recorded so nobody assumes they were missed.
@@ -10504,7 +12800,8 @@ Deliberate. Recorded so nobody assumes they were missed.
   [PR #110](https://github.com/NateBJones-Projects/OB1/pull/110) was closed
   pending a consolidation that never landed. Any feature gated on it is inert.
 - **`server-portable` has not served a live `workerd` request.** The Cloudflare
-  target is verified with the real bundler (272 KiB gzipped) and CI rebuilds it on
+  target is verified with the real bundler (`server-portable/README.md` has the
+  size) and CI rebuilds it on
   every push, but no request has gone through `workerd` end to end. Smoke-test a
   real deploy before relying on it.
 - **Two suites still test mirrors.** `server/test-stats-pagination.mjs` and

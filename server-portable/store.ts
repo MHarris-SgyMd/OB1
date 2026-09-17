@@ -105,11 +105,13 @@ export type ThoughtHybridMatch = {
 
 /**
  * A timestamptz as either backend hands it back, into the one string form the
- * store's types promise. The two clients disagree: Bun.sql (the SQL store, and
- * `compat/supabase-sql` under the PostgREST store's tests) returns a Date, or
- * the number ±Infinity for an infinite timestamp; PostgREST returns a JSON
- * string in Postgres's own spelling — `2026-09-14T16:27:09.123456+00:00`, or
- * `infinity`. Nothing else may format a timestamp: a `String()` on the Date
+ * store's types promise. The two clients disagree: Bun.sql (the SQL store)
+ * returns a Date, or the number ±Infinity for an infinite timestamp; PostgREST
+ * returns a JSON string in Postgres's own spelling —
+ * `2026-09-14T16:27:09.123456+00:00`, or `infinity`; and `compat/supabase-sql`
+ * under the PostgREST store's tests, which hands back a finite Date as its
+ * `toISOString` string since FORK.md change 73 (SMD-1544), gives the string
+ * form in JS's spelling. Nothing else may format a timestamp: a `String()` on the Date
  * gave a locale string once, and a bare cast gave each caller its client's
  * shape (SMD-1040; FORK.md §52 has the history).
  *

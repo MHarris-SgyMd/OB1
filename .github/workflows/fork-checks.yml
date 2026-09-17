@@ -72,7 +72,7 @@ jobs:
       # is not installed on the maintainer's machine, so a node-only run was
       # the one step nobody could reproduce locally); the script is plain ESM
       # and runs under either.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions and credential compares
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes and the shim's runtime
         run: bun scripts/check-fork-consistency.mjs
 
   deno-check:
@@ -99,7 +99,8 @@ jobs:
         run: deno check --node-modules-dir=none index.ts
 
       # The two extensions still on supabase-js resolve under Deno (the other
-      # five import the SQL shim, which imports `bun`), so they are checked as
+      # five import the SQL shim, which imports `bun`, and run under Bun — the
+      # Portable-server job starts each; change 74), so they are checked as
       # deployed — with ../_shared/auth.ts, the copy of server-portable/auth.ts.
       - name: deno check extensions/family-calendar and job-hunt
         working-directory: extensions/family-calendar
@@ -183,7 +184,9 @@ jobs:
       # Imported as deployed under a stand-in for Deno's two globals and a loader
       # for Deno's specifiers: a wrong or revoked key is refused, a read-scoped
       # key never sees a tool that writes, is told so by a route that writes and
-      # may only dry-run a worker, every copy is byte for byte auth.ts. No database.
+      # may only dry-run a worker, every copy is byte for byte auth.ts. Then every
+      # server on the SQL shim is started under `bun` for real and answered over
+      # its port (change 74). No database.
       - name: Scoped access keys reach every vendored server
         working-directory: extensions
         run: bun test-auth.ts
@@ -425,9 +428,9 @@ jobs:
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
       # each is driven as deployed against this database — the fork's schema
-      # plus the two sidecars the writers assume, dropped again at the end —
+      # plus the three sidecars and the log table the writers assume, dropped again at the end —
       # and the row it leaves is compared with the row update_thought leaves
-      # for the same edit. Last in the job because it applies those sidecars.
+      # for the same edit. Late in the job because it applies those sidecars.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
@@ -435,6 +438,20 @@ jobs:
       - name: Vendored writers leave what update_thought leaves
         working-directory: extensions
         run: bun test-writes.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # Every tool of the five extension servers on the SQL shim, called through
+      # tools/call against the extensions' own schema.sql files (applied after
+      # the READMEs' two auth.* stubs, dropped again at the end) — each read's
+      # filters, each write's row, the embedded relation, the trigger's effect,
+      # the message a failure carries (change 77, SMD-1588). A shim gap fails a
+      # named assertion here rather than a user's first call; a tool added to a
+      # server fails the drift guard until it is driven. Last in the job because
+      # it applies those schemas.
+      - name: Every extension tool answers on the SQL shim
+        working-directory: extensions
+        run: bun test-tools.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 

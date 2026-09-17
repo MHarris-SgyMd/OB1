@@ -56,6 +56,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssert, seededRandom } from "./test-support.ts";
+import { markerAnswers } from "./bench-oracle.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -76,8 +77,10 @@ function subst(sql: string, trgm = DEFAULT_TRGM_INDEX): string {
   return substituteMigration(
     sql,
     // backfillLimit pinned: the shell's OB1_BACKFILL_LIMIT must not change what
-    // this suite applies ([24] asks for a batch by passing it explicitly).
-    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm, backfillLimit: null })
+    // this suite applies ([24] asks for a batch by passing it explicitly);
+    // chunkContext pinned for the same reason — [13] asserts the default 013
+    // records, and a shell's OB1_CHUNK_CONTEXT must not be what it recorded.
+    migrationValues({ dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, trgm, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: null })
   );
 }
 
@@ -3850,11 +3853,11 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
       FROM query_log act WHERE act.kind='action' AND act.agent_id = '${AG3}'::uuid`)).rows[0];
   assert(inWindow.from_query === "a fresh search", "a search within the window does attribute the touch");
 
-  // prune_query_log: default arg, bounded delete, the strict bound, and a
-  // refusal on a bad window.
+  // prune_query_log: default arg, bounded delete, the default window's unit,
+  // the strict bound, and a refusal on a bad window.
   const nBefore = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n;
-  const keptByDefault = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
-  assert(keptByDefault === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
+  const deletedFresh = (await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n;
+  assert(deletedFresh === 0 && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === nBefore, "prune_query_log() with the default 30-day window deletes nothing fresh");
   // The bound is `logged_at < now()`, strict, and now() is the transaction's
   // start, read from a clock that under PGlite has millisecond grain, so a row
   // inserted a few statements earlier can share the prune's now() and survive
@@ -3863,6 +3866,30 @@ console.log("\n[34] Migration 034: query_log shape + CHECKs, the export join, an
   await db.exec(`UPDATE query_log SET logged_at = logged_at - interval '1 hour'`);
   const wiped = (await db.query<{ n: number }>(`SELECT prune_query_log(0) AS n`)).rows[0].n;
   assert(Number(wiped) === nBefore && (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM query_log`)).rows[0].n === 0, `prune_query_log(0) deletes every row older than now() (${wiped} of ${nBefore})`);
+  // The default window, unit and number. "deletes nothing fresh" above ran
+  // over rows at most two hours old, and rows going was asserted only at 0,
+  // so a body reading `make_interval(hours => p_keep_days)` — 30 hours keeps
+  // a 2-hour-old row, 0 wipes — passed every prune line here (SMD-1515). One
+  // row each side of the 30-day edge, half a day out: 30.5 days goes, 29.5
+  // stays. Half a day, not a day: rows at 31 and 29 days sit exactly on a
+  // 31- or 29-day bound whenever the INSERT and the prune share a now(), and
+  // one ms under it when they do not, so the tick decides those mutants — a
+  // 29-day default slips on the shared tick (its row equals the bound, and
+  // `<` keeps it), a 31-day default on the drift (its row falls under the
+  // bound and goes); this ticket's first review pass saw the first slip 3 of
+  // 3 runs and the second 2 of 3. Twelve hours dwarf the tick and a DST hour
+  // both; the hours body deletes both rows, a weeks body neither.
+  await db.exec(`
+    INSERT INTO query_log (kind, tool, query, logged_at) VALUES
+      ('search', 'search_thoughts', 'half a day past the window', now() - interval '30 days 12 hours'),
+      ('search', 'search_thoughts', 'half a day inside the window', now() - interval '29 days 12 hours')`);
+  const deletedByDefault = Number((await db.query<{ n: number }>(`SELECT prune_query_log() AS n`)).rows[0].n);
+  const leftByDefault = (await db.query<{ q: string }>(`SELECT query AS q FROM query_log`)).rows.map((r) => r.q);
+  assert(deletedByDefault === 1 && leftByDefault.length === 1 && leftByDefault[0] === "half a day inside the window",
+    `prune_query_log()'s default window is 30 days: the 30.5-day row goes, the 29.5-day row stays (deleted ${deletedByDefault}, left: ${leftByDefault.join(", ") || "none"})`);
+  // Both by name, whatever the prune did, so the same-transaction keep below
+  // (left === 1) is judged alone.
+  await db.exec(`DELETE FROM query_log WHERE query IN ('half a day past the window', 'half a day inside the window')`);
   // The same now(), on purpose: a row logged in the prune's own transaction is
   // kept — the strict bound the COMMENT states ("older than now()"). now() is
   // the transaction's start on Postgres proper too; only the clock's grain
@@ -4064,6 +4091,59 @@ console.log("\n[36] Migration 036: delete_thought and review_supersession_propos
   assert(!/UPDATE\s+thoughts\b/i.test(review) && (review.match(/update_thought\(/g) ?? []).length === 2 && !/v_walk/.test(review),
     "…and 032's shape is intact: two update_thought calls, no UPDATE and no walk of its own");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[37] bench-hnsw's oracle cache: what of a marker's entry a run may trust (SMD-1562, bench-oracle.ts)");
+{
+  // A pure function of the entry: the container suite drives the bench's
+  // reads and writes; the guards are held here, in milliseconds, with the
+  // mechanism removed one clause at a time (review passes counted five of
+  // seven mutant-blind under the container suite's two planted cases).
+  const keys = ["t50", "whole table"];
+  const size = (key: string) => (key === "whole table" ? 3 : 2);
+  const answer = (i: number, n: number) => ({ ids: Array.from({ length: n }, (_, j) => `id-${i}-${j}`), top: 0.5 + i / 100 });
+  const entry = (q: number) => ({ queries: Array.from({ length: q }, (_, i) => `d${i}`), answers: { t50: Array.from({ length: q }, (_, i) => answer(i, 2)), "whole table": Array.from({ length: q }, (_, i) => answer(i, 3)) } });
+  const digests = ["d0", "d1", "d2"];
+  const whole = markerAnswers(entry(5), keys, digests, size);
+  assert(whole.have === 3 && whole.had === 5 && whole.taken["whole table"].length === 3 && whole.taken["whole table"][2].ids[0] === "id-2-0", `a whole entry answers for this run's leading queries (have ${whole.have}, had ${whole.had})`);
+  const longer = markerAnswers(entry(2), keys, digests, size);
+  assert(longer.have === 2 && longer.had === 2 && longer.taken.t50.length === 2, "an entry shorter than the run answers for what it holds");
+  const drifted = markerAnswers(entry(5), keys, ["d0", "x1", "d2"], size);
+  assert(drifted.have === 1 && drifted.had === 5, `a digest that stops matching ends the prefix there (have ${drifted.have})`);
+  const foreign = markerAnswers(entry(5), keys, ["x0", "d1", "d2"], size);
+  assert(foreign.have === 0 && foreign.had === 5, "a first digest that differs answers for nothing, and the entry is still counted");
+  for (const [what, e] of [
+    ["absent", undefined],
+    ["null", null],
+    ["a string", "oracle"],
+    ["no queries", { answers: {} }],
+    ["empty queries", { queries: [], answers: {} }],
+  ] as const) {
+    const r = markerAnswers(e, keys, digests, size);
+    assert(r.have === 0 && r.had === 0 && r.taken.t50.length === 0, `${what}: nothing, had none`);
+  }
+  const broken = (mutate: (e: ReturnType<typeof entry>) => void) => {
+    const e = entry(3);
+    mutate(e);
+    return markerAnswers(e, keys, digests, size);
+  };
+  for (const [what, mutate] of [
+    ["a key missing", (e) => delete (e.answers as Record<string, unknown>).t50],
+    ["a key with fewer answers than queries", (e) => e.answers.t50.pop()],
+    ["a tier answer one id short", (e) => e.answers.t50[1].ids.pop()],
+    ["a whole-table answer one id short", (e) => e.answers["whole table"][0].ids.pop()],
+    ["an answer one id long", (e) => e.answers.t50[0].ids.push("extra")],
+    ["a duplicated id", (e) => (e.answers["whole table"][2].ids[2] = e.answers["whole table"][2].ids[0])],
+    ["a non-string id", (e) => ((e.answers.t50[0].ids as unknown[])[0] = 7)],
+    ["a null cosine", (e) => ((e.answers["whole table"][1] as { top: unknown }).top = null)],
+    ["an infinite cosine", (e) => (e.answers["whole table"][1].top = Infinity)],
+    ["a non-string digest", (e) => ((e.queries as unknown[])[0] = 0)],
+    ["an answer that is not an object", (e) => ((e.answers.t50 as unknown[])[2] = "x")],
+  ] as [string, (e: ReturnType<typeof entry>) => void][]) {
+    const r = broken(mutate);
+    assert(r.have === 0 && r.had === 3 && r.taken["whole table"].length === 0, `${what}: the entry answers for nothing, and is counted as found (had ${r.had})`);
+  }
+  assert(markerAnswers(entry(3), keys, digests, () => 2).have === 0, "an expected size the entry does not meet answers for nothing");
 }
 
 report();

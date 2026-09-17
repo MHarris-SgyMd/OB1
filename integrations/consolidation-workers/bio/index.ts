@@ -10,6 +10,15 @@
 // (021) and the chunk rows (022) follow the text and vector, and the actor
 // reaches the audit (008). FORK.md change 69; extensions/test-writes.ts drives it
 // against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
+// SMD-1524 (change 71): the first run's row too — the raw insert computed its own
+// fingerprint and stored no vector; the enhanced columns follow on a fresh row —
+// and the key's name reaches 008's audit row as the actor on both paths (the
+// functions record an actor only when the caller names one; change 69 named none).
+// SMD-1544 (change 73): the source and profile queries filter on JSON paths
+// (metadata->>generated_by, ->>artifact_type, ->>subject), which the SQL shim
+// refused — a 500 at the first query on the fork — and renders now; the shim
+// also hands created_at back as a string, as PostgREST does, which the prompt
+// slices. extensions/test-writes.ts drives the worker on both write paths.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
@@ -39,13 +48,13 @@
  * See docs/05-tool-audit.md for the full tool and worker inventory.
  */
 
+import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 import {
   isRecord,
   asString,
   asInteger,
-  computeContentFingerprint,
   embedText,
   embeddingModelUsed,
 } from "../_shared/helpers.ts";
@@ -407,6 +416,7 @@ async function upsertProfile(
   sourceCount: number,
   existingId: string | null,
   subject: string,
+  actor: { name: string; source: string },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date().toISOString();
 
@@ -440,6 +450,7 @@ async function upsertProfile(
       p_metadata_patch: profileMetadata,
       p_embedding: embedding,
       p_embedding_model: embeddingModelUsed(),
+      p_actor: actor,
     });
     if (updateError) {
       throw new Error(`Failed to update existing profile (id=${existingId}): ${updateError.message}`);
@@ -464,36 +475,44 @@ async function upsertProfile(
     return { id: existingId, created: false };
   }
 
-  // First-run insert path. We do NOT go through upsert_thought here because
-  // the stock RPC (see docs/01-getting-started.md:197-219) only reads
-  // p_payload->'metadata' — sibling keys like type/importance/source_type
-  // are silently dropped, producing a first row with NULL enhanced-thoughts
-  // columns that the README queries can't find. Writing the row directly
-  // also gives us a typed `id` back.
-  //
-  // Dedupe is still safe: findExistingProfile() has already run. We also
-  // populate content_fingerprint so the unique index on it is honored.
-  const contentFingerprint = await computeContentFingerprint(profileContent);
-  const { data, error: insertError } = await supabase
+  // First run: the row through the 3-argument upsert_thought (SMD-1524) — the
+  // text, its fingerprint, the vector and its label, and the audit actor in
+  // one statement. The raw insert this replaced computed the fingerprint
+  // itself and stored no vector at all, so the first profile was unsearchable
+  // until a re-embed pass reached it. The function reads p_payload->'metadata'
+  // and ->>'embedding_model' only — sibling keys such as type/importance/
+  // source_type are dropped, by upstream's function and this fork's alike — so
+  // the enhanced-thoughts columns follow by a raw update that carries neither
+  // content nor vector, as the rewrite path's do. findExistingProfile() has
+  // already run; `existed` is a concurrent run's row, reported as not created
+  // and left with its columns. The key's name rides as the actor (008).
+  const embedding = await embedText(profileContent);
+  const { data, error: insertError } = await supabase.rpc("upsert_thought", {
+    p_content: profileContent,
+    p_payload: { metadata: profileMetadata, embedding_model: embeddingModelUsed(), actor },
+    p_embedding: embedding,
+  });
+  if (insertError) {
+    throw new Error(`Bio profile capture failed: ${insertError.message}`);
+  }
+  const result: Record<string, unknown> = isRecord(data) ? data : {};
+  const thoughtId = asString(result.id, "");
+  if (!thoughtId) {
+    throw new Error("Bio profile capture did not return an ID");
+  }
+  if (result.existed === true) {
+    return { id: thoughtId, created: false };
+  }
+  const { error: sidecarError } = await supabase
     .from("thoughts")
-    .insert({
-      content: profileContent,
+    .update({
       type: "person_note",
       importance: 5,
       source_type: "system_profile",
-      metadata: profileMetadata,
-      content_fingerprint: contentFingerprint,
     })
-    .select("id")
-    .single();
-
-  if (insertError) {
-    throw new Error(`Bio profile insert failed: ${insertError.message}`);
-  }
-
-  const thoughtId = isRecord(data) ? asString(data.id, "") : "";
-  if (!thoughtId) {
-    throw new Error("Bio profile insert did not return an ID");
+    .eq("id", thoughtId);
+  if (sidecarError) {
+    throw new Error(`Bio profile capture failed (id=${thoughtId}): ${sidecarError.message}`);
   }
 
   return { id: thoughtId, created: true };
@@ -589,7 +608,8 @@ Deno.serve(async (req) => {
 
     let result: { id: string | null; created: boolean } = { id: null, created: false };
     if (!dryRun) {
-      result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject);
+      result = await upsertProfile(profileContent, sources.length, existing?.id ?? null, subject,
+        { name: principal.name, source: "consolidation-bio" });
       await logConsolidation(result.id!, sources.length, result.created);
     }
 

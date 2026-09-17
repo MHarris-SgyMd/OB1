@@ -28,7 +28,7 @@ Three failure modes the policy + auditor pair catches that scattered prompt-tuni
 
 - **`editorial-policy.md`** — the full 40-rule constitution. Copy to your `docs/editorial-policy.md`. Adapt the operator-specific rules (R1.1, R9.2, R9.3) to your name and timezone; keep everything else.
 - **`schema.sql`** — adds one helper RPC (`get_recent_audit_reports`) and one partial index on the `thoughts` table. No new tables.
-- **`auditor/index.ts`** + **`deno.json`** — Supabase Edge Function that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only.
+- **`auditor/index.ts`** + **`deno.json`** — Supabase Edge Function that runs weekly, scans recent thoughts, returns structured JSON findings, stores them as `type=audit_report` thoughts, and posts to Slack on critical findings only. On this fork the report is stored through the database's `upsert_thought` (FORK.md change 71, SMD-1524), so the row carries its content fingerprint and 008's audit row names the key that ran the audit — the raw insert it replaced left the fingerprint NULL and the actor unnamed; the report carries no vector, so it has no model label and is not a search target.
 - **`schedule.sql`** — pg_cron entry to fire the auditor weekly.
 
 ## Prerequisites
@@ -123,7 +123,13 @@ POLICY_VERSION = 1.3   # or whatever your editorial-policy.md says
 
 ### Step 5: Deploy the function
 
-> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+>
+> ```bash
+> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' AUDITOR_ACCESS_KEYS='schedule:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun recipes/editorial-policy/auditor/index.ts
+> ```
+>
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its report against Postgres. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.mjs --revert recipes/editorial-policy/auditor/index.ts`, which puts it back on supabase-js.
 
 ```bash
 # From your OB1 working directory:

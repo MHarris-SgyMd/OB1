@@ -10,7 +10,7 @@
 
 This integration provides two Supabase Edge Function workers that improve thought quality after initial import:
 
-**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run's insert is a raw row with no vector (SMD-1524). Useful for generating "Who is X" summaries from scattered notes.
+**Bio Worker** (`bio/index.ts`): Synthesizes a canonical biographical profile from person_note, decision, and journal thoughts. The profile is stored as a thought with `metadata.generated_by = "consolidation-bio"` and is rewritten through the database's `update_thought` on subsequent runs — embedded by the worker, so the row carries a vector and its model label and the content fingerprint follows the text; a re-embed pass's vector is replaced, not blanked (FORK.md change 69). The first run stores the profile through the 3-argument `upsert_thought`, embedded, with the enhanced columns following on the fresh row, and both paths name the key as 008's audit actor (FORK.md change 71, SMD-1524) — the raw insert it replaced computed its own fingerprint and stored no vector. On this fork the worker's source and profile queries — filters on `metadata->>generated_by`, `->>artifact_type` and `->>subject` — run through the SQL shim's JSON-path columns (FORK.md change 73, SMD-1544); before that change the shim refused the column and the worker answered 500 at its first query, so nothing above had run. `extensions/test-writes.ts` drives both write paths against Postgres. Useful for generating "Who is X" summaries from scattered notes.
 
 **Metadata Normalization Worker** (`metadata-norm/index.ts`): Finds thoughts with weak metadata (catch-all type="reference", default importance=3, low-confidence topics) and re-evaluates them via LLM. Only applies changes when the reclassification confidence exceeds 0.8 and the change is material (different type, importance shift >= 2, or new topics where none existed). Marks reviewed thoughts to prevent re-processing.
 
@@ -52,11 +52,17 @@ cp integrations/consolidation-workers/deno.json supabase/functions/consolidation
 cp integrations/consolidation-workers/_shared/*.ts supabase/functions/_shared/
 ```
 
-Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and needs it only once SMD-1480 lands. Both workers import the access-key module from `../_shared/auth.ts`.
+Files are copied one by one, not folders, so running the block again — or into a `_shared/` folder you already have from the enhanced MCP server or any other server on this fork — replaces files rather than nesting a copy. The `deno.json` pins `@supabase/supabase-js`, which `consolidation-metadata` imports by its bare name (Supabase reads one per function directory); `consolidation-bio` imports the SQL shim instead and runs under Bun (the callout below), so the copy is for `consolidation-metadata`. Both workers import the access-key module from `../_shared/auth.ts`.
 
 ### 2. Deploy the Edge Functions
 
-> **`consolidation-bio` is not deployable as it stands.** It imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix; its access-key behaviour is exercised by `extensions/test-auth.ts`. `consolidation-metadata` deploys.
+> **Runs under Bun, not as an Edge Function.** This worker (`consolidation-bio`) imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+>
+> ```bash
+> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' MCP_ACCESS_KEYS='cron:write:<sha256-of-your-key>' OPENROUTER_API_KEY='…' bun integrations/consolidation-workers/bio/index.ts
+> ```
+>
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives both of its write paths against Postgres; `consolidation-metadata` deploys as below. The `supabase functions deploy consolidation-bio` below applies to the file after `bun scripts/migrate-to-sql-shim.mjs --revert integrations/consolidation-workers/bio/index.ts`, which puts it back on supabase-js.
 
 ```bash
 supabase functions deploy consolidation-bio --no-verify-jwt

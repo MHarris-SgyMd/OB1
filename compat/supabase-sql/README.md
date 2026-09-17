@@ -30,7 +30,7 @@ node scripts/migrate-to-sql-shim.mjs --apply --all      # rewrite every eligible
 node scripts/migrate-to-sql-shim.mjs --revert <file>    # undo, byte-for-byte
 ```
 
-The rewrite is one line:
+The rewrite is one line — two, for a file that reads `Deno.env` or calls `Deno.serve` (step 3):
 
 ```diff
 - import { createClient } from "@supabase/supabase-js";
@@ -46,7 +46,58 @@ accepted and ignored — with SQL the credentials live in the URL.
 Passing a `https://…supabase.co` URL fails immediately with an explanation rather
 than at the first query.
 
-### 3. Run the tests
+### 3. Run a migrated server under Bun
+
+A migrated server was written as a Supabase Edge Function — `Deno.env.get` for its
+environment, `Deno.serve` at the end — and the shim imports `bun`, so one import
+line left it running nowhere: not under Deno, which cannot resolve `bun`, and not
+under Bun, which has no `Deno` (SMD-1480, FORK.md change 74). The codemod
+therefore gives such a file a second line, first among its imports:
+
+```diff
++ import "../../compat/deno-on-bun.ts";
+```
+
+That module installs exactly the two Deno members these files use — `Deno.env.get`
+reading the process environment, `Deno.serve` as `Bun.serve` on `PORT` (8000 unset,
+Deno's default — a port podman's `gvproxy` also holds on macOS, so the examples
+say `PORT=8787`), printing Deno's `Listening on` line — and nothing else, so a file
+that starts using another `Deno.*` fails at the call rather than running on a
+guess at another runtime's semantics. Where the file's first import was Supabase's
+type-only `import "jsr:@supabase/functions-js/edge-runtime.d.ts"`, which Bun cannot
+resolve, that is the line replaced, the original recorded beside it for `--revert`.
+Then, from a checkout:
+
+```bash
+(cd extensions && bun install)     # once: the pinned hono, zod and MCP SDK the servers import
+
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:<sha256-of-your-key>' \
+PORT=8787 bun extensions/home-maintenance/index.ts                      # an extension
+
+NODE_PATH=extensions/node_modules SUPABASE_URL='postgres://…' MCP_ACCESS_KEYS='…' \
+bun integrations/delete-thought-mcp/index.ts                             # a recipe or integration
+```
+
+An extension sits beside `extensions/node_modules` and resolves its packages from
+there; a recipe or integration does not, and `NODE_PATH` points it at the same
+pinned install (only the servers that import `hono` or the MCP SDK need it — the
+workers, the APIs on their own key and the webhook receiver import nothing but the
+shim and their own files). The other variables are the ones the file's README has
+its Supabase deploy set as secrets, passed as environment instead; each README's
+callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
+every server but `work-operating-model-activation`, which refuses to start
+without it — set it to any value there. An extension's `schema.sql` carries
+Supabase RLS policies on `auth.uid()`; its README's Step 1 gives the two stub
+functions a plain Postgres needs before the file runs. Check 11 of `scripts/check-fork-consistency.mjs` holds
+every shim-importing file in this state — the polyfill first, no other `Deno.*`, no
+`jsr:`/`npm:`/URL specifier, through the files it imports — and
+`extensions/test-auth.ts` starts each one under `bun` and answers it over its port
+in CI. One file is kept on supabase-js by the codemod's `KEEP` list, with the
+reason: `recipes/local-brain-no-mcp`'s client runs inside that recipe's own
+self-hosted Supabase stack, where PostgREST is present and `bun` is not.
+
+### 4. Run the tests
 
 ```bash
 cd compat/supabase-sql && bun run test
@@ -54,30 +105,57 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`61 assertions: 61 passed, 0 failed` and `PASS`. A migrated file behaves
+`177 assertions: 177 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
+`extensions/test-tools.ts` then drives every tool of the five extension servers
+on the shim against their own schemas — the migrated files this shim is judged by.
 
 ## What is supported
 
 | | |
 | --- | --- |
 | Verbs | `from` `select` `insert` `update` `upsert` `delete` `rpc` |
-| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` |
+| Filters | `eq` `neq` `gt` `gte` `lt` `lte` `like` `ilike` `is` `in` `contains` `match` `or` `not` |
+| Filter columns | a column, or PostgREST's JSON path — `metadata->>key`, `meta->a->>key` — in the comparison filters, `is`, `in`, `match`, `.or()` terms and `.order()`; not `.contains()`, which is containment with the column's own operator |
 | Modifiers | `order` `limit` `range` `single` `maybeSingle` `count` `head` |
+| Embedding | one hop: `relation (cols)`, `alias:fk_column (cols)`, `relation(*)` — through the foreign key the catalog finds; many-to-one an object or `null`, one-to-many an array or `[]` |
+| Arrays | a JavaScript array is bound by the column's or the function argument's declared type: an array literal for `text[]`, JSON for `jsonb`, JSON text for `vector` |
 
 Behaviours that are easy to get wrong and are pinned by tests: `range()` is
 inclusive at both ends; `.in([])` selects nothing; `.single()` on zero rows is an
-error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is jsonb
-`@>`; errors resolve as `{ error }` rather than throwing.
+error with code `PGRST116` while `.maybeSingle()` is `null`; `.contains()` is `@>`
+with the column's operator — array containment on `text[]`, jsonb containment on
+`jsonb` — and `.or()` takes `cs` the same way; `.not(col, op, v)` is `IS NOT` for
+`is` and `NOT (…)` otherwise; errors resolve as `{ error }` rather than throwing,
+and the error is a `PostgrestError`, an `Error` subclass carrying `code`, so a
+file's `throw error` renders the database's message; a JSON path compares
+the key's *text*, so a number against `meta->>score` is a text comparison
+(`"5" >= "20"`), as it is through PostgREST — a numeric comparison on a JSON
+key is an `.rpc()`; and a `timestamptz` arrives as an ISO string
+(`toISOString()`'s form), as PostgREST's JSON has it, not as the Date Bun hands
+back — a migrated file's `created_at.slice(0, 10)` works (FORK.md change 73,
+SMD-1544). A `date` column is the bare date PostgREST gives, `2026-09-16`, from
+a table's rows, a `RETURNS TABLE` function's and a `date[]` (change 77; five
+extension tools read one). A `timestamp without time zone` column is still a
+`Z` instant where PostgREST gives a zone-less datetime; `.slice(0, 10)` agrees,
+an equality does not — no migrated file reads one.
 
 ## What is deliberately refused
 
 Each of these throws with an explanation instead of guessing:
 
-- **Resource embedding** — `.select("*, other_table(*)")` needs foreign-key
-  introspection to become a join. Four files use it.
+- **A nested embed, or an embedding hint** — `applications!inner(*,
+  job_postings(*))`, `graph_nodes!graph_edges_target_node_id_fkey(…)`. One hop is
+  served through the catalog's foreign-key read (above); a second hop, `!inner`
+  and a named key are not, nor is a relation with no foreign key to the table or
+  with two (name the column: `alias:fk_column (…)`), nor an embed in a
+  `RETURNING` list.
 - **Nested `.or()`** — `or(and(a.eq.1,b.eq.2),c.eq.3)` needs a real parser. The flat
   form, which is the only one this repo uses, works.
+- **A JSON path ending in `->`** — `meta->flag` yields jsonb, and what a bound value
+  means against it depends on the value's JavaScript type. End the path in `->>`
+  for the key's text, or use `.contains()`. An array index (`->0`), and a path in
+  a select list, a payload or a conflict target, are refused too.
 - **Type-only imports** — `import type { Session, User } from "@supabase/supabase-js"`.
   The shim exports different types.
 - **`.auth`, `.storage`, `.channel`, `.functions.invoke`** — nothing here uses them.
@@ -87,9 +165,35 @@ The codemod treats all of these as blockers and refuses to touch those files.
 ## Safety
 
 Identifiers cannot be parameterised in Postgres, so table and column names are
-validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws.
-Values always travel as bound parameters. A test asserts that a value containing
+validated against `^[A-Za-z_][A-Za-z0-9_]*$` and quoted; anything else throws. A
+JSON path's keys are held to the same shape and rendered as quoted string
+literals (`"meta"->>'key'`). Values always travel as bound parameters — against
+a path, cast to text, so a number or a null in an `.in()` list compares as its
+text where a plain text column would refuse the integer; an array for an array
+column as one parameter holding the array literal, its elements quoted and
+escaped, cast to the declared type. A test asserts that a value containing
 `'; DROP TABLE …` is stored as data and the table survives.
+
+## The catalog
+
+PostgREST knows the schema; a supabase-js caller leans on that without knowing
+it. The shim reads the same three things once per name per process, cached by
+connection URL: a table's column types (`pg_attribute` — which columns are
+arrays, which jsonb), its foreign keys in both directions (`pg_constraint`), and
+a function's argument names and types (`pg_proc`). Bun's driver serialises a
+parameter by the type the server describes for it and has no array-literal
+form, so a JavaScript array reached a `text[]` column as its `String()` (`a,b`,
+`""` for `[]`) and was refused as malformed — while the same array into a `jsonb`
+column beside it was right. Value shape cannot decide that (`tags TEXT[]` and
+`instructions JSONB` take the same `string[]`); the column's declared type does.
+A schema change after the first query is not seen until the process restarts,
+as with PostgREST's own cache. `toSQL()` reads the catalog too, so it is a
+promise.
+
+Clients on one connection URL share one pool. The vendored servers build a
+client inside each request and close none — an Edge Function's shape — and
+under Bun a pool per request held its connection for the life of the process
+(84 after the tool suite's calls, against a default limit of 100).
 
 ## Two gotchas worth knowing
 
@@ -106,16 +210,31 @@ development — the test caught it.
 ## Caveats
 
 - **Bun only.** It uses `Bun.sql`. Node needs a driver swap; Cloudflare Workers
-  cannot pool connections at all.
-- **The migrated files are not individually tested.** Most need live credentials —
-  Gmail, Slack, Readwise. The shim is tested; each migrated file is verified only
-  to parse. Exercise the ones you actually run before trusting them.
+  cannot pool connections at all. The servers on it run as `bun <file>` (step 3).
+- **Most migrated recipes and integrations are not individually tested.** Most
+  need live credentials — Gmail, Slack, Readwise. The shim is tested; each
+  migrated file is verified to parse; `extensions/test-writes.ts` drives the
+  writers among them against a real Postgres (the bio worker, the one that
+  filters on a JSON path, found the two gaps change 73 closed); and
+  `extensions/test-tools.ts` drives every tool of the five extension servers
+  against their own schemas (change 74's review had found seven of twenty-nine
+  failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
+  four embedded selects the codemod's blocker regex let through — and driving
+  every argument branch found two more; change 77 closed them all). Exercise
+  the recipes and integrations you actually run before trusting them.
 - **`insert()` with heterogeneous rows** fills missing keys with `NULL` rather than
   letting the column default apply, because a multi-row `INSERT` needs one column
   list.
+- **Timestamps are strings.** A `Date` Bun hands back is rendered as its ISO
+  string, as PostgREST's JSON has it (FORK.md change 73); a consumer that wants a
+  `Date` does `new Date(row.x)`, as the shim-migrated extensions already do.
+- **JSON-path keys are identifier-shaped.** `meta->>café` and `meta->>a$b` are
+  refused here; PostgREST accepts both. Nothing in the tree uses such a key.
 
 ## Related
 
 - `../../scripts/migrate-to-sql-shim.mjs` — the codemod
+- `../../extensions/test-tools.ts` — every extension tool on the shim, driven against Postgres
+- `../deno-on-bun.ts` — Deno's two globals on Bun, for the servers on the shim
 - `../../server-portable/store-sql.ts` — the core server's own SQL layer
 - `../../db/` — the schema these queries run against

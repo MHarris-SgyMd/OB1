@@ -8,6 +8,8 @@
 
 Receives Readwise highlight webhooks and stores each highlight as a thought in your Open Brain — automatically embedded, classified as a reference, and tagged with book title, author, and location. Works for highlights made anywhere Readwise aggregates from: Kindle, Apple Books, Reader, Instapaper, Hypothesis, Airr/Snipd podcasts, and physical books via the Readwise OCR app.
 
+> **On this fork (FORK.md change 71, SMD-1524):** the highlight is stored through the database's 3-argument `upsert_thought`, so the row carries its content fingerprint and its vector's model label in the same statement (no audit actor: the receiver holds a shared secret, not an access key, and 008 records a NULL actor for such a write); the raw insert this replaced left the fingerprint and the label NULL — the row invisible to dedup, its vector of unknown model to a re-embed pass. The `source_type`/`type` columns (the enhanced-thoughts schema's) follow by updates carrying neither content nor vector, each column where it is NULL — a fresh row's, or a row whose first write was interrupted before them, healed on the re-capture; a column already set, whichever writer set it, is left as it is (a passage another tool captured first and typed by hand keeps its type when the highlight arrives, and takes `source_type = 'readwise'` if it had none, so the dedupe sees it from then on; a row another tool labelled — `source_type = 'mcp'`, say — keeps that label, and since the dedupe looks for readwise rows only, every delivery of that highlight is re-sent to the function, which answers `existed` and re-merges the metadata: one row throughout, one audit row per delivery). A highlight whose text the brain already holds comes back `existed`: its metadata is merged and its vector replaced, not a second row — the book's `num_highlights` still counts it, as Readwise does. WIDTH: the function embeds `openai/text-embedding-3-small` at 1536, so the brain must be at that model and width (upstream's Supabase brain is; this fork's default is `qwen3-embedding:4b` at 1024, where the capture fails whole).
+
 ## Prerequisites
 
 - A working Open Brain setup (follow the [Getting Started guide](../../docs/01-getting-started.md) through Step 7 — you need the Supabase database, OpenRouter API key, and Supabase CLI installed)
@@ -76,7 +78,13 @@ supabase link --project-ref YOUR_PROJECT_REF
 
 Replace `YOUR_PROJECT_REF` with the value from your Supabase dashboard URL: `supabase.com/dashboard/project/THIS_PART`.
 
-> **Not deployable as it stands.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`. The steps below are the deploy it will have.
+> **Runs under Bun, not as an Edge Function.** This function imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) and `compat/deno-on-bun.ts`, the two Deno globals it uses on Bun (FORK.md change 74), so `supabase functions deploy` cannot bundle it; from a checkout of this repository it serves on `PORT` (8000 unset — podman's `gvproxy` holds that port on macOS, so set one):
+>
+> ```bash
+> PORT=8787 SUPABASE_URL='postgres://user:password@host:5432/openbrain' READWISE_WEBHOOK_SECRET='…' READWISE_ACCESS_TOKEN='…' OPENROUTER_API_KEY='…' bun integrations/readwise-capture/index.ts
+> ```
+>
+> `SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset), and the other variables are the secrets the steps below set, passed as environment — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). `extensions/test-auth.ts` starts it this way in CI, and `extensions/test-writes.ts` drives its capture against Postgres. The Supabase steps below apply to the file after `bun scripts/migrate-to-sql-shim.mjs --revert integrations/readwise-capture/index.ts`, which puts it back on supabase-js.
 
 ### Create the Function
 

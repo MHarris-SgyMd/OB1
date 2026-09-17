@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDING_DIM } from "./config.mjs";
-import { dropSchema, runScript } from "./test-support.ts";
+import { dropSchema, runMigrator } from "./test-support.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const URL_ = process.env.DATABASE_URL;
@@ -38,7 +38,7 @@ const traceDef = (name: string) => file(name).match(/^CREATE OR REPLACE FUNCTION
 const unit = (i: number) => { const v = new Array(EMBEDDING_DIM).fill(0); v[i % EMBEDDING_DIM] = 1; return "[" + v.join(",") + "]"; };
 
 await dropSchema(URL_);
-await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_], { cwd: HERE });
+await runMigrator(URL_, undefined);
 const sql = new SQL({ url: URL_, max: 1 });
 
 // Build a dense, cycle-free DAG: WIDTH nodes per layer for DEPTH layers, each

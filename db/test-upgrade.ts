@@ -19,10 +19,9 @@
  */
 
 import { SQL } from "bun";
-import { readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, plantLegacyRow, requireDatabaseUrl, resetSchema, runScript, updatedAtTriggerState } from "./test-support.ts";
+import { applyMigrations, createAssert, dropSchema, ledgerStrangers, migrationFiles, migratorEnv, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, UPDATE_THOUGHT_SIGNATURE, reembedKey } from "./config.mjs";
 
 const URL_ = requireDatabaseUrl("test-upgrade.ts");
@@ -30,24 +29,11 @@ const { assert, report } = createAssert();
 
 const OPTS = { dim: 8, model: "stub-embed" };
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS = readdirSync(join(HERE, "migrations"))
-  .filter((f) => f.endsWith(".sql"))
-  .sort();
+const MIGRATIONS = migrationFiles();
 
-/**
- * The migrator's shell for a fixture: this process's, with the test width and
- * model, and without what the migrator would refuse or read as an override.
- */
-function migratorEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries({ ...process.env, DATABASE_URL: URL_, OB1_EMBEDDING_DIM: String(OPTS.dim), OB1_EMBEDDING_MODEL: OPTS.model }))
-    if (v !== undefined && !/^OB1_(EMBEDDING_DIMENSIONS|LLM_API_KEY|BACKFILL_LIMIT)$/.test(k)) env[k] = String(v);
-  return env;
-}
-
-/** The migrator, from the fixture's shell. */
-const MIGRATOR_ENV = migratorEnv();
-const migrate = (...extra: string[]) => runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, ...extra], { env: MIGRATOR_ENV, cwd: HERE });
+/** The migrator, from the fixture's shell (test-support's migratorEnv: the test width and model, the overrides the runner would refuse stripped). */
+const MIGRATOR_ENV = migratorEnv(URL_, OPTS);
+const migrate = (...extra: string[]) => runMigrator(URL_, MIGRATOR_ENV, ...extra);
 
 /** The migrator's lock message, as its one constant spells the timeout — the three modes share the opening. */
 const LOCK_RE = new RegExp(`A lock was not granted within the run's ${LOCK_TIMEOUT_S} s lock_timeout`);
@@ -433,14 +419,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // were, and a ledger that says every migration. reembed.ts refuses to run
   // there and names the remedy; this is the remedy.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "021" });
-  // The migrator's shell: the parent's, with the suite's width and model. The
-  // schema above was applied with the parent's OB1_CHUNK_CONTEXT (applyMigrations
-  // reads it), so the child must see the same value or --reapply rightly refuses
-  // to re-record it. reembed.ts --status gets the narrower environment test-live
-  // gives it.
-  const env = MIGRATOR_ENV;
-  const statusEnv: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) if (k !== "OB1_CHUNK_CONTEXT") statusEnv[k] = v;
+  // The migrator's shell: the parent's without its OB1_* variables, plus the
+  // suite's width and model (test-support's migratorEnv); the bare apply above
+  // pinned the same chunk-context default, so the two halves of the fixture
+  // agree. reembed.ts --status takes the same shell.
   const baselined = await migrate("--baseline");
   assert(baselined.code === 0 && new RegExp(`baselined ${MIGRATIONS.length}, skipped 0`).test(baselined.out), `--baseline records every migration without running one (exit ${baselined.code})`);
 
@@ -480,7 +462,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // What the operator reads first. --status runs against any schema and says
   // what a run would refuse on; the ledgered remedy is the migrator's command.
-  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: statusEnv, cwd: HERE });
+  const status = await runScript(["bun", join(HERE, "reembed.ts"), "--url", URL_, "--status"], { env: MIGRATOR_ENV, cwd: HERE });
   const recorded021 = async () => Number((await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '021%'`)[0].c);
   const ledger = async () => JSON.stringify(await sql`SELECT name, sha256, applied_at::text AS a FROM schema_migrations ORDER BY 1`);
   assert(status.code === 0 && /a run would refuse: the schema predates migration 021/.test(status.out) &&
@@ -504,16 +486,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
 
   // Refused before BEGIN, nothing written. A shell configured differently from
   // the brain: 006 would re-record ob1_config from it.
-  const otherShell = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
+  const otherShell = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply");
   assert(otherShell.code === 2 && /refusing --reapply: ob1_config records embedding_model = stub-embed and this shell would re-record it as other-embed/.test(otherShell.out),
          `a shell whose model differs from the record is refused — 006 would re-record it (exit ${otherShell.code})`);
   assert((await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`)[0].value === OPTS.model && (await column()) === 0, "…and nothing was written");
-  const otherDry = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_MODEL: "other-embed" }, cwd: HERE });
+  const otherDry = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_MODEL: "other-embed" }, "--reapply", "--dry-run");
   assert(otherDry.code === 2 && /would refuse --reapply: ob1_config records embedding_model = stub-embed/.test(otherDry.out) && !/would re-apply \(/.test(otherDry.out) && !/would re-apply every migration/.test(otherDry.out),
          `…and --dry-run from that shell says it would refuse, the same judgement, with no banner for a run that never begins (exit ${otherDry.code})`);
   // The width is the column's, judged before BEGIN in both modes — 006 would
   // refuse it inside the transaction, after a dry run had said green.
-  const otherWidth = await runScript(["bun", join(HERE, "migrate.ts"), "--url", URL_, "--reapply", "--dry-run"], { env: { ...env, OB1_EMBEDDING_DIM: "9" }, cwd: HERE });
+  const otherWidth = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_EMBEDDING_DIM: "9" }, "--reapply", "--dry-run");
   assert(otherWidth.code === 2 && /would refuse --reapply: thoughts\.embedding is vector\(8\) and this shell says OB1_EMBEDDING_DIM=9/.test(otherWidth.out) && /Set OB1_EMBEDDING_DIM=8/.test(otherWidth.out),
          `a shell whose width differs from the column is refused before BEGIN, dry run included (exit ${otherWidth.code})`);
   // The two rows 021's block labels from and 030 leaves: an acceptance under a
@@ -940,7 +922,7 @@ console.log("\n[11] 021 with the acceptances out of its sight on a plain run —
     await b.sql.unsafe(`GRANT CONNECT ON DATABASE "${db}" TO ob1_notemp`);
     await b.sql.unsafe("GRANT USAGE, CREATE ON SCHEMA public TO ob1_notemp");
     await b.sql.unsafe("GRANT SELECT ON ALL TABLES IN SCHEMA public TO ob1_notemp");
-    const noTemp = await runScript(["bun", join(HERE, "migrate.ts"), "--url", noTempUrl.href, "--reapply", "--dry-run"], { env: { ...MIGRATOR_ENV, DATABASE_URL: noTempUrl.href }, cwd: HERE });
+    const noTemp = await runMigrator(noTempUrl.href, { ...MIGRATOR_ENV, DATABASE_URL: noTempUrl.href }, "--reapply", "--dry-run");
     assert(noTemp.code === 2 && /would refuse --reapply: this role may not create a temp relation, and 021's evidence backfill needs one/.test(noTemp.out) &&
              new RegExp(`GRANT TEMPORARY ON DATABASE "${db}" TO "ob1_notemp"; then run again`).test(noTemp.out) && !/would re-apply every migration/.test(noTemp.out),
            `a role without TEMP is refused before anything runs, with the GRANT, and the dry run says so too (exit ${noTemp.code})`);
@@ -1155,6 +1137,26 @@ console.log("\n[14] Migration 037 onto a populated 035 — match_thoughts gains 
   await sql.unsafe(`GRANT EXECUTE ON FUNCTION ${SIX} TO PUBLIC`);
   await sql.unsafe(`DROP OWNED BY ob1_upgrade_searcher36`);
   await sql.unsafe(`DROP ROLE ob1_upgrade_searcher36`);
+  await sql.close();
+}
+
+console.log("\n[15] A kept bench corpus's ledger against the tree: a schema applied bare has none, the migrator's names only the tree's files, and a name the tree lacks is reported where the migrator would not notice it (SMD-1493)");
+{
+  // bench-hnsw.ts reuses a corpus kept across runs only under a schema the
+  // tree vouches for: migrate.ts brings a pending file onto it and refuses a
+  // drifted one, and test-support's ledgerStrangers covers the case the
+  // runner cannot — a ledger from another branch's tree.
+  await resetSchema(URL_, OPTS);
+  const sql = new SQL({ url: URL_, max: 1 });
+  assert((await ledgerStrangers(sql)) === null, "a schema applied bare (applyMigrations) has no ledger, so nothing vouches for it");
+  await dropSchema(URL_);
+  const fresh = await migrate();
+  assert(fresh.code === 0 && /^applied \d+, skipped 0$/m.test(fresh.out), `the migrator applies the tree onto the empty database and records every file ${shown(fresh)}`);
+  assert(JSON.stringify(await ledgerStrangers(sql)) === "[]", "…and its ledger names only files the tree carries");
+  await sql`INSERT INTO schema_migrations (name, sha256) VALUES ('999_from_another_branch.sql', '000000000000')`;
+  assert(JSON.stringify(await ledgerStrangers(sql)) === JSON.stringify(["999_from_another_branch.sql"]), "a recorded name no file carries is reported by name");
+  const again = await migrate();
+  assert(again.code === 0 && /^applied 0, skipped \d+$/m.test(again.out), `…which a plain run of the migrator does not notice: it skips everything and exits 0 — the blind spot SMD-1504 closes, when this assertion inverts ${shown(again)}`);
   await sql.close();
 }
 

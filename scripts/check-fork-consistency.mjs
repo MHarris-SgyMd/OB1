@@ -32,11 +32,18 @@
  *   9. a committed eval fixture carries no thought content — ids, vectors and
  *      the searcher's own queries only (SMD-1295)
  *  10. a vendored file never writes a thought's content or vector around the
- *      functions that own them — no PostgREST `.update(`/`.upsert(` on
- *      `thoughts` whose payload carries `content` or `embedding`, inline or
- *      through an object the file fills, and no SQL `UPDATE thoughts … SET`
- *      of either column — in the same files as 7, with counted per-file
- *      exceptions for a file whose README says it bypasses them (none today)
+ *      functions that own them — no PostgREST `.update(`/`.upsert(`/`.insert(`
+ *      on `thoughts` whose payload carries `content` or `embedding`, inline or
+ *      through an object the file fills, and no SQL `UPDATE thoughts … SET` of
+ *      either column or `INSERT INTO thoughts (…)` naming one — in the same
+ *      files as 7, with counted per-file exceptions for a file whose README
+ *      says it bypasses them (seven: three deployments with a database of
+ *      their own, three function bodies shown, one test fixture)
+ *  11. a file that imports the SQL shim (Bun's client) and uses a Deno global
+ *      imports compat/deno-on-bun.ts first, uses no member of `Deno` beyond
+ *      the two it provides (`env.get`, `serve`) and no specifier Bun cannot
+ *      resolve (`jsr:`, `npm:`, a URL) — itself or through the files it
+ *      imports — so `bun <file>` serves it (SMD-1480); no exceptions
  *
  * Run: bun scripts/check-fork-consistency.mjs   (plain ESM; node runs it too)
  * Exits non-zero on any violation.
@@ -1025,9 +1032,17 @@ function checkCredentialCompares() {
 // backfill and the fingerprint recipe's are theirs to write). In every
 // non-binary, non-ignored file under the seven category directories and
 // docs/, prose included — a README's code block is what the next integration
-// is copied from. Not in the rule, and said so: `.insert(` (a fresh row around
-// the functions is a different defect — no fingerprint, no label, and 016's
-// trigger does not fill them — held separately), a metadata-only update
+// is copied from. SMD-1524 (change 71) added the fresh row: `.insert(` with
+// either key (a literal, an array of literals, a bound name — one filled by
+// `x.push({ … })` or Python's `x.append({ … })` too), and the SQL
+// `INSERT INTO [public.]thoughts [AS alias] (<columns>)` naming either column
+// — a row written around the 3-argument upsert_thought has no fingerprint
+// (003: 016's trigger does not fill it; the row is invisible to dedup until
+// 023's backfill and a later capture of the text makes a twin), no model
+// label (021: a vector of unknown model, which the re-embed pool treats as
+// not at the target), and no actor for 008. Not in the rule, and said so: an
+// INSERT with no column list (`INSERT INTO thoughts VALUES …`, `INSERT INTO
+// thoughts SELECT …`, a client's `${sql(rows)}` helper), a metadata-only update
 // (nothing it leaves stale), a REST `PATCH …/rest/v1/thoughts` built by hand
 // (none in the tree), a payload spread from another object (`{ ...updates }`),
 // a payload that arrives as a function's return value or parameter, a builder
@@ -1035,14 +1050,20 @@ function checkCredentialCompares() {
 // a table name held in a variable, a payload behind a type assertion or a
 // conditional (`.update(<any>p)`, `.update(cond ? { content } : {})`), a
 // two-hop `Object.assign({}, a, b)` of bound names, Python's
-// `dict(content=…)`, and an `.rpc("update_thought", …)`, which is the remedy
-// — the dataflow cases need what this rule does not have, and a miss there
-// is what the second half of the audit, extensions/test-writes.ts, is for.
-// Exceptions are per
-// file and COUNTED, as checks 6–8's are: a file that deliberately writes
-// around the functions is listed with the reason and the line count, and its
-// README must say what it leaves stale; one fixed drops out as stale, one
-// added fails. The list is empty.
+// `dict(content=…)`, a list built by comprehension from a function's return
+// (`[build_row(h) for h in batch]` — readwise-import's, converted by hand and
+// held by test-writes.ts's text guard), and an `.rpc("update_thought", …)` or
+// `.rpc("upsert_thought", …)`, which is the remedy — the dataflow cases need
+// what this rule does not have, and a miss there is what the second half of
+// the audit, extensions/test-writes.ts, is for. Exceptions are per file and
+// COUNTED, as checks 6–8's are: a file that deliberately writes around the
+// functions is listed with the reason and the line count, and its README must
+// say what its rows lack; one fixed drops out as stale, one added fails. Seven
+// today, none a bypass a fix could remove: three deployments whose database is
+// their own (the fork's functions are not in it — two of them the files check 7
+// excepts for creating a brain), the two guides and the one container init that
+// show an upsert_thought body (the INSERT is the function's own), and the test
+// that plants a row as an older write left it, to be moved by the writer under test.
 /** The table, as PostgREST's client (with a row type), the SQL shim or Python's client name it. */
 const THOUGHTS_TABLE = String.raw`\.(?:from|from_|table)(?:<[^>\n]*>)?\s*\(\s*["'\x60]thoughts["'\x60]\s*\)`;
 /** What may sit between the table and its verb: whitespace, line and block comments. */
@@ -1106,6 +1127,42 @@ function topLevel(block, depth = 1) {
   });
   return out;
 }
+/**
+ * SQL from a statement's head onward with its dash-dash line comments and
+ * slash-star block comments blanked (newlines kept), and a single-quoted
+ * string's text blanked between its quotes — a dash pair, a comma or a column
+ * name inside one is text: a column named in a comment or a string is not a
+ * column, one beside a comment is, and a comment's own `;`, `WHERE` or `(` no
+ * longer ends the list early — the three review passes.
+ * Started at the head, where the text is SQL, so a quote in the prose before
+ * it does not open a string.
+ */
+function sqlUncommented(sqlText) {
+  let out = "", i = 0, quote = false, escapes = false, ident = false;
+  while (i < sqlText.length) {
+    const ch = sqlText[i];
+    if (quote) {
+      // An E'…' string reads a backslash-escaped quote as text (the fourth review pass).
+      if (escapes && ch === "\\") { out += "  "; i += 2; continue; }
+      out += ch === "'" || ch === "\n" ? ch : " "; if (ch === "'") quote = false; i++; continue;
+    }
+    // A "quoted identifier" is a name, read whole: a dash pair inside it is not a comment (the fourth review pass).
+    if (ident) { out += ch; if (ch === '"') ident = false; i++; continue; }
+    if (ch === '"') { ident = true; out += ch; i++; continue; }
+    if (ch === "'") { quote = true; escapes = /[eE]$/.test(out.slice(-1)) && !/\w/.test(out.slice(-2, -1)); out += ch; i++; continue; }
+    if (ch === "-" && sqlText[i + 1] === "-") { while (i < sqlText.length && sqlText[i] !== "\n") { out += " "; i++; } continue; }
+    if (ch === "/" && sqlText[i + 1] === "*") {
+      const end = sqlText.indexOf("*/", i + 2);
+      const stop = end < 0 ? sqlText.length : end + 2;
+      for (; i < stop; i++) out += sqlText[i] === "\n" ? "\n" : " ";
+      continue;
+    }
+    out += ch; i++;
+  }
+  return out;
+}
+/** The text from `from` on, comments blanked, as far as a statement can reasonably run: 4000 characters (the longest in the tree is under 400). */
+const sqlFrom = (text, from) => sqlUncommented(text.slice(from, from + 4000));
 /** Whether a literal opening at `text[open]` — `{…}` or `[{…}, …]` — carries either key at the level a table verb reads. */
 const literalCarries = (text, open) => {
   const block = blockAt(text, open);
@@ -1124,8 +1181,8 @@ function thoughtWritesAroundIn(text) {
   const lineOf = (i) => text.slice(0, i).split("\n").length;
   const lines = new Set();
   // Identifiers bound to a payload with either key: `x = { … content … }` or
-  // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.content = …`,
-  // `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
+  // `x = [{ … }]` (the block walked), `Object.assign(x, { … })`, `x.push({ … })`,
+  // `x.content = …`, `x.embedding ??= …`, `x.content += …`, `x["embedding"] = …`.
   const payloads = new Set();
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\s*(?::[^=\n]*?)?\s*=\s*([{[])`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
@@ -1133,13 +1190,17 @@ function thoughtWritesAroundIn(text) {
   for (const m of text.matchAll(new RegExp(String.raw`Object\.assign\(\s*(${IDENT})\s*,\s*\{`, "g"))) {
     if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
   }
+  // A list filled one literal at a time — `rows.push({ … })`, Python's `rows.append({ … })` — is an array of them (SMD-1524).
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})\.(?:push|append)\(\s*\{`, "g"))) {
+    if (literalCarries(text, m.index + m[0].length - 1)) payloads.add(m[1]);
+  }
   for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(${IDENT})!?(?:\.(?:content|embedding)|\[\s*["'\x60](?:content|embedding)["'\x60]\s*\])\s*(?:\?\?|\|\||\+)?=(?![=>])`, "g"))) {
     payloads.add(m[1]);
   }
-  // The verb (a type argument allowed): its first argument a literal, a bound
-  // name, or an `Object.assign(…)` whose own literals — not the ones nested in
-  // them — are read.
-  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
+  // The verb — `.update(`, `.upsert(`, or, since SMD-1524, `.insert(` (a type
+  // argument allowed): its first argument a literal, a bound name, or an
+  // `Object.assign(…)` whose own literals — not the ones nested in them — are read.
+  for (const m of text.matchAll(new RegExp(String.raw`${THOUGHTS_TABLE}${GAP}\.(update|upsert|insert)(?:<[^>\n]*>)?\(\s*(?:([{[])|Object\.assign\(|(${IDENT}))`, "g"))) {
     const verbAt = m.index + m[0].lastIndexOf("." + m[1]);
     let hit = false;
     if (m[2]) hit = literalCarries(text, m.index + m[0].length - 1);
@@ -1160,16 +1221,24 @@ function thoughtWritesAroundIn(text) {
   }
   // SQL: `UPDATE [ONLY] [public.]thoughts [[AS] alias] SET <list>` up to WHERE/RETURNING/;, identifiers
   // quoted or not — the list naming either column as an assignment target, or the tuple form `SET (a, b) = …`.
-  for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/gi)) {
-    const list = m[1];
+  // The head is found in the text; the list is read from the text with its comments blanked, so a
+  // comment's `;` or `WHERE` does not end it (the third review pass).
+  for (const m of text.matchAll(/\bUPDATE\s+(?:ONLY\s+)?(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!SET\b)\w+)?\s+SET\b/gi)) {
+    const list = /^([\s\S]*?)(?=\bWHERE\b|\bRETURNING\b|;|$)/.exec(sqlFrom(text, m.index + m[0].length))[1];
     const tuple = /^\s*\(([^)]*)\)\s*=/.exec(list);
     // An assignment TARGET: first in the list or after a comma — `SET summary = CASE WHEN content = 'x'` compares, it does not assign.
     if (tuple ? /(?:^|[\s,(])"?(?:content|embedding)"?\s*(?:,|$)/i.test(tuple[1]) : /(?:^|,)\s*"?(?:content|embedding)"?\s*=(?!=)/i.test(list)) lines.add(lineOf(m.index));
   }
+  // SQL: `INSERT INTO [public.]thoughts [[AS] alias] (<columns>)` — the column list naming either
+  // column (SMD-1524). No list, no rule: `INSERT INTO thoughts VALUES …` and `… SELECT …` say nothing.
+  for (const m of text.matchAll(/\bINSERT\s+INTO\s+(?:"?public"?\.)?"?thoughts"?(?![\w"])(?:\s+(?:AS\s+)?(?!VALUES\b|SELECT\b)\w+)?\s*\(/gi)) {
+    const list = /^([^()]*)\)/.exec(sqlFrom(text, m.index + m[0].length));
+    if (list && /(?:^|[\s,])"?(?:content|embedding)"?\s*(?:,|$)/i.test(list[1])) lines.add(lineOf(m.index));
+  }
   return [...lines].sort((a, b) => a - b);
 }
 
-/** Texts the rule must catch — the nine files' eleven statements, one probe each, and the forms a rebase could bring. */
+/** Texts the rule must catch — the nine files' eleven updates and the eight files' inserts, one probe each, the forms a rebase could bring, and the review passes' escapes. */
 const THOUGHT_WRITE_PROBES = [
   // update-thought-mcp: a payload filled by property assignment, sent by name, verb on its own line.
   'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',
@@ -1221,6 +1290,44 @@ const THOUGHT_WRITE_PROBES = [
   'await supabase.from("thoughts").update({ note: "}", content }).eq("id", id);',
   'await supabase.from("thoughts").update({ [`embedding`]: vec }).eq("id", id);',
   'const p: Record<string, unknown> = {};\np[`content`] = text;\nawait supabase.from("thoughts").update(p).eq("id", id);',
+  // SMD-1524: the fresh row. The Slack/Telegram samples' literal (the non-probe change 69 carried,
+  // moved here); readwise-capture's, with the enhanced columns beside the vector; consolidation-bio's,
+  // with the file's own fingerprint and no vector; the classification recipe's, content alone; the
+  // Python client's dict; a list filled by append, sent by name; a list pushed, sent by name; an
+  // array literal; a bound array; the Kubernetes server's SQL with casts; the Neon recipe's template
+  // over lines; quoted identifiers with a schema; an alias; INSERT … SELECT with a column list.
+  'await supabase.from("thoughts").insert({ content, embedding, metadata });',
+  'const { error } = await supabase.from("thoughts").insert({\n  content,\n  embedding,\n  source_type: "readwise",\n  type: "reference",\n  metadata: {\n    source: "readwise",\n    readwise_highlight_id: event.id,\n  },\n});',
+  'const { data, error: insertError } = await supabase\n  .from("thoughts")\n  .insert({\n    content: profileContent,\n    type: "person_note",\n    importance: 5,\n    metadata: profileMetadata,\n    content_fingerprint: contentFingerprint,\n  })\n  .select("id")\n  .single();',
+  'await db.from("thoughts").insert({\n  content: classified.title,\n  type: classified.type,\n  created_at: new Date().toISOString(),\n});',
+  'supabase.table("thoughts").insert({"content": content, "embedding": embedding, "metadata": meta}).execute()',
+  'rows = []\nfor h in highlights:\n    rows.append({"content": h["text"], "embedding": h["vec"]})\nsupabase.table("thoughts").insert(rows).execute()',
+  'const rows: Record<string, unknown>[] = [];\nrows.push({ content, embedding });\nawait supabase.from("thoughts").insert(rows);',
+  'await supabase.from("thoughts").insert([{ content: a, embedding: va }, { content: b, embedding: vb }]);',
+  'const batch = [{ content, embedding, metadata }];\nconst { error } = await supabase.from("thoughts").insert(batch);',
+  'await client.queryObject(\n  `INSERT INTO thoughts (content, embedding, metadata)\n   VALUES ($1, $2::vector, $3::jsonb)`,\n  [content, embStr, JSON.stringify(meta)]\n);',
+  'const rows = await sql`\n  INSERT INTO thoughts (content, embedding, metadata, source)\n  VALUES (${content}, ${embeddingStr}::vector, ${metadataStr}::jsonb, ${source})\n  RETURNING id\n`;',
+  'INSERT INTO "public"."thoughts" ("content", "metadata") VALUES ($1, $2);',
+  'INSERT INTO thoughts AS t (content, embedding) VALUES ($1, $2::vector) ON CONFLICT DO NOTHING;',
+  'INSERT INTO thoughts (content, metadata) SELECT body, \'{}\'::jsonb FROM staging;',
+  // The first review pass: a column list over lines with a comment beside a column.
+  'INSERT INTO thoughts (\n  content, -- the text\n  metadata\n) VALUES ($1, $2);',
+  // The second review pass: a comment after the comma in a SET list, a block comment beside a column.
+  'UPDATE thoughts SET metadata = $1, -- note\n  content = $3 WHERE id = $2;',
+  'INSERT INTO thoughts (content /* the text */, metadata) VALUES ($1, $2);',
+  // The third review pass: a comment whose text would end the list — a `;`, a WHERE, a paren — and a
+  // dash pair inside a string beside a real target.
+  'UPDATE thoughts SET metadata = $1, -- v2; was v1\n  content = $2 WHERE id = $3;',
+  'UPDATE thoughts SET metadata = $1 -- where content lives\n, content = $2 WHERE id = $3;',
+  'INSERT INTO thoughts (content, -- (the text)\n  metadata) VALUES ($1, $2);',
+  "UPDATE thoughts SET summary = 'a -- b', content = $2 WHERE id = $1;",
+  'UPDATE thoughts SET metadata = $1 /* where */ , embedding = $2 WHERE id = $3;',
+  'INSERT INTO thoughts (metadata /* (note) */, content) VALUES ($1, $2);',
+  // The fourth review pass: a doubled quote, an E-string's escaped quote and a dash pair inside a
+  // quoted identifier, each beside a real target.
+  "UPDATE thoughts SET summary = 'it''s', content = $2 WHERE id = $1;",
+  "UPDATE thoughts SET summary = E'a\\'b', content = $2 WHERE id = $1;",
+  'UPDATE thoughts SET "note--x" = $1, content = $2 WHERE id = $3;',
 ];
 /** Texts the rule must not catch — the remedy, the other columns, the other tables, reads, prose. */
 const THOUGHT_WRITE_NON_PROBES = [
@@ -1230,7 +1337,6 @@ const THOUGHT_WRITE_NON_PROBES = [
   'await supabase.from("thoughts").update({ status: "new", status_updated_at: new Date().toISOString() }).eq("id", id);',
   'const sidecar = { type: extracted.type, sensitivity_tier: resolvedTier, importance: 3 };\nawait supabase.from("thoughts").update(sidecar).eq("id", id);',
   'const { data } = await supabase.from("thoughts").select("id, content, embedding, metadata").eq("id", id).single();',
-  'await supabase.from("thoughts").insert({ content, embedding, metadata });',
   'await supabase.from("thought_chunks").update({ content: window }).eq("id", chunkId);',
   'await supabase.from("agent_memories").update({ content: row.content, summary }).eq("id", id);',
   'const updates: Record<string, unknown> = {};\nupdates.type = sanitizeType(String(body.type));\nawait supabase.from("thoughts").update(updates).eq("id", id);',
@@ -1255,8 +1361,41 @@ const THOUGHT_WRITE_NON_PROBES = [
   // nested object inside an inline Object.assign.
   "UPDATE thoughts SET summary = CASE WHEN content = 'x' THEN 'y' ELSE summary END WHERE id = $1;",
   'await supabase.from("thoughts").update(Object.assign({}, base, { metadata: { content: "x" } })).eq("id", id);',
+  // SMD-1524: inserts that are not the rule's — another table, the other columns, no column list,
+  // a metadata-only row, the function's own remedy, prose naming the statement, a chunk row.
+  'INSERT INTO thought_chunks (thought_id, chunk_index, content, embedding) VALUES ($1, 0, $2, $3::vector);',
+  'INSERT INTO thoughts (id, content_fingerprint, embedding_model, created_at) VALUES ($1, $2, $3, now());',
+  'INSERT INTO thoughts VALUES ($1, $2, $3);',
+  "INSERT INTO thoughts SELECT * FROM thoughts_staging;",
+  'await supabase.from("thoughts").insert({ metadata: { source: "import" } });',
+  'await supabase.from("readwise_books").insert({ content: note, title });',
+  'await supabase.from("consolidation_log").insert({ operation: "profile", details: { content: "x" } });',
+  'Any code path that writes a raw `INSERT INTO thoughts` — a webhook handler — will insert a row with a NULL fingerprint.',
+  'await supabase.rpc("upsert_thought", { p_content: content, p_payload: { metadata: meta, embedding_model: EMBEDDING_MODEL }, p_embedding: embedding });',
+  'thoughts = [build_thought(h, book) for h in batch]\nsupabase.table("thoughts").insert(thoughts).execute()',
+  // The first review pass: a comment naming the column is not the column.
+  'INSERT INTO thoughts (\n  metadata -- not content\n) VALUES ($1);',
+  // The second review pass: the same in a block comment, and in a SET list.
+  'INSERT INTO thoughts (metadata /* content */) VALUES ($1);',
+  'UPDATE thoughts SET metadata = $1 /* content = $3, */ WHERE id = $2;',
+  // The third review pass: the column named inside a string is text, not a target.
+  "UPDATE thoughts SET summary = 'x -- content = 1' WHERE id = $1;",
+  "UPDATE thoughts SET summary = 'see, content = old' WHERE id = $1;",
 ];
-const THOUGHT_WRITE_EXCEPTIONS = new Map([]);
+const OWN_DATABASE = (what) => ({ why: `${what} — the fork's functions are not in it, so the capture is a raw row with no fingerprint, no label and no audit actor; the README says so`, lines: 1 });
+const THOUGHT_WRITE_EXCEPTIONS = new Map([
+  // The guides that show upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
+  ["docs/01-getting-started.md", { why: "the INSERT inside upstream's upsert_thought definition, the function itself, shown as the guide's; SETUP.md sends this fork's readers past it", lines: 1 }],
+  ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
+  // Two deployments whose database is their own, built from the guide's shape.
+  ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
+  ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
+  ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
+  // The recipe's own container: its upsert_thought body, the guide's shape — the INSERT is the function's own.
+  ["recipes/local-brain-no-mcp/volumes/db/init/02-match-thoughts-fn.sh", { why: "the INSERT inside the recipe's own upsert_thought, in its own container's init (check 7 excepts the same definition); the README says what its rows lack", lines: 1 }],
+  // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
+  ["extensions/test-writes.ts", { why: "plants a thought as an older write left it, fingerprint and label supplied by hand, for the writer under test to move whole", lines: 1 }],
+]);
 
 function checkThoughtWritesAround() {
   const SELF = "scripts/check-fork-consistency.mjs";
@@ -1264,13 +1403,13 @@ function checkThoughtWritesAround() {
     // Caught on exactly one line, and that line is the verb's (or the UPDATE's): the second review
     // pass found an upsert chain reported on the line before its verb, which a count alone passed.
     const got = thoughtWritesAroundIn(probe);
-    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert)\b/.test(l) || /\bUPDATE\s+(?:ONLY\s+)?"?(?:public|thoughts)\b/i.test(l)) + 1;
+    const verbLine = probe.split("\n").findIndex((l) => /\.(?:update|upsert|insert)\b/.test(l) || /\b(?:UPDATE\s+(?:ONLY\s+)?|INSERT\s+INTO\s+)"?(?:public|thoughts)\b/i.test(l)) + 1;
     if (got.length !== 1 || got[0] !== verbLine) fail(SELF, `thought-write rule no longer catches its probe on its verb's line ${verbLine} (caught ${got.join(",") || "none"}): ${JSON.stringify(probe)}`);
   }
   for (const text of THOUGHT_WRITE_NON_PROBES) {
     if (thoughtWritesAroundIn(text).length > 0) fail(SELF, `thought-write rule catches ordinary text it must not: ${JSON.stringify(text)}`);
   }
-  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture through the 3-argument upsert_thought with embedding_model in the payload (FORK.md change 69, SMD-1228) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what it leaves stale";
+  const MSG = "writes a thought's content or vector around the functions that own them — the fingerprint (003/018), the model label (021) and the chunk rows (022) are left describing the text and vector before the write, and no actor reaches the audit (008); route an edit through update_thought(p_id, p_content, p_metadata_patch, p_embedding, …, p_embedding_model) and a capture — an insert too — through the 3-argument upsert_thought with embedding_model in the payload, the columns it does not know by an update carrying neither content nor vector (FORK.md changes 69 and 70, SMD-1228 and SMD-1524) — or list the file in THOUGHT_WRITE_EXCEPTIONS with its line count and the reason, and say in its README what its rows lack";
   const counts = new Map();
   for (const file of textFilesUnder(SCANNED_ROOTS)) {
     const rel = relOf(file);
@@ -1289,6 +1428,235 @@ function checkThoughtWritesAround() {
   }
 }
 
+// ── 11: a file on the SQL shim runs under Bun ────────────────────────────────
+//
+// SMD-1480 (FORK.md change 74). The shim imports `bun`, and the files fix 13's
+// codemod put on it were Supabase Edge Functions — `Deno.env.get` for their
+// environment, `Deno.serve` at the end. One import line therefore left sixteen
+// of them running nowhere: not under Deno, which cannot resolve `bun`, and not
+// under Bun, which has no `Deno` — exercised only under the tests' stand-in for
+// those globals, their READMEs sending a reader to `supabase functions deploy`.
+// compat/deno-on-bun.ts is the second line: imported FIRST, it gives Bun
+// exactly `Deno.env.get` and `Deno.serve`, and `bun <file>` serves the file as
+// written. This holds the state a migrated file must be in to run:
+//   - a file that imports compat/supabase-sql and — itself, or through the
+//     relative imports it evaluates — uses a member of `Deno` imports
+//     compat/deno-on-bun.ts as its first import statement (ES modules evaluate
+//     imports in order; a helper whose module body reads `Deno.env` before the
+//     polyfill has run is a ReferenceError at startup);
+//   - no member of `Deno` beyond `env.get` and `serve` is used, in the file or
+//     the files it imports — the polyfill provides only those two, and an
+//     emulation of `readTextFile`, `exit` or `args` would be a guess at another
+//     runtime's semantics; a new use fails at the call under Bun, and here;
+//   - no import specifier Bun cannot resolve remains — `jsr:`, `npm:`, a URL —
+//     in the file or the files it imports, a dynamic `import("…")` included
+//     (`node:` is fine; the codemod swaps the one such line these files had
+//     and records it);
+//   - `Deno` is reached only as `Deno.env.get` or `Deno.serve`: an alias, a
+//     bracket or a destructure is a use the rule cannot follow, so it is
+//     refused as one — and so are `typeof Deno` and `"Deno" in globalThis`:
+//     a migrated file does not detect its runtime, the polyfill is that.
+// Comments and string contents are not code: members and specifiers are read
+// with both blanked (line numbers kept). Scanned: every .ts/.js/.mjs under the
+// seven category directories and docs/ that imports the shim. No exceptions —
+// a file that must stay a Deno deployment is kept on supabase-js by the
+// codemod's KEEP list (the local-brain recipe's client), not excepted here.
+/** Members of `Deno` compat/deno-on-bun.ts provides. */
+const DENO_PROVIDED = new Set(["env.get", "serve"]);
+/** `Deno` wherever it appears in code: a member chain of up to two names, or bare — an alias (`const D = Deno`), a bracket (`Deno["env"]`), a destructure. */
+const DENO_MEMBER = /\bDeno\b(?:\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?)?/g;
+/** A dynamic import's literal specifier — quoted or in a plain backtick literal; one with `${…}` is not a literal and is not read. */
+const DYNAMIC_IMPORT = /\bimport\s*\(\s*(["'\x60])([^"'\x60\n$]+)\1/g;
+const SHIM_SPECIFIER = /compat\/supabase-sql\/index\.ts$/;
+const RUNTIME_SPECIFIER = /compat\/deno-on-bun\.ts$/;
+/** A specifier Bun does not resolve: Deno's registries and a URL. */
+const NOT_ON_BUN = /^(?:jsr:|npm:|https?:\/\/)/;
+
+/**
+ * `text` with comments blanked, and — when `stringsToo` — string contents
+ * blanked as well; every blanked character becomes a space, newlines stay, so
+ * offsets and line numbers hold. A regex literal is not tracked: a quote or
+ * `//` inside one may blank to the next quote or line end, which only ever
+ * hides text from this check, never invents a member or a specifier. A
+ * template literal is blanked whole, `${…}` included, so a `Deno` member
+ * inside one is not seen either way (no file on the shim has one).
+ */
+function blanked(text, stringsToo) {
+  let out = "";
+  for (let i = 0; i < text.length;) {
+    const c = text[i], d = text[i + 1];
+    if (c === "/" && d === "/") { while (i < text.length && text[i] !== "\n") { out += " "; i++; } continue; }
+    if (c === "/" && d === "*") {
+      const end = text.indexOf("*/", i + 2), stop = end < 0 ? text.length : end + 2;
+      for (; i < stop; i++) out += text[i] === "\n" ? "\n" : " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      out += c; i++;
+      while (i < text.length && text[i] !== c) {
+        if (text[i] === "\\") { out += stringsToo ? "  " : text.slice(i, i + 2); i += 2; continue; }
+        out += stringsToo && text[i] !== "\n" ? " " : text[i]; i++;
+      }
+      if (i < text.length) { out += c; i++; }
+      continue;
+    }
+    out += c; i++;
+  }
+  return out;
+}
+
+/**
+ * Every import (and export-from) statement's specifier, with the line it starts
+ * on, in order. A statement ends at its `;` — the tree's imports all carry one;
+ * a semicolon-less import would run on to the next `;` and its specifier be
+ * missed (a silent miss, never a false catch), so the rule says so here.
+ */
+function importSpecifiers(text) {
+  const code = blanked(text, false);
+  const out = [];
+  for (const m of code.matchAll(/^[ \t]*(?:import|export)\b[^;]*;/gm)) {
+    const spec = /\bfrom\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]) ?? /^[ \t]*import\s*(["'])([^"'\n]+)\1\s*;$/.exec(m[0]);
+    if (spec) out.push({ spec: spec[2], line: code.slice(0, m.index).split("\n").length });
+  }
+  return out;
+}
+
+/** Whether `text` imports the SQL shim by a relative specifier. */
+const importsShim = (text) => importSpecifiers(text).some((s) => SHIM_SPECIFIER.test(s.spec));
+
+/**
+ * The gaps between a shim-importing entry file and running under Bun, as
+ * strings: `no-runtime-import` / `runtime-not-first` (the entry, given that it
+ * or a dependency uses `Deno`), `deno-member:<m>@<line>` for a member the
+ * polyfill does not provide, `specifier:<s>@<line>` for one Bun does not
+ * resolve. `deps` are the texts of the files the entry imports, relatively and
+ * transitively; their own gaps come back prefixed with their index (`dep0:`).
+ * Pure over texts so the probes below need no files.
+ */
+function shimRuntimeGapsIn(entry, deps = []) {
+  const gaps = [];
+  let usesDeno = false;
+  [entry, ...deps].forEach((text, i) => {
+    const at = i === 0 ? "" : `dep${i - 1}:`;
+    const code = blanked(text, true);
+    for (const m of code.matchAll(DENO_MEMBER)) {
+      usesDeno = true;
+      // `globalThis.Deno.x` reads as `Deno.x`; a bare `Deno` (aliased, bracketed, destructured) is a use the rule cannot follow, so it is refused as one.
+      const member = m[1] === undefined ? "<bare>" : m[2] ? `${m[1]}.${m[2]}` : m[1];
+      const line = text.slice(0, m.index).split("\n").length;
+      if (!DENO_PROVIDED.has(member)) gaps.push(`${at}deno-member:${member}@${line}`);
+    }
+    for (const s of importSpecifiers(text)) if (NOT_ON_BUN.test(s.spec)) gaps.push(`${at}specifier:${s.spec}@${s.line}`);
+    for (const m of code.matchAll(DYNAMIC_IMPORT)) {
+      // The specifier's text is blanked in `code`; read it from the original at the same offset.
+      const spec = text.slice(m.index + m[0].length - m[2].length - 1, m.index + m[0].length - 1);
+      if (NOT_ON_BUN.test(spec)) gaps.push(`${at}specifier:${spec}@${text.slice(0, m.index).split("\n").length}`);
+    }
+  });
+  if (usesDeno) {
+    const specs = importSpecifiers(entry);
+    const runtime = specs.findIndex((s) => RUNTIME_SPECIFIER.test(s.spec));
+    if (runtime < 0) gaps.push("no-runtime-import");
+    else if (runtime > 0) gaps.push(`runtime-not-first@${specs[runtime].line}`);
+  }
+  return gaps;
+}
+
+const SHIM_RUNTIME_PROBES = [
+  // The state fix 13 left the files in: the shim, a Deno global, no runtime line.
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nconst u = Deno.env.get("SUPABASE_URL");\nDeno.serve(() => new Response("ok"));\n', "no-runtime-import"],
+  // The runtime line present, but after another import whose module body may read Deno.env.
+  ['import { Hono } from "hono";\nimport "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "runtime-not-first@2"],
+  // A member the polyfill does not provide, in three spellings.
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst t = await Deno.readTextFile("x");\n', "deno-member:readTextFile@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nif (!ok) Deno.exit(1);\n', "deno-member:exit@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst all = Deno.env.toObject();\n', "deno-member:env.toObject@3"],
+  // `Deno` reached around the member syntax: an alias, a bracket, a destructure — each a use the rule cannot follow.
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst D = Deno;\nD.exit(1);\n', "deno-member:<bare>@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst k = Deno["env"].get("X");\n', "deno-member:<bare>@3"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst { readTextFile } = Deno;\n', "deno-member:<bare>@3"],
+  // A dynamic import of a specifier Bun does not resolve.
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst p = await import("jsr:@std/path");\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@std/path@3"],
+  // Specifiers Bun does not resolve: Deno's registries and a URL, in an import and an export-from.
+  ['import "../../compat/deno-on-bun.ts";\nimport "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:jsr:@supabase/functions-js/edge-runtime.d.ts@2"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { Hono } from "npm:hono@4.9.2";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:npm:hono@4.9.2@2"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nexport {\n  Pool,\n} from "https://deno.land/x/postgres@v0.17.0/mod.ts";\nDeno.serve(() => new Response("ok"));\n', "specifier:https://deno.land/x/postgres@v0.17.0/mod.ts@3"],
+];
+/** [entry, dep, gap]: the transitive cases — the entry itself reads no Deno member. */
+const SHIM_RUNTIME_DEP_PROBES = [
+  ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\nexport const c = createClient(key(), "");\n', 'export const key = () => Deno.env.get("SUPABASE_URL") ?? "";\n', "no-runtime-import"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { key } from "./_shared/helpers.ts";\n', 'export const key = () => Deno.args[0];\n', "dep0:deno-member:args@1"],
+  ['import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', 'import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n', "dep0:specifier:npm:pg@8@1"],
+];
+const SHIM_RUNTIME_NON_PROBES = [
+  // The state the codemod leaves: the runtime line first, node: fine, both members.
+  '// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.\nimport "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nimport { createHash } from "node:crypto";\nconst u = Deno.env.get("SUPABASE_URL")!;\nDeno.serve(app.fetch);\n',
+  // The runtime line in the jsr: types import's place, the original recorded in a comment.
+  'import "../../compat/deno-on-bun.ts"; // ob1-original-types: jsr:@supabase/functions-js/edge-runtime.d.ts\n\nimport { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nDeno.serve(app.fetch);\n',
+  // A Node script on the shim: no Deno global, so no runtime line owed.
+  '#!/usr/bin/env node\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst url = process.env.SUPABASE_URL;\n',
+  // Members and specifiers in comments and strings are prose.
+  'import "../../compat/deno-on-bun.ts";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\n// All env reads use Deno.env.get(); never Deno.readTextFile — see "jsr:@supabase/functions-js".\nconst note = "Deno.exit is not provided; import \\"npm:x\\" fails";\n/* Deno.args too */\nDeno.serve(app.fetch);\n',
+  // A multi-line import after the runtime line; `Deno.serve({ port }, handler)`; `globalThis.Deno.env.get`; a dynamic import Bun resolves.
+  'import "../../compat/deno-on-bun.ts";\nimport {\n  createClient,\n  type SupabaseClient,\n} from "../../compat/supabase-sql/index.ts";\nconst u = globalThis.Deno.env.get("X");\nconst m = await import("./tools.ts");\nDeno.serve({ port: 8000 }, (req) => new Response("ok"));\n',
+  // Not on the shim at all: whatever it does with Deno is a Deno deployment's business.
+  'import "jsr:@supabase/functions-js/edge-runtime.d.ts";\nimport { createClient } from "@supabase/supabase-js";\nconst t = await Deno.readTextFile("x");\nDeno.serve(app.fetch);\n',
+];
+
+function checkShimRuntime() {
+  const SELF = "scripts/check-fork-consistency.mjs";
+  for (const [probe, gap] of SHIM_RUNTIME_PROBES) {
+    const got = shimRuntimeGapsIn(probe);
+    if (got.length !== 1 || got[0] !== gap) fail(SELF, `shim-runtime rule no longer reports exactly "${gap}" for its probe (reported ${JSON.stringify(got)}): ${JSON.stringify(probe)}`);
+  }
+  for (const [entry, dep, gap] of SHIM_RUNTIME_DEP_PROBES) {
+    const got = shimRuntimeGapsIn(entry, [dep]);
+    if (got.length !== 1 || got[0] !== gap) fail(SELF, `shim-runtime rule no longer reports exactly "${gap}" through a dependency (reported ${JSON.stringify(got)}): ${JSON.stringify(entry)} + ${JSON.stringify(dep)}`);
+  }
+  for (const text of SHIM_RUNTIME_NON_PROBES) {
+    const got = importsShim(text) ? shimRuntimeGapsIn(text) : [];
+    if (got.length > 0) fail(SELF, `shim-runtime rule reports ${JSON.stringify(got)} on text it must not: ${JSON.stringify(text)}`);
+  }
+
+  const WHY = "imports compat/supabase-sql, which imports `bun`, and uses a Deno global";
+  const code = textFilesUnder(SCANNED_ROOTS).filter((f) => /\.(ts|js|mjs)$/.test(f) && !f.includes(`${sep}node_modules${sep}`));
+  for (const file of code) {
+    const text = readFileSync(file, "utf8");
+    if (!importsShim(text)) continue;
+    const rel = relOf(file);
+    // The files it evaluates: relative imports, transitively, that exist in the tree — not the shim or the polyfill themselves.
+    const deps = [];
+    const seen = new Set([file]);
+    const queue = [file];
+    while (queue.length) {
+      const from = queue.shift();
+      const src = from === file ? text : readFileSync(from, "utf8");
+      for (const { spec } of importSpecifiers(src)) {
+        if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+        const p = join(dirname(from), spec);
+        if (seen.has(p) || !existsSync(p) || !statSync(p).isFile() || relOf(p).startsWith("compat/")) continue;
+        seen.add(p); queue.push(p); deps.push(p);
+      }
+    }
+    for (const gap of shimRuntimeGapsIn(text, deps.map((d) => readFileSync(d, "utf8")))) {
+      // The gap strings, above; a bare `Deno` reports as `<bare>`.
+      const dep = /^dep(\d+):/.exec(gap);
+      const where = dep ? relOf(deps[Number(dep[1])]) : rel;
+      const g = dep ? gap.slice(dep[0].length) : gap;
+      const line = /@(\d+)$/.exec(g)?.[1];
+      const at = line ? `${where}:${line}` : where;
+      if (g === "no-runtime-import") fail(rel, `${WHY} (itself or through ${deps.length ? "a file it imports" : "its own text"}) but does not import compat/deno-on-bun.ts — under Bun \`Deno\` is undefined at the first read, under Deno the shim's \`bun\` import fails, so the file runs nowhere; \`bun scripts/migrate-to-sql-shim.mjs --apply --all\` adds the line as the first import (SMD-1480, FORK.md change 74)`);
+      else if (g.startsWith("runtime-not-first")) fail(at, `imports compat/deno-on-bun.ts after another import — a module evaluated before it may read \`Deno.env\` in its body and throw at startup; make it the first import statement (SMD-1480, FORK.md change 74)`);
+      else if (g.startsWith("deno-member:")) {
+        const member = g.slice("deno-member:".length).replace(/@\d+$/, "");
+        fail(at, `uses ${member === "<bare>" ? "\`Deno\` other than as \`Deno.env.get\` or \`Deno.serve\` (aliased, bracketed or destructured — a use this rule cannot follow)" : `\`Deno.${member}\``} in a file that runs under Bun through compat/deno-on-bun.ts, which provides only \`Deno.env.get\` and \`Deno.serve\` — the call fails under Bun; use the Node API Bun and Deno both have (node:fs, process.argv, process.exit), or extend the polyfill deliberately and say so (SMD-1480, FORK.md change 74)`);
+      }
+      else if (g.startsWith("specifier:")) fail(at, `imports \`${g.slice("specifier:".length).replace(/@\d+$/, "")}\` in a file that runs under Bun, which does not resolve jsr:, npm: or URL specifiers — a bare package name resolves from extensions/node_modules (NODE_PATH, as the README says); a type-only jsr: import is what the codemod swaps for the polyfill line (SMD-1480, FORK.md change 74)`);
+      else fail(at, `shim-runtime gap ${g}`);
+    }
+  }
+}
+
 // ── Run ──────────────────────────────────────────────────────────────────────
 
 const dirs = contributionDirs();
@@ -1303,6 +1671,7 @@ checkShellHazards(dirs);
 checkCoreFunctions();
 checkCredentialCompares();
 checkThoughtWritesAround();
+checkShimRuntime();
 
 /**
  * The embedding default is stated in three places that must agree, and two of them

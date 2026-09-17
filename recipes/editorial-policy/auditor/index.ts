@@ -26,11 +26,17 @@
 //
 // Schedule: see schedule.sql in this recipe folder.
 
+// ob1-fork (SMD-1524): the audit report is stored through the database's upsert_thought,
+// which writes the content fingerprint (003) and the audit actor (008) with the text; a
+// raw insert left the fingerprint NULL and the row invisible to dedup. The report carries
+// no vector, so the 2-argument form is resolved. FORK.md change 71; extensions/test-writes.ts
+// drives it against Postgres, and scripts/check-fork-consistency.mjs check 10 holds it.
 // ob1-fork (SMD-1455): access keys go through ../_shared/auth.ts — the core server's
 // server-portable/auth.ts, copied so Supabase bundles it with the function — named,
 // scoped, hashed entries in AUDITOR_ACCESS_KEYS (the older single AUDITOR_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key may only dry_run. FORK.md
 // change 67; extensions/test-auth.ts exercises it.
+import "../../../compat/deno-on-bun.ts";
 import { createClient } from "../../../compat/supabase-sql/index.ts";
 import { authenticateRequest, canWrite } from "../_shared/auth.ts";
 
@@ -455,12 +461,22 @@ function buildAuditContent(result: AuditResult): string {
   return lines.join("\n").trim();
 }
 
-async function storeAuditReport(result: AuditResult): Promise<string> {
+async function storeAuditReport(result: AuditResult, actor: { name: string }): Promise<string> {
   const content = buildAuditContent(result);
-  const { data, error } = await supabase
-    .from("thoughts")
-    .insert({
-      content,
+  // Through the database's upsert_thought (FORK.md change 71): the content
+  // fingerprint is written with the text, and the key's name reaches 008's
+  // audit row as the actor (the function records one only when the caller
+  // names it) — the raw insert this replaced left the fingerprint NULL, and
+  // 016's trigger does not fill it.
+  // No vector: the report is a record, not a search target, so the 2-argument
+  // form is resolved and the row carries no label (a re-embed pass may give it
+  // one). The window's timestamps are in the text, so two reports are two rows;
+  // an identical text would be merged into the earlier row — the 2-argument
+  // form answers `{id, fingerprint}` only, no `existed`, and this needs neither.
+  const { data, error } = await supabase.rpc("upsert_thought", {
+    p_content: content,
+    p_payload: {
+      actor,
       metadata: {
         type: "audit_report",
         source: "auditor-function",
@@ -477,13 +493,13 @@ async function storeAuditReport(result: AuditResult): Promise<string> {
         minor_count: result.findings.filter((f) => f.severity === "minor").length,
         findings: result.findings, // structured, queryable
       },
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`audit_report insert failed: ${error?.message ?? "unknown"}`);
+    },
+  });
+  const id = (data as { id?: unknown } | null)?.id;
+  if (error || typeof id !== "string") {
+    throw new Error(`audit_report capture failed: ${error?.message ?? "upsert_thought returned no id"}`);
   }
-  return data.id as string;
+  return id;
 }
 
 // ── Slack ────────────────────────────────────────────────────────────────
@@ -555,7 +571,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           "No synthesizable thoughts in window. Audit skipped LLM call; storing empty report for time-series continuity (R8.3).",
       };
       let storedId: string | null = null;
-      if (!dryRun) storedId = await storeAuditReport(baselineResult);
+      if (!dryRun) storedId = await storeAuditReport(baselineResult, { name: principal.name });
       return new Response(
         JSON.stringify({
           ok: true,
@@ -589,7 +605,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     let storedId: string | null = null;
     if (!dryRun) {
-      storedId = await storeAuditReport(result);
+      storedId = await storeAuditReport(result, { name: principal.name });
     }
 
     const criticalCount = findings.filter((f) => f.severity === "critical").length;

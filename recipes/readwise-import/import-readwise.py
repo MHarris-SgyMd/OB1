@@ -30,6 +30,7 @@ Requires environment variables (or a .env file loaded by your shell):
 """
 
 import argparse
+import json
 import os
 import signal
 import sys
@@ -52,7 +53,6 @@ except ImportError:
 
 try:
     from supabase import create_client
-    from postgrest.exceptions import APIError
 except ImportError:
     print("Missing dependency: supabase")
     print("Run: pip install -r requirements.txt")
@@ -65,10 +65,9 @@ READWISE_BASE = "https://readwise.io/api/v2"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 EMBEDDING_MODEL = "openai/text-embedding-3-small"
 EMBEDDING_BATCH_SIZE = 100           # OpenRouter API calls; throughput-bound, safe to be large
-INSERT_BATCH_SIZE = 25               # Supabase inserts; bound by pgvector index maintenance cost
+INSERT_BATCH_SIZE = 25               # Rows per store_thoughts() call; each row is one upsert_thought call
 READWISE_PAGE_SIZE = 1000            # Export endpoint max
 PROGRESS_EVERY = 500                 # Print a heartbeat every N highlights
-STATEMENT_TIMEOUT_CODE = "57014"     # Postgres: canceling statement due to statement timeout
 
 
 # -- Date parsing ------------------------------------------------------------
@@ -179,40 +178,106 @@ def upsert_book(supabase, book: dict, set_highlight_count: bool) -> None:
     supabase.table("readwise_books").upsert(row).execute()
 
 
-def insert_thoughts(supabase, thoughts: list[dict]) -> None:
-    """Insert thoughts, splitting the batch recursively on statement timeout.
+def store_thoughts(supabase, thoughts: list[dict]) -> int:
+    """Store each highlight through the database's upsert_thought; return the fresh rows.
 
-    Supabase's default statement_timeout for the authenticated role is ~8s.
-    Inserting many 1536-dim vectors at once occasionally triggers pgvector
-    index maintenance that blows past that. Splitting the batch in half on
-    timeout and retrying is almost always enough to get under the limit.
+    ob1-fork (SMD-1524, FORK.md change 71). The 3-argument form writes the
+    text, its content fingerprint (003), the vector and the vector's model
+    label (021) in one statement. The raw batch INSERT this replaced left the fingerprint NULL — 016's trigger does
+    not fill it, so the row was invisible to dedup until 023's backfill — and
+    the label NULL, a vector of unknown model to the re-embed pass.
+
+    One row per call: the batch bisection the raw insert needed for
+    statement_timeout and for a duplicate aborting the whole batch goes with
+    it. A text Open Brain already holds is not a unique violation but the
+    function's `existed` — its metadata is merged, its vector replaced, and
+    the highlight is counted as already present. The enhanced-thoughts
+    columns the function does not know (source_type, type — the same for
+    every highlight) follow by one update per column per batch that carries
+    neither content nor vector, over every row of the batch WHERE that column
+    IS NULL: the fresh rows take both, a row whose earlier run was interrupted
+    between the function and these updates takes them now (already_imported()
+    filters on source_type, so it re-sends such a row and the function answers
+    `existed`), and a column already set — a hand-set type on a row another
+    path captured first — is left as it is.
+
+    No actor is named in the payload: this is a script run by hand, and 008
+    keeps a NULL actor for a write made without an access key.
     """
-    if not thoughts:
-        return
+    ids: list[str] = []
+    fresh = 0
+    loop_error: Optional[BaseException] = None
     try:
-        supabase.table("thoughts").insert(thoughts).execute()
-    except APIError as e:
-        code = getattr(e, "code", None)
-        # Two conditions are handled by splitting the batch and retrying:
-        #  - 57014 statement timeout: pgvector index maintenance on a large
-        #    batch of 1536-dim vectors blew past the ~8s statement_timeout.
-        #  - 23505 unique violation: Open Brain guards content_fingerprint
-        #    with a partial UNIQUE index (idx_thoughts_fingerprint, populated
-        #    by a BEFORE INSERT trigger). A multi-row INSERT is atomic, so one
-        #    duplicate aborts the whole batch. That partial index can't be
-        #    targeted by PostgREST's on_conflict=, so instead of ON CONFLICT we
-        #    bisect to isolate the colliding row and skip just that one below.
-        if code in (STATEMENT_TIMEOUT_CODE, "23505") and len(thoughts) > 1:
-            mid = len(thoughts) // 2
-            insert_thoughts(supabase, thoughts[:mid])
-            insert_thoughts(supabase, thoughts[mid:])
-            return
-        if code == "23505":
-            # A single row that still collides is a content-duplicate Open
-            # Brain already holds; skipping it is the intended dedupe-by-meaning
-            # behaviour and keeps the backfill idempotent.
-            return
+        for thought in thoughts:
+            result = (
+                supabase.rpc(
+                    "upsert_thought",
+                    {
+                        "p_content": thought["content"],
+                        "p_payload": {
+                            "metadata": thought["metadata"],
+                            "embedding_model": EMBEDDING_MODEL,
+                        },
+                        "p_embedding": thought["embedding"],
+                    },
+                )
+                .execute()
+            )
+            data = _rpc_object(result.data)
+            if not data.get("id"):
+                # The function always answers an id; anything else is a client or
+                # schema fault (an older brain without the 3-argument form, a
+                # client version wrapping the reply another way) — not a row to skip.
+                raise RuntimeError(
+                    f"upsert_thought returned no id for highlight "
+                    f"{thought['metadata'].get('readwise_highlight_id')}: {result.data!r}"
+                )
+            ids.append(str(data["id"]))
+            if not data.get("existed"):
+                fresh += 1
+    except BaseException as e:
+        loop_error = e
         raise
+    finally:
+        # The rows stored so far take their columns whether or not the batch
+        # finished — a refused reply or an interrupt after the function's write
+        # must not leave them half-shaped (the second review pass). If this
+        # update fails while the loop's own error is propagating, that error
+        # stays the one reported; the rows take their columns on the next run
+        # (the third review pass).
+        if ids:
+            try:
+                for column in ("source_type", "type"):
+                    supabase.table("thoughts").update(
+                        {column: thoughts[0][column]}
+                    ).in_("id", ids).is_(column, "null").execute()
+            except Exception as sidecar_error:
+                if loop_error is None:
+                    raise
+                print(
+                    f"warning: source_type/type not written for {len(ids)} row(s) "
+                    f"({sidecar_error}); the next run completes them",
+                    file=sys.stderr,
+                )
+    return fresh
+
+
+def _rpc_object(data) -> dict:
+    """The JSON object a scalar-jsonb function returns, however the client wraps it.
+
+    postgrest-py hands back the parsed body — a dict for `RETURNS jsonb` — but
+    has wrapped scalar replies in a one-element list, and a JSON string is what
+    an older client gives a jsonb it did not decode. Unwrap the shapes that are
+    the object; anything else is {} and the caller refuses it.
+    """
+    if isinstance(data, list) and len(data) == 1:
+        data = data[0]
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError:
+            return {}
+    return data if isinstance(data, dict) else {}
 
 
 def already_imported(supabase, highlight_ids: list[int]) -> set[int]:
@@ -516,14 +581,16 @@ def main() -> None:
                     embeddings = embed_batch(openrouter_key, texts)
                     for thought, emb in zip(thoughts, embeddings):
                         thought["embedding"] = emb
-                    # Split into smaller insert batches so each Supabase
-                    # request stays comfortably under statement_timeout.
+                    fresh = 0
                     for j in range(0, len(thoughts), INSERT_BATCH_SIZE):
-                        insert_thoughts(
+                        fresh += store_thoughts(
                             supabase, thoughts[j : j + INSERT_BATCH_SIZE]
                         )
-
-                total_inserted += len(batch)
+                    # A highlight whose text the brain already held is present, not inserted.
+                    total_inserted += fresh
+                    total_skipped_existing += len(batch) - fresh
+                else:
+                    total_inserted += len(batch)
                 total_highlights += len(batch)
 
                 if total_highlights - last_progress >= PROGRESS_EVERY:

@@ -9,6 +9,7 @@
 // scoped, hashed entries in MCP_ACCESS_KEYS (the older single MCP_ACCESS_KEY still
 // works, compared by digest), and a read-scoped key is never given the tools
 // that write. FORK.md change 64; extensions/test-auth.ts exercises it.
+import "../../compat/deno-on-bun.ts";
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";

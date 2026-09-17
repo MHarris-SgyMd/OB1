@@ -14,12 +14,21 @@
  */
 
 import { SQL } from "bun";
-import { alignVectorSearchPath, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
+import { alignVectorSearchPath, DEFAULT_CHUNK_CONTEXT, DEFAULT_TRGM_INDEX, HNSW_BOUNDS, MATCH_THOUGHTS_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SUPERSEDED_SIGNATURES, UPDATE_THOUGHT_SIGNATURE, migrationValues, quoteIdent, substituteMigration } from "./config.mjs";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "migrations");
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS = join(HERE, "migrations");
+
+/** bench-hnsw.ts's kept-corpus marker table (SMD-1493): the bench writes and reads it by this name, the reuse suite plants and drops its own, and `dropSchema` refuses a database holding one. */
+export const BENCH_MARKER = "bench_hnsw_corpus";
+/** Whether the database holds the marker table — the one probe the bench, the reuse suite and `dropSchema` share. */
+export async function hasKeptCorpus(sql: SQL): Promise<boolean> {
+  const [{ has }] = await sql`SELECT to_regclass(${BENCH_MARKER}) IS NOT NULL AS has`;
+  return Boolean(has);
+}
 
 /**
  * Every table the schema owns, in drop order — dependents first. `thoughts` is
@@ -39,6 +48,10 @@ const TABLES = [
   "ob1_agents",
   "schema_migrations",
   "ob1_config",
+  // bench-hnsw.ts's kept-corpus marker (SMD-1493): dropped with the schema it
+  // vouches for, so a suite run in a kept database cannot leave a marker over
+  // rows that are gone.
+  BENCH_MARKER,
 ];
 
 /**
@@ -133,11 +146,17 @@ export type SchemaOptions = {
  * by name.
  */
 export function substitute(sql: string, opts: SchemaOptions): string {
+  // chunkContext pinned to the default as trgm is: 013 records it into
+  // ob1_config, and a fixture applied bare here and through migrate.ts (whose
+  // shell migratorEnv strips) must not disagree by which helper applied it.
   return substituteMigration(
     sql,
-    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, backfillLimit: opts.backfillLimit ?? null, routeEstimateMinPages: opts.routeEstimateMinPages })
+    migrationValues({ dim: opts.dim, model: opts.model, trgm: opts.trgm ?? DEFAULT_TRGM_INDEX, chunkContext: DEFAULT_CHUNK_CONTEXT, backfillLimit: opts.backfillLimit ?? null, routeEstimateMinPages: opts.routeEstimateMinPages })
   );
 }
+
+/** The deliberate overrides of the loopback rule below, named once so a suite that spawns another checked script can pass them on. */
+export const REMOTE_DB_FLAGS = ["OB1_ALLOW_REMOTE_DB", "OB1_EVAL_ALLOW_REMOTE_DB"] as const;
 
 /**
  * Refuse to drop a database that is not obviously a throwaway.
@@ -168,7 +187,7 @@ export function substitute(sql: string, opts: SchemaOptions): string {
  * honoured too so a shell profile that set it keeps working.
  */
 export function assertThrowawayDatabase(url: string): void {
-  if (process.env.OB1_ALLOW_REMOTE_DB === "1" || process.env.OB1_EVAL_ALLOW_REMOTE_DB === "1") return;
+  if (REMOTE_DB_FLAGS.some((flag) => process.env[flag] === "1")) return;
   let host: string | null = null;
   try {
     host = new URL(url).hostname.toLowerCase();
@@ -200,6 +219,13 @@ export async function dropSchema(url: string): Promise<void> {
   assertThrowawayDatabase(url);
   const admin = new SQL({ url, max: 1 });
   try {
+    // A kept bench corpus (SMD-1493) is thirty minutes of build behind a
+    // marker; a suite run under the same OB1_PG_KEEP name would drop it here
+    // with no word. The bench itself never reaches this with a marker present
+    // (it reuses or refuses first), so a marker here means another caller.
+    if ((await hasKeptCorpus(admin)) && process.env.OB1_DROP_KEPT_CORPUS !== "1") {
+      throw new Error(`this database holds a kept bench-hnsw corpus (${BENCH_MARKER}); a schema reset would drop it. Run this suite without OB1_PG_KEEP, or set OB1_DROP_KEPT_CORPUS=1 to drop the corpus deliberately.`);
+    }
     for (const t of TABLES) await admin.unsafe(`DROP TABLE IF EXISTS ${t} CASCADE`);
     for (const f of FUNCTIONS) await admin.unsafe(`DROP FUNCTION IF EXISTS ${f}`);
     // 014 seeds two database-level settings. They are not schema, so a fresh
@@ -237,10 +263,7 @@ export async function applyMigrations(url: string, opts: SchemaOptions): Promise
     // schema so 001's bare `vector({{EMBEDDING_DIM}})` resolves. A no-op on the
     // normal container, where pgvector installs into public.
     await alignVectorSearchPath(admin);
-    const files = readdirSync(MIGRATIONS)
-      .filter((f) => f.endsWith(".sql"))
-      .filter((f) => opts.only?.(f) ?? true)
-      .sort();
+    const files = migrationFiles().filter((f) => opts.only?.(f) ?? true);
     for (const f of files) {
       await admin.unsafe(substitute(readFileSync(join(MIGRATIONS, f), "utf8"), opts));
     }
@@ -382,9 +405,86 @@ export function neverAnswers(): Promise<never> {
  * a few builds that object itself.
  */
 export async function runScript(cmd: string[], opts: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn(cmd, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
+  // A child given its own environment gets exactly that: Bun loads the cwd's
+  // .env into a child for every variable the passed environment lacks — which
+  // after a fixture's strip is every OB1_* name, and db/.env is where a
+  // migrator-only flag is documented to live — so `--no-env-file` rides on
+  // every `bun` spawn that passes an env (review passes, reproduced) — a
+  // spawn whose command IS bun, by basename, so a binary spelled by path
+  // gets the flag too; a spawn fronted by another program spells it itself.
+  const argv = opts.env && basename(cmd[0]) === "bun" ? [cmd[0], "--no-env-file", ...cmd.slice(1)] : cmd;
+  const p = Bun.spawn(argv, { ...(opts.env ? { env: opts.env } : {}), stdout: "pipe", stderr: "pipe", cwd: opts.cwd });
   const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
   return { code: await p.exited, out };
+}
+
+/** This process's environment with every `OB1_*` variable removed — the allowlist `migratorEnv` and test-bench-reuse.ts build their spawns' shells on. */
+export function shellWithoutOb1(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("OB1_")) env[k] = v;
+  return env;
+}
+
+/**
+ * The migrator's shell for a fixture: this process's environment with every
+ * `OB1_*` variable REMOVED — an allowlist, so a flag the shell happens to
+ * carry (a truncation request, a backfill batch, a chunk-context choice 013
+ * records into ob1_config) cannot reach the spawned migrator, today's flag or
+ * a future one — then the fixture's width, model and trigram choice; the bare
+ * apply (`substitute`) pins the same values from the fixture. For running
+ * `migrate.ts` through `runMigrator` where a suite or bench wants the ledger
+ * the runner keeps — test-upgrade's incremental cases, bench-hnsw.ts's kept
+ * corpus — rather than `applyMigrations`' bare apply. (The first draft was a
+ * denylist of three names, one of them read by nothing; review pass.)
+ */
+export function migratorEnv(url: string, opts: Pick<SchemaOptions, "dim" | "model" | "trgm">): Record<string, string> {
+  const env = shellWithoutOb1();
+  env.DATABASE_URL = url;
+  env.OB1_EMBEDDING_DIM = String(opts.dim);
+  env.OB1_EMBEDDING_MODEL = opts.model;
+  env.OB1_TRGM_INDEX = (opts.trgm ?? DEFAULT_TRGM_INDEX) ? "on" : "off";
+  return env;
+}
+
+/**
+ * `migrate.ts` against a URL, from a shell `migratorEnv` built, with any of its
+ * flags — for bench-hnsw's kept corpus and test-upgrade's plain runs; the other
+ * suites still spell the spawn for themselves. Exit code and combined output,
+ * as runScript gives them.
+ */
+export function runMigrator(url: string, env: Record<string, string> | undefined, ...flags: string[]): Promise<{ code: number; out: string }> {
+  return runScript(["bun", join(HERE, "migrate.ts"), "--url", url, ...flags], { ...(env ? { env } : {}), cwd: HERE });
+}
+
+/** The migration files, sorted — the one listing for the bare apply, the ledger comparison and the suites that count them. */
+export function migrationFiles(): string[] {
+  return readdirSync(MIGRATIONS)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+}
+
+/**
+ * The migrator's ledger against the tree: `null` where the database has no
+ * ledger (its schema was applied bare, or is not this schema), else the names
+ * recorded as applied that no file under db/migrations carries. migrate.ts
+ * applies what is pending and refuses a file edited since it was recorded, but
+ * it never looks for a recorded name it has no file for — a database migrated
+ * from another branch's tree looks fully applied to it. A bench reusing a kept
+ * corpus asks this first (SMD-1493). A stand-in: SMD-1504 moves the check into
+ * migrate.ts, after which this goes.
+ */
+export async function ledgerStrangers(sql: SQL): Promise<string[] | null> {
+  const names = await ledgerNames(sql);
+  if (names === null) return null;
+  const files = new Set(migrationFiles());
+  return names.filter((name) => !files.has(name));
+}
+
+/** The names the migrator's ledger records, or `null` where there is no ledger. */
+export async function ledgerNames(sql: SQL): Promise<string[] | null> {
+  const [{ has }] = await sql`SELECT to_regclass('schema_migrations') IS NOT NULL AS has`;
+  if (!has) return null;
+  return (await sql`SELECT name FROM schema_migrations ORDER BY name`).map((r: { name: string }) => r.name);
 }
 
 export function requireDatabaseUrl(script: string): string {

@@ -50,7 +50,7 @@ A complete meal planning system with recipes, weekly meal plans, and auto-genera
 
 - Working Open Brain setup
 - Extensions 1-3 recommended (Extension 3's family_members table is referenced for cross-extension integration)
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
 - **Required reading:** [Row Level Security](../../primitives/rls/) primitive
 - **Required reading:** [Shared MCP Server](../../primitives/shared-mcp/) primitive
 
@@ -65,7 +65,7 @@ MEAL PLANNING -- CREDENTIAL TRACKER
 --------------------------------------
 
 SUPABASE (from your Open Brain setup)
-  Project URL:           ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   Secret key:            ____________
   Project ref:           ____________
 
@@ -94,7 +94,7 @@ NOTE: This extension uses TWO Edge Functions:
 
 ### 1. Create the Database Schema
 
-Run the SQL in `schema.sql` against your Supabase database. This creates three RLS-enabled tables:
+Run the SQL in `schema.sql` against your Open Brain database, as the role the servers will connect with. Its row-level-security policies call Supabase's `auth.uid()` and `auth.jwt()`, which a plain Postgres does not have, so give it both first (the servers connect as one role and scope rows by `DEFAULT_USER_ID` themselves; the table owner is not subject to the policies) — **on a Supabase database skip this first command**, which has both and whose row-level security would break if they were replaced (the plain `CREATE` refuses with "already exists"): `psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth; CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid'; CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"` and then `psql "$DATABASE_URL" -f extensions/meal-planning/schema.sql` — or paste `schema.sql` alone into the Supabase SQL Editor, if that is where it lives. This creates three RLS-enabled tables:
 
 ```bash
 # Using Supabase SQL Editor (recommended)
@@ -116,24 +116,25 @@ uuidgen | tr '[:upper:]' '[:lower:]'
 # Or use any UUID generator — the value just needs to be unique to you
 ```
 
-Set it as an environment variable for your Edge Function:
-
-```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
-```
+Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 > If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
 
-### 3. Deploy the Primary MCP Server
+### 3. Run the Primary MCP Server
 
-> **Not deployable as it stands.** Both of this extension's servers import the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`.
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
+```bash
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
+DEFAULT_USER_ID='your-generated-uuid-here' \
+PORT=8787 bun extensions/meal-planning/index.ts
+```
 
-| Setting | Value |
-|---------|-------|
-| Function name | `meal-planning-mcp` |
-| Download path | `extensions/meal-planning` |
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+
+> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all six against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` beside `ingredients` into `JSONB` in one insert, the tag and ingredient filters, the recipe embedded on each meal (`recipes:recipe_id (…)`), the shopping list aggregated from it, and `update_recipe`'s error path carrying the database's message (FORK.md change 77, SMD-1588; change 74's review had found two of the six failing on the shim).
 
 ### 4. Connect to Your AI
 
@@ -186,18 +187,19 @@ WHERE email = 'spouse@example.com';
 
 For this guide, we'll use Option B (shared service account).
 
-### 2. Deploy the Shared Edge Function
+### 2. Run the Shared Server
 
-> Not deployable as it stands either — see the note above the primary server's table (SMD-1480).
+The shared server runs under Bun exactly as the primary one does (Step 3 above), from `shared-server.ts` instead of `index.ts`, with its own keys — `MCP_HOUSEHOLD_ACCESS_KEYS` (the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works) rather than `MCP_ACCESS_KEYS`, so a household member's key never opens the primary server — and on a port of its own:
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide with these differences:
+```bash
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_HOUSEHOLD_ACCESS_KEYS='spouse:write:paste-the-hash-here' \
+PORT=8788 bun extensions/meal-planning/shared-server.ts
+```
 
-| Setting | Value |
-|---------|-------|
-| Function name | `meal-planning-shared-mcp` |
-| Download path | `extensions/meal-planning` |
-| Server file | `shared-server.ts` (not `index.ts`) |
-| Access key secret name | `MCP_HOUSEHOLD_ACCESS_KEYS` (not `MCP_ACCESS_KEYS`; the older single `MCP_HOUSEHOLD_ACCESS_KEY` still works) |
+`SUPABASE_HOUSEHOLD_KEY`, the restricted Supabase key the Edge Function version read, may be left unset: with the shim the credentials live in the connection string, so give this server a `SUPABASE_URL` whose Postgres role has only the household member's privileges if you want the database to hold that line too. Its **MCP Connection URL** is `http://your-host:8788/mcp?key=the-household-key`.
+
+> **Every tool of the shared server runs on the fork.** `extensions/test-tools.ts` drives all four in CI on the rows the primary server's tools planted — the embedded recipe on `view_meal_plan`, the tag filter on `view_recipes`, `view_shopping_list`'s error path carrying the database's message (FORK.md change 77, SMD-1588).
 
 Mint the household member's key with scope `read` unless they should check items off the shopping list — `mark_item_purchased` is the shared server's one tool that writes, and a read-scoped key is not given it.
 

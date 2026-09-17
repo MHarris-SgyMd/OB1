@@ -32,7 +32,7 @@ A professional contact management system with interaction logging, opportunity t
 
 - Working Open Brain setup
 - Extensions 1-4 recommended (RLS concepts from Extension 4 are required knowledge)
-- Supabase CLI installed and linked to your project
+- [Bun](https://bun.sh) 1.4+ and a Postgres carrying the Open Brain schema ([`SETUP.md`](../../SETUP.md)) — this server runs under Bun, not as a Supabase Edge Function (FORK.md change 74)
 - **Required reading:** [Row Level Security](../../primitives/rls/) primitive
 
 ## Credential Tracker
@@ -47,7 +47,7 @@ PROFESSIONAL CRM -- CREDENTIAL TRACKER
 
 SUPABASE (from your Open Brain setup)
   Project ref:           ____________
-  Project URL:           ____________
+  Postgres URL:          ____________  (SUPABASE_URL — the shim's name for it)
   Secret key:            ____________
 
 MCP SERVER (you'll create these)
@@ -63,14 +63,16 @@ MCP SERVER (you'll create these)
 
 ### 1. Set Up the Database Schema
 
-Run the SQL in `schema.sql` in your Supabase SQL Editor:
+Run the SQL in `schema.sql` against your Open Brain database, as the role the server will connect with. Its row-level-security policies call Supabase's `auth.uid()`, which a plain Postgres does not have, so give it that function first — the server connects as one role and scopes rows by `DEFAULT_USER_ID` itself, and the table owner is not subject to the policies. **On a Supabase database skip the first command**: it has both functions, and replacing them would break row-level security across the project (the plain `CREATE` below refuses with "already exists" rather than replacing):
 
 ```bash
-# Navigate to your Supabase project SQL editor
-# https://supabase.com/dashboard/project/YOUR_PROJECT_ID/sql/new
+psql "$DATABASE_URL" -c "CREATE SCHEMA IF NOT EXISTS auth;
+  CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT NULL::uuid';
+  CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT ''{}''::jsonb';"
+psql "$DATABASE_URL" -f extensions/professional-crm/schema.sql
 ```
 
-Copy and paste the contents of `schema.sql` and click Run. This creates three RLS-enabled tables with proper foreign key relationships.
+(Or paste `schema.sql` alone into the Supabase SQL Editor, if that is where your database lives.) This creates three RLS-enabled tables with proper foreign key relationships.
 
 ### 2. Generate Your User ID
 
@@ -83,24 +85,25 @@ uuidgen | tr '[:upper:]' '[:lower:]'
 # Or use any UUID generator — the value just needs to be unique to you
 ```
 
-Set it as an environment variable for your Edge Function:
-
-```bash
-supabase secrets set DEFAULT_USER_ID=your-generated-uuid-here
-```
+Pass it to the server as `DEFAULT_USER_ID` when you start it in Step 3.
 
 > If you already set `DEFAULT_USER_ID` for a previous extension, you can skip this step — all extensions share the same user ID.
 
-### 3. Deploy the MCP Server
+### 3. Run the MCP Server
 
-> **Not deployable as it stands.** This server imports the repository's SQL shim (`compat/supabase-sql`, which imports `bun`) while still reading `Deno.env`, so `supabase functions deploy` cannot bundle it and Bun cannot run it — SMD-1480 holds the fix. Its access-key behaviour is exercised by `extensions/test-auth.ts`.
+This server runs under [Bun](https://bun.sh) against your Postgres: it imports the repository's SQL shim (`compat/supabase-sql`, Bun's Postgres client in supabase-js's shape) and `compat/deno-on-bun.ts` (the two Deno globals it uses, on Bun), so it is not a Supabase Edge Function and `supabase functions deploy` does not apply (FORK.md change 74). From a checkout of this repository:
 
-Follow the [Deploy an Edge Function](../../primitives/deploy-edge-function/) guide using these values:
+```bash
+(cd extensions && bun install)   # once: the pinned hono, zod and MCP SDK the server imports
+SUPABASE_URL='postgres://user:password@host:5432/openbrain' \
+MCP_ACCESS_KEYS='laptop:write:paste-the-hash-here' \
+DEFAULT_USER_ID='your-generated-uuid-here' \
+PORT=8787 bun extensions/professional-crm/index.ts
+```
 
-| Setting | Value |
-|---------|-------|
-| Function name | `professional-crm-mcp` |
-| Download path | `extensions/professional-crm` |
+`SUPABASE_URL` carries the Postgres connection string — the shim keeps the variable names, so the code does not change — and `SUPABASE_SERVICE_ROLE_KEY` may be left unset. Mint the access key as [Deploy an Edge Function, Step 3](../../primitives/deploy-edge-function/README.md#step-3-mint-an-access-key) shows and set its `name:scope:hash` line in `MCP_ACCESS_KEYS` (the older single `MCP_ACCESS_KEY` still works, with write scope). The server prints `Listening on http://localhost:8787/` (`PORT` unset, it listens on 8000, Deno's default — which podman's `gvproxy` also holds on macOS, hence 8787 here); your **MCP Server URL** is `http://your-host:8787/mcp`, and your **MCP Connection URL** adds the key: `http://your-host:8787/mcp?key=your-access-key` — a read-scoped key is the one to put in a connector URL. To reach it from a hosted client, put it behind the same TLS proxy as the core server ([`SETUP.md`](../../SETUP.md)). `extensions/test-auth.ts` starts the server this way in CI. Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its life, shared by every request; five extension servers beside the core server are sixty of Postgres's default hundred before any load, so set it lower where several share one database.
+
+> **Every tool of this server runs on the fork.** `extensions/test-tools.ts` drives all ten against a real Postgres carrying this `schema.sql` in CI — `tags` into `TEXT[]` (as `[]` too), full-text search with a tag filter through the `text[]` argument, the follow-up window with `.not()`, the stale-contact query, a thought linked through the fork's own `upsert_thought` (FORK.md change 77, SMD-1588; change 74's review had found two of the ten failing on the shim, and the tag filters were a third path nobody had driven).
 
 ### 4. Connect to Your AI
 
