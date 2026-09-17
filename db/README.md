@@ -1392,7 +1392,11 @@ is on one index. It drops its marker table on the way out. Not in CI or
   found by the window and by the new vector; at another model it has no
   windows, is no longer found by the old window's axis and is found by the
   new vector's; a re-capture with no vector keeps the windows with the vector
-  and its label. `test-upgrade.ts` [5] shows the defect at 021 before
+  and its label. The found-by reads filter on a metadata key only that
+  thought carries, so `match_thoughts`'s exact branch answers them and no
+  HNSW walk decides (SMD-1574; the walk missed live rows outright after an
+  autovacuum — SMD-1632).
+  `test-upgrade.ts` [5] shows the defect at 021 before
   applying 022 over it, then both halves of the rule.
 - **The re-embed, end to end.** [9] runs `reembed.ts` as a subprocess against a
   stub provider: refused without `--switch-model`, then two workers over
