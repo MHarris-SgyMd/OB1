@@ -1257,11 +1257,30 @@ function buildServer(principal: Principal): McpServer {
 
 // --- Hono App with Auth + CORS ---
 
+// The methods the MCP endpoint serves. The transport is offered POST only: it is
+// built per request and is sessionless, so there is no server stream for a GET
+// to open and no session for a DELETE to end. One list registers the handler
+// and names the 405's `Allow`, so the two cannot drift. FORK.md change 75.
+const MCP_METHODS = ["POST"];
+const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
+// A health path serves GET and HEAD (the route below) AND the MCP methods, since
+// the MCP handler is registered at every path. Derived from the same list.
+const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"].join(", ");
+
+// The CORS list is a different question — what a browser may send so it can
+// hear our answer — so it keeps GET and DELETE: a browser-hosted SDK client
+// given a session id by its constructor sends DELETE from terminateSession()
+// and accepts the 405 it gets here; a preflight that hid DELETE would turn that
+// into a network error instead.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key, x-access-key, accept, mcp-session-id, mcp-protocol-version, last-event-id",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
 };
+
+// The two 405 header sets, built once; the refusal path spreads nothing per request.
+const METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: ALLOWED_METHODS };
+const HEALTH_METHOD_NOT_ALLOWED_HEADERS = { ...corsHeaders, Allow: HEALTH_ALLOWED_METHODS };
 
 // JSON-RPC error code for unauthorized requests.
 // Per the JSON-RPC 2.0 spec, the range -32099 to -32000 is reserved for
@@ -1291,14 +1310,13 @@ const REVOKED_MESSAGE =
   "Unauthorized: this access key has been revoked. Its history is retained; request a new key.";
 
 /**
- * Read the request body as text without consuming the original request's
- * body stream for downstream handlers. Returns null on bodyless methods
- * or read failure.
+ * Read the request body as text. This CONSUMES the body: both callers return a
+ * refusal right after, so nothing downstream needs it. Returns null on read
+ * failure. No
+ * bodyless-method branch: `req.text()` on a request without a body resolves to
+ * "", and extractJsonRpcId("") is null, so the method never mattered here.
  */
 async function readBodyText(req: Request): Promise<string | null> {
-  if (req.method === "GET" || req.method === "HEAD" || req.method === "DELETE") {
-    return null;
-  }
   try {
     return await req.text();
   } catch {
@@ -1372,17 +1390,54 @@ app.options("*", (c) => {
 // OAuth discovery is a 404, not an auth challenge. claude.ai fetches
 // /.well-known/oauth-protected-resource before opening a custom connector: 404
 // means "no OAuth here" and it proceeds on the key; anything else — a 401, our
-// 200 + JSON-RPC envelope, or the GET reaching the transport — sends it into a
-// Dynamic Client Registration it cannot complete. Upstream cannot fix this on
+// 200 + JSON-RPC envelope, or notFound's 405 (change 75; before it, the GET
+// reached the transport and hung) — sends it into a Dynamic Client
+// Registration it cannot complete. Upstream cannot fix this on
 // Supabase, where the gateway answers the path first (#340); we own the route
-// table. Ordered after the OPTIONS preflight and before the catch-all, so it
+// table. Ordered after the OPTIONS preflight and before the MCP handler, so it
 // runs before authenticate() and the agent resolve — the answer is about the
 // server, not the caller, and a revoked key gets the same 404. Terminal for the
 // whole prefix: a future /.well-known/ route (real RFC 9728 metadata, say) must
 // be registered ABOVE this line or it never fires. FORK.md change 42.
 app.all("/.well-known/*", (c) => c.text("Not Found", 404, corsHeaders));
 
-app.all("*", async (c) => {
+// Liveness for platform probes (Kubernetes httpGet, load-balancer target checks,
+// uptime monitors), which can only GET and expect 2xx — the MCP endpoint answers
+// GET with 405 (below). Before authenticate(), like /.well-known/*: it says the
+// process is serving and nothing else. Readiness — is the database reachable —
+// is preflight's job at the entrypoint. HEAD is routed here as GET by Hono, so a
+// HEAD probe gets a bodiless 200. Matched as the last path segment under any
+// prefix a proxy leaves on the request (`/mcp/health`,
+// `/functions/v1/open-brain-mcp/health`) except `/.well-known/`, which the
+// route above owns, with at most one trailing slash —
+// deploy/README.md anticipates an unstripped prefix, and a probe aimed at
+// `<base>/health` must not 405 there. The breadth ("health under anything") is
+// a stand-in for a base-path setting the server does not have; a mount (the
+// path-axis decision change 42 defers) would match `${base}/health` exactly.
+// The name is exact after Hono's decodeURI (`/he%61lth` is it; /healthz and
+// /Health are not; an encoded slash `%2F` stays encoded and is not a slash; an
+// empty segment `//health` passes). Tested against the path rather than
+// written as a route pattern because on Hono 4.9.2 a `:param` route that shares
+// the root with a static route (`/.well-known/*` here) makes the RegExpRouter
+// throw UnsupportedPathError at registration, SmartRouter then falls back to
+// the TrieRouter, and the TrieRouter miscounts a `{.+}` prefix of three or more
+// segments — so `/:prefix{.+}/health` matched `/a/b/health` and not
+// `/functions/v1/open-brain-mcp/health`. Anything else falls through to
+// notFound's 405. POST /health is the MCP endpoint, as POST at every path is.
+// FORK.md change 75.
+const HEALTH_PATH = /(^|\/)health\/?$/;
+app.get("*", async (c, next) => (HEALTH_PATH.test(c.req.path) ? c.text("ok", 200, corsHeaders) : next()));
+
+// The MCP endpoint, registered for MCP_METHODS only. The transport is built per
+// request and is sessionless, so a GET has no server stream to open: before
+// change 75 an authenticated GET cost an agent-registry resolve and a server
+// build, then reached the transport, which opened an SSE stream nothing wrote
+// to — pinged every 30 s, closed only by the client or by Bun's idle reset —
+// from a browser opening the connector URL or any client echoing `?key=` on GET
+// (upstream #424). The SDK client sets `Accept: text/event-stream` on its own
+// GET, so gating the Accept patch below would not have been enough; it treats
+// the 405 notFound gives as "no stream here". FORK.md change 75.
+app.on(MCP_METHODS, "*", async (c) => {
   // Accept the access key via header, bearer token OR URL query parameter — every
   // form presented is tried, so a gateway's own bearer token beside the client's
   // `?key=` does not shadow it. The query form stays because Claude Desktop
@@ -1424,7 +1479,13 @@ app.all("*", async (c) => {
   // Fix: Claude Desktop connectors don't send the Accept header that
   // StreamableHTTPTransport requires. Build a patched request if missing.
   // See: https://github.com/NateBJones-Projects/OB1/issues/33
-  if (!c.req.header("accept")?.includes("text/event-stream")) {
+  // Only MCP_METHODS reach this handler, so the patch never tells a GET to
+  // expect an event stream — that was SMD-1259's mechanism. The transport
+  // requires BOTH tokens on a POST (406 otherwise), so the patch fires when
+  // either is missing; it used to test only the SSE token, and a POST carrying
+  // `Accept: text/event-stream` alone paid the resolve and the build for a 406.
+  const accept = c.req.header("accept") ?? "";
+  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
     headers.set("Accept", "application/json, text/event-stream");
     const patched = new Request(c.req.raw.url, {
@@ -1446,6 +1507,21 @@ app.all("*", async (c) => {
   for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
   return response;
 });
+
+// Whatever no route above matched: 405 with `Allow`, before authenticate(), so
+// no key shape reaches the agent registry or builds a server and the answer is
+// the same for no key, a wrong key and a revoked one. Since the MCP handler
+// serves POST at every path, an unmatched request is always a method the
+// endpoint does not serve, never an unknown path — hence 405, not 404. This is
+// where GET, HEAD, PUT, PATCH and DELETE land; a keyless GET or HEAD used to get
+// the 200 JSON-RPC refusal, so a platform probe uses /health above. Hono's
+// notFound rather than a trailing app.all("*"), so a route registered later is
+// not silently shadowed by dispatch order. `Allow` names the target resource's
+// methods (RFC 9110 §10.2.1): at a health path, GET and HEAD beside the MCP
+// methods. FORK.md change 75.
+app.notFound((c) =>
+  c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS),
+);
 
 export default {
   // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
