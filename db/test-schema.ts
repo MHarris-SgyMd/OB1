@@ -55,7 +55,7 @@ import {
 } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, createAssert, seededRandom } from "./test-support.ts";
+import { SAMPLE_STATEMENT, TID_PROBE, buffersOf, createAssert, sampleStatementOf, seededRandom } from "./test-support.ts";
 import { markerAnswers } from "./bench-oracle.ts";
 import { ENTITY_TYPES, RELATIONS } from "../server-portable/entities.ts";
 
@@ -726,7 +726,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // mention EXISTS and the sample in the same breath (review pass 1). Read
   // once here — the three counts and the FROM clause — for the token checks
   // now and the draws further down.
-  const stmt = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/.exec(src);
+  const stmt = SAMPLE_STATEMENT.exec(src);
   const sampleStmt = stmt?.[2] ?? "";
   assert(/embedding IS NOT NULL\) AS hit/.test(sampleStmt) && !/EXISTS/.test(sampleStmt) && !/thought_chunks/.test(sampleStmt),
     "the sample counts rows with a vector and probes no chunk table (the EXISTS became a hashed subplan there — 037's header says)");
@@ -798,7 +798,6 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
   // the rest, rather than throwing the suite away from [9] on (review pass 2).
   assert(stmt !== null, "the sample statement reads out of the installed body (SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen FROM (<the draw>) b LEFT JOIN LATERAL (<the probe>) p ON true)");
   if (stmt) {
-    const [, counts, from] = stmt;
     type Draw = { hits: number; hit_pages: number; pages_seen: number };
     /**
      * The body's sample with its locals substituted. `drawn` pins the blocks in
@@ -808,7 +807,7 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
      * draw is not that shape.
      */
     const deployedSample = (filter: string, pageCount: number, drawn?: number[]): string | null => {
-      let text = `SELECT ${counts} ${from}`.replace(/\bv_pages\b/g, () => String(pageCount)).replace(/\bfilter\b/g, () => `'${filter}'::jsonb`);
+      let text = sampleStatementOf(src, pageCount, filter)!;
       if (drawn) {
         const pinned = text.replace(/floor\(random\(\) \* \d+\)::bigint AS blk\s+FROM generate_series\(1, \d+\)/, () => `unnest(ARRAY[${drawn.join(",")}])::bigint AS blk`);
         if (pinned === text) {
@@ -898,14 +897,11 @@ console.log("\n[8e] Migrations 037 and 038: the routing count is gated by a samp
     // the DISTINCT draw's subtree reads catalog buffers when the syscache is
     // cold (measured: 5 at the top on a first run, 2 at the scan) — the count
     // would then hold only because the same statement ran just before
-    // (review pass 3). Planning buffers, when printed, come after the tree
-    // under `Planning:`.
+    // (review pass 3). buffersOf reads one node's line when given the node.
     const buffers = pinnedText === null ? "" : (await db.query<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS) ${pinnedText}`)).rows.map((r) => r["QUERY PLAN"]).join("\n");
-    // The plan tree only — `Planning:` and its own Buffers line follow it.
-    const scanBuffers = /Tid Range Scan on thoughts[^\n]*\n(?:[^\n]*\n)*?\s*Buffers: ([^\n]*)/.exec(buffers.split(/\nPlanning:/)[0])?.[1] ?? "";
-    const touched = [...scanBuffers.matchAll(/(?:hit|read)=(\d+)/g)].reduce((n, m) => n + Number(m[1]), 0);
+    const touched = buffersOf(buffers, /Tid Range Scan on thoughts/);
     assert(touched === ROUTE_SAMPLE_PAGES,
-      `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all (the Tid Range Scan's line: ${scanBuffers || "none in the plan"})`);
+      `…and the probe touches ${touched} buffers doing it — one page per block, ${ROUTE_SAMPLE_PAGES} in all, on the Tid Range Scan's own line`);
     // And the random draw over the heap with its band emptied: it still
     // reaches its pages and the rule still says "collect".
     const sparse: string[] = [];

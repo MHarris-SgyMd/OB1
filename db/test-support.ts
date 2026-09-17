@@ -563,7 +563,10 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
     // `... FROM (<eight distinct blocks>) b LEFT JOIN LATERAL (<one TID range>)
     // p ON true;` under 038 — minus the INTO, either shape. A body from before
     // 037 has none, and says so.
-    const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?(?:TABLESAMPLE SYSTEM[\s\S]*?\) s|LEFT JOIN LATERAL \([\s\S]*?\) p ON true));/.exec(def);
+    // Comment lines stripped first: 038's header quotes the statement, and a
+    // body that did the same in a comment would have the bench explain the
+    // comment (review pass 3).
+    const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?(?:TABLESAMPLE SYSTEM[\s\S]*?\) s|LEFT JOIN LATERAL \([\s\S]*?\) p ON true));/.exec(def.replace(/^[ \t]*--.*$/gm, ""));
     if (!m) throw new Error("match_thoughts has no sample of the heap in a shape this rewrite recognises — a body from before 037, or a redefinition that re-aliased the statement; the bench's rewrite does not apply");
     block = `SELECT ${m[1]} ${m[2]}`;
   } else {
@@ -656,6 +659,26 @@ export const preparedSignature = (dim: number) => `(vector(${dim}), float, int, 
  * installed body for it; one spelling here rather than three that drift.
  */
 export const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid\s+AND t\.ctid <\s+\('\(' \|\| b\.blk \+ 1 \|\| ',0\)'\)::tid/;
+
+/**
+ * 038's sample statement in a body: group 1 the three counts, group 2 the
+ * FROM clause from the draw through `) p ON true`. The INTO is left out, so
+ * the text runs on its own once the two plpgsql-supplied values are in.
+ */
+export const SAMPLE_STATEMENT = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/;
+
+/**
+ * The sample statement read out of an installed body (pg_proc.prosrc) with
+ * the page count and the filter substituted as literals — what test-schema
+ * [8e] draws with and test-live [5d] times, so neither keeps a copy of the
+ * statement (a copy passed every drop-the-mechanism mutant, SMD-1526 review
+ * pass 1). Null when the body has no statement of that shape.
+ */
+export function sampleStatementOf(prosrc: string, pageCount: number, filterJson: string): string | null {
+  const m = SAMPLE_STATEMENT.exec(prosrc);
+  if (!m) return null;
+  return `SELECT ${m[1]} ${m[2]}`.replace(/\bv_pages\b/g, () => String(pageCount)).replace(/\bfilter\b/g, () => `'${filterJson}'::jsonb`);
+}
 
 
 /**
@@ -805,8 +828,13 @@ export async function loadChunkRows(sql: SQL, every: number): Promise<void> {
  * there lands mostly in `read=` — and under-counts in the direction that
  * flatters the plan that read less (first review pass).
  */
-export function buffersOf(plan: string): number {
-  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(plan);
+export function buffersOf(plan: string, node?: RegExp): number {
+  // With `node`, that node's own Buffers line (its total across loops) inside
+  // the plan tree — `Planning:` and its Buffers line follow the tree — rather
+  // than the top node's cumulative one, which counts catalog reads under a
+  // cold syscache too (test-schema [8e], review pass 3).
+  const scope = node ? new RegExp(`${node.source}[^\\n]*\\n(?:[^\\n]*\\n)*?\\s*(Buffers: [^\\n]*)`).exec(plan.split(/\nPlanning:/)[0])?.[1] ?? "" : plan;
+  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(scope);
   return m ? Number(m[1] ?? 0) + Number(m[2] ?? 0) : 0;
 }
 

@@ -444,7 +444,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // 030, to force this note to be re-read (034 needs only 001/010; 035 needs
   // 016, 025, 032 and 033; 036 redefines delete_thought and needs only 009's
   // body and 029's supersession lock; 037 redefines 020's match_thoughts and
-  // 038 037's — all recorded in a through-035 schema, so none becomes the
+  // 038 037's — all recorded by the baseline with their prerequisites present, so none becomes the
   // plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 9, `030 is among the last nine migrations (${last})`);

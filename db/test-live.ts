@@ -33,7 +33,7 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { TID_PROBE, applyFunctionSettings, applyMigrations, createAssert, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { heartbeatFor, leaseRefusal } from "./lease.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -414,6 +414,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
     // applied through test-support with the one override SchemaOptions carries.
     await applyMigrations(URL_, { ...opts038, routeEstimateMinPages: 0 });
     assert(/IF v_pages >= 0 THEN/.test(await body()) && TID_PROBE.test(await body()), "038 is installed with its floor at 0: the sample runs on every filtered call to this table");
+    // 038's body, kept for the timing at the end: by then 020's re-apply has replaced it.
+    const body038 = await body();
 
     // The observable: 014's collection is one scan of the GIN index per call,
     // and nothing else in a call to this table scans it the same way twice — so
@@ -517,10 +519,10 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
       for (let i = 0; i < n; i++) { const t0 = performance.now(); await sql.unsafe(stmt); ts.push(performance.now() - t0); }
       return ts.sort((a, b) => a - b)[Math.floor(n / 2)];
     };
-    const sampleMs = await timed(`SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
-      FROM (SELECT DISTINCT floor(random() * ${pages})::bigint AS blk FROM generate_series(1, ${ROUTE_SAMPLE_PAGES})) b
-      LEFT JOIN LATERAL (SELECT (t.metadata @> '${BROAD}'::jsonb AND t.embedding IS NOT NULL) AS hit FROM thoughts t
-                         WHERE t.ctid >= ('(' || b.blk || ',0)')::tid AND t.ctid < ('(' || b.blk + 1 || ',0)')::tid LIMIT 291) p ON true`);
+    // The deployed statement, read out of 038's body rather than a copy kept
+    // here — the class of thing review pass 1 removed from [8e].
+    const sampleText = sampleStatementOf(body038, Number(pages), BROAD);
+    const sampleMs = sampleText === null ? NaN : await timed(sampleText);
     const collectMs = await timed(`SELECT array_agg(s.id) FROM (SELECT t.id FROM thoughts t WHERE t.metadata @> '${BROAD}'::jsonb AND (t.embedding IS NOT NULL OR EXISTS (SELECT 1 FROM thought_chunks k WHERE k.thought_id = t.id)) LIMIT 1001) s`);
     console.log(`      (${ROUTE_SAMPLE_PAGES} pages of ${pages} read by TID range: ${sampleMs.toFixed(2)} ms a call; the collection on the ${N.toLocaleString()}-row filter: ${collectMs.toFixed(2)} ms — round trip included in both)`);
 
