@@ -12474,8 +12474,11 @@ with a session id — neither of which any server here uses.
 **The sample.** `pruneExpiredSessions()` closes the transport of each session
 it drops: `close()` aborts whatever stream is still open, clears the maps and,
 through `onclose`, tells the SDK the server has no transport — a dropped
-session is ended rather than left to the collector. The README's paragraph on
-the session-long transport says the release is 0.1.2's and what 0.1.1 did.
+session is ended rather than left to the collector; the call carries a
+`.catch` so that a rejection — nothing in `close()` throws today — cannot
+become an unhandled one, which under Deno ends the isolate. The README's
+paragraph on the session-long transport says the release is 0.1.2's and what
+0.1.1 did.
 
 **The measurement.** A probe from `extensions/` — one `McpServer`, one
 transport, 200 completed `tools/list` POSTs, a forced GC, then how many of the
@@ -12486,14 +12489,19 @@ the registry's callbacks stopped arriving after the first run; `deref()` after
 `Bun.gc(true)` is read on our schedule, not the runtime's. At 0.1.1: the
 shared transport releases 0 of 200; `close()` then releases 199; a transport
 per request releases 198–199. At 0.1.5: the shared transport releases
-199–200 of 200 with no `close()`. The one that lingers is the most recent
-request, reachable for a while from the frame that answered it; three rounds
-of each at each version. 200 POSTs take 4–16 ms either way.
+199–200 of 200 with no `close()`; three rounds of each at each version. 200
+POSTs take 4–16 ms either way. One or two can linger, reachable from the
+frames that answered them under a conservative stack scan — the review's
+standalone copy of the same loop read 98 of 100 twice in thirty rounds where
+the suite's read 100 in ninety — so the slack is a property of the frame
+shape, not of the transport, and no assertion should rest on its exact size.
 
 **The test.** `extensions/test-auth.ts` gains a section after the pin guard:
 one server, one transport, 100 sequential `tools/list`, each asserted
 answered with its own id, then a forced GC and the count of `Request` objects
-collected, asserted at 99 or more with the reason for the one. It is a test of
+collected, asserted at 90 or more of 100 — 0.1.1 releases none, and the
+distance between none and most is the mechanism; the exact slack is not
+(the review's first pass moved the bar from 99, see above). It is a test of
 the pinned library, which nothing runnable in the tree exercised across a
 session; the after sample, which does, cannot be run here (change 78) and is
 held by a text rule that its sweep closes what it drops. The docblock names
@@ -12507,6 +12515,17 @@ passed. `check-fork-consistency.mjs` PASS. Drills: 0.1.1 put back in
 `extensions/package.json` fails 12 — the eleven `deno.json` the guard compares
 and the transport's `0/100 Request objects collected`; the sample without its
 `close()` fails its one rule.
+
+**Review, first pass** (one cold reviewer beside the author's read; the pass
+covered change 80 with this one, and its findings there are recorded there).
+Two findings here, both fixed. The release assertion's bar of 99 rested on
+the slack being exactly one; the reviewer's standalone copy of the loop read
+98 twice, so the bar is 90 and the paragraphs above say why. The sample's
+`close()` was `void`ed; it carries a `.catch` now. Checked and found right:
+the stream lifecycle at 0.1.5 (`send()` → `abort()` → `reader.cancel()`,
+the frame already pulled because the transform's readable has no buffer),
+that per-request transports hold no timer on the POST path, and that
+deleting from the sessions Map inside `for…of` is safe.
 
 **Not done here.** SMD-1616 (the Accept patches, and whether 0.3.x's
 either-token check is worth the SDK and hono moves it needs — change 80

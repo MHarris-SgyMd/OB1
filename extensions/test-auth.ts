@@ -871,7 +871,7 @@ const TEXT_ONLY: { file: string; must: RegExp[]; mustNot: RegExp[] }[] = [
   // The sweep closes the transport of each session it drops (SMD-1607), which tells the server too.
   { file: "recipes/edge-function-cost-optimization/examples/after/index.ts",
     must: [/from "\.\.\/_shared\/auth\.ts"/, /authenticateRequest\(c\.req\.raw,/, /const server = buildServer\(principal\);[^\n]*\n\s*await server\.connect\(transport\);\n\s*session = \{ server, transport,/, /session\.scope !== principal\.scope/,
-      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*void s\.transport\.close\(\);/,
+      /sessions\.delete\(id\);\n(?:\s*\/\/[^\n]*\n)*\s*s\.transport\.close\(\)\.catch\(/,
       /\/\/ @ts-types="@modelcontextprotocol\/sdk\/server\/mcp"\nimport type \{ McpServer \} from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/],
     mustNot: [/[!=]== ?MCP_ACCESS_KEY\b/, /c\.req\.header\("x-access-key"\)/, /serverFor\(/, /Map<[^>\n]*McpServer/, ACCEPT_PATCH] },
   { file: "recipes/edge-function-cost-optimization/examples/after/server.ts",
@@ -934,9 +934,11 @@ for (const t of TEXT_ONLY) {
 // (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin
 // moved to 0.1.5 (change 79), then 0.3.2 with the SDK, hono and zod (change
 // 80). Collection is read through WeakRefs after a forced GC —
-// a FinalizationRegistry's callbacks arrive on the runtime's schedule. The
-// most recent request can stay reachable from the frame that answered it, so
-// one of N may remain; at 0.1.1 none is released.
+// a FinalizationRegistry's callbacks arrive on the runtime's schedule. One
+// or two of N can stay reachable from the frames that answered them (a
+// conservative stack scan; the review's standalone copy of this loop read 98
+// of 100 twice in thirty rounds), so the bar is most of N, not all: at 0.1.1
+// none is released, and the distance between none and most is the mechanism.
 // ── The pinned SDK, one server and two transports ───────────────────────────
 // Change 78 fixed five servers that connect()ed one McpServer to a fresh
 // transport per request, which SDK 1.24.3 accepted silently and answered on
@@ -981,7 +983,7 @@ console.log("\n[the pinned @hono/mcp, one transport across a session]");
   assert(answered === N, `${N} sequential tools/list on one transport are each answered with their own id (${answered}/${N})`);
   for (let k = 0; k < 5; k++) { Bun.gc(true); await new Promise((r) => setTimeout(r, 5)); }
   const released = refs.filter((w) => w.deref() === undefined).length;
-  assert(released >= N - 1, `…and the transport has let go of them: ${released}/${N} Request objects collected after GC (0.1.1 kept every one until close())`);
+  assert(released >= N - 10, `…and the transport has let go of them: ${released}/${N} Request objects collected after GC, ${N - 10} or more wanted (0.1.1 kept every one until close())`);
 
   // New at 0.3.x, absent at 0.1.x: a POST after initialize is checked for the
   // `mcp-protocol-version` header — absent it reads as 2025-03-26 and passes;
