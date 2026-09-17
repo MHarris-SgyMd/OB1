@@ -40,7 +40,7 @@ function pruneExpiredSessions(): void {
       sessions.delete(id);
       // A dropped session is closed, not left to the collector: close() ends
       // the transport and, through its onclose, tells the server it has no
-      // transport (ob1-fork, SMD-1607, FORK.md change 80). Nothing in close()
+      // transport (ob1-fork, SMD-1607, FORK.md change 81). Nothing in close()
       // throws today; a rejection here must still not become an unhandled one,
       // which under Deno ends the isolate.
       s.transport.close().catch(() => {});

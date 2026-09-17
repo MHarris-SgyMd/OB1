@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty numbered changes on top of the pin. Seven fix defects found in an
+Eighty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–80 are the numbered `###` sections** further down, which is
+sections. Changes **18–81 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -202,7 +202,7 @@ extensions/test-tools.ts         # change 77 (new file — every tool of the fiv
 db/test-bench-reuse.ts           # change 76 (new file — the kept bench corpus's oracle cache held to the computation, on one index)
 db/bench-oracle.ts               # change 76 (new file — the cache's pure part: what of a marker's entry a run may trust; test-schema [37])
 <4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
-<17 pin sites, 3 lockfiles>      # change 80 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
+<17 pin sites, 3 lockfiles>      # change 81 (@hono/mcp 0.1.1 → 0.1.5: the transport lets go of each POST it has answered; the after sample's sweep closes the transports it drops)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -12411,7 +12411,7 @@ Hono `Context` per tool call until the 30-minute prune drops the session
 (measured: 200 completed POSTs on one transport, 0 of 200 `Request` objects
 finalized after GC; with a transport per request, 200 of 200). The four
 servers moved to a transport per request are clear of it; the sample's README
-says the bound; SMD-1607 held the library fix, and change 80 moves the pin to
+says the bound; SMD-1607 held the library fix, and change 81 moves the pin to
 0.1.5, which releases each POST as it is answered. Nothing here changes a response, a
 header or a tool surface; the answer a client receives is the same, now for
 the request it sent.
@@ -12422,7 +12422,7 @@ Upstream status: at the pin, all five files carry the shared server —
 "after" sample as an exported singleton connected once per session.
 **Unfiled** by us.
 
-### 80. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
+### 81. The `@hono/mcp` pin moves from 0.1.1 to 0.1.5 — the transport lets go of each POST it has answered, so a transport kept for a session (the cost recipe's after sample) no longer holds one Request and one Context per tool call until the session is swept (SMD-1607)
 
 **The defect.** Change 78's third review pass found it and its "Not done here"
 records it: in `@hono/mcp` 0.1.1 `handlePostRequest` records each request's
@@ -12513,7 +12513,7 @@ and the transport's `0/100 Request objects collected`; the sample without its
 `close()` fails its one rule.
 
 **Review, first pass** (one cold reviewer beside the author's read; the pass
-covered change 80 with this one, and its findings there are recorded there).
+covered change 81 with this one, and its findings there are recorded there).
 Two findings here, both fixed. The release assertion's bar of 99 rested on
 the slack being exactly one; the reviewer's standalone copy of the loop read
 98 twice, so the bar is 90 and the paragraphs above say why. The sample's

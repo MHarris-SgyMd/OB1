@@ -28,7 +28,7 @@
  * supabase/functions/, so the module is copied beside the servers rather than
  * imported across the tree), and each deno.json still pins what package.json
  * installs — and the pinned `@hono/mcp` lets go of each request once it has
- * answered it (SMD-1607, change 80: 0.1.1 kept every one until close()).
+ * answered it (SMD-1607, change 81: 0.1.1 kept every one until close()).
  *
  * The files are imported under a stand-in for the two Deno globals they use —
  * `Deno.env.get` hands the process environment through, `Deno.serve` captures
@@ -912,7 +912,7 @@ for (const t of TEXT_ONLY) {
 // deleted the record only on abort or close(), so a session grew by one
 // Request and one Hono Context per tool call until the TTL sweep dropped it
 // (SMD-1607). 0.1.2 deletes the record when the response is sent; the pin is
-// 0.1.5 (change 80). Collection is read through WeakRefs after a forced GC —
+// 0.1.5 (change 81). Collection is read through WeakRefs after a forced GC —
 // a FinalizationRegistry's callbacks arrive on the runtime's schedule. One
 // or two of N can stay reachable from the frames that answered them (a
 // conservative stack scan; the review's standalone copy of this loop read 98
