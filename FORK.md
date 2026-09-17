@@ -11593,6 +11593,31 @@ select-list and `*` columns seen. `test-compat.ts` 177/177; `test-tools.ts`
 reading the rule pass 3 wrote against the header's claim; the loop stops
 here — the reviewers said so too.
 
+**Boyscout.** The passes' cut-for-space tidy-ups in the files this change
+touched, no behaviour changed: the no-op `this.op = "select"` line is its
+comment alone; `cs` trims and quotes the column once instead of in the
+closure; `toSQL()`'s comment says it rejects where `execute()` would resolve
+`{ error }` (an `.or()` term that is the 400); `arrayLiteral`'s comment names
+`undefined` beside `null`; `Result<T>`'s comment says the error is a
+`PostgrestError` at runtime while the type stays what migrated files were
+written against; two `SQL` instances the compat fixtures opened for one raw
+statement each are closed; the tool suite's misplaced drift-guard banner sits
+above its section, and two labels say what their assertion checks (a zod
+refusal is `Invalid arguments`, which a database's `invalid input syntax`
+would not have matched; "an empty list", not "before the log query", which a
+count cannot tell). Left as they are, with the reason: `close()`'s
+`POOLS.get(…) === this.pool` guard, called unreachable — harmless, and
+"unreachable" has been wrong before; `catch()`/`finally()` re-running the
+query after an `await` (pre-existing; memoising `execute()` would change
+what a second `await` sees); the upsert's `EXCLUDED` filter reading the
+target unsplit (SMD-1602's, a behaviour change); `forget()` leaving the
+foreign-key memo (a table's keys change more rarely than its columns, and
+dropping them is a read, not a tidy); `.or()`'s 400 messages carrying the
+developer's hint to a user (PostgREST's do too); `meal-planning`'s
+`search_recipes` being the one driven tool with no `try/catch` — upstream's
+text, named here so the next reader knows which tool a thrown error would
+leave to the SDK.
+
 **Upstream status:** not applicable — the shim, the codemod and the suite are
 fork-only, and the five servers' own text is untouched (the embeds, the
 `.not()` calls and the array payloads are upstream's spelling, now served).

@@ -483,7 +483,9 @@ try {
   const ints = rowsOf(await db.from("nodes").insert({ name: "counted", counts: [3, 1, 2], days: ["2026-01-02", "2026-01-03"] }).select("counts, days"), "int[]");
   assert(Array.isArray(ints[0]?.counts) && JSON.stringify(ints[0]?.counts) === "[3,1,2]", `an int[] column comes back as a list, not the Int32Array Bun decodes it into (${JSON.stringify(ints[0]?.counts)})`);
   assert(JSON.stringify(ints[0]?.days) === '["2026-01-02","2026-01-03"]', `a date[] column's elements are bare dates, as the scalar is (${JSON.stringify(ints[0]?.days)})`);
-  await new SQL({ url: URL_, max: 1 }).unsafe(`UPDATE nodes SET blob = '\\x0102'::bytea WHERE name = 'counted'`);
+  const raw15 = new SQL({ url: URL_, max: 1 });
+  await raw15.unsafe(`UPDATE nodes SET blob = '\\x0102'::bytea WHERE name = 'counted'`);
+  await raw15.close();
   const blob = rowsOf(await db.from("nodes").select("blob").eq("name", "counted"), "bytea");
   assert(blob[0]?.blob instanceof Uint8Array && !Array.isArray(blob[0]?.blob), `a bytea column stays the byte view Bun hands back — the list rule is for an array column (${Object.prototype.toString.call(blob[0]?.blob)})`);
   await db.from("nodes").delete().eq("name", "counted");
@@ -596,7 +598,9 @@ try {
   assert(JSON.stringify(parent[0]) === JSON.stringify({ name: "leaf", parent: { name: "root" } }), `…and the column form serves it (${JSON.stringify(parent[0])})`);
   // A same-named table in a schema off the search path carries a foreign key the visible one lacks: it is not
   // counted under the visible table's name, which the join would have reached (the silent wrong join).
-  await new SQL({ url: URL_, max: 1 }).unsafe(`INSERT INTO hidden.kids (widget_id, v) VALUES (${alpha}, 'the hidden table''s row')`).then(() => {});
+  const raw17 = new SQL({ url: URL_, max: 1 });
+  await raw17.unsafe(`INSERT INTO hidden.kids (widget_id, v) VALUES (${alpha}, 'the hidden table''s row')`);
+  await raw17.close();
   assert(/no foreign key joins it/.test(await refusedMsg(() => db.from("widgets").select("*, kids(v)"))), "a foreign key on an invisible same-named table is not the visible table's — refused, not joined to the wrong rows");
   // A table the catalog cannot see: the query reports it, not a refusal about foreign keys.
   const ghost = await db.from("no_such_table").select("*, widgets(name)");

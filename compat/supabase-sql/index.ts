@@ -205,9 +205,10 @@ function jsonShaped(row: Record<string, unknown>, cols?: Columns): Record<string
  * one: `["a","b"]` reaches a `text[]` column as `a,b`, `[]` as `""`, and
  * Postgres refuses both as malformed (22P02); an `int[]` fails in the wire
  * protocol itself. Elements are double-quoted with `\` and `"` escaped, so
- * a tag with a comma or a space survives; null is `NULL`, a nested array a
- * nested literal, an object its JSON (a `jsonb[]` column), a Date its ISO
- * instant. Bound with an explicit cast to the declared type.
+ * a tag with a comma or a space survives; null (and undefined, as JSON has no
+ * word for it) is `NULL`, a nested array a nested literal, an object its JSON
+ * (a `jsonb[]` column), a Date its ISO instant. Bound with an explicit cast to
+ * the declared type.
  */
 function arrayLiteral(values: unknown[]): string {
   const element = (x: unknown): string => {
@@ -502,6 +503,7 @@ function parseSelect(spec: string): SelectItem[] {
 type Filter = (cols: Columns) => { sql: string; values: unknown[] };
 type Op = "select" | "insert" | "update" | "upsert" | "delete";
 
+/** `error` is a PostgrestError at runtime (change 76); the type stays the structural one migrated files were written against. */
 export type Result<T> = { data: T | null; error: { message: string; code?: string } | null; count: number | null };
 
 export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<Result<T>> {
@@ -529,8 +531,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
   // ── verbs ──────────────────────────────────────────────────────────────────
 
   select(cols = "*", opts?: { count?: "exact" | "planned" | "estimated"; head?: boolean }): this {
-    // `.select()` after insert/update/delete means RETURNING, not a new query.
-    if (this.op === "select") this.op = "select";
+    // `.select()` after insert/update/delete means RETURNING, not a new query: the verb stands, only the list moves.
     this.items = parseSelect(cols);
     for (const item of this.items) if (item.kind === "column") this.names(item.sql.slice(1, -1));
     if (opts?.count) this.wantCount = "exact";
@@ -609,9 +610,10 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       };
     }
     if (operator === "cs") {
-      const c = ident(col, "column");
+      const name = col.trim();
+      const c = ident(name, "column");
       return (cols) => {
-        const info = cols.get(col.trim());
+        const info = cols.get(name);
         if (info?.category === "A") {
           // An array column: the caller's array, or the literal text PostgREST's `cs.{a,b}` carries.
           const v = Array.isArray(value) ? arrayLiteral(value) : value;
@@ -944,7 +946,12 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     return { text: `DELETE FROM ${t}${where.text} RETURNING ${returning}`, values: where.values, cols };
   }
 
-  /** Exposed for tests and for anyone debugging what the shim generates. Reads the catalog, so it is a promise (change 76). */
+  /**
+   * Exposed for tests and for anyone debugging what the shim generates. Reads
+   * the catalog, so it is a promise (change 76); it rejects where execute()
+   * would resolve `{ error }` for what compiles badly — an `.or()` term that is
+   * PostgREST's 400 — since there is no result to carry the error in.
+   */
   async toSQL(): Promise<{ text: string; values: unknown[] }> {
     const { text, values } = await this.compile();
     return { text, values };

@@ -249,7 +249,7 @@ try {
   const byCategory = await c("search_maintenance_history", { category: "exter" });
   assert(ok(byCategory) && byCategory.body?.count === 1 && byCategory.body?.logs?.[0]?.performed_by === "Ann the Plumber", "…by category");
   const noTask = await c("search_maintenance_history", { task_name: "zzz" });
-  assert(ok(noTask) && noTask.body?.count === 0 && eqJson(noTask.body?.logs, []), "…a name no task has answers an empty list before the log query");
+  assert(ok(noTask) && noTask.body?.count === 0 && eqJson(noTask.body?.logs, []), "…a name no task has answers an empty list");
   const since = await c("search_maintenance_history", { date_from: isoDaysFromNow(-7) });
   assert(ok(since) && since.body?.count === 1 && since.body?.logs?.[0]?.task_id === gutter.body?.task.id, "…date_from keeps the recent log");
   const until = await c("search_maintenance_history", { date_to: isoDaysFromNow(-7) });
@@ -407,7 +407,7 @@ let pastaId = "", saladId = "", shoppingListId = "";
   const interaction = await c("crm_log_interaction", { contact_id: ids.ada, interaction_type: "coffee", occurred_at: met, summary: "talked about the difference engine", follow_up_needed: true, follow_up_notes: "send the paper" });
   assert(ok(interaction) && UUID.test(interaction.body?.interaction?.id) && interaction.body?.interaction?.follow_up_needed === true, `crm_log_interaction stores the row (${failure(interaction)})`);
   const badType = await c("crm_log_interaction", { contact_id: ids.ada, interaction_type: "carrier pigeon", summary: "x" });
-  assert(badType.isError && /carrier pigeon|invalid/i.test(badType.toolText), "…a type outside the enum is refused before the database");
+  assert(badType.isError && /Invalid arguments/.test(badType.toolText), `…a type outside the enum is refused by the tool's schema, before the database (${badType.toolText.slice(0, 60)})`);
 
   const history = await c("crm_get_contact_history", { contact_id: ids.ada });
   assert(ok(history) && history.body?.contact?.last_contacted === met, `crm_get_contact_history: the trigger set last_contacted to the interaction's time (${failure(history) || history.body?.contact?.last_contacted})`);
@@ -469,8 +469,6 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(ok(staleOne) && staleOne.body?.count === 1, "…limit applies");
 }
 
-// ── The drift guard: every registered tool is driven, and nothing else is ────
-
 // ── The connections the servers hold: every request built a client and closed none ──
 
 console.log("\n[the servers' clients share one pool]");
@@ -482,6 +480,8 @@ console.log("\n[the servers' clients share one pool]");
   // arithmetic: 84 were held before change 76, against a default of 100.
   assert(Number(n) <= 20, `after ${requests}+ tools/call requests, each of which built a client it never closed, the database sees a handful of connections, not one per request (${n}; 84 held before change 76, against a default limit of 100)`);
 }
+
+// ── The drift guard: every registered tool is driven, and nothing else is ────
 
 console.log("\n[every tool each server registers is driven here]");
 {
