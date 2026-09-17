@@ -60,9 +60,9 @@
 --   quarters empty at the floor (037's "bloated heap" bullet).
 --
 -- What
---   The gate is 037's — floor, {{ROUTE_SAMPLE_PAGES}} pages, three conditions,
---   the collection wrapped in the same IF — and only the statement that
---   produces its three counts changes:
+--   The gate is 037's — floor, {{ROUTE_SAMPLE_PAGES}} pages, three
+--   conditions, the collection wrapped in the same IF — and only the
+--   statement that produces its three counts changes:
 --
 --     SELECT count(*) FILTER (WHERE p.hit),
 --            count(DISTINCT b.blk) FILTER (WHERE p.hit),
@@ -320,9 +320,9 @@
 --   change 78's tables; section C prints the sample's own cost beside the
 --   collection's at every scale: 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at
 --   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36, and
---   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the idle
---   machine across FORK.md change 70's two passes, so load barely moved
---   that
+--   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the
+--   idle machine across FORK.md change 70's two passes, so load barely
+--   moved that
 --   row). Through the function the empty filter at ten million rows
 --   costs 0.36 ms — 0.27 before 037, 1.31 under it — and the 50% tier 14.4,
 --   as under 037 (13.2); the thin tiers moved by the sample's saving and the
@@ -587,34 +587,21 @@ BEGIN
   ELSE
     -- The gate (037), sampling by TID range (038). On a heap large enough for
     -- the collection below to cost more than a sample of it, draw
-    -- {{ROUTE_SAMPLE_PAGES}} block numbers and read each block as a TID
+    -- {{ROUTE_SAMPLE_PAGES}} block numbers and read each block as one TID
     -- range — `ctid >= '(b,0)' AND ctid < '(b+1,0)'`, a TID Range Scan, one
-    -- page read per block whatever the heap holds (037's SYSTEM sample
-    -- decided page by page over the WHOLE heap and cost ~2 ns a heap page:
-    -- a millisecond at ten million rows; this file's header) —
-    -- and count the rows that pass the filter and carry a vector, the pages
-    -- those rows sit on, and the pages drawn. A row with a vector, not the
-    -- collection's "vector or chunks": the EXISTS probe inside an expression
-    -- became a hashed subplan over the whole chunk table (18 ms measured,
-    -- against 0.15 for the sample), and counting fewer scoreable rows than
-    -- there are only biases the gate towards running the collection, which
-    -- is the safe side. The draw is DISTINCT so a block drawn twice is read
-    -- and counted once; the join is LEFT so a page with no live row still
-    -- counts among the pages drawn (037's pages_seen counted only pages that
-    -- returned a row, which biased the estimate up on a bloated heap). The
-    -- probe's LIMIT never cuts a page — an 8 KB page holds at most 291
-    -- tuples — and is there for the planner: it keeps the probe a subquery,
-    -- so the ctid bounds stay a base restriction the TID Range path reads
-    -- (pulled up into the join they become join quals, and the plan is a
-    -- sequential scan under Materialize: 72 ms measured), and it caps the
-    -- estimate the planner cannot make for a bound it cannot see, so the
-    -- statement's cost stays far under jit_above_cost at any heap size —
-    -- unless an operator has disabled a path it is built from (tidscan,
-    -- nestloop, or hashagg and sort together), when disable_cost puts every
-    -- call through the JIT compiler: the header's failure mode, SMD-1624.
-    -- Sampling is by page, so a filter whose matches sit together on disk
-    -- shows up as one page full of hits or none, and the third condition
-    -- below is what catches that.
+    -- page read per block whatever the heap holds — and count the rows that
+    -- pass the filter and carry a vector, the pages those rows sit on, and
+    -- the pages drawn. A row with a vector, not the collection's "vector or
+    -- chunks": an EXISTS probe here became a hashed subplan over the whole
+    -- chunk table, and counting fewer scoreable rows than there are only
+    -- biases the gate towards running the collection, the safe side. The
+    -- draw is DISTINCT (a block drawn twice is read and counted once), the
+    -- join is LEFT (a page with no live row counts among the pages drawn),
+    -- and the probe's LIMIT never cuts a page — it keeps the probe a
+    -- subquery, which is what gives it a TID Range path, and caps the
+    -- planner's estimate under jit_above_cost. The header has the
+    -- measurements behind each, the planner paths the statement depends on
+    -- (SMD-1624), and why sampling by page needs the third condition below.
     IF v_pages >= {{ROUTE_ESTIMATE_MIN_PAGES}} THEN
       SELECT count(*) FILTER (WHERE p.hit), count(DISTINCT b.blk) FILTER (WHERE p.hit), count(DISTINCT b.blk)
         INTO v_hits, v_hit_pages, v_pages_seen

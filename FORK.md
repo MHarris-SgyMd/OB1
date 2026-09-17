@@ -12503,7 +12503,9 @@ weakened accordingly. Boyscout, after the passes: one exported `TID_PROBE`
 (both bounds) where three files had their own, [8e]'s FROM clause read once
 and a tautological bound dropped, two helper comments reworded for two
 migrations, test-upgrade [14]'s title naming the schema it applies, the
-header's cost table stated once — no behaviour change.
+header's cost table stated once — no behaviour change; and a second look
+after CI: the body comment above the sample statement trimmed to the
+mechanism, its measurements left to the header.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`
