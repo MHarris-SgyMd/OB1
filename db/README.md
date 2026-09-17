@@ -164,7 +164,7 @@ back and corrects the own-key labels an earlier paste of the body left
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `901 assertions: 901 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `903 assertions: 903 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports twenty-three migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
@@ -201,7 +201,8 @@ thought_chunks` shows five columns since 013 added `context`.
 Migrations 024 onward are described in `FORK.md`, one numbered change each
 (024 change 45, 025 change 46, 026 change 47, 027 change 48, 028 change 49,
 029 change 54, 030 change 56, 031 change 57, 032 change 60, 033 change 63,
-034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80).
+034 change 65, 035 change 66, 036 change 68, 037 change 70, 038 change 80,
+039 change 81).
 
 ## What changed relative to the guide
 
@@ -978,10 +979,10 @@ OB1_BENCH_SCALES=1000000  OB1_PG_SHM_SIZE=4g  ./with-postgres.sh bun bench-hnsw.
 OB1_BENCH_SCALES=10000000 OB1_PG_SHM_SIZE=11g OB1_BENCH_MAINTENANCE_MEM=9GB ./with-postgres.sh bun bench-hnsw.ts
 
 # Before/after a redefinition of match_thoughts, from one tree: the after
-# arm's schema stops at the named migration (the function before 038 here;
-# 036 for the function before 037). Not with OB1_PG_KEEP below: a corpus cut
+# arm's schema stops at the named migration (the function before 039 here;
+# 037 for the function before 038). Not with OB1_PG_KEEP below: a corpus cut
 # at a migration is measured and dropped, never kept.
-OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts
+OB1_BENCH_UPTO=038 ./with-postgres.sh bun bench-hnsw.ts
 
 # Keep the corpus between passes (SMD-1493): the first run under a name builds
 # it and records the exact oracle's answers beside it (SMD-1562); every later
@@ -1242,8 +1243,8 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 901 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 500 assertions, real server, throwaway container
+bun test-schema.ts                          # 903 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 517 assertions, real server, throwaway container
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 ```
 
@@ -1388,6 +1389,19 @@ is on one index. It drops its marker table on the way out. Not in CI or
   populated 037 — no column, signature, row or privilege moves — and each,
   after a hand re-apply of 014 puts the 4-argument form back, applies the
   migration under test alone and finds one form again.
+- **match_thoughts runs with `jit = off`** (migration 039). [5e] turns off
+  each planner path the sample has exactly one of (`enable_tidscan`,
+  `enable_nestloop`, `enable_hashagg` with `enable_sort`) at session level
+  on a heap with the floor lowered: the statement read out of the body,
+  explained under the function's settings, keeps its TID Range Scan at
+  `disable_cost` and has no JIT block, the same statement with `jit` forced
+  on has one, and through the function the mutant with 039's clause RESET
+  pays the compile on every call (~50 ms) where the clause costs the
+  default's time. `test-upgrade.ts` [17] applies 039 onto a populated 038:
+  the body byte for byte 038's, `jit=off` beside 014's and 019's clauses, no
+  row or privilege moves, and the last definer applied alone drops a
+  hand-re-applied 014's 4-argument form. `test-schema.ts` [20] pins the
+  three clauses; preflight's `candidate scan` reads the third beside 019's.
 - **The backfill holds the table** (migration 023). [6c] plants a legacy
   singleton and two twins, runs `backfill_content_fingerprints()` on one
   connection inside an open transaction, and has a second capture the

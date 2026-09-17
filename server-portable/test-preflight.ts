@@ -388,8 +388,10 @@ else {
   const led019 = new SQL({ url: LIVE, max: 1 });
   await led019.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('019_match_thoughts_plan_and_rows.sql', 'test')`);
   // RESET ALL leaves prorows alone; a CREATE OR REPLACE would not, so reset it by hand as a redefinition would —
-  // and reset the keyword function's too, as re-applying 012 alone does.
-  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order ROWS 1000`);
+  // and reset the keyword function's too, as re-applying 012 alone does. 039's
+  // jit clause is put back here so this fixture is 019's loss alone; its own
+  // loss is probed at the end.
+  await led019.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET hnsw.iterative_scan = relaxed_order SET jit = off ROWS 1000`);
   await led019.unsafe(`ALTER FUNCTION search_thoughts_keyword(text, int, int, jsonb) ROWS 1000`);
   await led019.close();
   const noSeq = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
@@ -399,7 +401,7 @@ else {
   assert(/ALTER FUNCTION match_thoughts\(vector,double precision,integer,jsonb,double precision,double precision\) SET enable_seqscan = off ROWS 10; ALTER FUNCTION search_thoughts_keyword\(text, int, int, jsonb\) ROWS 25;/.test(noSeq.out), "…with one ALTER FUNCTION per function as the remedy, after any body re-apply");
   // Only the keyword estimate gone: the clause is fine, one ALTER, the other function not named.
   const kwOnly = new SQL({ url: LIVE, max: 1 });
-  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off ROWS 10`);
+  await kwOnly.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} SET enable_seqscan = off SET jit = off ROWS 10`);
   await kwOnly.close();
   const kwReset = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
   assert(/candidate scan.*carries enable_seqscan = off but search_thoughts_keyword's row estimate is 1000 rather than 25 — a redefinition reset what 019 declared/s.test(kwReset.out), "a reset keyword estimate alone is named alone");
@@ -412,8 +414,20 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f >= "013" });
   // Everything shipped again: both estimates and the clause, reported as ok.
   const shipped = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
-  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause and both row estimates");
+  assert(/candidate scan.*declares enable_seqscan = off and ROWS 10, search_thoughts_keyword ROWS 25 \(019\), and match_thoughts jit = off \(039\)/s.test(shipped.out), "with every migration re-applied, the candidate-scan check reports 019's clause, both row estimates and 039's clause");
   assert(shipped.code === 0 && /search signatures.*one of each/s.test(shipped.out), "…and the signature check is satisfied");
+  // 039's clause alone gone — what a redefinition that carried 019's clauses
+  // and not 039's leaves: a warning naming the compile it lets back in, with
+  // the migration as the remedy while no ledger records 039, then ok again
+  // once 039 is re-applied.
+  const jitReset = new SQL({ url: LIVE, max: 1 });
+  await jitReset.unsafe(`ALTER FUNCTION ${MATCH_THOUGHTS_SIGNATURE} RESET jit`);
+  await jitReset.close();
+  const noJit = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+  assert(noJit.code === 0 && /candidate scan.*carries enable_seqscan = off and both row estimates hold, but not jit = off — migration 039 is not applied: a planner path disabled at any level/s.test(noJit.out) && /039_match_thoughts_jit_off\.sql/.test(noJit.out),
+         "match_thoughts without 039's jit clause still starts, and the candidate-scan check names the clause, the compile it lets back in and 039 as the remedy");
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("039") });
+  assert(/candidate scan.*and match_thoughts jit = off \(039\)/s.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE })).out), "…and 039 re-applied is reported as carrying it");
 
   /**
    * The other state 020's header names: an earlier migration re-applied by hand

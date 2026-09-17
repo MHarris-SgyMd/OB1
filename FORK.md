@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Eighty numbered changes on top of the pin. Seven fix defects found in an
+Eighty-one numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Five (changes 31, 53, 55, 59, and 79) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–80 are the numbered `###` sections** further down, which is
+sections. Changes **18–81 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -12482,8 +12482,9 @@ a real Postgres before the file was written.**
   too (85 ms against 81). A function-level `SET jit = off` removes all three
   (measured) but also changes what the walk pays under a generic plan, which
   is SMD-1464's question; pinning the two `enable_*` GUCs on the function
-  overrides an operator's setting for the walk as well. The decision is
-  SMD-1624; the header states the premise. Row-level security on `thoughts`
+  overrides an operator's setting for the walk as well. The decision was
+  SMD-1624 (done: migration 039, change 81 — `SET jit = off` on the
+  function); 038's header states the premise. Row-level security on `thoughts`
   is a fourth trigger, and the one operators actually set: `jsonb_contains`
   is not leakproof, so under a policy `metadata @> filter` cannot be an index
   qual and 014's collection and the walk's direct CTE become sequential scans
@@ -12693,7 +12694,7 @@ the line for the next preflight change. The threshold, the plan mode of the
 *walk* statement (which flips onto a generic plan under a recency weight at
 the ceiling and changes answers; change 70's "Not done here") and the seeded
 bounds are SMD-1464; `ef_search` on real vectors SMD-1465. The `hit_pages ≥
-4` knob is stated, not turned. The disabled-path JIT premise is SMD-1624; row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
+4` knob is stated, not turned. The disabled-path JIT premise was SMD-1624 (done: migration 039, change 81); row-level security, which has cost `@>` its index since 014 and is a fourth trigger of the same JIT, is SMD-1625. A hundred million rows was not run, for the
 reasons change 28 gives; what this change establishes is that the sample's
 cost no longer depends on it. The bench's before arm (`OB1_BENCH_UPTO=037`)
 does not combine with a kept corpus — change 72's rule: a corpus built under
@@ -12752,7 +12753,7 @@ x/20 − y/20 wrong for 52 exact deltas). What changed the documents: the
 "no JIT at any size" premise (a disabled planner path adds `disable_cost`
 and JIT-compiles the sample on every call, 41 ms against 0.46 — SMD-1624, the
 decision between `SET jit = off` and pinning the paths, since either touches
-the walk); row-level security as a fourth trigger, pre-existing since 014
+the walk; done: migration 039, change 81); row-level security as a fourth trigger, pre-existing since 014
 (`jsonb_contains` is not leakproof, 150 ms against 7 — SMD-1625); "every
 page in `shared_buffers`" corrected to the OS page cache (the larger two
 heaps never fit the image's 128 MB; change 70's sentence carried the same

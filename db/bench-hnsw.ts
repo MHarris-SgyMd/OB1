@@ -141,7 +141,7 @@
  *   # a million rows and up: one scale per container, with the shared memory
  *   # the parallel build needs — the two commands are in db/README.md
  *   ./with-postgres.sh bun bench-hnsw.ts --plans     # print the full plans
- *   OB1_BENCH_UPTO=037 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 037: the function before 038
+ *   OB1_BENCH_UPTO=038 ./with-postgres.sh bun bench-hnsw.ts   # the after arm's schema stops at 038: the function before 039 (037 for the one before 038)
  *
  *   # Keep the ten-million-row corpus between passes: the first run builds it
  *   # and records the exact pass's answers in its marker; every later run under
@@ -178,7 +178,12 @@
  * and section C prints the sample's cost beside the collection's. Migration
  * 038 (SMD-1526, change 80) draws that sample by TID range — eight page reads
  * whatever the heap holds, where 037's TABLESAMPLE cost ~2 ns a heap page —
- * and its before/after is OB1_BENCH_UPTO=037 against the default.
+ * and its before/after is OB1_BENCH_UPTO=037 against the default. Migration
+ * 039 (SMD-1624, change 81) puts `jit = off` on the function — a planner path
+ * an operator disabled had JIT-compiled the sample on every call, and a
+ * generic plan's flat estimate the walk — and its before/after is
+ * OB1_BENCH_UPTO=038 against the default; section C's third column is what
+ * the clause saves the generic plan.
  *
  * The before arm — the function as shipped by 001–013 — runs at the published
  * scales only (up to 100,000 rows). Its defect is established there; at a
@@ -1161,7 +1166,7 @@ function shapeOf(plan: string, ms: number): PlanShape {
   };
 }
 
-type Plans = { custom: PlanShape; generic: PlanShape; genericNoJit: PlanShape };
+type Plans = { custom: PlanShape; generic: PlanShape; genericJitOn: PlanShape };
 
 async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Promise<Plans> {
   // The estimate's locals as literals, the values the function's own custom
@@ -1174,23 +1179,27 @@ async function plans(sql: SQL, q: number[], filter: string, branch: Branch): Pro
       ? { ...(routing.vPages !== undefined ? { v_pages: String(routing.vPages) } : {}), ...(routing.vPct !== undefined ? { v_pct: String(routing.vPct) } : {}) }
       : undefined;
   const body = await extractBody(sql, branch, DIM, { overrides });
-  const arm = async (mode: "force_custom_plan" | "force_generic_plan", jit: boolean): Promise<PlanShape> => {
+  const arm = async (mode: "force_custom_plan" | "force_generic_plan", jitOn: boolean): Promise<PlanShape> => {
     const { text, ms } = await sql.begin(async (tx: SQL) => {
       // Function-level SETs are not in effect outside the function; apply the
       // same settings the function declares so the plan is the one it gets —
       // all but a plan mode, since this section exists to show both plans.
       await applyFunctionSettings(tx);
-      if (!jit) await tx.unsafe(`SET LOCAL jit = off`);
+      // The third arm forces JIT back on over the function's `jit = off`
+      // (039): what the same plan pays without the clause.
+      if (jitOn) await tx.unsafe(`SET LOCAL jit = on`);
       return explainPrepared(tx, { body, dim: DIM, args: `'${lit(q)}'::vector, -1.0, ${K}, '${filter}'::jsonb, 0.0, 90.0`, mode });
     });
     return shapeOf(text, ms);
   };
-  // The generic plan twice: as the function would get it, and with JIT off.
+  // The generic plan twice: as the function gets it, and with JIT forced on.
   // At ten million rows every generic plan carried 30–130 ms of startup its
   // custom twin did not, and the flat estimate that makes a plan generic is
-  // also what carries its cost past jit_above_cost; the third arm reads that
-  // rather than inferring it (SMD-1018 review pass).
-  return { custom: await arm("force_custom_plan", true), generic: await arm("force_generic_plan", true), genericNoJit: await arm("force_generic_plan", false) };
+  // also what carries its cost past jit_above_cost; the third arm read that
+  // rather than inferring it (SMD-1018 review pass) and, since 039 put
+  // `jit = off` on the function, reads what the clause saves. On a body
+  // before 039 (OB1_BENCH_UPTO=038) the last two columns agree.
+  return { custom: await arm("force_custom_plan", false), generic: await arm("force_generic_plan", false), genericJitOn: await arm("force_generic_plan", true) };
 }
 
 /**
@@ -1759,24 +1768,24 @@ for (const r of results) {
 }
 
 console.log("\n### C. Plan shape of each filtered branch, on the filter the function routes to it (custom plan / generic plan)\n");
-console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown, and the generic plan once more with `jit = off` — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what JIT costs the call.\n");
+console.log("plpgsql runs custom plans for the first five calls, then generic if it is not costlier; both are shown under the function's own settings, and the generic plan once more with `jit` forced on over the function's `jit = off` (039) — the flat estimate that makes a plan generic can also carry its cost past jit_above_cost, and the difference between the last two columns is what the clause saves the call. On a body before 039 (OB1_BENCH_UPTO=038) the last two columns agree.\n");
 console.log("`route` is the capped id collection that decides between the other two; it has no chunk side, and its cost is the filter's matching rows (GIN builds the whole bitmap before the LIMIT). `estimate` is the gate's sample of the heap (037), which runs before `route` on a heap of ROUTE_ESTIMATE_MIN_PAGES pages or more and skips it when the sample says the filter is far too broad for the exact branch; its cost is the pages it reads, whatever the filter — eight TID range probes since 038, where 037's TABLESAMPLE SYSTEM also paid ~2 ns a heap page. It is explained wherever the deployed body has it — the function itself runs it only on a heap of that many pages, so under the floor the row prices a statement the call never makes. Its three columns explain one plan: the gate's locals (the heap's page count; 037's sample share) are substituted as the literals the function's custom plan sees (routingAt), so nothing is left for a generic plan to leave unknown — the whole-heap estimate a generic plan would make of 037's sample scan is exactly what the substitution removes; 038's probes are priced alike under both modes.\n");
-console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit off |");
+console.log("| rows | branch | filter | matching rows | thoughts side | chunk side | exec ms: custom / generic / generic, jit on |");
 console.log("| ---: | --- | ---: | ---: | --- | --- | ---: |");
 for (const r of results) {
   if (!r.plan) continue;
-  for (const { branch, tier, matches, custom, generic, genericNoJit } of Object.values(r.plan)) {
+  for (const { branch, tier, matches, custom, generic, genericJitOn } of Object.values(r.plan)) {
     const chunks = branch === "route" || branch === "estimate" ? "—" : `${custom.chunks} / ${generic.chunks}`;
     console.log(
-      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} / ${genericNoJit.ms.toFixed(2)} |`
+      `| ${r.scale.toLocaleString()} | ${branch} | ${tier} | ${matches.toLocaleString()} | ${custom.thoughts} / ${generic.thoughts} | ${chunks} | ${custom.ms.toFixed(2)} / ${generic.ms.toFixed(2)} / ${genericJitOn.ms.toFixed(2)} |`
     );
   }
 }
 if (PRINT_PLANS) {
   for (const r of results) {
     if (!r.plan) continue;
-    for (const [key, { branch, tier, custom, generic, genericNoJit }] of Object.entries(r.plan)) {
-      for (const [mode, shape] of [["custom", custom], ["generic", generic], ["generic, jit off", genericNoJit]] as const) {
+    for (const [key, { branch, tier, custom, generic, genericJitOn }] of Object.entries(r.plan)) {
+      for (const [mode, shape] of [["custom", custom], ["generic", generic], ["generic, jit on", genericJitOn]] as const) {
         console.log(`\n#### ${r.scale.toLocaleString()} rows, ${branch} branch (${key}, ${tier}), ${mode} plan\n`);
         console.log(shape.text.replace(/\[[-\d.,e]+\]'::vector/g, "[…]'::vector"));
       }
