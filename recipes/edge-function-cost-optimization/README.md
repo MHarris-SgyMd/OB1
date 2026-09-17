@@ -113,7 +113,7 @@ The minimal pattern (full version in [`examples/after/index.ts`](./examples/afte
 
 ```ts
 // Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 81).
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 83).
 // @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { buildServer } from "./server.ts";
@@ -156,7 +156,7 @@ app.all("*", async (c) => {
 });
 ```
 
-The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, drops the first session's transport for the second's the moment the second is minted — every session but the newest hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 78). Building the server costs tens of microseconds and happens once per session, so nothing the invocation counts above rest on changes. The transport that lives as long as the session lets go of each POST once it has answered it — at `@hono/mcp` 0.1.2 and later. 0.1.1, the pin until FORK.md change 80, kept a record of every POST until the transport was closed, so a session's memory grew by one request per tool call until the TTL sweep dropped it (SMD-1607). The sweep closes the transport of each session it drops, which tells the server too.
+The server is built per session, not shared between them: a `McpServer` holds one transport, and the SDK answers a request on whichever transport the server holds when the message arrives. One server per key scope, `connect()`ed once per session, drops the first session's transport for the second's the moment the second is minted — every session but the newest hangs (the same defect, per request, that the fork's single-tool integrations had; FORK.md change 78). Building the server costs tens of microseconds and happens once per session, so nothing the invocation counts above rest on changes. The transport that lives as long as the session lets go of each POST once it has answered it — at `@hono/mcp` 0.1.2 and later. 0.1.1, the pin until FORK.md change 82, kept a record of every POST until the transport was closed, so a session's memory grew by one request per tool call until the TTL sweep dropped it (SMD-1607). The sweep closes the transport of each session it drops, which tells the server too.
 
 Don't forget `Access-Control-Expose-Headers: mcp-session-id` in your CORS config — without it, browser clients can't read the session ID off the response.
 

@@ -17,7 +17,7 @@
 // FORK.md change 78). A build is tens of microseconds, once per session.
 
 // Deno reads the SDK's types through the extensionless subpath: its exports map
-// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 81).
+// names them `./dist/esm/*.d.ts`, unreachable from `.js` (FORK.md change 83).
 // @ts-types="@modelcontextprotocol/sdk/server/mcp"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type Principal } from "../_shared/auth.ts";
