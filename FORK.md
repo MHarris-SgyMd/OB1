@@ -10269,6 +10269,9 @@ row-level security every `metadata @> filter` loses the GIN index, because
 CTE seq-scan the heap at `disable_cost`, JIT-compiled — 150 ms against 7 on
 25,000 rows, since 014/019; 038's probe is unaffected in kind (the TID bounds
 are leakproof; the policy undercounts the hits, the safe side). SMD-1625.
+test-live's first run after this pass failed once more at [7] with no other
+suite running anywhere, and passed on re-run — SMD-1545's fifth sighting,
+and one that weakens its concurrent-suite lead.
 
 **The operator's path, walked.** A brain at 037 with rows, upgraded by `bun
 db/migrate.ts`: "038 applied, 1 applied, 37 skipped", one `match_thoughts`
