@@ -7,7 +7,7 @@
 // ob1-fork (SMD-1497): the McpServer is built per request, inside buildServer()
 // — one built at module scope and connect()ed to a fresh transport each request
 // answered the first of two overlapping requests on the second's transport.
-// FORK.md change 77; extensions/test-auth.ts fires three overlapping requests.
+// FORK.md change 78; extensions/test-auth.ts fires three overlapping requests.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -102,7 +102,7 @@ function truncateContent(content: string, maxLen: number): string {
 // ob1-fork (SMD-1497): built per request, inside buildServer(), and connected
 // to that request's transport — not once at module scope, which answered the
 // first of two overlapping requests on the second's transport (the header note
-// at the top of the file; FORK.md change 77 for the mechanism). Registering the
+// at the top of the file; FORK.md change 78 for the mechanism). Registering the
 // thirteen tools costs about half a millisecond on Bun and two to four times
 // that under Deno, the runtime this deploys on — a fraction of the database
 // round trip every tool then makes.

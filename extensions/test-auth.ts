@@ -17,7 +17,7 @@
  * for a worker anything but a dry run answers 403. The webhook receiver's
  * secret has no scope to give and is compared digest to digest. Each MCP
  * server answers three overlapping requests each with its own id (SMD-1497,
- * change 77: a server that outlives the request and is connect()ed to a fresh
+ * change 78: a server that outlives the request and is connect()ed to a fresh
  * transport each time answers on the wrong one). Then the drift
  * guards: every tool a file registers and every route an API mounts is
  * classified here as a read or a write, exactly the writes are gated, each
@@ -348,7 +348,7 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // ── Overlapping requests ─────────────────────────────────────────────────────
 //
 // Three tools/list at one server under one key, overlapping two ways
-// (SMD-1497, FORK.md change 77). The first request starts alone, its headers
+// (SMD-1497, FORK.md change 78). The first request starts alone, its headers
 // in and its body still on the wire for LATE_BODY_MS; the other two start
 // STAGGER_MS later with their bodies complete. So the first sits inside the
 // server between connect() and the arrival of its message while the second
@@ -359,7 +359,7 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 // what catches a server per request that first close()s the previous
 // request's server — in a burst that server has always finished; staggered,
 // the first request's answer is sent to a transport the SDK has forgotten,
-// and it fails here as the lone timeout. Change 77 records the mutants run,
+// and it fails here as the lone timeout. Change 78 records the mutants run,
 // and the one shape the probe passes yet is worse than a build per request
 // (a per-scope server behind a serialising lock). The margin: the first
 // request reaches its body await within microseconds and the other two
@@ -797,7 +797,7 @@ for (const s of SERVERS) {
       assert(!writes(reach), `…${r} does not write (no table verb; any RPC it calls is in RPC_READS)`);
     }
     assert(text.includes("authenticateRequest(c.req.raw,"), "…the key is read and resolved from the request, every presented form tried");
-    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 77)");
+    assert(builtPerRequest(text), "…the McpServer is built inside a function, per request: no module-level declaration names McpServer, holds what buildServer() returns, or is a `new Map` (a server that outlives the request is connect()ed to a fresh transport each time and answers on the wrong one — SMD-1497, change 78)");
   } else if (s.kind === "rest") {
     const mounted = [...text.matchAll(/^app\.(get|post|put|patch|delete)\("([^"]+)",\s*(requireWrite,\s*)?/gm)]
       .map((m) => ({ route: `${m[1].toUpperCase()} ${m[2]}`, gated: Boolean(m[3]), at: m.index! }));
@@ -839,7 +839,7 @@ for (const s of SERVERS) {
   const file = "integrations/enhanced-mcp/index.ts";
   const text = readFileSync(join(ROOT, file), "utf8");
   assert(builtPerRequest(text) && text.includes("await buildServer().connect(transport)"),
-    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 77)`);
+    `${file}: the McpServer is built per request by buildServer() and connected to that request's transport (SMD-1497, change 78)`);
 }
 
 // The files this test cannot import — a sample whose tool modules are not in

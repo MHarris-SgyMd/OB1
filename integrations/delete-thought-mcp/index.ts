@@ -11,7 +11,7 @@
 // that write. FORK.md change 67; extensions/test-auth.ts exercises it.
 // ob1-fork (SMD-1497): the McpServer is built per request — one that outlived
 // the request, connect()ed to a fresh transport each time, answered the first
-// of two overlapping requests on the second's transport. FORK.md change 77;
+// of two overlapping requests on the second's transport. FORK.md change 78;
 // extensions/test-auth.ts fires three overlapping requests.
 /**
  * delete-thought-mcp — Standalone MCP Edge Function that adds a single tool:
@@ -201,7 +201,7 @@ app.all("*", async (c) => {
   // with it — a read-scoped principal is handed a server on which the tool was
   // never registered. Not one per key scope (change 67's cache): a server that
   // outlives the request answers on the wrong transport — the header note
-  // above, and FORK.md change 77 for the mechanism and the build cost (tens of
+  // above, and FORK.md change 78 for the mechanism and the build cost (tens of
   // microseconds).
   const transport = new StreamableHTTPTransport();
   await buildServer(principal).connect(transport);

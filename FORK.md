@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-seven numbered changes on top of the pin. Seven fix defects found in an
+Seventy-eight numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–77 are the numbered `###` sections** further down, which is
+sections. Changes **18–78 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -198,7 +198,7 @@ extensions/test-writes.ts        # change 69 (new file — every vendored writer
 compat/supabase-sql/index.ts     # change 73 (PostgREST's JSON-path column in filters and order; a timestamp back as a string — the bio worker runs on the fork)
 compat/deno-on-bun.ts            # change 74 (new file — Deno's two globals on Bun, for the servers on the shim)
 <16 vendored files>              # change 74 (one import line each — compat/deno-on-bun.ts first; four swap Supabase's jsr: types import for it)
-<4 vendored MCP servers, 1 sample> # change 77 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
+<4 vendored MCP servers, 1 sample> # change 78 (a McpServer built per request — per session in the cost recipe's after sample — in place of one shared and connect()ed to a fresh transport each time)
 docs/01-getting-started.md       # fix 6
 recipes/content-fingerprint-dedup/README.md  # fix 6
 recipes/email-history-import/README.md       # fix 6
@@ -8741,7 +8741,7 @@ sample) the principal is a parameter; where it was a module singleton
 (`delete-thought-mcp`, `update-thought-mcp`, `work-operating-model-activation`)
 `buildServer(principal)` runs once per key scope and `serverFor(principal)`
 hands back the cached one — two servers at most, not one per request, which is
-the property those files and the cost recipe care about (undone by change 77:
+the property those files and the cost recipe care about (undone by change 78:
 a server shared across requests is connect()ed to a fresh transport each time
 and answers on the wrong one; `buildServer(principal)` runs per request now,
 and the cost recipe's sample per session). A server with no
@@ -8874,11 +8874,11 @@ module-singleton MCP servers still, at this change, `connect()`ed one cached
 `McpServer` to a fresh transport per request, as they did on main: the SDK overwrites the
 transport on connect and captures it when a message arrives, so two concurrent
 requests to one of them can cross responses — a pre-existing defect the
-per-scope cache neither causes nor cures (SMD-1497 held it; change 77 builds
+per-scope cache neither causes nor cures (SMD-1497 held it; change 78 builds
 each server per request, and found `enhanced-mcp` a fourth); the "after"
 sample's one transport per session was the shape this paragraph first called
 correct — it shared one server per scope across sessions and hung every
-session but the last minted; change 77 builds its server per session.
+session but the last minted; change 78 builds its server per session.
 
 **Review, first pass** (triaged; two reviewers, nineteen findings — one HIGH,
 four MED, the rest low — twelve fixed, one filed, the rest noted or declined).
@@ -8937,7 +8937,7 @@ branch's hunks (the fourth pass found three that were, hidden among the
 shim's, and fixed them; two casts in `work-operating-model-activation` are
 `main`'s);
 two overlapping requests to a module singleton hang on `main` and here alike —
-SMD-1497 has the trigger, any two, not a burst (closed by change 77). Text: `metadata-norm` deploys
+SMD-1497 has the trigger, any two, not a burst (closed by change 78). Text: `metadata-norm` deploys
 through its `deno.json`, not an inline specifier; fourteen importers, not
 thirteen; the Verified line's count; two non-probes record spellings the rule
 must keep ignoring (a property of a bound principal, a `typeof` beside a bound
@@ -11350,7 +11350,7 @@ is why check 4 reads the body.
 
 Upstream status: #424 open, PR #425 open. **Unfiled** by us.
 
-### 77. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons, one the ticket did not name and one it called correct no longer answer a request on another's transport (SMD-1497)
+### 78. Every vendored MCP server is built for the request, or the session, it answers — the three per-scope singletons, one the ticket did not name and one it called correct no longer answer a request on another's transport (SMD-1497)
 
 **The defect.** `integrations/delete-thought-mcp`, `integrations/update-thought-mcp`
 and `recipes/work-operating-model-activation` built their `McpServer` once —
@@ -11589,7 +11589,7 @@ git fetch upstream
 git log --oneline upstream-pin-9543c29..upstream/main -- server/ docs/01-getting-started.md
 
 git checkout -b siggymd/rebase-$(date +%Y%m%d) siggymd/fork-baseline
-git rebase -X ignore-space-change upstream/main   # change 77 re-indented 1,517 lines of
+git rebase -X ignore-space-change upstream/main   # change 78 re-indented 1,517 lines of
                                                   # integrations/enhanced-mcp/index.ts; the flag
                                                   # resolves whitespace-only hunks and takes an
                                                   # upstream edit inside the span at its old

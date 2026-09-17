@@ -4,7 +4,7 @@
 //  - One McpServer per session, built with the session's transport when the
 //    session is minted (not per request — and not one per key scope shared
 //    across sessions, which hangs every session but the last minted: a server
-//    holds one transport; ob1-fork, SMD-1497, FORK.md change 77); the Supabase
+//    holds one transport; ob1-fork, SMD-1497, FORK.md change 78); the Supabase
 //    client at module scope
 //  - app.options("*") returns CORS preflights cheaply BEFORE auth
 //  - Mcp-Session-Id header is minted on first request and reused on

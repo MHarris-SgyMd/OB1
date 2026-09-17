@@ -15,7 +15,7 @@
 // new Supabase client. Multiplied across multiple connectors and the MCP
 // handshake fan-out, this drives invocation counts orders of magnitude higher
 // than necessary. (The McpServer build itself is tens of microseconds — the
-// invocations are the cost, not the build; FORK.md change 77. The new Supabase
+// invocations are the cost, not the build; FORK.md change 78. The new Supabase
 // client per request is the other real waste here.)
 
 import "../../../../compat/deno-on-bun.ts";
