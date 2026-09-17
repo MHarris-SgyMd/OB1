@@ -21,7 +21,7 @@
 --   on the table, which costs `metadata @> filter` its GIN index since 014
 --   (SMD-1625); a body carrying TABLESAMPLE means 037 was pasted over this
 --   file — `bun db/migrate.ts --reapply` (preflight has no recogniser for
---   the gate's body; FORK.md change 78's operator's path). Failure modes
+--   the gate's body; FORK.md change 80's operator's path). Failure modes
 --   below has the first two.
 --
 -- Why
@@ -217,7 +217,7 @@
 --     (251 / 8,191)^3 = 1.6e-3 as a union bound, 1.44e-3 exact (a re-run:
 --     34 in 20,000). 037's statement, re-run on this heap, was skipped only
 --     14 times in 20,000 — under the formula's 32 — because SYSTEM's
---     variance made condition 1 fail on its larger draws (FORK.md change 78
+--     variance made condition 1 fail on its larger draws (FORK.md change 80
 --     has the arithmetic, and why 037's own header says 13). That accident
 --     is gone, and the bound is now what 037's header computes, falling as
 --     the cube of the heap (7e-6 at a million rows, 7e-9 at ten million). A
@@ -239,7 +239,7 @@
 --     their collection back for want of hits, as under 037 — the cost before
 --     037 returns, nothing worse — and the thin filters' bound is the
 --     uniform one again, not the ~3e-5 the biased denominator gave (the
---     figures are in FORK.md change 78). VACUUM FULL restores the density.
+--     figures are in FORK.md change 80). VACUUM FULL restores the density.
 --   * The eight page reads. They are the whole cost now: about 0.05 ms
 --     together on a heap of one row a page, warm in the page cache, about
 --     0.3 ms at the shipped width's 65–80 rows a page, each of which the
@@ -317,7 +317,7 @@
 --   round trip once the generic plan is adopted, against 0.5–0.7 for
 --   037's. db/bench-hnsw.ts before and
 --   after this file at 10,000, a million and ten million rows are FORK.md
---   change 78's tables; section C prints the sample's own cost beside the
+--   change 80's tables; section C prints the sample's own cost beside the
 --   collection's at every scale: 0.07–0.14 ms at 10,000 rows, 0.08–0.12 at
 --   a million, 0.09–0.12 at ten million (037's: 0.04–0.14, 0.22–0.36, and
 --   1.10–1.20 in a before pass that ran under load — 0.94–1.11 on the

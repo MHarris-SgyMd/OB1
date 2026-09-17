@@ -176,7 +176,7 @@
  * change 70) then gated the routing count behind a sample of the heap; the
  * before/after tables there are this bench with and without OB1_BENCH_UPTO=036,
  * and section C prints the sample's cost beside the collection's. Migration
- * 038 (SMD-1526, change 78) draws that sample by TID range — eight page reads
+ * 038 (SMD-1526, change 80) draws that sample by TID range — eight page reads
  * whatever the heap holds, where 037's TABLESAMPLE cost ~2 ns a heap page —
  * and its before/after is OB1_BENCH_UPTO=037 against the default.
  *

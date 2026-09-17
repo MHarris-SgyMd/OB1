@@ -68,14 +68,14 @@ migration exists to remove. Apply the whole set with `cd db && bun migrate.ts`.
 
 ## What we changed
 
-Seventy-eight numbered changes on top of the pin. Seven fix defects found in an
+Eighty numbered changes on top of the pin. Seven fix defects found in an
 audit of the pinned tree; the rest are migration work — a runtime-neutral build
 (Phase 3), the core schema as applicable migrations (Phase 1), and a swappable
 data layer (Phase 2). Four (changes 31, 53, 55, and 59) ship no runtime change at
 all: each is a measurement that decided against building something.
 
 The table below covers changes 1–17, which landed before this file grew prose
-sections. Changes **18–78 are the numbered `###` sections** further down, which is
+sections. Changes **18–80 are the numbered `###` sections** further down, which is
 where the reasoning for anything recent lives.
 
 | # | Commit | What | Upstream status |
@@ -9694,7 +9694,7 @@ Read down the tables and four things fall out.
   eight pages' rows plus ~2 ns a page — not a cache effect) and the
   measurement agreed: one row a page, every page warm in
   the OS page cache (the larger two heaps exceed the image's 128 MB
-  `shared_buffers`; change 78's fourth review pass), the statement costs 0.038 ms at 2,000 pages, 0.094 at
+  `shared_buffers`; change 80's fourth review pass), the statement costs 0.038 ms at 2,000 pages, 0.094 at
   20,000, 0.459 at 200,000. `TABLESAMPLE SYSTEM` decides per page by hashing
   every block number against its cutoff, so the eight page reads are the
   small part. So the ticket's "the estimate must not cost more than the
@@ -9706,7 +9706,7 @@ Read down the tables and four things fall out.
   a different sampling statement does — eight TID range probes, eight page
   reads whatever the heap, which also counts sampled pages exactly where
   `pages_seen` today misses an empty one — and that is SMD-1526 (done:
-  migration 038, change 78). The bench's own
+  migration 038, change 80). The bench's own
   `estimate` row at ten million read 60 ms under both plan modes and 0.94
   with JIT off, which is why the table's last column is the JIT-off figure:
   the extraction had substituted the sample share as its declaring
@@ -9754,7 +9754,7 @@ capture` names 035's — a line for the next preflight change, not this one.
 The sample's per-page cost and its `pages_seen` denominator
 are SMD-1526 (TID range probes in place of `TABLESAMPLE SYSTEM`: eight page
 reads whatever the heap, sampled pages counted exactly — done: migration 038,
-change 78). The threshold, the
+change 80). The threshold, the
 plan mode and which of the two seeded bounds bites are SMD-1464; `ef_search`
 on real vectors is SMD-1465. One thing
 the prototype saw in passing belongs with SMD-1464: with `enable_seqscan` on,
@@ -12103,7 +12103,7 @@ leave to the SDK.
 fork-only, and the five servers' own text is untouched (the embeds, the
 `.not()` calls and the array payloads are upstream's spelling, now served).
 
-### 78. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
+### 80. The gate's sample is drawn by TID range — migration 038 reads its eight pages as eight TID Range Scans instead of a `TABLESAMPLE SYSTEM` over the whole heap, so the sample costs eight page reads at any size and counts the pages it drew (SMD-1526)
 
 Change 70 ended on a term that grows with the table, and this removes it.
 Migration 037 gates the routing count behind a sample of the heap: `FROM
