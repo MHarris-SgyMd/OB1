@@ -105,7 +105,7 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`165 assertions: 165 passed, 0 failed` and `PASS`. A migrated file behaves
+`177 assertions: 177 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
 `extensions/test-tools.ts` then drives every tool of the five extension servers
 on the shim against their own schemas — the migrated files this shim is judged by.

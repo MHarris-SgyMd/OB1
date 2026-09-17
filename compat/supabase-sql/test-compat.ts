@@ -76,6 +76,14 @@ if (!URL_) {
     CREATE OR REPLACE FUNCTION gizmos_all() RETURNS SETOF gizmos LANGUAGE sql STABLE AS $$ SELECT * FROM gizmos ORDER BY id $$`;
   await admin`
     CREATE OR REPLACE FUNCTION gizmo_made_on(p_label text) RETURNS date LANGUAGE sql STABLE AS $$ SELECT made_on FROM gizmos WHERE label = p_label $$`;
+  // A standalone composite type, and two overloads sharing an argument name whose shapes disagree.
+  await admin`DROP TYPE IF EXISTS pair CASCADE`;
+  await admin`CREATE TYPE pair AS (a int, b date)`;
+  await admin`CREATE OR REPLACE FUNCTION a_pair() RETURNS pair LANGUAGE sql STABLE AS $$ SELECT ROW(1, '2026-09-20'::date)::pair $$`;
+  await admin`CREATE OR REPLACE FUNCTION shape_x(k int) RETURNS TABLE (n int[], b bytea) LANGUAGE sql STABLE AS $$ SELECT ARRAY[k, k + 1], '\\x0102'::bytea $$`;
+  await admin`CREATE OR REPLACE FUNCTION shape_x(k text) RETURNS TABLE (n text) LANGUAGE sql STABLE AS $$ SELECT k $$`;
+  await admin`CREATE OR REPLACE FUNCTION tagged(search_tags text[]) RETURNS int LANGUAGE sql STABLE AS $$ SELECT 2 $$`;
+  await admin`CREATE OR REPLACE FUNCTION tagged(search_tags text) RETURNS int LANGUAGE sql STABLE AS $$ SELECT 3 $$`;
   // A domain over an array type (format_type gives the domain's name; the type category says array), and a
   // same-named table in a schema behind the visible one, carrying the foreign key the visible one lacks.
   await admin`DROP DOMAIN IF EXISTS tagset CASCADE`;
@@ -141,6 +149,12 @@ console.log("\n[2] insert, and RETURNING via .select()");
     { name: "gamma", kind: "gadget", score: 30 },
   ]).select("*");
   assert(batch.error === null && (batch.data as unknown[]).length === 2, "batch insert of heterogeneous rows");
+  // supabase-js's JSON drops an undefined value, so the column's DEFAULT applies; `retired boolean DEFAULT false`.
+  const dropped = await db.from("widgets").insert({ name: "omega", retired: undefined }).select("retired");
+  assert(dropped.error === null && (dropped.data as { retired: boolean }[])[0]?.retired === false, `an undefined value is not a column: the DEFAULT applies, not NULL (${dropped.error?.message ?? JSON.stringify(dropped.data)})`);
+  const { text: undefText } = await db.from("widgets").update({ kind: "x", score: undefined }).eq("name", "omega").select("id").toSQL();
+  assert(!/"score"/.test(undefText), `…and an undefined value is left out of an update's SET list (${undefText})`);
+  await db.from("widgets").delete().eq("name", "omega");
 }
 
 console.log("\n[3] Errors resolve as { error }, they do not throw");
@@ -421,6 +435,11 @@ try {
   assert(viaSetof.length >= 1 && viaSetof.every((r) => r.made_on === "2026-09-20"), `…and through a RETURNS SETOF <table> function, shaped by that table's columns (${String(viaSetof[0]?.made_on)})`);
   const viaScalar = await db.rpc("gizmo_made_on", { p_label: "dated" });
   assert(viaScalar.data === "2026-09-20", `…and a scalar date-returning function answers the bare date (${String(viaScalar.data)})`);
+  const viaComposite = await db.rpc("a_pair");
+  // (Its one row arrives as a one-row list, the collapse rule SMD-1602 holds; the columns are the type's.)
+  assert((viaComposite.data as { b?: unknown }[])?.[0]?.b === "2026-09-20", `…and a function returning a standalone composite type is shaped by the type's columns (${JSON.stringify(viaComposite.data)})`);
+  const noMap = rowsOf(await db.rpc("shape_x", { k: 1 }), "overloads that disagree");
+  assert(JSON.stringify(noMap[0]?.n) === "[1,2]" && noMap[0]?.b instanceof Uint8Array, `overloads whose shapes disagree leave the rows unshaped, and an int[] is still a list while a bytea keeps its byte view (${JSON.stringify(noMap[0]?.n)}; ${Object.prototype.toString.call(noMap[0]?.b)})`);
   await db.from("gizmos").delete().eq("label", "dated");
 } catch (e) {
   assert(false, `[13] threw: ${e instanceof Error ? e.message : String(e)}`);
@@ -490,6 +509,10 @@ try {
   // rpc: a text[] argument by the function's declaration.
   const fn = rowsOf(await db.rpc("widgets_labelled", { p_labels: ["ai"] }), "rpc text[]");
   assert(fn.map((r) => r.name).join() === "zeta,eta", `a text[] argument is bound as an array literal (${fn.map((r) => r.name).join()})`);
+  const shadowed = await db.rpc("tagged", { search_tags: ["a", "b"] });
+  assert(shadowed.data === 2, `two overloads sharing the argument's name but not its type: a JS array chooses the array one, as PostgREST's JSON would — not the text one Postgres picks for an unbound "a,b" (${String(shadowed.data)})`);
+  const shadowedText = await db.rpc("tagged", { search_tags: "a" });
+  assert(shadowedText.data === 3, `…and a string the text one (${String(shadowedText.data)})`);
   const fnEmpty = rowsOf(await db.rpc("widgets_labelled", { p_labels: [], p_kind: "gadget" }), "rpc []");
   assert(fnEmpty.map((r) => r.name).join() === "delta", `…and [] as an empty one — every gadget contains it; epsilon's kind is NULL since [13] (${fnEmpty.map((r) => r.name).join()})`);
   const { text, values } = await db.from("widgets").insert({ name: "x", labels: ["a"], meta: ["a"] }).select("id").toSQL();
@@ -603,11 +626,44 @@ try {
   const grown = rowsOf(await db.from("latecomers").insert({ aliases: ["x"] }).select("aliases"), "insert into a new column");
   assert(JSON.stringify(grown[0]?.aliases) === '["x"]', `a column added under a running client binds by type on its first use — the map is re-read when a named column is missing (${JSON.stringify(grown[0]?.aliases)})`);
   // A column the table does not have: one re-read, then remembered as absent — not a read per call.
-  const typo1 = await db.from("latecomers").select("id").eq("nmae", "x");
-  const typo2 = await db.from("latecomers").select("id").eq("nmae", "x");
-  assert(typo1.error?.code === "42703" && typo2.error?.code === "42703", "a column the table lacks is Postgres's 42703, both times");
+  // A column that appears only in the select list, or only in a `*` row: seen on the next call, not the process's life.
+  await admin`ALTER TABLE latecomers ADD COLUMN made_on date DEFAULT '2026-09-20'`;
+  const listed = rowsOf(await db.from("latecomers").select("id, made_on").limit(1), "select list names the column");
+  assert(listed[0]?.made_on === "2026-09-20", `a date column added under the client and named only in the select list is the bare date — the list names it (${String(listed[0]?.made_on)})`);
+  await admin`ALTER TABLE latecomers ADD COLUMN seen_on date DEFAULT '2026-09-21'`;
+  const starFirst = rowsOf(await db.from("latecomers").select("*").limit(1), "star, stale map");
+  const starSecond = rowsOf(await db.from("latecomers").select("*").limit(1), "star, fresh map");
+  assert(typeof starFirst[0]?.seen_on === "string" && starSecond[0]?.seen_on === "2026-09-21", `a column added under the client and reached only through * shapes on the second call: the first row carried a key the map lacked, and the map was forgotten (${String(starFirst[0]?.seen_on)} → ${String(starSecond[0]?.seen_on)})`);
   // …and when a migration then adds that very column, the absent memo would bind its array raw for the process's life:
   // the failed call forgets the map (22P02 is not "undefined column"), and the next one reads the table again.
+  // in.() on a column the table lacks selects nothing and names nothing: not an error, and not a refresh — counted:
+  // the shared pool's unsafe() is spied for catalog reads across the calls that follow.
+  const pool = db.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
+  const realUnsafe = pool.unsafe;
+  let catalogReads = 0;
+  pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_attribute/.test(String(a[0]))) catalogReads++; return realUnsafe.apply(this, a); };
+  try {
+    const ghost = await db.from("latecomers").select("id").in("ghost", []);
+    const ghostAgain = await db.from("latecomers").select("id").in("ghost", []);
+    assert(ghost.error === null && ghostAgain.error === null && (ghost.data as unknown[]).length === 0, `in([]) on a column the table lacks is an empty answer, as PostgREST's is — the column never reaches the SQL (${ghost.error?.code ?? "ok"})`);
+    assert(catalogReads === 0, `…and costs no catalog read: the column was never named, so nothing is refreshed or forgotten (${catalogReads} reads for two calls)`);
+    const typoOnce = await db.from("latecomers").select("id").eq("nmae", "x");
+    const typoTwice = await db.from("latecomers").select("id").eq("nmae", "x");
+    assert(typoOnce.error?.code === "42703" && typoTwice.error?.code === "42703" && catalogReads === 1, `a column the table lacks costs one re-read, then is remembered as absent (${catalogReads} read for two calls)`);
+    // Concurrency: callers missing the same name share one re-read; callers missing different names all get remembered.
+    catalogReads = 0;
+    await Promise.all([1, 2, 3, 4, 5].map(() => db.from("latecomers").select("id").eq("same_ghost", "x")));
+    const sharedReads = catalogReads;
+    catalogReads = 0;
+    await Promise.all([1, 2, 3, 4, 5].map((i) => db.from("latecomers").select("id").eq(`ghost_${i}`, "x")));
+    const distinctReads = catalogReads;
+    catalogReads = 0;
+    for (const i of [1, 2, 3, 4, 5]) await db.from("latecomers").select("id").eq(`ghost_${i}`, "x");
+    assert(sharedReads <= 2, `five concurrent callers missing the same column share the re-read (${sharedReads} reads)`);
+    assert(distinctReads <= 2 && catalogReads === 0, `five concurrent callers missing five columns are all remembered — one set per table, made before the await — so asking again costs nothing (${distinctReads} then ${catalogReads} reads)`);
+  } finally {
+    pool.unsafe = realUnsafe;
+  }
   await admin`ALTER TABLE latecomers ADD COLUMN nmae text[] DEFAULT '{}'`;
   const staleFirst = await db.from("latecomers").insert({ nmae: ["late"] }).select("nmae");
   const staleSecond = rowsOf(await db.from("latecomers").insert({ nmae: ["later"] }).select("nmae"), "insert after the map was forgotten");

@@ -11236,7 +11236,9 @@ is `NOT (x = 1)`, not `x <> 1` — they differ on NULL). Every filter is now a
 closure rendered at compile time with the column map in hand, `build()` is
 async `compile()`, `toSQL()` is a promise, and a catalog read that fails (the
 database unreachable) resolves as `{ error }` like any other runtime failure
-while the shim's own refusals still throw.
+while the shim's own refusals still throw — except inside `.or()`, where a
+term the shim cannot serve is PostgREST's 400 (pass 3), because four tools
+build that expression from a user's text.
 
 One hop of embedding, from the select list parsed at the call — top-level
 commas, `*`, columns, `[alias:]relation (cols|*)`, whitespace anywhere. The
@@ -11318,8 +11320,8 @@ columns as the labels say. *Twenty-nine:* recorded, not corrected backwards —
 change 74's prose keeps its count with a note.
 
 **Verified:** `../../db/with-postgres.sh bun test-compat.ts` 131/131 (84
-before; 144 after pass 1, 152 after pass 2, 165 after pass 3 — the passes'
-pins are listed in their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
+before; 144 after pass 1, 152 after pass 2, 165 after pass 3, 177 after pass
+4 — the passes' pins are listed in their paragraphs): [14] `.not()` on `is`, `eq`, `in`, `in []`, `ilike`, `cs`, the two
 renderings in `toSQL()`, an unknown operator refused; [15] `[]` and
 `["ai", "with, comma", "quo\"te"]` into `text[]` beside an array into `jsonb`
 in one insert, an update, `.contains()` on both column kinds and with
@@ -11331,8 +11333,8 @@ across lines, by key column with and without an alias, one-to-many with `(*)`,
 `null` and `[]`, an embed under `.single()`, the correlated subquery in
 `toSQL()`, and eight refusals; [1] two clients share a pool and closing one
 twice leaves the other's open. `../db/with-postgres.sh bun test-tools.ts`
-114/114 (117 after pass 1, 121 after pass 2, 122 after pass 3) — 29 tools,
-every argument branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
+114/114 (117 after pass 1, 121 after pass 2, 122 after passes 3 and 4) — 29
+tools, every argument branch, the drift guard, the connection count. Six mutations of the shim, each restored from saved text: `.not()`
 removed → 5 named failures in the tool suite (the two tools' `.not is not a
 function`), 1 in compat; the array literal removed → 50 and 17 (`malformed
 array literal: "quick,vegetarian"`, `""`; the first run read 25 because a
@@ -11362,8 +11364,7 @@ serves every embed whatever the spacing or alias, `test-compat.ts` pins
 why not here). A second hop of embedding, `!inner`, a named foreign key, an
 embed in a `RETURNING` list, a filter on an embedded column
 (`.neq("thoughts.sensitivity_tier", …)`, `enhanced-mcp`) — refused, with the
-files that use them still blocked by the codemod. `.or()` with PostgREST's
-double-quoted value form. A column DROPPED under a running server, or one
+files that use them still blocked by the codemod. A column DROPPED under a running server, or one
 whose type changes, is not seen until the process restarts (a column added is
 — pass 1); PostgREST's cache has none but a reload either. A `timestamp
 without time zone` column still arrives as a `Z` instant (change 73's rule;
@@ -11379,7 +11380,7 @@ as one ticket: `count: "exact"` without `head` answers the page size;
 `.single()` with several rows returns the first; `head: true` without a count
 streams every row; upsert's default conflict target is the payload's first
 key and its EXCLUDED filter reads the target unsplit; `.rpc()` collapses any
-one-row, one-column result to a scalar. The two
+one-row, one-column result to a scalar (SMD-1602). The two
 extensions still on supabase-js (`family-calendar`, `job-hunt`) are not driven
 — they do not run on the fork's shim, and their PostgREST is Supabase's.
 
@@ -11541,7 +11542,56 @@ at the start still a throw, `not.`; `[13]` `SETOF` and a scalar date; `[15]`
 `date[]`, `bytea`; `[17]` `INCLUDE`, an invalid index; `[18]` the late column
 named early. `test-compat.ts` 165/165; `test-tools.ts` 122/122. Every top
 finding again sat in the previous pass's additions, and the two mechanisms
-pass 2 added have each had their seam closed once; the loop stops here.
+pass 2 added have each had their seam closed once.
+
+**Review pass 4** (the same two shapes, at the user's call; fourteen items,
+ten taken). Both reviewers found the seam pass 3's forget-on-success rule
+opened: `.in(col, [])` renders `FALSE` without the column, so on a column
+the table lacks it RAN, the rule forgot the absent memo the same call had
+built, and the next call re-read the catalog — measured at two reads per
+call for ever, against two in total under pass 2 — and one such call
+poisoned the table's memo for every other query. A column that never
+reaches the SQL is not one the query names: `in.()`'s positive form returns
+before the name is recorded. Its pin counts the reads through a spy on the
+pool's `unsafe()` (two calls, zero reads; a typo, one read then none) — the
+first pin had asserted only the empty answer, which the defect also gave.
+The reader then found the rule's own comment broader than its code, in the
+original change: a column that appears only in the select list, or only in a
+`*` row, never passed through `names()`, so a `date` column added under a
+running server shaped as an instant on every read (measured) — the select
+list names its columns now, and a returned row carrying a key the map does
+not know forgets the table for the next call. The runner found the absent
+set losing names under concurrency (pass 2's bookkeeping: read before the
+await, written after — twenty concurrent callers naming twenty missing
+columns kept one; nineteen re-reads followed) — one set per table, made
+before the await, pinned by count. And one original-mechanism defect with a
+wrong answer and no error: two overloads sharing an argument's name but not
+its type (`tagged(search_tags text[])` beside `tagged(search_tags text)`, in
+one schema or across two visible ones) made `typeOf` give up, the array went
+as `"a,b"`, and Postgres chose the text overload — the value's shape now
+tells the candidates apart as PostgREST's JSON body does (an array fits an
+array, json or vector parameter; an object json), and the cast then resolves
+the call. Also taken: an `undefined` payload value was written as NULL where
+supabase-js's JSON drops the key and Postgres applies the DEFAULT (a `NOT
+NULL DEFAULT` column was a 23502) — dropped from the column list and the SET
+list; a function returning a standalone composite type was unshaped
+(`relkind 'c'`); the typed-array rule without a map, the cap and the
+coalescing have their pins (overloads that disagree, a counted shared
+re-read); the header's error convention and the Mechanism paragraph name
+`.or()`'s exception; the `cs` message says when the column is not the
+table's; the ticket for the pre-existing divergences is named. Noted, no
+change: the shapes-equality check is a tidy-up of the agreement rule, not a
+closed defect (the runner could not make the old check misbehave); `RETURNS
+SETOF <scalar>` answers `[{fn: v}, …]` where PostgREST may answer bare
+scalars (unverified, nothing in the tree); a JSON path the file wrote wrong
+inside `.or()` is the 400 where the same path outside it throws — the
+undecidable case, now stated. Pins: `[2]` the DEFAULT applied, the SET list;
+`[13]` the composite type, overloads that disagree; `[15]` the array-typed
+overload chosen, the text one for a string; `[18]` the read counts, the
+select-list and `*` columns seen. `test-compat.ts` 177/177; `test-tools.ts`
+122/122. The two silent wrong values were in the original change, found by
+reading the rule pass 3 wrote against the header's claim; the loop stops
+here — the reviewers said so too.
 
 **Upstream status:** not applicable — the shim, the codemod and the suite are
 fork-only, and the five servers' own text is untouched (the embeds, the
