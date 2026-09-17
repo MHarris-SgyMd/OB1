@@ -1168,9 +1168,12 @@ export const MATCH_COUNT_CEILING = 500;
  * bitmap before the LIMIT can stop anything, so that statement cost the
  * number of MATCHING rows (~50 ns each: 25–27 ms at 50% of a million rows, 240
  * at 50% of ten million) before the walk began. 037 samples the heap first —
- * ROUTE_SAMPLE_PAGES pages through TABLESAMPLE SYSTEM, ~0.15 ms at the floor
- * and growing ~2 ns a heap page (a millisecond at ten million rows; 037's
- * header, SMD-1526) — and skips the collection when the sample says the filter is
+ * ROUTE_SAMPLE_PAGES pages, read since 038 as eight TID range probes — eight
+ * page reads whatever the heap holds, ~0.05 ms with one row a page and ~0.3
+ * at the shipped width (037's TABLESAMPLE SYSTEM decided page by page
+ * over the whole heap and cost ~2 ns a heap page besides, a millisecond at
+ * ten million rows; 038's header, SMD-1526) — and skips the collection when
+ * the sample says the filter is
  * far too broad for the exact branch. The sample runs only on a heap of at
  * least ROUTE_ESTIMATE_MIN_PAGES pages (64 MB; some 160,000 rows at the
  * bench's width, fewer with long content): under that the whole bitmap costs

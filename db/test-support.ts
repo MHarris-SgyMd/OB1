@@ -127,10 +127,11 @@ export type SchemaOptions = {
   /** Rows migration 023's call writes: NULL (every row) unless a suite asks for a batch. Pinned so the shell's OB1_BACKFILL_LIMIT cannot change what a suite applies. */
   backfillLimit?: number | null;
   /**
-   * The heap size, in pages, under which 036's match_thoughts does not sample
-   * before its routing count. The shipped floor (ROUTE_ESTIMATE_MIN_PAGES) is
-   * 64 MB of heap; a suite that wants the gate on a table of a few thousand
-   * rows applies 036 with 0 and restores the default afterwards.
+   * The heap size, in pages, under which the routing gate (037; its sample
+   * drawn by TID range since 038) does not run before the routing count. The
+   * shipped floor (ROUTE_ESTIMATE_MIN_PAGES) is 64 MB of heap; a suite that
+   * wants the gate on a table of a few thousand rows applies the last definer
+   * with 0 and restores the default afterwards.
    */
   routeEstimateMinPages?: number;
 };
@@ -508,11 +509,13 @@ export function requireDatabaseUrl(script: string): string {
  * text under the same rewrite.
  *
  * `route` is the statement that decides between the filtered branches: the
- * capped collection of matching ids that ran on EVERY filtered call until 036
+ * capped collection of matching ids that ran on EVERY filtered call until 037
  * gated it. It is a plpgsql SELECT INTO rather than a RETURN QUERY, so it is
- * extracted on its own. `estimate` is 036's gate — the TABLESAMPLE count that
- * runs before it on a large heap and decides whether it runs at all — the
- * other SELECT INTO in the body.
+ * extracted on its own. `estimate` is 037's gate — the sample of the heap
+ * that runs before it on a large heap and decides whether it runs at all —
+ * the other SELECT INTO in the body: 037 sampled through TABLESAMPLE SYSTEM,
+ * 038 reads eight TID ranges, and both shapes are recognised so a bench's
+ * before arm (OB1_BENCH_UPTO=037) explains its estimate too.
  */
 export type Branch = "unfiltered" | "walk" | "exact" | "route" | "estimate";
 
@@ -555,11 +558,16 @@ export async function extractBody(sql: SQL, branch: Branch, dim: number, opts: {
     if (!m) throw new Error("match_thoughts has no `SELECT array_agg(s.id) INTO v_ids` routing statement; the bench's rewrite does not apply");
     block = `SELECT array_agg(s.id) ${m[1]}`;
   } else if (branch === "estimate") {
-    // 036's gate: `SELECT <three counts> INTO v_hits, v_hit_pages, v_pages_seen
-    // FROM (... TABLESAMPLE SYSTEM (v_pct)) s;` — minus the INTO. A body from
-    // before 036 has none, and says so.
-    const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?TABLESAMPLE SYSTEM[\s\S]*?\) s);/.exec(def);
-    if (!m) throw new Error("match_thoughts has no TABLESAMPLE estimate before its routing statement (a body from before 036); the bench's rewrite does not apply");
+    // The gate's statement: `SELECT <three counts> INTO v_hits, v_hit_pages,
+    // v_pages_seen FROM (... TABLESAMPLE SYSTEM (v_pct)) s;` under 037, and
+    // `... FROM (<eight distinct blocks>) b LEFT JOIN LATERAL (<one TID range>)
+    // p ON true;` under 038 — minus the INTO, either shape. A body from before
+    // 037 has none, and says so.
+    // Comment lines stripped first: 038's header quotes the statement, and a
+    // body that did the same in a comment would have the bench explain the
+    // comment (review pass 3).
+    const m = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?(?:TABLESAMPLE SYSTEM[\s\S]*?\) s|LEFT JOIN LATERAL \([\s\S]*?\) p ON true));/.exec(def.replace(/^[ \t]*--.*$/gm, ""));
+    if (!m) throw new Error("match_thoughts has no sample of the heap in a shape this rewrite recognises — a body from before 037, or a redefinition that re-aliased the statement; the bench's rewrite does not apply");
     block = `SELECT ${m[1]} ${m[2]}`;
   } else {
     // Three RETURN QUERY branches: unfiltered, the exact answer for a thin
@@ -645,6 +653,33 @@ function resolveLocals(text: string, locals: Map<string, string>, opts: { overri
 /** The PREPARE parameter list every explainer declares — match_thoughts' six arguments since 020, in one place. */
 export const preparedSignature = (dim: number) => `(vector(${dim}), float, int, jsonb, float, float)`;
 
+/**
+ * 038's probe as the body spells it — every tuple of one block, half-open at
+ * the next. test-schema [8e], test-live [5d] and test-upgrade [16] read the
+ * installed body for it; one spelling here rather than three that drift.
+ */
+export const TID_PROBE = /t\.ctid >= \('\(' \|\| b\.blk \|\| ',0\)'\)::tid\s+AND t\.ctid <\s+\('\(' \|\| b\.blk \+ 1 \|\| ',0\)'\)::tid/;
+
+/**
+ * 038's sample statement in a body: group 1 the three counts, group 2 the
+ * FROM clause from the draw through `) p ON true`. The INTO is left out, so
+ * the text runs on its own once the two plpgsql-supplied values are in.
+ */
+export const SAMPLE_STATEMENT = /SELECT (count\(\*\) FILTER[\s\S]*?)\s+INTO v_hits, v_hit_pages, v_pages_seen\s+(FROM \([\s\S]*?\) p ON true);/;
+
+/**
+ * The sample statement read out of an installed body (pg_proc.prosrc) with
+ * the page count and the filter substituted as literals — what test-schema
+ * [8e] draws with and test-live [5d] times, so neither keeps a copy of the
+ * statement (a copy passed every drop-the-mechanism mutant, SMD-1526 review
+ * pass 1). Null when the body has no statement of that shape.
+ */
+export function sampleStatementOf(prosrc: string, pageCount: number, filterJson: string): string | null {
+  const m = SAMPLE_STATEMENT.exec(prosrc);
+  if (!m) return null;
+  return `SELECT ${m[1]} ${m[2]}`.replace(/\bv_pages\b/g, () => String(pageCount)).replace(/\bfilter\b/g, () => `'${filterJson}'::jsonb`);
+}
+
 
 /**
  * The DECLARE block's locals, name → expression text: `name  type words  :=
@@ -670,7 +705,7 @@ function declaredLocals(def: string): Map<string, string> {
  * 020 re-based it on v_base, and a redefinition that raises the floor
  * (SMD-1464) moves every consumer at once (SMD-1018 review pass).
  */
-export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number; vPct?: number }> {
+export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch: number; vExact: number; vPages?: number; vPct?: number }> {
   const { def, argNames } = await matchThoughtsDef(sql);
   const locals = declaredLocals(def);
   if (!locals.has("v_exact") || !locals.has("v_fetch")) throw new Error("the deployed match_thoughts declares no v_exact / v_fetch; it is not a 014-or-later body");
@@ -690,18 +725,27 @@ export async function routingAt(sql: SQL, matchCount: number): Promise<{ vFetch:
         half_life_days: "90.0::float",
       },
     });
-  // 036's sample share too, where the body declares it: the fraction of the
-  // heap TABLESAMPLE reads, evaluated NOW against this table. An explainer
-  // that substituted the declaring expression instead — pg_relation_size is
-  // volatile — left the planner unable to size the sample scan; it priced a
-  // scan of the whole heap, and at ten million rows that estimate crossed
-  // jit_above_cost and the explained statement paid ~50 ms of JIT the
-  // function never pays (its custom plan knows the parameter's value). The
-  // bench passes this back as the local's override (SMD-1463).
+  // The gate's locals too, where the body declares them, evaluated NOW
+  // against this table — the heap's page count (v_pages; 037 and 038, the
+  // range 038 draws its blocks from) and 037's sample share (v_pct, the
+  // fraction of the heap its TABLESAMPLE read) — so the bench can substitute
+  // the values the function's own custom plan sees. Under 037 that was
+  // load-bearing: an explainer that substituted the declaring expression
+  // (pg_relation_size is volatile) left the planner unable to size the
+  // sample scan, which it then priced as the whole heap, past jit_above_cost
+  // at ten million rows — ~50 ms of JIT the function never pays (SMD-1463).
+  // Under 038 the literal only makes the explained plan the function's; the
+  // probes are priced alike whatever the planner knows (SMD-1526).
+  const gate = ["v_pages", "v_pct"].filter((name) => locals.has(name));
   const [row] = await sql.unsafe(
-    `SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact${locals.has("v_pct") ? `, ${resolve("v_pct")}::float AS v_pct` : ""}`
+    `SELECT ${resolve("v_fetch")}::int AS v_fetch, ${resolve("v_exact")}::int AS v_exact${gate.map((name) => `, ${resolve(name)}::float AS ${name}`).join("")}`
   );
-  return { vFetch: Number(row.v_fetch), vExact: Number(row.v_exact), ...(locals.has("v_pct") ? { vPct: Number(row.v_pct) } : {}) };
+  return {
+    vFetch: Number(row.v_fetch),
+    vExact: Number(row.v_exact),
+    ...(locals.has("v_pages") ? { vPages: Number(row.v_pages) } : {}),
+    ...(locals.has("v_pct") ? { vPct: Number(row.v_pct) } : {}),
+  };
 }
 
 /**
@@ -784,8 +828,13 @@ export async function loadChunkRows(sql: SQL, every: number): Promise<void> {
  * there lands mostly in `read=` — and under-counts in the direction that
  * flatters the plan that read less (first review pass).
  */
-export function buffersOf(plan: string): number {
-  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(plan);
+export function buffersOf(plan: string, node?: RegExp): number {
+  // With `node`, that node's own Buffers line (its total across loops) inside
+  // the plan tree — `Planning:` and its Buffers line follow the tree — rather
+  // than the top node's cumulative one, which counts catalog reads under a
+  // cold syscache too (test-schema [8e], review pass 3).
+  const scope = node ? new RegExp(`${node.source}[^\\n]*\\n(?:[^\\n]*\\n)*?\\s*(Buffers: [^\\n]*)`).exec(plan.split(/\nPlanning:/)[0])?.[1] ?? "" : plan;
+  const m = /Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?/.exec(scope);
   return m ? Number(m[1] ?? 0) + Number(m[2] ?? 0) : 0;
 }
 
